@@ -1,0 +1,136 @@
+---
+title: "ElasticSearch"
+description: "Configure alert rules for ElasticSearch data sources with SQL aggregate query support"
+---
+
+Monitors implements log and metric data monitoring through ElasticSearch SQL feature, supporting flexible aggregate queries and alert evaluation.
+
+## Core Concepts
+
+<Warning>
+Due to SQL feature dependency, only **ElasticSearch 6.3** and above versions are supported.
+</Warning>
+
+| Config Item | Description |
+|--------|------|
+| **Query Language** | Currently only supports SQL syntax |
+| **Field Processing** | All field names are automatically converted to lowercase; please use lowercase letters when configuring |
+
+## 1. Threshold Evaluation Mode
+
+This mode is suitable for scenarios requiring threshold comparison on aggregated values, such as monitoring "error log count in the last 5 minutes".
+
+### Configuration
+
+1. **Query Statement**: Write SQL aggregate query, returning value columns and (optional) grouping columns.
+  - Example: Count error log quantity by service in the last 5 minutes.
+    ```sql
+    SELECT service_name, count(*) AS error_cnt 
+    FROM "app-logs-*" 
+    WHERE "@timestamp" > now() - INTERVAL 5 MINUTES AND log_level = 'ERROR'
+    GROUP BY service_name
+    ```
+2. **Field Mapping**:
+  - **Label Fields**: Fields used to distinguish different alert objects. In the above example, it's `service_name`. Can be left empty; Monitors will automatically treat all fields except value fields as label fields.
+  - **Value Fields**: Numeric fields used for threshold evaluation. In the above example, it's `error_cnt`.
+3. **Threshold Conditions**:
+  - Use `$A.field_name` to reference values.
+  - Example: `Critical: $A.error_cnt > 50`, `Warning: $A.error_cnt > 10`.
+  - Shorthand: If only one value field is configured, you can directly use `$A`, like `$A > 50`.
+
+### How It Works
+
+The engine executes SQL query and gets two-dimensional table data. It groups data by "label fields", then extracts "value fields" values to compare against threshold expressions.
+
+<Warning>
+Label field combination uniquely identifies an alert object. Query results cannot have multiple rows with the same label field value combination.
+</Warning>
+
+### Recovery Logic
+
+| Strategy | Description |
+|------|------|
+| **Auto Recovery** | When values no longer satisfy any alert threshold, automatically generates recovery event |
+| **Specific Recovery Condition** | Configure recovery expression (e.g., `$A.error_cnt < 5`) to prevent alert flapping |
+| **Recovery Query** | Write independent SQL for recovery evaluation, supports `${label_name}` variables |
+
+<Accordion title="Recovery Query Example">
+If the alert SQL found that network card with `network_host="a", interface="b"` is down, the recovery SQL can be written as:
+
+```sql
+SELECT network_host, interface, status FROM "network-status-*" 
+WHERE "@timestamp" > now() - INTERVAL 5 MINUTES 
+  AND network_host = '${network_host}' 
+  AND interface = '${interface}' 
+  AND status = 'UP'
+```
+
+The engine will replace variables with actual values before executing the query. If data is found, recovery is determined.
+</Accordion>
+
+## 2. Data Exists Mode
+
+This mode is suitable for scenarios where filter logic is written directly in SQL, or when you only care about "whether data is returned".
+
+### Configuration
+
+1. **Query Statement**: Use `HAVING` clause in SQL to directly filter out anomalous data.
+  - Example: Directly query services with error count exceeding 50.
+    ```sql
+    SELECT service_name, count(*) AS error_cnt 
+    FROM "app-logs-*" 
+    WHERE "@timestamp" > now() - INTERVAL 5 MINUTES AND log_level = 'ERROR'
+    GROUP BY service_name
+    HAVING count(*) > 50
+    ```
+2. **Field Mapping**:
+  - In this mode, label fields and value fields are **optional**. If both are left empty, the engine will treat all fields in query results as label fields, which can be referenced in rule notes.
+
+### Recovery Logic
+
+- **Recovery When Data Disappears**: When SQL query result is empty (i.e., no longer satisfies HAVING condition), the engine determines incident recovery. This is the most commonly used recovery method.
+- **Recovery Query**:
+  - **Scenario**: Sometimes "no data found" doesn't mean recovery (might be log collection down), or need stricter recovery conditions (like no errors for N consecutive minutes).
+  - **Configuration**: Write an independent SQL statement for recovery evaluation. As long as that query can find data, the incident is considered recovered.
+  - **Variable Support**: Supports using `${label_name}` in recovery SQL to reference alert event label values for precise recovery detection.
+
+### Pros and Cons Analysis
+
+| Type | Description |
+|------|------|
+| **Pros** | Leverages ES cluster's computing power for filtering, reducing network transmission with better performance |
+| **Cons** | Cannot differentiate multi-level alerts (like Info/Warning); SQL can only return data satisfying specific conditions |
+
+## 3. No Data Mode
+
+This mode is used to monitor scenarios where "data is expected but actually missing", commonly used to monitor log collection pipeline interruption or periodic task non-execution.
+
+### Configuration
+
+1. **Query Statement**: Write a SQL query that is expected to continuously return data.
+  - Example: Query log reporting heartbeat from all hosts.
+    ```sql
+    SELECT host_name 
+    FROM "heartbeat-logs-*" 
+    WHERE "@timestamp" > now() - INTERVAL 5 MINUTES 
+    GROUP BY host_name
+    ```
+2. **Evaluation Rules**:
+  - The engine periodically executes this SQL.
+  - If a `host_name` appeared in previous cycles but no longer appears in current cycle (and N consecutive cycles) query results, triggers "No Data" alert.
+  - Note: This is opposite to Data Exists mode. Data Exists means "alert when data found", No Data means "alert when data not found".
+
+### Recovery Logic
+
+| Strategy | Description |
+|------|------|
+| **Recovery When Data Appears** | Once that `host_name` reappears in query results, alert automatically recovers |
+| **Auto Recovery Timeout** | Configurable timeout (like 24 hours), automatically closes alert after timeout |
+
+## 4. Use Case
+
+Log alerting often encounters this requirement: count ERROR logs in the last 5 minutes, alert if exceeding threshold, and display the most recent ERROR log as a sample in the alert message. Configuration approach:
+
+- **Main Alert Condition**: Use Threshold mode, SQL statement counts ERROR logs in the last 5 minutes, configure threshold conditions.
+- **Related Query**: Configure a related query, SQL statement queries the most recent ERROR log, using `${service_name}` and other variables to limit to specific service.
+- **Rule Notes Description**: Reference related query results in alert rule's notes description, using `$relates` variable to render the original log.

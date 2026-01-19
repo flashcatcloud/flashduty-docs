@@ -1,0 +1,242 @@
+---
+title: "Web"
+description: "了解 Flashduty RUM 的异常上报机制"
+keywords: ["RUM", "异常追踪", "用户监控", "前端监控"]
+---
+
+本文档介绍异常类型、捕获机制、手动上报方法、React 集成以及上报的异常数据结构定义。
+
+## 异常类型
+
+Flashduty RUM 可以监控以下类型的异常：
+
+<Tabs>
+  <Tab title="JavaScript 异常">
+    包括代码语法错误、运行时异常和未处理的 Promise 异常等。这些问题可能导致页面功能失效，严重影响用户体验。
+  </Tab>
+  <Tab title="网络异常">
+    监控与后端服务或第三方 API 的通信问题：
+
+    - XHR/Fetch 请求失败
+    - 请求超时
+    - 跨域（CORS）错误
+    - HTTP 4xx/5xx 状态码
+  </Tab>
+  <Tab title="资源加载异常">
+    监控网页资源加载失败的情况：
+
+    - 图片加载失败
+    - 脚本加载失败
+    - 样式表加载失败
+    - 字体文件加载失败
+  </Tab>
+  <Tab title="自定义异常">
+    除了自动捕获的异常外，您还可以使用 RUM SDK 手动上报自定义异常，用于跟踪业务逻辑错误等特定问题。
+  </Tab>
+</Tabs>
+
+## 上报方式
+
+### 自动错误捕获
+
+Flashduty RUM SDK 自动捕获以下类型的浏览器错误：
+
+| 错误类型 | 说明 |
+|----------|------|
+| 未捕获的异常 | 运行时抛出的 JavaScript 异常（如 `TypeError`、`ReferenceError`） |
+| 未处理的 Promise 拒绝 | 未被 `.catch()` 处理的 Promise 错误 |
+| 网络错误 | XHR 或 Fetch 请求失败（如 4xx、5xx 状态码或网络中断） |
+| React 渲染错误 | React 组件渲染期间的异常（需配合错误边界） |
+
+<Note>
+- 自动捕获的错误默认包含堆栈跟踪、错误消息和来源信息。
+- 来自浏览器扩展或第三方脚本的错误（如 `network` 来源）会被过滤，避免数据污染。
+</Note>
+
+### 手动错误上报
+
+通过 `addError` API，您可以手动上报已处理的异常、自定义错误或其他未被自动捕获的错误。
+
+**适用场景：**
+- 记录业务逻辑中的已处理错误
+- 附加上下文信息（如用户 ID、页面状态）以便问题排查
+- 监控第三方服务或异步操作的异常
+
+<CodeGroup>
+```javascript 上报自定义错误
+// 上报带有上下文的自定义错误
+const error = new Error("登录失败");
+window.FC_RUM.addError(error, {
+  pageStatus: "beta",
+  userId: "12345",
+  action: "login_attempt",
+});
+```
+
+```javascript 上报网络错误
+fetch("https://api.example.com/data").catch((error) => {
+  window.FC_RUM.addError(error, {
+    requestUrl: "https://api.example.com/data",
+    method: "GET",
+  });
+});
+```
+
+```javascript 上报已处理异常
+try {
+  // 可能抛出异常的业务逻辑
+  riskyOperation();
+} catch (error) {
+  window.FC_RUM.addError(error, {
+    operation: "riskyOperation",
+    timestamp: Date.now(),
+  });
+}
+```
+</CodeGroup>
+
+### React 错误边界集成
+
+Flashduty RUM 支持通过 React [错误边界](https://legacy.reactjs.org/docs/error-boundaries.html)捕获组件渲染错误，并将错误信息上报。您可以在 `componentDidCatch` 中调用 `addError` API，附加组件堆栈信息以便调试。
+
+<Steps>
+  <Step title="创建错误边界组件">
+    ```javascript
+    class ErrorBoundary extends React.Component {
+      componentDidCatch(error, info) {
+        const renderingError = new Error(error.message);
+        renderingError.name = "ReactRenderingError";
+        renderingError.stack = info.componentStack; // 组件堆栈
+        renderingError.cause = error; // 原始错误
+
+        window.FC_RUM.addError(renderingError, {
+          component: this.props.componentName || "Unknown",
+          version: "1.0.0",
+        });
+      }
+
+      render() {
+        return this.props.children;
+      }
+    }
+    ```
+  </Step>
+  <Step title="使用错误边界包装组件">
+    ```jsx
+    <ErrorBoundary componentName="UserProfile">
+      <UserProfile />
+    </ErrorBoundary>
+    ```
+  </Step>
+</Steps>
+
+## 错误数据结构
+
+每条错误数据包含以下属性，用于描述错误详情和上下文：
+
+<ParamField path="error.source" type="string">
+  错误来源（如 `console`、`network`、`custom`、`source`、`report`）
+</ParamField>
+
+<ParamField path="error.type" type="string">
+  错误类型或错误码（如 `TypeError`、`NetworkError`）
+</ParamField>
+
+<ParamField path="error.message" type="string">
+  简洁的可读性强的错误消息
+</ParamField>
+
+<ParamField path="error.stack" type="string">
+  错误堆栈跟踪或补充信息
+</ParamField>
+
+<ParamField path="error.causes" type="Array">
+  提供额外上下文的关联错误列表（可选）
+</ParamField>
+
+<ParamField path="context" type="Object">
+  自定义上下文信息（如页面状态、用户 ID），通过 `addError` 传入
+</ParamField>
+
+## 错误过滤与配置
+
+为确保错误数据的准确性和相关性，Flashduty RUM 应用以下过滤规则：
+
+<AccordionGroup>
+  <Accordion title="默认过滤规则">
+    - 仅处理 `source` 为 `custom`、`source`、`report` 或 `console` 的错误
+    - 忽略来自浏览器扩展、第三方脚本或 `network` 来源的无关错误
+  </Accordion>
+  <Accordion title="堆栈要求">
+    错误必须包含堆栈跟踪信息，否则可能被忽略
+  </Accordion>
+  <Accordion title="自定义过滤">
+    使用 `beforeSend` 回调自定义错误处理逻辑，过滤或修改错误数据
+  </Accordion>
+</AccordionGroup>
+
+### 自定义错误过滤示例
+
+```javascript
+window.FC_RUM.init({
+  beforeSend: (event) => {
+    if (event.type === "error") {
+      // 忽略特定错误消息
+      if (event.error.message.includes("ThirdPartyScript")) {
+        return false; // 丢弃该错误
+      }
+      // 添加全局上下文
+      event.context = { ...event.context, appVersion: "2.1.0" };
+    }
+    return true;
+  },
+});
+```
+
+## 常见问题
+
+<AccordionGroup>
+  <Accordion title="为什么某些错误未被聚合？">
+    - 确认堆栈跟踪是否完整，或自定义指纹是否冲突
+    - 检查 `sourcemap` 是否正确上传，若未上传，堆栈可能无法正确解析
+  </Accordion>
+  <Accordion title="如何减少第三方脚本错误噪音？">
+    使用 `beforeSend` 回调过滤特定错误来源或消息：
+
+    ```javascript
+    beforeSend: (event) => {
+      if (event.error.source === "network") return false;
+      return true;
+    };
+    ```
+  </Accordion>
+  <Accordion title="自定义聚合无效怎么办？">
+    - 确保 `fingerprint` 属性正确设置，且值为字符串
+    - 检查 `beforeSend` 回调是否被正确调用
+  </Accordion>
+</AccordionGroup>
+
+## 最佳实践
+
+<CardGroup cols={2}>
+  <Card title="丰富上下文信息" icon="info-circle">
+    在 `addError` 中附加业务相关上下文（如用户 ID、操作类型），便于问题定位。
+    
+    示例：`{ userId: "12345", action: "submit_form" }`
+  </Card>
+  <Card title="优化错误边界" icon="shield">
+    为关键 React 组件配置错误边界，确保渲染错误被捕获。记录组件名称和版本，便于追踪问题。
+  </Card>
+  <Card title="控制错误量" icon="filter">
+    使用采样率或 `beforeSend` 过滤低价值错误，避免数据过载。优先监控影响用户体验的关键错误。
+  </Card>
+  <Card title="分析与可视化" icon="chart-line">
+    在「分析看板」-「异常分析」Tab 查看错误数据趋势和分布，解决重点异常问题。
+  </Card>
+</CardGroup>
+
+## 下一步
+
+<Card title="查看异常" icon="eye" href="./error-viewing">
+  了解如何在异常追踪模块查看和分析 Issue
+</Card>

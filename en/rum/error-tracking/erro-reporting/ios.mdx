@@ -1,0 +1,404 @@
+---
+title: "iOS"
+description: "Master Flashduty RUM iOS SDK error capture mechanisms, including crash capture, App Hangs, Watchdog terminations, manual reporting, and dSYM symbolication"
+---
+
+This document covers the error capture mechanisms of the Flashcat iOS RUM SDK, helping you monitor and diagnose crashes and errors in iOS applications.
+
+<Info>
+The SDK supports automatic capture of application crashes, App Hangs (application freezes), and Watchdog terminations, while also providing manual error reporting and dSYM symbolication features.
+</Info>
+
+## Error Types
+
+Flashcat iOS RUM can monitor the following types of errors:
+
+### Application Crashes
+
+The SDK automatically captures unhandled exceptions and fatal signals, including:
+
+- Uncaught Swift/Objective-C exceptions
+- Fatal signals (e.g., `SIGSEGV`, `SIGABRT`)
+- Mach exceptions
+
+### App Hangs
+
+When the main thread is blocked beyond a specified threshold, the SDK detects and reports App Hang events, helping you identify stuttering issues that affect user experience.
+
+### Watchdog Terminations
+
+iOS's Watchdog mechanism terminates applications that are unresponsive for extended periods. The SDK can detect these terminations and report them as crash events.
+
+### Custom Errors
+
+In addition to automatically captured exceptions, you can use the RUM SDK to manually report custom errors for tracking business logic errors and other specific issues.
+
+## Configure Crash Reporting
+
+### Add Crash Reporting Module
+
+To enable crash reporting, you need to add the `FlashcatCrashReporting` module.
+
+#### Swift Package Manager
+
+When adding package dependencies in Xcode, include the following modules:
+
+- `FlashcatCore`: Core SDK
+- `FlashcatRUM`: RUM functionality module
+- `FlashcatCrashReporting`: Crash reporting module
+
+### Initialize Crash Reporting
+
+Enable crash reporting after SDK initialization:
+
+```swift AppDelegate.swift
+import FlashcatCore
+import FlashcatRUM
+import FlashcatCrashReporting
+
+@main
+class AppDelegate: UIResponder, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
+    ) -> Bool {
+        // Initialize Flashcat SDK
+        Flashcat.initialize(
+            with: Flashcat.Configuration(
+                clientToken: "<CLIENT_TOKEN>",
+                env: "<ENV_NAME>"
+            ),
+            trackingConsent: .granted
+        )
+
+        // Enable crash reporting
+        CrashReporting.enable()
+
+        // Enable RUM
+        RUM.enable(
+            with: RUM.Configuration(
+                applicationID: "<RUM_APPLICATION_ID>"
+            )
+        )
+
+        return true
+    }
+}
+```
+
+<Tip>
+It's recommended to initialize the SDK and crash reporting as early as possible in `application(_:didFinishLaunchingWithOptions:)` to ensure crashes during app startup are captured.
+</Tip>
+
+## Configure App Hangs Detection
+
+App Hang refers to situations where the main thread is blocked, causing the application to become unresponsive to user input. The SDK can detect and report these issues.
+
+### Enable App Hangs Tracking
+
+Set the `appHangThreshold` parameter in the RUM configuration:
+
+```swift
+import FlashcatRUM
+
+RUM.enable(
+    with: RUM.Configuration(
+        applicationID: "<RUM_APPLICATION_ID>",
+        appHangThreshold: 0.25  // 250 milliseconds
+    )
+)
+```
+
+### App Hang Threshold Settings
+
+| Threshold | Description | Use Case |
+| --------- | ----------- | -------- |
+| `0.25` | 250 milliseconds, detects minor stuttering | Apps with extremely high smoothness requirements |
+| `1.0` | 1 second, detects noticeable stuttering | Recommended value for general apps |
+| `nil` | Disable App Hang detection | Default setting |
+
+<Tip>
+**Configuration Recommendations:**
+- Setting too low a threshold may generate excessive reports; adjust based on your app's actual needs
+- If an App Hang causes the app to be terminated by Watchdog, the event will be marked as a crash type
+</Tip>
+
+## Configure Watchdog Termination Tracking
+
+iOS's Watchdog mechanism terminates applications that are unresponsive for extended periods. The SDK can detect and report these terminations on the next app launch.
+
+### Enable Watchdog Termination Tracking
+
+```swift
+import FlashcatRUM
+
+RUM.enable(
+    with: RUM.Configuration(
+        applicationID: "<RUM_APPLICATION_ID>",
+        trackWatchdogTerminations: true
+    )
+)
+```
+
+### Watchdog Termination Detection Conditions
+
+The SDK will classify the previous app termination as a Watchdog termination when all of the following conditions are met:
+
+- The app was not force-quit by the user
+- No crash or fatal error occurred during the last run
+- The app was not upgraded
+- The app was in the foreground and responding to events
+
+## Manual Error Reporting
+
+Using the `addError` API, you can manually report handled exceptions, custom errors, or other errors not automatically captured.
+
+### Error Reporting Example
+
+```swift
+import FlashcatRUM
+
+// Report an error with context
+RUMMonitor.shared().addError(
+    message: "Network request failed",
+    type: "NetworkError",
+    source: .network,
+    attributes: [
+        "url": "https://api.example.com",
+        "status_code": 500,
+        "userId": "12345"
+    ]
+)
+```
+
+### Error Source Types
+
+| Source     | Description      |
+| ---------- | ---------------- |
+| `.source`  | Source error     |
+| `.network` | Network error    |
+| `.webview` | WebView error    |
+| `.console` | Console error    |
+| `.custom`  | Custom error     |
+
+### Exception Object Reporting Example
+
+```swift
+import FlashcatRUM
+
+do {
+    try riskyOperation()
+} catch {
+    RUMMonitor.shared().addError(
+        error: error,
+        source: .source,
+        attributes: [
+            "operation": "riskyOperation",
+            "timestamp": Date().timeIntervalSince1970
+        ]
+    )
+}
+```
+
+## Get Symbolicated Stack Traces
+
+Crash report stacks are memory addresses by default. By uploading dSYM symbol files, you can convert these addresses to readable function names, file names, and line numbers.
+
+### What are dSYM Files
+
+dSYM (Debug Symbol) files contain the application's debug symbol information, used to map memory addresses in crash stacks to source code locations.
+
+### Upload dSYM Using Command Line Tool
+
+<Steps>
+<Step title="Install flashcat-ci Tool">
+
+```bash
+npm install -g @flashcat/flashcat-ci
+```
+</Step>
+
+<Step title="Upload dSYM Files">
+
+```bash
+export FLASHCAT_API_KEY="<API_KEY>"
+
+flashcat-ci dsyms upload /path/to/dSYMs
+```
+
+<Check>
+**Supported File Formats:**
+- `.dSYM` directories
+- `.dSYM.zip` archives
+- `.zip` archives containing multiple dSYMs
+</Check>
+</Step>
+</Steps>
+
+### Integrate dSYM Upload in CI/CD
+
+#### Xcode Build Phase Script
+
+Add a Run Script in your Xcode project's Build Phases:
+
+```bash
+#!/bin/bash
+
+if [ "$CONFIGURATION" = "Release" ]; then
+    export FLASHCAT_API_KEY="<API_KEY>"
+    flashcat-ci dsyms upload "${DWARF_DSYM_FOLDER_PATH}"
+fi
+```
+
+#### Fastlane Integration
+
+Add an upload step in your `Fastfile`:
+
+```ruby
+lane :upload_dsyms do
+  ENV["FLASHCAT_API_KEY"] = "<API_KEY>"
+
+  sh("flashcat-ci dsyms upload #{lane_context[SharedValues::DSYM_OUTPUT_PATH]}")
+end
+```
+
+### dSYM for Bitcode Apps
+
+If your app has Bitcode enabled, Apple will recompile the app during App Store processing, generating new dSYM files. You need to download these dSYMs from App Store Connect and upload them.
+
+#### Download Bitcode dSYM
+
+<Steps>
+<Step title="Log in to App Store Connect">
+  Visit [App Store Connect](https://appstoreconnect.apple.com) and log in to your account.
+</Step>
+
+<Step title="Select Build Version">
+  Go to your app → Activity → Select the build version for which you need to download dSYMs.
+</Step>
+
+<Step title="Download dSYM">
+  Click the "Download dSYM" button, then upload using the flashcat-ci tool after download completes.
+</Step>
+</Steps>
+
+### dSYM File Limitations
+
+- Each dSYM file size is limited to **2 GB**
+- Only crashes from real devices support symbolication; crashes from simulators are not supported
+
+## Track Background Events
+
+By default, only crashes that occur when a view is active are tracked. If you want to track crashes that occur when the app is in the background, enable background event tracking:
+
+```swift
+import FlashcatRUM
+
+RUM.enable(
+    with: RUM.Configuration(
+        applicationID: "<RUM_APPLICATION_ID>",
+        trackBackgroundEvents: true
+    )
+)
+```
+
+<Warning>
+Tracking background events may generate additional sessions, which could affect billing. If you have questions, please contact the Flashcat support team.
+</Warning>
+
+## Limitations and Considerations
+
+### Crash Detection Limitations
+
+- **SDK Initialization Timing**: Crashes can only be detected after SDK initialization and `CrashReporting.enable()` is called. It's recommended to initialize as early as possible.
+- **Debugger Interference**: When the Xcode debugger is attached, crashes are captured by the debugger rather than the SDK. Test crash reporting by running the app without the debugger attached.
+- **Crash Report Upload Timing**: Crash reports are uploaded on the next app launch, so the app needs to be restarted after a crash to see the report.
+
+### Symbolication Limitations
+
+- Only crashes from real devices support symbolication; crashes from simulators are not supported.
+- Each release version requires uploading the corresponding dSYM files.
+- If using Bitcode, you need to download and upload the regenerated dSYMs from App Store Connect.
+
+### App Hang Detection Limitations
+
+- App Hang detection only works when the app is in the foreground.
+- Detection accuracy depends on threshold settings; too low a threshold may generate many false positives.
+
+## Testing and Verification
+
+### Verify Crash Reporting
+
+1. **Run app without debugger attached**: Stop the app from Xcode, then launch directly from the device.
+
+2. **Trigger a test crash**:
+
+```swift
+func triggerTestCrash() {
+    fatalError("Test crash")
+}
+```
+
+3. **Restart the app**: After the crash occurs, restart the app from the device and wait for the SDK to upload the crash report.
+
+4. **View the report**: Check the crash report in the Flashcat console's Error Tracking module.
+
+### Verify App Hang
+
+1. Execute a time-consuming operation on the main thread:
+
+```swift
+func blockMainThread() {
+    Thread.sleep(forTimeInterval: 5)  // Block main thread for 5 seconds
+}
+```
+
+2. Trigger this operation and try to interact with the app.
+
+3. Check if the Flashcat console received the App Hang report.
+
+### Verify Symbolication
+
+1. Ensure the corresponding version's dSYM files have been uploaded.
+2. Trigger a crash and view the report.
+3. Confirm the stack shows function names, file names, and line numbers rather than raw memory addresses.
+
+## Error Data Structure
+
+Each error record contains the following attributes:
+
+| Attribute        | Type    | Description                                                    |
+| ---------------- | ------- | -------------------------------------------------------------- |
+| `error.source`   | string  | Error source (e.g., `source`, `network`, `custom`)             |
+| `error.type`     | string  | Error type (e.g., `NSException`, `Signal`)                     |
+| `error.message`  | string  | Error message                                                  |
+| `error.stack`    | string  | Error stack trace                                              |
+| `error.is_crash` | boolean | Whether it's a crash                                           |
+| `context`        | Object  | Custom context information passed via `addError`'s `attributes` |
+
+## Best Practices
+
+1. **Initialize SDK Early**: Call `Flashcat.initialize()` and `CrashReporting.enable()` as early as possible in `application(_:didFinishLaunchingWithOptions:)`.
+
+2. **Properly Upload dSYM**:
+
+   - Upload corresponding dSYM files for each release version
+   - Integrate dSYM upload into your CI/CD pipeline
+   - If using Bitcode, promptly download and upload dSYMs from App Store Connect
+
+3. **Set Appropriate App Hang Threshold**: Set a suitable threshold based on your app's performance requirements to avoid excessive false positives.
+
+4. **Enrich Error Context**: When manually reporting errors, attach business-related context information (e.g., user ID, operation type).
+
+5. **Disconnect Debugger When Testing**: When verifying crash reporting functionality, ensure the Xcode debugger is not attached.
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="View Errors" icon="eye" href="../error-viewing">
+  Learn how to view and analyze errors in the Error Tracking module
+</Card>
+<Card title="iOS SDK Advanced Configuration" icon="sliders" href="/en/rum/sdk/ios/advanced-config">
+  Learn about advanced SDK configuration options
+</Card>
+</CardGroup>

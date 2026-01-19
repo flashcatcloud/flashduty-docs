@@ -1,0 +1,605 @@
+---
+title: "Web SDK 高级配置"
+description: "深入了解 Flashduty RUM SDK 的高级配置功能，包括视图管理、数据控制、用户会话和分布式追踪"
+keywords: ["RUM", "Web SDK", "用户监控", "前端监控"]
+---
+
+<Info>
+本文档介绍 Flashduty RUM SDK 的高级配置选项，帮助您根据业务需求定制数据收集行为。
+</Info>
+
+Flashduty RUM 提供多种高级配置选项：
+
+<CardGroup cols={2}>
+<Card title="保护敏感数据" icon="shield">
+  屏蔽个人身份信息等敏感数据
+</Card>
+<Card title="关联用户会话" icon="user">
+  将用户会话与内部用户标识关联
+</Card>
+<Card title="减少数据量" icon="chart-line-down">
+  通过采样降低 RUM 数据收集量
+</Card>
+<Card title="增强上下文" icon="tags">
+  为数据添加丰富的上下文信息
+</Card>
+</CardGroup>
+
+## 覆盖默认 RUM 视图名称
+
+Flashduty RUM 会在用户访问新页面或 SPA 中 URL 更改时自动生成视图事件。视图名称默认从当前页面 URL 计算，并自动移除变量 ID（包含数字的路径段）。例如，`/dashboard/1234` 和 `/dashboard/9a` 会被归一化为 `/dashboard/?`。
+
+您可以通过设置 `trackViewsManually` 选项手动跟踪视图事件，并为视图指定自定义名称。
+
+### 配置手动跟踪视图
+
+<Steps>
+<Step title="启用手动跟踪">
+在初始化时设置 `trackViewsManually` 为 `true`：
+
+```javascript rum-init.js
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackViewsManually: true
+});
+```
+</Step>
+
+<Step title="调用 startView 方法">
+在每个新页面或路由更改时调用 `startView` 方法：
+
+```javascript
+flashcatRum.startView({
+  name: "checkout",
+  service: "purchase",
+  version: "1.2.3",
+  context: {
+    payment: "Done"
+  }
+});
+```
+</Step>
+</Steps>
+
+<ParamField body="name" type="string">
+视图名称，默认为页面 URL 路径
+</ParamField>
+
+<ParamField body="service" type="string">
+服务名称，默认为创建 RUM 应用时指定的服务
+</ParamField>
+
+<ParamField body="version" type="string">
+应用版本，默认为创建 RUM 应用时指定的版本
+</ParamField>
+
+<ParamField body="context" type="object">
+视图的附加上下文，应用于视图及其子事件
+</ParamField>
+
+### React Router 集成
+
+<Accordion title="React Router v6 示例">
+
+```javascript RumTracker.jsx
+import { matchRoutes, useLocation } from "react-router-dom";
+import { routes } from "path/to/routes";
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+import { useEffect } from "react";
+
+export default function App() {
+  let location = useLocation();
+
+  useEffect(() => {
+    const routeMatches = matchRoutes(routes, location.pathname);
+    const viewName = routeMatches && computeViewName(routeMatches);
+    if (viewName) {
+      flashcatRum.startView({ name: viewName });
+    }
+  }, [location.pathname]);
+
+  // ...
+}
+
+function computeViewName(routeMatches) {
+  let viewName = "";
+  for (let index = 0; index < routeMatches.length; index++) {
+    const routeMatch = routeMatches[index];
+    const path = routeMatch.route.path;
+    if (!path) continue;
+
+    if (path.startsWith("/")) {
+      viewName = path;
+    } else {
+      viewName += viewName.endsWith("/") ? path : `/${path}`;
+    }
+  }
+  return viewName || "/";
+}
+```
+
+</Accordion>
+
+### 设置视图名称
+
+使用 `setViewName` 方法更新当前视图的名称，而无需启动新视图：
+
+```javascript
+flashcatRum.setViewName("Checkout");
+```
+
+## 丰富和控制 RUM 数据
+
+通过 `beforeSend` 回调函数，您可以在事件发送到 Flashduty 之前对其进行拦截和修改：
+
+- **丰富事件**：添加额外的上下文属性
+- **修改事件**：更改事件内容或屏蔽敏感信息
+- **丢弃事件**：选择性地丢弃特定 RUM 事件
+
+### 上下文类型
+
+不同的事件类型对应不同的上下文：
+
+| 事件类型 | 上下文 |
+|----------|--------|
+| View | `Location` 对象 |
+| Action | 触发事件的 `Event` 和处理堆栈 |
+| Resource (XHR) | `XMLHttpRequest`、`PerformanceResourceTiming` 和处理堆栈 |
+| Resource (Fetch) | `Request`、`Response`、`PerformanceResourceTiming` 和处理堆栈 |
+| Resource (Other) | `PerformanceResourceTiming` |
+| Error | `Error` 对象 |
+| Long Task | `PerformanceLongTaskTiming` |
+
+### 丰富 RUM 事件
+
+为事件添加上下文属性，例如为资源事件添加响应头数据：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event, context) => {
+    if (event.type === "resource" && event.resource.type === "fetch") {
+      event.context.responseHeaders = Object.fromEntries(
+        context.response.headers
+      );
+    }
+    return true;
+  }
+});
+```
+
+### 修改 RUM 事件内容
+
+例如，从视图 URL 中屏蔽电子邮件地址：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event) => {
+    event.view.url = event.view.url.replace(/email=[^&]*/, "email=REDACTED");
+  }
+});
+```
+
+#### 可修改的属性
+
+| 属性 | 说明 |
+|------|------|
+| `view.url` | 当前页面的 URL |
+| `view.referrer` | 前一个页面的 URL |
+| `view.name` | 当前视图名称 |
+| `service` | 应用的服务名称 |
+| `version` | 应用版本 |
+| `action.target.name` | 用户交互的元素（仅限自动收集的操作） |
+| `error.message` | 错误消息 |
+| `error.stack` | 错误堆栈或补充信息 |
+| `error.resource.url` | 触发错误的资源 URL |
+| `resource.url` | 资源 URL |
+| `context` | 通过上下文 API 或手动生成事件添加的属性 |
+
+### 丢弃 RUM 事件
+
+通过在 `beforeSend` 中返回 `false`，可以丢弃特定 RUM 事件：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event) => {
+    if (shouldDiscard(event)) {
+      return false;
+    }
+  }
+});
+```
+
+<Warning>
+视图事件无法被丢弃。
+</Warning>
+
+## 用户会话
+
+通过为 RUM 会话添加用户信息，您可以：
+
+- 跟踪特定用户的浏览路径
+- 了解哪些用户受错误影响最大
+- 监控关键用户的性能
+
+### 用户属性
+
+以下为可选的用户属性，建议至少提供一个：
+
+<ParamField body="usr.id" type="string">
+唯一用户标识符
+</ParamField>
+
+<ParamField body="usr.name" type="string">
+用户友好名称，默认在 RUM UI 中显示
+</ParamField>
+
+<ParamField body="usr.email" type="string">
+用户电子邮件，若无名称则显示邮件
+</ParamField>
+
+### 用户会话 API
+
+<Tabs>
+<Tab title="设置用户">
+```javascript
+flashcatRum.setUser({
+  id: "1234",
+  name: "John Doe",
+  email: "john@doe.com",
+  plan: "premium"
+});
+```
+</Tab>
+
+<Tab title="获取用户">
+```javascript
+const user = flashcatRum.getUser();
+```
+</Tab>
+
+<Tab title="更新属性">
+```javascript
+flashcatRum.setUserProperty("name", "John Doe");
+```
+</Tab>
+
+<Tab title="删除属性">
+```javascript
+flashcatRum.removeUserProperty("name");
+```
+</Tab>
+
+<Tab title="清除用户">
+```javascript
+flashcatRum.clearUser();
+```
+</Tab>
+</Tabs>
+
+<Note>
+用户会话信息更改后，之后的 RUM 事件将包含更新后的信息。注销（调用 `clearUser`）后，最后一个视图仍保留用户信息，但后续视图和会话级别数据不会。
+</Note>
+
+## 采样
+
+默认情况下，Flashduty RUM 会收集所有会话的数据。您可以通过 `sessionSampleRate` 参数设置采样率来减少收集的会话数量：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  sessionSampleRate: 90  // 采集 90% 的会话
+});
+```
+
+<Warning>
+被采样的会话将不收集任何页面视图及其相关遥测数据。
+</Warning>
+
+## 用户跟踪同意
+
+为遵守 GDPR、CCPA 等隐私法规，Flashduty RUM 允许在初始化时设置用户跟踪同意状态：
+
+| 状态 | 行为 |
+|------|------|
+| `"granted"` | 开始收集数据并发送到 Flashduty |
+| `"not-granted"` | 不收集任何数据 |
+
+### 示例：处理用户同意
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackingConsent: "not-granted"
+});
+
+acceptCookieBannerButton.addEventListener("click", function () {
+  flashcatRum.setTrackingConsent("granted");
+});
+```
+
+<Note>
+同意状态不会在标签页间同步或持久化，您需要在初始化或通过 `setTrackingConsent` 提供用户决定。
+</Note>
+
+## 视图上下文
+
+您可以通过以下 API 为当前视图及其子事件添加或修改上下文：
+
+<Tabs>
+<Tab title="启动视图时指定">
+```javascript
+flashcatRum.startView({
+  name: "checkout",
+  context: {
+    hasPaid: true,
+    amount: 23.42
+  }
+});
+```
+</Tab>
+
+<Tab title="添加/修改属性">
+```javascript
+flashcatRum.setViewContextProperty("activity", {
+  hasPaid: true,
+  amount: 23.42
+});
+```
+</Tab>
+
+<Tab title="替换上下文">
+```javascript
+flashcatRum.setViewContext({
+  originalUrl: "shopist.io/department/chairs"
+});
+```
+</Tab>
+</Tabs>
+
+## 错误上下文
+
+在捕获错误时，您可以通过 `dd_context` 属性为错误对象附加本地上下文：
+
+```javascript
+const error = new Error("Something went wrong");
+error.dd_context = { component: "Menu", param: 123 };
+throw error;
+```
+
+## 全局上下文
+
+全局上下文会附加到所有 RUM 事件上：
+
+```javascript
+// 添加属性
+flashcatRum.setGlobalContextProperty("activity", {
+  hasPaid: true,
+  amount: 23.42
+});
+
+// 删除属性
+flashcatRum.removeGlobalContextProperty("codeVersion");
+
+// 替换全局上下文
+flashcatRum.setGlobalContext({
+  codeVersion: 34
+});
+
+// 清除全局上下文
+flashcatRum.clearGlobalContext();
+
+// 读取全局上下文
+const context = flashcatRum.getGlobalContext();
+```
+
+### 上下文生命周期
+
+默认情况下，全局上下文和用户上下文存储在当前页面内存中：
+
+- 页面完全刷新后不会保留
+- 不同标签页或窗口间不共享
+
+启用 `storeContextsAcrossPages` 选项可以将上下文存储到 `localStorage`：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  storeContextsAcrossPages: true
+});
+```
+
+<Warning>
+- 不建议在上下文中存储个人身份信息，因为 `localStorage` 数据会超出用户会话生命周期
+- 与 `trackSessionAcrossSubdomains` 选项不兼容
+- `localStorage` 容量限制为 5 MiB
+</Warning>
+
+## 微前端支持
+
+Flashduty RUM 支持微前端架构，通过堆栈跟踪机制识别事件来源。在 `beforeSend` 中根据堆栈信息覆盖 `service` 和 `version` 属性：
+
+```javascript
+const SERVICE_REGEX = /some-pathname\/(?<service>\w+)\/(?<version>\w+)\//;
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event, context) => {
+    const stack = context?.handlingStack || event?.error?.stack;
+    const { service, version } = stack?.match(SERVICE_REGEX)?.groups || {};
+
+    if (service && version) {
+      event.service = service;
+      event.version = version;
+    }
+
+    return true;
+  }
+});
+```
+
+<Note>
+以下事件无法归因于特定来源：自动收集的操作事件、非 XHR/Fetch 的资源事件、视图事件、CORS 和 CSP 违规事件。
+</Note>
+
+## 集成 RUM 与分布式追踪
+
+集成 RUM 与分布式追踪，可让您将 Web 应用程序的请求与其对应的后端跟踪关联起来，实现完整的前后端链路追踪。
+
+### 使用方法
+
+使用 `allowedTracingUrls` 参数配置当前应用的 API 服务域名：
+
+<Tabs>
+<Tab title="NPM">
+```javascript
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  service: "<SERVICE_NAME>",
+  env: "<ENV_NAME>",
+  version: "1.0.0",
+  sessionSampleRate: 100,
+  allowedTracingUrls: [
+    "https://api.example.com",
+    /https:\/\/.*\.my-api-domain\.com/,
+    (url) => url.startsWith("https://api.example.com")
+  ],
+  traceSampleRate: 20
+});
+```
+</Tab>
+
+<Tab title="CDN 同步">
+```html
+<script
+  src="https://static.flashcat.cloud/browser-sdk/v0/flashcat-rum.js"
+  type="text/javascript">
+</script>
+<script>
+  window.FC_RUM && window.FC_RUM.init({
+    applicationId: "<YOUR_APPLICATION_ID>",
+    clientToken: "<YOUR_CLIENT_TOKEN>",
+    service: "<SERVICE_NAME>",
+    env: "<ENV_NAME>",
+    version: "1.0.0",
+    sessionSampleRate: 100,
+    allowedTracingUrls: [
+      "https://api.example.com",
+      /https:\/\/.*\.my-api-domain\.com/
+    ]
+  });
+</script>
+```
+</Tab>
+
+<Tab title="CDN 异步">
+```html
+<script>
+  (function(h,o,u,n,d) {
+    h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
+    d=o.createElement(u);d.async=1;d.src=n
+    n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
+  })(window,document,'script','https://static.flashcat.cloud/browser-sdk/v0/flashcat-rum.js','FC_RUM')
+  window.FC_RUM.onReady(function() {
+    window.FC_RUM.init({
+      applicationId: "<YOUR_APPLICATION_ID>",
+      clientToken: "<YOUR_CLIENT_TOKEN>",
+      service: "<SERVICE_NAME>",
+      env: "<ENV_NAME>",
+      version: "1.0.0",
+      sessionSampleRate: 100,
+      allowedTracingUrls: [
+        "https://api.example.com",
+        /https:\/\/.*\.my-api-domain\.com/
+      ]
+    })
+  })
+</script>
+```
+</Tab>
+</Tabs>
+
+`allowedTracingUrls` 匹配完整 URL，接受以下类型：
+
+| 类型 | 说明 |
+|------|------|
+| **String** | 匹配任何以该值开头的 URL |
+| **RegExp** | 使用正则表达式的 `test()` 方法检查匹配 |
+| **Function** | 接收 URL 作为参数，返回 `true` 表示匹配 |
+
+### 追踪协议
+
+分布式追踪通过在 Header 上添加对应的头部字段实现：
+
+<Info>
+**traceparent**: `[version]-[trace id]-[parent id]-[trace flags]`
+
+- `version`: 当前为 00
+- `trace id`: 128 bits 的 trace ID，16 进制处理后为 32 个字符
+- `parent id`: 64 bits 的 span ID，16 进制处理后为 16 个字符
+- `trace flags`: 代表是否有降采样，01 代表命中采样，00 代表非采样
+
+**tracestate**: `dd=s:[sampling priority];o:[origin]`
+
+- `sampling priority`: 1 代表 trace 被采样
+- `origin`: 始终为 RUM，代表通过 RUM SDK 采集
+</Info>
+
+**示例**：
+```
+traceparent: 00-00000000000000008448eb211c80319c-b7ad6b7169203331-01
+tracestate: dd=s:1;o:rum
+```
+
+### 如何验证
+
+添加配置后，查看从应用中发送的请求，如能正确携带对应的 header 则说明配置无误。
+
+<Frame>
+<img src="https://api.apifox.com/api/v1/projects/4386769/resources/534953/image-preview" alt="分布式追踪验证" />
+</Frame>
+
+<Warning>
+如您的 HTTP 请求涉及到跨域问题，需要确保请求可通过跨域检测。请确保对应的 server [有跨域相关配置](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Access-Control-Allow-Headers)，支持[预检请求](https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request)访问。
+</Warning>
+
+## 注意事项
+
+<Warning>
+- 确保正确配置 `applicationId` 和 `clientToken`，以避免数据上传失败
+- 根据应用需求调整采样率和隐私设置，平衡数据量与合规性
+- 对于微前端或复杂前端框架，建议在框架路由级别实现 `startView` 逻辑
+</Warning>
+
+## 相关文档
+
+<CardGroup cols={3}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/web/sdk-integration">
+  了解如何快速接入 RUM SDK
+</Card>
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/web/data-collection">
+  了解 SDK 收集的数据类型和属性
+</Card>
+<Card title="问题排查" icon="bug" href="/zh/rum/sdk/web/faq">
+  解决常见问题和调试技巧
+</Card>
+</CardGroup>
+
+<Tip>
+有关 Flashduty RUM SDK 的更多详细信息，请访问 [Flashduty SDK GitHub 仓库](https://github.com/flashcatcloud/browser-sdk)。
+</Tip>

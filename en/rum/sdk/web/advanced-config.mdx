@@ -1,0 +1,604 @@
+---
+title: "Advanced Configuration"
+description: "Learn about advanced configuration options for Flashduty RUM SDK, including view management, data control, user sessions, and distributed tracing"
+---
+
+<Info>
+This document introduces advanced configuration options for Flashduty RUM SDK, helping you customize data collection behavior based on your business needs.
+</Info>
+
+Flashduty RUM provides various advanced configuration options:
+
+<CardGroup cols={2}>
+<Card title="Protect Sensitive Data" icon="shield">
+  Mask personally identifiable information and sensitive data
+</Card>
+<Card title="Associate User Sessions" icon="user">
+  Link user sessions with internal user identifiers
+</Card>
+<Card title="Reduce Data Volume" icon="chart-line-down">
+  Lower RUM data collection through sampling
+</Card>
+<Card title="Enrich Context" icon="tags">
+  Add rich contextual information to data
+</Card>
+</CardGroup>
+
+## Override Default RUM View Names
+
+Flashduty RUM automatically generates view events when users visit new pages or when URLs change in SPAs. View names are calculated from the current page URL by default, with variable IDs (path segments containing numbers) automatically removed. For example, `/dashboard/1234` and `/dashboard/9a` are normalized to `/dashboard/?`.
+
+You can manually track view events and specify custom names by setting the `trackViewsManually` option.
+
+### Configure Manual View Tracking
+
+<Steps>
+<Step title="Enable Manual Tracking">
+Set `trackViewsManually` to `true` during initialization:
+
+```javascript rum-init.js
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackViewsManually: true
+});
+```
+</Step>
+
+<Step title="Call startView Method">
+Call the `startView` method on each new page or route change:
+
+```javascript
+flashcatRum.startView({
+  name: "checkout",
+  service: "purchase",
+  version: "1.2.3",
+  context: {
+    payment: "Done"
+  }
+});
+```
+</Step>
+</Steps>
+
+<ParamField body="name" type="string">
+View name, defaults to page URL path
+</ParamField>
+
+<ParamField body="service" type="string">
+Service name, defaults to the service specified when creating the RUM application
+</ParamField>
+
+<ParamField body="version" type="string">
+Application version, defaults to the version specified when creating the RUM application
+</ParamField>
+
+<ParamField body="context" type="object">
+Additional context for the view, applied to the view and its child events
+</ParamField>
+
+### React Router Integration
+
+<Accordion title="React Router v6 Example">
+
+```javascript RumTracker.jsx
+import { matchRoutes, useLocation } from "react-router-dom";
+import { routes } from "path/to/routes";
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+import { useEffect } from "react";
+
+export default function App() {
+  let location = useLocation();
+
+  useEffect(() => {
+    const routeMatches = matchRoutes(routes, location.pathname);
+    const viewName = routeMatches && computeViewName(routeMatches);
+    if (viewName) {
+      flashcatRum.startView({ name: viewName });
+    }
+  }, [location.pathname]);
+
+  // ...
+}
+
+function computeViewName(routeMatches) {
+  let viewName = "";
+  for (let index = 0; index < routeMatches.length; index++) {
+    const routeMatch = routeMatches[index];
+    const path = routeMatch.route.path;
+    if (!path) continue;
+
+    if (path.startsWith("/")) {
+      viewName = path;
+    } else {
+      viewName += viewName.endsWith("/") ? path : `/${path}`;
+    }
+  }
+  return viewName || "/";
+}
+```
+
+</Accordion>
+
+### Set View Name
+
+Use the `setViewName` method to update the current view's name without starting a new view:
+
+```javascript
+flashcatRum.setViewName("Checkout");
+```
+
+## Enrich and Control RUM Data
+
+Using the `beforeSend` callback function, you can intercept and modify events before they are sent to Flashduty:
+
+- **Enrich events**: Add additional context attributes
+- **Modify events**: Change event content or mask sensitive information
+- **Discard events**: Selectively discard specific RUM events
+
+### Context Types
+
+Different event types correspond to different contexts:
+
+| Event Type | Context |
+|------------|---------|
+| View | `Location` object |
+| Action | Triggering `Event` and handling stack |
+| Resource (XHR) | `XMLHttpRequest`, `PerformanceResourceTiming`, and handling stack |
+| Resource (Fetch) | `Request`, `Response`, `PerformanceResourceTiming`, and handling stack |
+| Resource (Other) | `PerformanceResourceTiming` |
+| Error | `Error` object |
+| Long Task | `PerformanceLongTaskTiming` |
+
+### Enrich RUM Events
+
+Add context attributes to events, such as adding response header data to resource events:
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event, context) => {
+    if (event.type === "resource" && event.resource.type === "fetch") {
+      event.context.responseHeaders = Object.fromEntries(
+        context.response.headers
+      );
+    }
+    return true;
+  }
+});
+```
+
+### Modify RUM Event Content
+
+For example, mask email addresses from view URLs:
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event) => {
+    event.view.url = event.view.url.replace(/email=[^&]*/, "email=REDACTED");
+  }
+});
+```
+
+#### Modifiable Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `view.url` | Current page URL |
+| `view.referrer` | Previous page URL |
+| `view.name` | Current view name |
+| `service` | Application service name |
+| `version` | Application version |
+| `action.target.name` | Interacted element (auto-collected actions only) |
+| `error.message` | Error message |
+| `error.stack` | Error stack or supplementary information |
+| `error.resource.url` | Resource URL that triggered the error |
+| `resource.url` | Resource URL |
+| `context` | Attributes added via context API or manual event generation |
+
+### Discard RUM Events
+
+Return `false` in `beforeSend` to discard specific RUM events:
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event) => {
+    if (shouldDiscard(event)) {
+      return false;
+    }
+  }
+});
+```
+
+<Warning>
+View events cannot be discarded.
+</Warning>
+
+## User Sessions
+
+By adding user information to RUM sessions, you can:
+
+- Track specific user browsing paths
+- Understand which users are most affected by errors
+- Monitor performance for key users
+
+### User Attributes
+
+The following are optional user attributes; we recommend providing at least one:
+
+<ParamField body="usr.id" type="string">
+Unique user identifier
+</ParamField>
+
+<ParamField body="usr.name" type="string">
+User-friendly name, displayed by default in RUM UI
+</ParamField>
+
+<ParamField body="usr.email" type="string">
+User email, displayed if no name is provided
+</ParamField>
+
+### User Session API
+
+<Tabs>
+<Tab title="Set User">
+```javascript
+flashcatRum.setUser({
+  id: "1234",
+  name: "John Doe",
+  email: "john@doe.com",
+  plan: "premium"
+});
+```
+</Tab>
+
+<Tab title="Get User">
+```javascript
+const user = flashcatRum.getUser();
+```
+</Tab>
+
+<Tab title="Update Property">
+```javascript
+flashcatRum.setUserProperty("name", "John Doe");
+```
+</Tab>
+
+<Tab title="Remove Property">
+```javascript
+flashcatRum.removeUserProperty("name");
+```
+</Tab>
+
+<Tab title="Clear User">
+```javascript
+flashcatRum.clearUser();
+```
+</Tab>
+</Tabs>
+
+<Note>
+After user session information changes, subsequent RUM events will contain the updated information. After logout (calling `clearUser`), the last view still retains user information, but subsequent views and session-level data will not.
+</Note>
+
+## Sampling
+
+By default, Flashduty RUM collects data from all sessions. You can set the sampling rate via the `sessionSampleRate` parameter to reduce the number of collected sessions:
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  sessionSampleRate: 90  // Collect 90% of sessions
+});
+```
+
+<Warning>
+Sampled-out sessions will not collect any page views or related telemetry data.
+</Warning>
+
+## User Tracking Consent
+
+To comply with privacy regulations like GDPR and CCPA, Flashduty RUM allows setting user tracking consent state during initialization:
+
+| State | Behavior |
+|-------|----------|
+| `"granted"` | Start collecting data and send to Flashduty |
+| `"not-granted"` | Do not collect any data |
+
+### Example: Handling User Consent
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackingConsent: "not-granted"
+});
+
+acceptCookieBannerButton.addEventListener("click", function () {
+  flashcatRum.setTrackingConsent("granted");
+});
+```
+
+<Note>
+Consent state is not synchronized or persisted across tabs. You need to provide the user's decision during initialization or via `setTrackingConsent`.
+</Note>
+
+## View Context
+
+You can add or modify context for the current view and its child events using these APIs:
+
+<Tabs>
+<Tab title="Specify When Starting View">
+```javascript
+flashcatRum.startView({
+  name: "checkout",
+  context: {
+    hasPaid: true,
+    amount: 23.42
+  }
+});
+```
+</Tab>
+
+<Tab title="Add/Modify Property">
+```javascript
+flashcatRum.setViewContextProperty("activity", {
+  hasPaid: true,
+  amount: 23.42
+});
+```
+</Tab>
+
+<Tab title="Replace Context">
+```javascript
+flashcatRum.setViewContext({
+  originalUrl: "shopist.io/department/chairs"
+});
+```
+</Tab>
+</Tabs>
+
+## Error Context
+
+When catching errors, you can attach local context to error objects via the `dd_context` property:
+
+```javascript
+const error = new Error("Something went wrong");
+error.dd_context = { component: "Menu", param: 123 };
+throw error;
+```
+
+## Global Context
+
+Global context is attached to all RUM events:
+
+```javascript
+// Add property
+flashcatRum.setGlobalContextProperty("activity", {
+  hasPaid: true,
+  amount: 23.42
+});
+
+// Remove property
+flashcatRum.removeGlobalContextProperty("codeVersion");
+
+// Replace global context
+flashcatRum.setGlobalContext({
+  codeVersion: 34
+});
+
+// Clear global context
+flashcatRum.clearGlobalContext();
+
+// Read global context
+const context = flashcatRum.getGlobalContext();
+```
+
+### Context Lifecycle
+
+By default, global context and user context are stored in current page memory:
+
+- Not persisted after full page refresh
+- Not shared between different tabs or windows
+
+Enable the `storeContextsAcrossPages` option to store context in `localStorage`:
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  storeContextsAcrossPages: true
+});
+```
+
+<Warning>
+- Not recommended to store personally identifiable information in context, as `localStorage` data persists beyond user session lifetime
+- Incompatible with `trackSessionAcrossSubdomains` option
+- `localStorage` capacity is limited to 5 MiB
+</Warning>
+
+## Micro-frontend Support
+
+Flashduty RUM supports micro-frontend architectures by using stack trace mechanisms to identify event sources. Override `service` and `version` attributes in `beforeSend` based on stack information:
+
+```javascript
+const SERVICE_REGEX = /some-pathname\/(?<service>\w+)\/(?<version>\w+)\//;
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend: (event, context) => {
+    const stack = context?.handlingStack || event?.error?.stack;
+    const { service, version } = stack?.match(SERVICE_REGEX)?.groups || {};
+
+    if (service && version) {
+      event.service = service;
+      event.version = version;
+    }
+
+    return true;
+  }
+});
+```
+
+<Note>
+The following events cannot be attributed to specific sources: auto-collected action events, non-XHR/Fetch resource events, view events, CORS and CSP violation events.
+</Note>
+
+## Integrate RUM with Distributed Tracing
+
+Integrating RUM with distributed tracing allows you to correlate web application requests with their corresponding backend traces, enabling complete end-to-end tracing.
+
+### Usage
+
+Use the `allowedTracingUrls` parameter to configure API service domains for your application:
+
+<Tabs>
+<Tab title="NPM">
+```javascript
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  service: "<SERVICE_NAME>",
+  env: "<ENV_NAME>",
+  version: "1.0.0",
+  sessionSampleRate: 100,
+  allowedTracingUrls: [
+    "https://api.example.com",
+    /https:\/\/.*\.my-api-domain\.com/,
+    (url) => url.startsWith("https://api.example.com")
+  ],
+  traceSampleRate: 20
+});
+```
+</Tab>
+
+<Tab title="CDN Sync">
+```html
+<script
+  src="https://static.flashcat.cloud/browser-sdk/v0/flashcat-rum.js"
+  type="text/javascript">
+</script>
+<script>
+  window.FC_RUM && window.FC_RUM.init({
+    applicationId: "<YOUR_APPLICATION_ID>",
+    clientToken: "<YOUR_CLIENT_TOKEN>",
+    service: "<SERVICE_NAME>",
+    env: "<ENV_NAME>",
+    version: "1.0.0",
+    sessionSampleRate: 100,
+    allowedTracingUrls: [
+      "https://api.example.com",
+      /https:\/\/.*\.my-api-domain\.com/
+    ]
+  });
+</script>
+```
+</Tab>
+
+<Tab title="CDN Async">
+```html
+<script>
+  (function(h,o,u,n,d) {
+    h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
+    d=o.createElement(u);d.async=1;d.src=n
+    n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
+  })(window,document,'script','https://static.flashcat.cloud/browser-sdk/v0/flashcat-rum.js','FC_RUM')
+  window.FC_RUM.onReady(function() {
+    window.FC_RUM.init({
+      applicationId: "<YOUR_APPLICATION_ID>",
+      clientToken: "<YOUR_CLIENT_TOKEN>",
+      service: "<SERVICE_NAME>",
+      env: "<ENV_NAME>",
+      version: "1.0.0",
+      sessionSampleRate: 100,
+      allowedTracingUrls: [
+        "https://api.example.com",
+        /https:\/\/.*\.my-api-domain\.com/
+      ]
+    })
+  })
+</script>
+```
+</Tab>
+</Tabs>
+
+`allowedTracingUrls` matches full URLs and accepts the following types:
+
+| Type | Description |
+|------|-------------|
+| **String** | Matches any URL starting with this value |
+| **RegExp** | Uses regular expression's `test()` method to check for matches |
+| **Function** | Receives URL as parameter, returns `true` for a match |
+
+### Tracing Protocol
+
+Distributed tracing is implemented by adding corresponding header fields:
+
+<Info>
+**traceparent**: `[version]-[trace id]-[parent id]-[trace flags]`
+
+- `version`: Currently 00
+- `trace id`: 128-bit trace ID, 32 characters in hexadecimal
+- `parent id`: 64-bit span ID, 16 characters in hexadecimal
+- `trace flags`: Indicates sampling; 01 means sampled, 00 means not sampled
+
+**tracestate**: `dd=s:[sampling priority];o:[origin]`
+
+- `sampling priority`: 1 means trace is sampled
+- `origin`: Always RUM, indicating collection via RUM SDK
+</Info>
+
+**Example**:
+```
+traceparent: 00-00000000000000008448eb211c80319c-b7ad6b7169203331-01
+tracestate: dd=s:1;o:rum
+```
+
+### Verification
+
+After adding configuration, check requests sent from your application. If they correctly carry the corresponding headers, the configuration is correct.
+
+<Frame>
+<img src="https://api.apifox.com/api/v1/projects/4386769/resources/534953/image-preview" alt="Distributed Tracing Verification" />
+</Frame>
+
+<Warning>
+If your HTTP requests involve cross-origin issues, ensure requests can pass cross-origin checks. Make sure the corresponding server [has cross-origin configuration](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Access-Control-Allow-Headers) and supports [preflight requests](https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request).
+</Warning>
+
+## Important Notes
+
+<Warning>
+- Ensure correct configuration of `applicationId` and `clientToken` to avoid data upload failures
+- Adjust sampling rates and privacy settings based on application needs, balancing data volume and compliance
+- For micro-frontends or complex frontend frameworks, implement `startView` logic at the framework routing level
+</Warning>
+
+## Related Documentation
+
+<CardGroup cols={3}>
+<Card title="SDK Integration Guide" icon="plug" href="/en/rum/sdk/web/sdk-integration">
+  Learn how to quickly integrate the RUM SDK
+</Card>
+<Card title="Data Collection" icon="database" href="/en/rum/sdk/web/data-collection">
+  Learn about data types and attributes collected by the SDK
+</Card>
+<Card title="Troubleshooting" icon="bug" href="/en/rum/sdk/web/faq">
+  Solve common issues and debugging tips
+</Card>
+</CardGroup>
+
+<Tip>
+For more details about Flashduty RUM SDK, visit the [Flashduty SDK GitHub Repository](https://github.com/flashcatcloud/browser-sdk).
+</Tip>

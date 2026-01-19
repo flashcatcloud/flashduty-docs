@@ -1,0 +1,141 @@
+---
+title: "Prometheus"
+description: "Configure alert rules for Prometheus data sources with PromQL query syntax support"
+---
+
+Monitors is compatible with Prometheus PromQL query syntax and provides flexible alert evaluation and recovery mechanisms.
+
+## Core Concepts
+
+The alert engine supports three core evaluation modes:
+
+<CardGroup cols={3}>
+<Card title="Threshold Evaluation" icon="gauge">
+Query returns raw metric values; the alert engine performs threshold comparison in memory
+</Card>
+<Card title="Data Exists" icon="database">
+Query statement includes filter conditions, returning only anomalous data; alert triggers when data is found
+</Card>
+<Card title="No Data" icon="circle-exclamation">
+Used for monitoring data reporting interruption scenarios
+</Card>
+</CardGroup>
+
+## 1. Threshold Evaluation Mode
+
+This mode is suitable for scenarios requiring multi-level alerts on the same metric (e.g., Info/Warning/Critical) or needing precise recovery values.
+
+### Configuration
+
+- **Query Statement (PromQL)**: Write PromQL **without** comparison operators, returning only metric values.
+  - Example: Query memory usage percentage
+    ```promql
+    (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100
+    ```
+- **Threshold Conditions**: Define threshold expressions for different severity levels in the rule configuration. Variable `$A` represents the query result value.
+  - **Critical**: `$A > 90` (Memory usage exceeds 90% triggers critical alert)
+  - **Warning**: `$A > 80` (Memory usage exceeds 80% triggers warning alert)
+
+### Multi-Query Support and Data Correlation
+
+Monitors supports configuring multiple query statements in one alert rule (named A, B, C...) and referencing these query results simultaneously in threshold expressions (e.g., `$A > 90 and $B < 50`).
+
+- **Auto Correlation**: The alert engine automatically correlates results from different query statements based on **labels**.
+- **Alignment Requirements**: Only when two query statements return data with **exactly the same** label sets can they be correlated to the same context for calculation.
+  - Example: Query A returns `cpu_usage_percent{instance="host-1", job="node"}`, Query B returns `mem_usage_percent{instance="host-1", job="node"}`, then `$A` and `$B` can be successfully correlated.
+  - Note: If Query A has an extra label (e.g., `disk="/"`), while Query B doesn't, they cannot be correlated. It's recommended to use aggregation operations like `sum by (...)` or `avg by (...)` in PromQL to explicitly control returned labels, ensuring consistent labels across multiple query results.
+
+### How It Works
+
+The alert engine periodically executes PromQL to get current values for all Series. Then, the engine iterates through each Series, matching Critical, Warning, Info conditions in order. Once a condition is met, an alert event of the corresponding severity is generated.
+
+### Recovery Logic
+
+Supports multiple recovery strategies:
+
+| Strategy | Description |
+|------|------|
+| **Auto Recovery** | When the latest query result no longer satisfies any alert threshold, automatically generates a recovery event |
+| **Specific Recovery Condition** | Configurable additional recovery expressions (e.g., `$A < 75`) to avoid frequent oscillation near thresholds |
+| **Recovery Query** | Customize a PromQL for recovery evaluation; recovery triggers when data is found |
+
+<Note>
+Recovery query statements support embedded variables (format `${label_name}`), which are automatically replaced with corresponding label values from the alert event, enabling precise detection for specific alert objects.
+</Note>
+
+## 2. Data Exists Mode
+
+This mode behaves consistently with Prometheus native alerting rules. Suitable for users who prefer defining thresholds directly in PromQL, or scenarios requiring high-performance processing of large numbers of Series.
+
+### Configuration
+
+- **Query Statement**: Write PromQL **including** comparison operators, filtering only anomalous data.
+  - Example: Query nodes with memory usage exceeding 90%
+    ```promql
+    (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100 > 90
+    ```
+- **Evaluation Rules**: No additional threshold expressions needed. As long as the engine finds query results, it considers an alert triggered; the number of alert events equals the number of data rows found.
+
+### Recovery Logic
+
+- **Recovery When Data Disappears**: The engine queries periodically; if some data is no longer found, the engine determines the corresponding alert has recovered. Note: Data identification is based on label sets.
+- **Recovery Query (Optional)**: Configure an independent query statement for recovery evaluation (e.g., query `up{instance="${instance}"} == 1` to confirm service recovery); recovery only when data is found. This QL introduces variable `${instance}`, which will be replaced with the specific label value from the alert event.
+
+### Pros and Cons Analysis
+
+<Tabs>
+<Tab title="Pros">
+- **Better Performance**: Filter logic is pushed down to the Prometheus server, reducing data transmitted to the alert engine
+- **Low Migration Cost**: Can directly reuse existing Prometheus Rule statements
+</Tab>
+<Tab title="Cons">
+- **Single Level**: One rule typically corresponds to one severity level (to differentiate >90 and >80, two rules needed)
+- **Getting Current Value**: Cannot directly get the specific value at recovery time (can use related query to get it)
+</Tab>
+</Tabs>
+
+## 3. No Data Mode
+
+This mode is specifically for monitoring whether monitored objects are alive or whether data reporting pipelines are normal.
+
+### Configuration
+
+- **Query Statement**: Write a metric query that is expected to always exist.
+  - Example: `up{job="my-service"}`
+- **Evaluation Rules**: If the Series data cannot be queried for N consecutive cycles (note: completely no data found, not value being 0), triggers a "No Data" alert.
+- **Engine Restart**: If the alert engine (monitedge) restarts, in-memory state is lost. If data that was queryable before restart happens to not be queryable after restart, alerts cannot trigger. After restart, the missing cycle count starts over.
+
+### Typical Applications
+
+- Monitor Exporter downtime.
+- Monitor instrumentation reporting service interruption.
+- Monitor batch jobs not executing on time.
+
+### Comparison with Prometheus Native `absent()` Function
+
+| Method | Description |
+|------|------|
+| Prometheus `absent()` | Requires listing all identifying label combinations; multiple instances need multiple statements |
+| Monitors No Data Mode | Only needs one query statement, automatically monitors all Series |
+
+## Advanced Configuration
+
+### Labels and Variables
+
+Monitors automatically parses Labels returned by Prometheus. In **Recovery Query** or **Related Query**, you can use `${label_name}` to reference label values.
+
+For example, if an alert rule's query statement returns results containing labels `instance="host-1"` and `job="node"`, you can write the recovery query like this:
+
+```
+up{instance="${instance}", job="${job}"} == 1
+```
+
+When the alert engine executes, it will replace `${instance}` with `host-1` and `${job}` with `node`, i.e., the specific values in the alert event labels.
+
+### Related Query (Enrichment)
+
+To enrich alert notification content, you can configure "Related Query". Related queries don't participate in alert evaluation, only used to get additional information.
+
+- **Scenario**: During CPU alert, simultaneously query that machine's `mem_usage_percent` load situation, displaying it in alert details to assist troubleshooting.
+- **Variables**: Related queries support `${label_name}` variables for querying specific alert objects.
+- **Result Display**: Related query results can be referenced in the alert rule's notes description using the `$relates` variable. You can check the detailed usage instructions for **Notes Description**.

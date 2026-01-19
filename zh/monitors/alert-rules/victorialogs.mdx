@@ -1,0 +1,148 @@
+---
+title: "VictoriaLogs"
+description: "配置 VictoriaLogs 数据源的告警规则"
+keywords: ["VictoriaLogs", "日志告警", "日志监控", "时序数据库", "告警规则"]
+---
+
+Monitors 通过 HTTP 查询 VictoriaLogs，支持查询日志原文、做统计分析，并基于结果进行阈值判定和数据存在/缺失判断。
+
+## 1. 前置说明
+
+### 查询模式
+
+<Tabs>
+<Tab title="查原文">
+调用 `/select/logsql/query` 接口，返回二维表格数据。
+
+| 配置项 | 说明 |
+|--------|------|
+| 查询语句 | 如 `error \| fields _time, _stream, _msg \| sort by (_time) desc` |
+| 返回条目限制 | 限制最大返回行数，最大可设置为 100 |
+| 时间范围 | 指定查询的时间窗口，例如"最近 5 分钟" |
+| 标签字段 | 用于区分不同告警实体，可配置多个 |
+| 值字段 | 阈值判定模式下必填 |
+</Tab>
+
+<Tab title="做统计">
+调用 `/select/logsql/stats_query` 接口，返回 Prometheus 协议格式数据。
+
+| 配置项 | 说明 |
+|--------|------|
+| 查询语句 | 如 `_time:1d \| stats by (level) count(*) total` |
+
+<Warning>
+查询语句中必须包含 `_time` 过滤条件（如 `_time:5m`），否则会查全部数据导致性能问题。
+</Warning>
+</Tab>
+</Tabs>
+
+<Tip>
+VictoriaLogs 数据源最推荐使用"数据存在模式"，最适合日志场景。
+</Tip>
+
+## 2. 阈值判定模式 (Threshold)
+
+**查原文**和**做统计**两种查询模式都可以使用。下面分别举例说明。
+
+### 2.1 查原文示例
+
+查询语句示例：
+
+```
+level:ERROR | stats by (level) count(*) total
+```
+
+得到的结果类似：
+
+| level | total |
+|-------|-------|
+| ERROR | 150   |
+
+值字段配置为 `total`，标签字段配置为 `level`（或不配置，Monitors 会自动识别）。不同阈值不同级别的配置示例：
+
+- Warning：`$A.total >= 50` 或者简写为 `$A >= 50`（因为只有 total 这一个值字段）
+- Critical：`$A.total >= 100` 或者简写为 `$A >= 100`（因为只有 total 这一个值字段）
+
+### 2.2 做统计示例
+
+查询语句示例：
+
+`_time:1d and level:ERROR | stats by (level) count(*) total`
+
+得到的结果遵从 Prometheus 协议格式：
+
+```
+total{level="ERROR"} 150
+```
+
+不同阈值不同级别的配置示例：
+
+- Warning：`$A.total >= 50` 或者简写为 `$A >= 50`（因为只有 total 这一个指标字段）
+- Critical：`$A.total >= 100` 或者简写为 `$A >= 100`（因为只有 total 这一个指标字段）
+
+
+### 2.3 恢复逻辑
+
+| 策略 | 说明 |
+|------|------|
+| **自动恢复** | 当数值不再满足任何告警阈值时，自动生成恢复事件 |
+| **特定恢复条件** | 配置恢复表达式（如 `$A.total < 10`），减少抖动 |
+| **恢复查询** | 独立查询用于恢复判定，支持 `${label_name}` 变量 |
+
+## 3. 数据存在模式 (Data Exists)
+
+<Note>
+这是**最推荐的 VictoriaLogs 告警配置方式**，因为日志场景更适合采用"有异常数据就告警"的模式。
+</Note>
+
+此模式将过滤逻辑全部写在 VictoriaLogs 查询中，Monitors 只负责判断"是否有数据返回"。
+
+**查询语句示例（做统计模式）：**
+
+```
+_time:15m and level:ERROR | stats by (level) count(*) total | filter total:>10
+```
+
+其中 `| filter total:>10` 用于筛选出 `total` 大于 10 的数据。只要有满足该条件的数据行返回，Monitors 就会触发告警；如果没有任何数据行满足该条件，则认为告警恢复。
+
+## 4. 数据缺失模式 (No Data)
+
+数据缺失模式用于监控"原本应该持续产生的日志不再出现"的情况，常见于：
+
+- 应用实例不再产生日志（可能是进程退出）
+- 日志采集链路异常（如 agent 宕机或输出阻塞）
+
+### 配置示例
+
+查询语句（**做统计**模式）：
+
+```
+_time:15m and level:INFO | stats by (level) count(*) total
+```
+
+场景：某个服务应该一直都有 INFO 日志输出，如果在最近 15 分钟内没有任何 INFO 日志产生，就触发告警。
+
+## 5. 获取告警时日志原文
+
+告警查询条件通常使用 “做统计” 模式，这种模式没有返回日志原文。Monitors 支持在告警规则中配置“关联查询”，用于在告警触发时额外查询日志原文。
+
+![](https://docs-cdn.flashcat.cloud/imges/mon/b5c1890d90cecf967695a4b0a4b4fba0.png)
+
+“关联查询”的结果可以渲染在 “备注描述” 中，示例：
+
+```
+{{- if eq $status "firing" }}
+triggered value: {{ $value | printf "%.3f" }}
+{{- range $x := $relates.R1}}
+{{- range $k, $v := $x.Fields }}
+{{- if eq $k "_time" }}
+{{ $k }} : {{ timeFormat $v "2006-01-02T15:04:05Z07:00" 8 }}
+{{- else }}
+{{ $k }} : {{ $v }}
+{{- end }}
+{{- end }}
+{{- end}}
+{{- else}}
+Recovered
+{{- end}}
+```

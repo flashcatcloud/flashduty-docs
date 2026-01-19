@@ -1,0 +1,241 @@
+---
+title: "Error Reporting"
+description: "Learn about Flashduty RUM's error reporting mechanism."
+---
+
+This document covers exception types, capture mechanisms, manual reporting methods, React integration, and the data structure definition for reported exceptions.
+
+## Exception Types
+
+Flashduty RUM can monitor the following types of exceptions:
+
+<Tabs>
+  <Tab title="JavaScript Exceptions">
+    Includes code syntax errors, runtime exceptions, and unhandled Promise rejections. These issues can cause page functionality to fail, severely affecting user experience.
+  </Tab>
+  <Tab title="Network Exceptions">
+    Monitors communication issues with backend services or third-party APIs:
+
+    - XHR/Fetch request failures
+    - Request timeouts
+    - Cross-origin (CORS) errors
+    - HTTP 4xx/5xx status codes
+  </Tab>
+  <Tab title="Resource Loading Exceptions">
+    Monitors webpage resource loading failures:
+
+    - Image loading failures
+    - Script loading failures
+    - Stylesheet loading failures
+    - Font file loading failures
+  </Tab>
+  <Tab title="Custom Exceptions">
+    In addition to automatically captured exceptions, you can use the RUM SDK to manually report custom exceptions for tracking specific issues like business logic errors.
+  </Tab>
+</Tabs>
+
+## Reporting Methods
+
+### Automatic Error Capture
+
+Flashduty RUM SDK automatically captures the following types of browser errors:
+
+| Error Type | Description |
+|----------|------|
+| Uncaught Exceptions | JavaScript exceptions thrown at runtime (e.g., `TypeError`, `ReferenceError`) |
+| Unhandled Promise Rejections | Promise errors not handled by `.catch()` |
+| Network Errors | XHR or Fetch request failures (e.g., 4xx, 5xx status codes or network interruption) |
+| React Rendering Errors | Exceptions during React component rendering (requires error boundaries) |
+
+<Note>
+- Automatically captured errors include stack traces, error messages, and source information by default.
+- Errors from browser extensions or third-party scripts (such as `network` source) are filtered to avoid data pollution.
+</Note>
+
+### Manual Error Reporting
+
+Through the `addError` API, you can manually report handled exceptions, custom errors, or other errors not automatically captured.
+
+**Applicable Scenarios:**
+- Log handled errors in business logic
+- Attach context information (such as user ID, page state) for troubleshooting
+- Monitor exceptions from third-party services or asynchronous operations
+
+<CodeGroup>
+```javascript Report Custom Error
+// Report custom error with context
+const error = new Error("Login failed");
+window.FC_RUM.addError(error, {
+  pageStatus: "beta",
+  userId: "12345",
+  action: "login_attempt",
+});
+```
+
+```javascript Report Network Error
+fetch("https://api.example.com/data").catch((error) => {
+  window.FC_RUM.addError(error, {
+    requestUrl: "https://api.example.com/data",
+    method: "GET",
+  });
+});
+```
+
+```javascript Report Handled Exception
+try {
+  // Business logic that might throw an exception
+  riskyOperation();
+} catch (error) {
+  window.FC_RUM.addError(error, {
+    operation: "riskyOperation",
+    timestamp: Date.now(),
+  });
+}
+```
+</CodeGroup>
+
+### React Error Boundary Integration
+
+Flashduty RUM supports capturing component rendering errors through React [Error Boundaries](https://legacy.reactjs.org/docs/error-boundaries.html) and reporting error information. You can call the `addError` API in `componentDidCatch`, attaching component stack information for debugging.
+
+<Steps>
+  <Step title="Create Error Boundary Component">
+    ```javascript
+    class ErrorBoundary extends React.Component {
+      componentDidCatch(error, info) {
+        const renderingError = new Error(error.message);
+        renderingError.name = "ReactRenderingError";
+        renderingError.stack = info.componentStack; // Component stack
+        renderingError.cause = error; // Original error
+
+        window.FC_RUM.addError(renderingError, {
+          component: this.props.componentName || "Unknown",
+          version: "1.0.0",
+        });
+      }
+
+      render() {
+        return this.props.children;
+      }
+    }
+    ```
+  </Step>
+  <Step title="Wrap Components with Error Boundary">
+    ```jsx
+    <ErrorBoundary componentName="UserProfile">
+      <UserProfile />
+    </ErrorBoundary>
+    ```
+  </Step>
+</Steps>
+
+## Error Data Structure
+
+Each error record contains the following attributes to describe error details and context:
+
+<ParamField path="error.source" type="string">
+  Error source (e.g., `console`, `network`, `custom`, `source`, `report`)
+</ParamField>
+
+<ParamField path="error.type" type="string">
+  Error type or error code (e.g., `TypeError`, `NetworkError`)
+</ParamField>
+
+<ParamField path="error.message" type="string">
+  Concise, readable error message
+</ParamField>
+
+<ParamField path="error.stack" type="string">
+  Error stack trace or supplementary information
+</ParamField>
+
+<ParamField path="error.causes" type="Array">
+  List of related errors providing additional context (optional)
+</ParamField>
+
+<ParamField path="context" type="Object">
+  Custom context information (e.g., page state, user ID), passed via `addError`
+</ParamField>
+
+## Error Filtering and Configuration
+
+To ensure accuracy and relevance of error data, Flashduty RUM applies the following filtering rules:
+
+<AccordionGroup>
+  <Accordion title="Default Filtering Rules">
+    - Only processes errors with `source` of `custom`, `source`, `report`, or `console`
+    - Ignores irrelevant errors from browser extensions, third-party scripts, or `network` source
+  </Accordion>
+  <Accordion title="Stack Requirements">
+    Errors must contain stack trace information, otherwise they may be ignored
+  </Accordion>
+  <Accordion title="Custom Filtering">
+    Use `beforeSend` callback to customize error handling logic, filtering or modifying error data
+  </Accordion>
+</AccordionGroup>
+
+### Custom Error Filtering Example
+
+```javascript
+window.FC_RUM.init({
+  beforeSend: (event) => {
+    if (event.type === "error") {
+      // Ignore specific error messages
+      if (event.error.message.includes("ThirdPartyScript")) {
+        return false; // Discard this error
+      }
+      // Add global context
+      event.context = { ...event.context, appVersion: "2.1.0" };
+    }
+    return true;
+  },
+});
+```
+
+## FAQ
+
+<AccordionGroup>
+  <Accordion title="Why aren't some errors being grouped?">
+    - Confirm stack trace is complete, or check if custom fingerprints conflict
+    - Check if `sourcemap` is correctly uploaded; if not, stacks may not be parsed correctly
+  </Accordion>
+  <Accordion title="How to reduce third-party script error noise?">
+    Use `beforeSend` callback to filter specific error sources or messages:
+
+    ```javascript
+    beforeSend: (event) => {
+      if (event.error.source === "network") return false;
+      return true;
+    };
+    ```
+  </Accordion>
+  <Accordion title="What if custom grouping isn't working?">
+    - Ensure `fingerprint` attribute is correctly set and value is a string
+    - Check if `beforeSend` callback is being called correctly
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Enrich Context Information" icon="info-circle">
+    Attach business-related context in `addError` (such as user ID, action type) for easier problem location.
+    
+    Example: `{ userId: "12345", action: "submit_form" }`
+  </Card>
+  <Card title="Optimize Error Boundaries" icon="shield">
+    Configure error boundaries for key React components to ensure rendering errors are captured. Record component names and versions for easier issue tracking.
+  </Card>
+  <Card title="Control Error Volume" icon="filter">
+    Use sampling rates or `beforeSend` to filter low-value errors and avoid data overload. Prioritize monitoring critical errors affecting user experience.
+  </Card>
+  <Card title="Analysis & Visualization" icon="chart-line">
+    View error data trends and distribution in the "Insights" - "Exception Analysis" Tab to resolve key exception issues.
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<Card title="View Exceptions" icon="eye" href="./error-viewing">
+  Learn how to view and analyze Issues in the error tracking module
+</Card>

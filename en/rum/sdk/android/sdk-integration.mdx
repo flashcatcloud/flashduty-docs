@@ -1,0 +1,312 @@
+---
+title: "SDK Integration"
+description: "Quickly integrate Flashcat Android RUM SDK for real-time monitoring of app performance, errors, and user behavior"
+---
+
+<Info>
+Flashduty Android RUM SDK supports **Android 6.0 (API level 23)** and above. By integrating the SDK, you can monitor your Android app's performance, errors, and user behavior in real-time.
+</Info>
+
+## Integration Steps
+
+<Steps>
+<Step title="Add SDK Dependencies">
+  Add Flashcat SDK dependencies in your app module's `build.gradle` file:
+
+```groovy build.gradle
+dependencies {
+    implementation "cloud.flashcat:fc-sdk-android-core:0.1.0"
+    implementation "cloud.flashcat:fc-sdk-android-rum:0.1.0"
+}
+```
+</Step>
+
+<Step title="Get Application Credentials">
+  In the Flashduty console's **RUM Application Management** page:
+
+1. Create or select an Android application
+2. Get the following credentials:
+   - **Application ID** - Application unique identifier
+   - **Client Token** - Client access token
+
+<Frame>
+  <img src="https://docs-cdn.flashcat.cloud/imges/png/68ee9835732aad09e4e134f30bd2cccd.png" alt="RUM Application Management page showing Application ID and Client Token locations" />
+</Frame>
+</Step>
+
+<Step title="Initialize SDK">
+  Initialize Flashcat SDK in your `Application` class's `onCreate()` method:
+
+```kotlin Application.kt
+import cloud.flashcat.android.Flashcat
+import cloud.flashcat.android.FlashcatSite
+import cloud.flashcat.android.core.configuration.Configuration
+import cloud.flashcat.android.privacy.TrackingConsent
+
+class SampleApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+
+        val clientToken = "<CLIENT_TOKEN>"
+        val environmentName = "<ENV_NAME>"
+        val appVariantName = "<APP_VARIANT_NAME>"
+
+        val configuration = Configuration.Builder(
+            clientToken = clientToken,
+            env = environmentName,
+            variant = appVariantName
+        ).build()
+
+        Flashcat.initialize(this, configuration, TrackingConsent.GRANTED)
+    }
+}
+```
+
+<Note>
+**Parameter Description:**
+- `environmentName` - Environment name (e.g., production, staging)
+- `appVariantName` - App variant name, used to distinguish data from different build versions
+- For more configuration options, see [Advanced Configuration](/en/rum/sdk/android/advanced-config)
+</Note>
+</Step>
+
+<Step title="Enable RUM Features">
+  Configure and enable Android SDK's RUM features:
+
+```kotlin Application.kt
+import cloud.flashcat.android.rum.Rum
+import cloud.flashcat.android.rum.RumConfiguration
+import cloud.flashcat.android.rum.tracking.ActivityViewTrackingStrategy
+
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .trackUserInteractions()
+    .trackLongTasks(durationThreshold)
+    .useViewTrackingStrategy(ActivityViewTrackingStrategy(true))
+    .build()
+    
+Rum.enable(rumConfig)
+```
+
+<Check>
+The SDK will automatically start collecting the following data:
+- User interaction events
+- Long task monitoring
+- Activity view tracking
+</Check>
+</Step>
+
+<Step title="Configure Network Tracking (Optional)">
+  Configure network interceptors to track HTTP requests and responses:
+
+**Add OkHttp dependency:**
+
+```groovy build.gradle
+dependencies {
+    implementation "cloud.flashcat:fc-sdk-android-okhttp:0.1.0"
+}
+```
+
+**Configure interceptor:**
+
+```kotlin
+import cloud.flashcat.android.okhttp.DatadogInterceptor
+import cloud.flashcat.android.trace.TracingHeaderType
+
+val tracedHostsWithHeaderType = mapOf(
+    "example.com" to setOf(
+        TracingHeaderType.DATADOG, // datadog protocol
+        TracingHeaderType.TRACECONTEXT // w3c standard protocol
+    ),
+    "api.example.com" to setOf(
+        TracingHeaderType.DATADOG,
+        TracingHeaderType.TRACECONTEXT
+    )
+)
+
+val okHttpClient = OkHttpClient.Builder()
+    .addInterceptor(DatadogInterceptor.Builder(tracedHostsWithHeaderType).build())
+    .build()
+```
+
+<Check>
+With `DatadogInterceptor`, every request handled by OkHttpClient is automatically recorded as a resource, with relevant information (URL, method, status code, error) automatically populated.
+</Check>
+
+<Note>
+- Only network requests initiated while a view is active are tracked
+- To track requests when app is in background, see [Track Background Events](#track-background-events)
+- If using multiple interceptors, add `DatadogInterceptor` as the first interceptor
+</Note>
+
+**Track Network Redirects or Retries:**
+
+To monitor network redirects or retries, use `DatadogInterceptor` as a network interceptor:
+
+```kotlin
+val okHttpClient = OkHttpClient.Builder()
+    .addNetworkInterceptor(DatadogInterceptor.Builder(tracedHostsWithHeaderType).build())
+    .build()
+```
+
+<Tip>
+You can also add an `EventListener` to `OkHttpClient` to automatically track resource timing for third-party providers and network requests.
+</Tip>
+
+**Filter Specific Errors:**
+
+To filter specific errors reported by `DatadogInterceptor`, configure a custom `EventMapper` in `RumConfiguration`:
+
+```kotlin
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setErrorEventMapper { errorEvent ->
+        if (errorEvent.shouldBeDiscarded()) {
+            null
+        } else {
+            errorEvent
+        }
+    }
+    .build()
+```
+</Step>
+</Steps>
+
+## Advanced Configuration
+
+### Track Background Events
+
+You can track events when the app is running in the background (e.g., crashes and network requests):
+
+```kotlin
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .trackBackgroundEvents(true)
+    .build()
+```
+
+<Warning>
+Tracking background events may generate additional sessions, affecting billing. If you have questions, please contact Flashcat support team.
+</Warning>
+
+### Offline Data Handling
+
+The Android SDK ensures data availability when the user's device is offline:
+
+<Check>
+**Data Persistence Mechanism:**
+- Events are stored locally in batches when network signal is weak or device battery is low
+- Automatically uploaded when network recovers, ensuring no data loss
+- Old data is automatically cleaned up to avoid excessive disk usage
+</Check>
+
+<Note>
+Even if users use the app while offline, data is retained and uploaded when network recovers, ensuring no monitoring data is lost.
+</Note>
+
+### Track Local Resource Access
+
+You can track access to assets and raw resources:
+
+<Tabs>
+<Tab title="Assets Resources">
+```kotlin
+val inputStream = context.getAssetAsRumResource(fileName)
+```
+</Tab>
+
+<Tab title="Raw Resources">
+```kotlin
+val inputStream = context.getRawResAsRumResource(id)
+```
+</Tab>
+</Tabs>
+
+## WebView Integration
+
+If your Android app contains WebViews, you can enable WebView tracking to monitor web content performance and errors.
+
+<Steps>
+<Step title="Add WebView Dependency">
+
+```groovy build.gradle
+dependencies {
+    implementation "cloud.flashcat:fc-sdk-android-webview:0.1.0"
+}
+```
+</Step>
+
+<Step title="Enable WebView Tracking">
+
+Enable WebView tracking in your Activity or Fragment:
+
+```kotlin
+import cloud.flashcat.android.webview.WebViewTracking
+
+// Enable tracking for specified WebView
+WebViewTracking.enable(webView, listOf("example.com", "*.example.com"))
+```
+
+<Note>
+**Parameter Description:**
+- `webView` - WebView instance to track
+- `allowedHosts` - List of domains to track, supports wildcards (e.g., `*.example.com`)
+</Note>
+</Step>
+</Steps>
+
+<Check>
+Web pages in WebView can now be correlated with native app RUM data.
+</Check>
+
+## Verify Integration
+
+After integration, verify that the integration is successful:
+
+<Steps>
+<Step title="Access Console">
+  Log in to Flashduty console, go to the corresponding RUM application, and check if data is being reported.
+</Step>
+
+<Step title="Trigger Test Events">
+  Perform the following actions in the app to verify data collection:
+  - Open different pages in the app to verify page view events
+  - Perform user actions (clicks, swipes, etc.) to verify interaction events
+  - Trigger network requests to verify resource loading events
+</Step>
+
+<Step title="Check Logs">
+  Check Logcat for network requests to the data reporting endpoint.
+  
+  <Check>
+  If you see data reporting requests and data appears in the console, the integration is successful!
+  </Check>
+</Step>
+</Steps>
+
+## ProGuard Configuration
+
+If your app has code obfuscation enabled (ProGuard/R8), add the following rules to your `proguard-rules.pro` file:
+
+```proguard proguard-rules.pro
+# Flashcat SDK
+-keep class cloud.flashcat.android.** { *; }
+-dontwarn cloud.flashcat.android.**
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Advanced Configuration" icon="sliders" href="/en/rum/sdk/android/advanced-config">
+  Configure advanced SDK features like custom sampling, user identification, global context, etc.
+</Card>
+
+<Card title="Data Collection" icon="database" href="/en/rum/sdk/android/data-collection">
+  Learn about data types and data structures collected by the SDK
+</Card>
+
+<Card title="Insights" icon="chart-line" href="/en/rum/analytics/native">
+  View and analyze app performance, errors, and user behavior data
+</Card>
+
+<Card title="Error Tracking" icon="bug" href="/en/rum/error-tracking/overview">
+  Configure crash reporting and error tracking features
+</Card>
+</CardGroup>

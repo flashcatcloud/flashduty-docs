@@ -1,0 +1,119 @@
+---
+title: "SLS"
+description: "Configure alert rules for Alibaba Cloud Log Service (SLS) data sources"
+---
+
+Monitors retrieves data through SLS SQL query interface (GetLogsV3) and triggers alerts based on query results.
+
+## Core Concepts
+
+| Config Item | Description |
+|--------|------|
+| **Query Language** | Uses SLS SQL syntax |
+| **Required Parameters** | Each query must specify `sls.project` and `sls.logstore` |
+| **Time Range** | Controlled by API parameters; no need to write `WHERE __time__ > ...` in SQL |
+| **Field Processing** | `__source__` and `__time__` fields are ignored by default |
+
+## 1. Threshold Evaluation Mode
+
+This mode is suitable for scenarios requiring threshold comparison on aggregated values.
+
+### Configuration
+
+1. **Query Statement**: Write SLS SQL aggregate query.
+  - Example: Count error log quantity by host in the last 15 minutes.
+    ```sql
+    * | SELECT host, count(*) as error_cnt WHERE level = 'ERROR' GROUP BY host
+    ```
+2. **Query Parameters**:
+  - `sls.project`: (Required) Project name.
+  - `sls.logstore`: (Required) Logstore name.
+  - `sls.timespan.value`: (Optional) Time span value, default is 15.
+  - `sls.timespan.unit`: (Optional) Time span unit, supports `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Default is `m`.
+3. **Field Mapping**:
+  - **Label Fields**: Fields used to distinguish different alert objects. In the above example, it's `host`. This field can be left empty; Monitors will automatically treat all fields except value fields as label fields.
+  - **Value Fields**: Numeric fields used for threshold evaluation. In the above example, it's `error_cnt`.
+4. **Threshold Conditions**:
+  - Use `$A.field_name` to reference values.
+  - Example: `Critical: $A.error_cnt > 50`, `Warning: $A.error_cnt > 10`.
+
+### How It Works
+
+The engine calls SLS API, specifying time range (like last 15 minutes), executing SQL query. After getting results, it groups by "label fields", extracts "value fields" to compare against thresholds.
+
+### Recovery Logic
+
+| Strategy | Description |
+|------|------|
+| **Auto Recovery** | When values no longer satisfy any alert threshold, automatically recovers |
+| **Specific Recovery Condition** | Configure recovery expression (e.g., `$A.error_cnt < 5`) |
+| **Recovery Query** | Independent SQL for recovery evaluation, supports `${label_name}` variables |
+
+## 2. Data Exists Mode
+
+This mode is suitable for scenarios where filter logic is written directly in SQL.
+
+### Configuration
+
+1. **Query Statement**: Use `HAVING` clause to filter anomalous data.
+  - Example: Query hosts with error count exceeding 50.
+    ```sql
+    * | SELECT host, count(*) as error_cnt WHERE level = 'ERROR' GROUP BY host HAVING error_cnt > 50
+    ```
+2. **Query Parameters**: Same as above, need to configure `sls.project` and `sls.logstore`.
+3. **Evaluation Rules**: As long as query returns data, triggers alert.
+
+### Pros and Cons Analysis
+
+| Type | Description |
+|------|------|
+| **Pros** | Leverages SLS server-side computing power, reducing data transmission |
+| **Cons** | Cannot differentiate multi-level alerts |
+
+### Recovery Logic
+
+- **Recovery When Data Disappears**: When query result is empty, determines recovery
+- **Recovery Query**: Supports configuring additional query statements
+
+## 3. No Data Mode
+
+This mode is used to monitor scenarios where "data is expected but actually missing".
+
+### Configuration
+
+1. **Query Statement**: Write a query that is expected to continuously return data.
+  - Example: Query log reporting heartbeat from all hosts.
+    ```sql
+    * | SELECT host, max(__time__) as last_seen GROUP BY host
+    ```
+2. **Evaluation Rules**: If a `host` appeared in previous cycles but cannot be found in current and N consecutive cycles, triggers "No Data" alert.
+
+## 4. Advanced Configuration
+
+<AccordionGroup>
+<Accordion title="Power SQL">
+If you need to use SLS enhanced SQL syntax, add in query parameters: `sls.powersql: true`
+</Accordion>
+
+<Accordion title="Time Range Control">
+Default queries data from the last 15 minutes. Adjustable via parameters:
+
+| Parameter | Description |
+|------|------|
+| `sls.timespan.value` | Time span value, like `60` |
+| `sls.timespan.unit` | Time unit: `s` (seconds), `m` (minutes), `h` (hours), `d` (days) |
+
+<Warning>
+Do not use `__time__` for filtering in SQL; the engine automatically sets time range based on parameters.
+</Warning>
+</Accordion>
+
+<Accordion title="Debug Parameters">
+For debugging only; do not configure in production rules:
+
+| Parameter | Description |
+|------|------|
+| `sls.from` | Start timestamp (seconds) |
+| `sls.to` | End timestamp (seconds) |
+</Accordion>
+</AccordionGroup>

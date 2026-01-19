@@ -1,0 +1,171 @@
+Configure alert Webhook. When specific operations occur on alerts (such as trigger or close), the system makes an HTTP callback to your configured address. The callback content includes the alert's latest key information, allowing integration with your custom tools.
+
+<span id="EventTypes"></span>
+
+## 1. Event Types
+
+The following event types are currently supported; more may be added in the future.
+
+<div className="md-block">
+
+| Event Type | Description |
+| :--------: | :------------------------------------------------------------------------------- |
+| a_new | Integration pushes new event, triggering a new alert |
+| a_update | Integration pushes new event, merges into an alert, and updates alert info (severity, status, labels, description, etc.) |
+| a_merge | Merge alert into incident |
+| a_close | Manually close alert |
+
+</div>
+
+## 2. Push Description
+
+### Request Method
+
+<div className="md-block">
+
+POST, Content-Type:"application/json"
+
+</div>
+
+### Request Payload:
+
+<div className="md-block">
+
+| Field | Type | Required | Description |
+| :--------: | :---------------: | :--: | :------------------------------------------------------------------ |
+| event_time | int64 | Yes | Event timestamp in `milliseconds` |
+| event_type | string | Yes | Event type, enum values see [Event Types](#EventTypes) |
+| event_id | string | Yes | Event ID, `the same event may retry multiple times due to timeout, receiver needs to deduplicate` |
+| person | [Person](#Person) | No | Operator, only exists for human actions |
+| alert | [Alert](#Alert) | Yes | Alert details |
+
+<span id="Person"></span>
+**Person**:
+Field|Type|Required|Description
+:-:|:-:|:-:|:---
+person_id | int64 | Yes | Person ID
+person_name | string | Yes | Person name
+email | string | Yes | Email address
+
+<span id="Alert"></span>
+**Alert**:
+
+| Field | Type | Required | Description |
+| :--------------: | :-----------: | :--: | :----------------- |
+| alert_id | string | Yes | Alert ID |
+| data_source_id | int64 | Yes | Integration ID |
+| data_source_name | string | Yes | Integration name |
+| data_source_type | string | Yes | Integration type |
+| channel_id | int64 | Yes | Channel ID |
+| channel_name | string | Yes | Channel name |
+| title | string | Yes | Alert title |
+| title_rule | string | No | Title generation rule |
+| description | string | No | Alert description |
+| alert_key | string | Yes | Alert association key |
+| alert_severity | string | Yes | Severity, enum: Critical, Warning, Info |
+| alert_status | string | Yes | Alert status, enum: Critical, Warning, Info, Ok |
+| progress | string | Yes | Progress, enum: Triggered, Closed |
+| created_at | int64 | Yes | Created time |
+| updated_at | int64 | Yes | Updated time |
+| start_time | int64 | Yes | First trigger time (time of first event received by platform), Unix seconds timestamp |
+| last_time | int64 | Yes | Latest event time (time of latest event received by platform), Unix seconds timestamp |
+| end_time | int64 | No | Alert recovery time (time platform last received end-type event), Unix seconds timestamp, default 0 |
+| close_time | int64 | No | Close time, different from end_time, this is progress close, doesn't mean alert truly recovered. Unix seconds timestamp, default 0 |
+| labels | map[string]string | No | Label KV, both Key and Value are strings |
+| event_cnt | int64 | No | Associated event count |
+| incident | [Incident](#Incident) | No | Associated incident |
+
+<span id="Incident"></span>
+**Incident**:
+
+| Field | Type | Required | Description |
+| :---------: | :----: | :--: | :------- |
+| incident_id | string | Yes | Incident ID |
+| title | string | Yes | Incident title |
+
+</div>
+
+### Request Response
+
+HTTP status code 200 indicates successful push.
+
+### Request Example
+
+```
+curl -X POST 'https://example.com/alert/webhook?a=a' \
+-H 'Content-Type: application/json' \
+-H 'X-Customize-Header-A: a' \
+-d '{
+    "alert":{
+        "alert_id":"645c3affd2b92d989a0bd824",
+        "alert_key":"d21d9e3126f5ae94",
+        "alert_severity":"Warning",
+        "alert_status":"Warning",
+        "channel_id":1163577812973,
+        "channel_name":"Order System",
+        "close_time":0,
+        "created_at":1683766015,
+        "data_source_id":1571358104973,
+        "data_source_name":"Aliyun SLS",
+        "data_source_ref_id":"",
+        "data_source_type":"aliyun-sls.alert",
+        "description":"Test sending to Flashduty alert trigger",
+        "end_time":0,
+        "event_cnt":1,
+        "incident":{
+            "incident_id":"645db17c9759374196929314",
+            "title":"123123123"
+        },
+        "labels":{
+            "a":"a",
+            "alert_type":"sls_alert",
+            "alert_url":"https://sls.console.aliyun.com/lognext/project/sls-api-testing/alert/alert-1683548531-071659",
+            "aliuid":"1082109605037616",
+            "check":"Test sending to Flashduty",
+            "fire_results":"{\"_col0\":\"true\"}",
+            "fire_results_count":"1",
+            "project":"sls-api-testing",
+            "raw_condition":"Count:__count__ \u003e 0; Condition:",
+            "region":"cn-beijing",
+            "resource":"d18195cd567c6e8b-5fb6a5e6fb8ad-1f269e0",
+            "severity":"6"
+        },
+        "last_time":1683809153,
+        "progress":"Triggered",
+        "start_time":1683766013,
+        "title":"Test sending to Flashduty alert trigger",
+        "title_rule":"$resource::$check",
+        "updated_at":1683809170
+    },
+    "event_id":"ffcf1d47a8d853dc800d000c87e5568b",
+    "event_time":1683890681639,
+    "event_type":"a_merge",
+    "person":{
+        "email":"zhangsan@flashcat.cloud",
+        "person_id":82138731581973,
+        "person_name":"Flashcat"
+    }
+}' -v
+```
+
+## 3. FAQ
+
+1. **Is there a response timeout?**
+
+   - Service needs to return response within 2 seconds; exceeding 2 seconds is considered a failure
+
+2. **Will pushes continue after failure?**
+
+  Retries for specific network errors, max 2 retries:
+    - context deadline exceeded (excluding awaiting headers)
+    - i/o timeout
+    - eof
+
+3. **How to ensure push order?**
+
+   - Theoretically, events for the same alert are pushed in chronological order, but retries may cause out-of-order delivery
+   - Services can filter based on event_time; if a later event has been received, earlier events can be filtered out. Each push carries the latest complete information, so occasional event loss is tolerable
+
+4. **Trusted IP whitelist for push source?**
+   - {ip_whitelist}
+   - May be updated in the future, please check regularly
