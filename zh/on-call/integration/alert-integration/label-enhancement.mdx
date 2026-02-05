@@ -1,7 +1,7 @@
 ---
 title: "标签增强"
-description: "标签增强可在告警接入时自动生成新标签，弥补源数据不足。例如：从描述中提取 IP、将资源 ID 映射为可读名称、组合多个字段生成跳转链接"
-keywords: ["标签增强", "自动标签", "数据提取", "字段映射", "告警标签"]
+description: "标签增强可在告警接入时自动生成新标签，弥补源数据不足。例如：从描述中提取 IP、将资源 ID 映射为可读名称、组合多个字段生成跳转链接、通过 API 查询外部系统获取动态数据"
+keywords: ["标签增强", "自动标签", "数据提取", "字段映射", "告警标签", "API映射", "动态标签"]
 ---
 {/*
 ## 视频介绍
@@ -105,7 +105,18 @@ keywords: ["标签增强", "自动标签", "数据提取", "字段映射", "告�
 </Tab>
 
 <Tab title="标签映射">
-**场景**：当源告警信息中的标签值不固定且不能直观定位其含义时，可以通过映射的方式将源标签映射为新定义的标签和值。比如源告警中只有资源类型 ID 信息，但希望将每个 ID 对应的资源类型名称也体现出来。
+**场景**：当源告警信息中的标签值不固定且不能直观定位其含义时，可以通过映射的方式将源标签映射为新定义的标签和值。
+
+标签映射支持两种映射方式：
+
+| 映射类型 | 说明 | 适用场景 |
+| :--- | :--- | :--- |
+| **Schema（映射表）** | 通过预定义的 CSV 映射表进行静态映射 | 映射关系相对固定，数据量有限 |
+| **API（接口映射）** | 通过调用外部 API 服务进行动态映射 | 需要查询外部系统（如 mapping api）获取实时数据 |
+
+<Tabs>
+<Tab title="Schema 映射">
+**示例**：源告警中只有资源类型 ID 信息，希望将每个 ID 对应的资源类型名称也体现出来。
 
 <Steps>
 <Step title="准备映射表文件">
@@ -153,7 +164,46 @@ keywords: ["标签增强", "自动标签", "数据提取", "字段映射", "告�
 </Step>
 </Steps>
 </Tab>
+
+<Tab title="API 映射">
+**示例**：需要根据告警中的主机信息从 mapping api 系统查询负责团队、服务等级等动态数据。
+
+<Steps>
+<Step title="创建映射服务">
+1. 进入 `集成中心` → `映射服务` → `创建映射服务`
+2. 填写服务配置信息：
+
+| 配置项 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| 服务名称 | 服务的可读名称 | Mapping api 资产查询服务 |
+| 描述 | 服务用途说明 | 根据主机 IP 查询资产信息 |
+| 请求 URL | API 的请求地址 | `https://mapping-api.example.com/v1/enrich-event` |
+| 请求头 | HTTP 请求头配置 | `X-Auth-Token: your-token` |
+| 超时时间 | 请求超时时间（秒） | 5 |
+| 重试次数 | 请求失败后的重试次数 | 2 |
+
+<Tip>
+如果 API 使用 HTTPS 且证书不受信任，可开启 `跳过证书验证` 选项。
+</Tip>
+</Step>
+
+<Step title="配置映射规则">
+在标签增强中添加映射规则，选择映射类型为 `API`：
+1. 选择已创建的映射服务
+2. 配置 `生成标签列表`：指定希望从 API 返回的标签名称，如 `owner_team`、`service_tier`、`host_ip`
+3. 根据需要开启 `覆盖` 选项
+</Step>
+
+<Step title="验证映射效果">
+当告警触发时，Flashduty 会自动调用配置的 API 服务，将告警事件数据发送给外部系统，并将返回的标签添加到告警中。
+</Step>
+</Steps>
+</Tab>
 </Tabs>
+</Tab>
+</Tabs>
+
+## 映射数据管理
 
 ### 映射表数据管理
 
@@ -172,8 +222,95 @@ keywords: ["标签增强", "自动标签", "数据提取", "字段映射", "告�
 </Frame>
 
 <Tip>
-对于频繁变更的映射关系（如 CMDB 数据同步），建议使用 [Flashduty API](https://developer.flashcat.cloud/api-142429470) 进行自动化更新。
+对于频繁变更的映射关系（如 Mapping api 数据同步），建议使用 API 映射方式，或通过 [Flashduty API](https://developer.flashcat.cloud/api-142429470) 自动化更新映射表数据。
 </Tip>
+
+### 映射服务 API 规范
+
+当使用 API 映射时，您的外部 API 服务需要遵循以下规范：
+
+#### 请求规范
+
+Flashduty 将通过 `POST` 方法调用您的 API，请求体包含以下内容：
+
+```json
+{
+  "result_label_keys": ["owner_team", "service_tier", "host_ip"],
+  "event": {
+    "account_id": 1,
+    "channel_id": 20,
+    "data_source_id": 15,
+    "data_source_type": "prometheus",
+    "description": "CPU usage for instance '10.0.1.1:9100' is over 95%",
+    "title": "High CPU Usage on instance 10.0.1.1:9100",
+    "alert_key": "d41d8cd98f00b204e9800998ecf8427e",
+    "alert_id": "62d6c0f6b8f1b2b3c4d5e6f7",
+    "event_severity": "Critical",
+    "event_status": "Critical",
+    "event_time": 1678886400,
+    "labels": {
+      "region": "us-east-1",
+      "service": "service-A",
+      "env": "production",
+      "instance": "10.0.1.1:9100"
+    }
+  }
+}
+```
+
+| 字段 | 类型 | 说明 |
+| :--- | :--- | :--- |
+| `result_label_keys` | array[string] | 期望返回的标签名称列表，由用户在规则中配置 |
+| `event` | object | 当前告警事件的完整信息 |
+
+#### 响应规范
+
+API 需要返回以下格式的 JSON 响应：
+
+**成功响应** (HTTP 200)：
+
+```json
+{
+  "result_labels": {
+    "owner_team": "team-database",
+    "service_tier": "tier-1",
+    "host_ip": "10.0.1.1"
+  }
+}
+```
+
+| 响应码 | 说明 |
+| :--- | :--- |
+| `200 OK` | 成功，返回 `result_labels` 对象 |
+| `404 Not Found` | 未找到匹配数据 |
+| `400 Bad Request` | 请求格式错误 |
+| `5xx` | 服务器内部错误 |
+
+<Note>
+如果某个请求的标签无法找到对应的值，API **不应**在 `result_labels` 中包含该 key。
+</Note>
+
+#### 安全约束
+
+为确保安全性，以下 HTTP Header 被禁止在映射服务中使用：
+
+| 分类 | 禁用 Header |
+| :--- | :--- |
+| 认证与授权 | `authorization`, `proxy-authorization`, `cookie`, `x-api-key`, `x-access-token` |
+| IP 伪造 | `x-forwarded-for`, `x-real-ip`, `true-client-ip`, `x-client-ip` |
+| 主机与路由 | `host`, `x-forwarded-host`, `x-forwarded-proto`, `x-internal-id`, `x-user-id` |
+| 协议相关 | `transfer-encoding`, `upgrade`, `connection` |
+
+<Tip>
+建议使用 `X-Custom-` 或 `X-Enrich-` 前缀的自定义 Header 进行认证。
+</Tip>
+
+#### 最佳实践
+
+1. **性能优先**：API 位于告警处理的关键路径，必须保证低延迟（建议 < 1s）
+2. **实现缓存**：对于相同的查询条件，建议实现缓存以提高性能
+3. **幂等设计**：对于同一个事件，多次调用应返回相同的结果
+4. **安全认证**：API 必须通过认证机制保护，防止未授权访问
 
 ## 延伸阅读
 
