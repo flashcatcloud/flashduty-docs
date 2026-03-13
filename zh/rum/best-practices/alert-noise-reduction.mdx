@@ -1,0 +1,184 @@
+---
+title: "RUM 告警太多？从这里开始配置"
+sidebarTitle: "RUM 告警降噪"
+description: "通过数据过滤、告警分级与 Flashduty 协同，让 RUM 告警聚焦关键问题，减少无效干扰。"
+keywords: ["RUM", "最佳实践", "告警", "降噪", "前端监控"]
+---
+
+Flashduty RUM 提供了从数据过滤、告警分级到 Flashduty 告警处理的完整链路。合理配置这一链路，可以有效降低告警噪音，让团队专注于真正重要的问题。
+
+本文将介绍 RUM 告警配置的核心原则和典型场景方案，帮助您快速减少无效告警干扰。
+
+## 告警处理链路
+
+RUM 告警从 Error 产生到通知到人，经过以下四层处理：
+
+| 层级 | 配置位置 | 核心作用 |
+|------|----------|----------|
+| ① 数据过滤 | RUM 应用 → 告警设置 | 在源头排除不需要的 Error，减少无效 Issue |
+| ② 告警分级 | RUM 应用 → 告警设置 | 根据 Error 属性设定 Issue 优先级 |
+| ③ 告警处理 | Flashduty 集成 → 告警处理 | 基于 Issue 维度做优先级调整、丢弃/抑制 |
+| ④ 告警分派 | Flashduty 协作空间 | 路由到团队、通知值班人员 |
+
+配置时建议**从上到下依次设置**：先过滤噪音，再分级告警，最后在 Flashduty 侧做精细化处理。
+
+## 第一步：过滤噪音数据
+
+在配置告警分级之前，先清理数据源。常见的噪音来源包括：
+
+<AccordionGroup>
+  <Accordion title="第三方脚本错误">
+    浏览器扩展或第三方广告/分析脚本产生的错误与您的业务无关，建议排除：
+
+    - 错误堆栈 包含 `chrome-extension://`
+    - 错误堆栈 包含 `moz-extension://`
+    - 错误堆栈 包含 `cdn.third-party.com`
+  </Accordion>
+  <Accordion title="已知无害错误">
+    某些错误频繁出现但不影响用户体验：
+
+    - 错误消息 包含 `ResizeObserver loop`
+    - 错误消息 包含 `Script error`
+  </Accordion>
+  <Accordion title="非核心环境错误">
+    如果您只关注生产环境的告警，可以过滤其他环境的错误：
+
+    - 环境 不包含 `production`
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+被过滤的 Error 不会参与 Issue 聚合和告警，但数据仍然保留，您可以在查看器中通过筛选条件查看这些被过滤的错误。
+</Tip>
+
+## 第二步：配置告警分级
+
+过滤噪音后，通过告警分级规则区分不同错误的重要程度。
+
+### 分级策略建议
+
+| 优先级 | 适用场景 | 期望响应时间 |
+|--------|----------|--------------|
+| **P0（Critical）** | 核心业务中断、VIP 用户受影响、生产环境崩溃 | 立即响应 |
+| **P1（Warning）** | 重要功能异常、核心页面错误 | 当日处理 |
+| **P2（Info）** | 非核心功能错误、低影响问题 | 按计划处理 |
+
+### 推荐规则配置
+
+以下是按业务优先级从高到低排列的推荐规则：
+
+<Steps>
+  <Step title="生产环境崩溃 → P0">
+    崩溃意味着应用完全不可用，需要最高优先级响应。
+
+    - 条件：环境 包含 `production`，且 是否崩溃 包含 `true`
+    - 告警级别：P0
+  </Step>
+  <Step title="VIP 用户错误 → P0">
+    VIP 用户的体验直接关系到商业价值。
+
+    - 条件：用户 ID 包含 `vip`（或通过自定义字段 `context.user.level` 包含 `vip` 来匹配）
+    - 告警级别：P0
+  </Step>
+  <Step title="核心页面错误 → P1">
+    支付、登录、结算等核心业务页面的错误需要优先处理。
+
+    - 条件：页面 URL 包含 `/payment`
+    - 告警级别：P1
+
+    可以为每个核心页面创建单独的规则，或在同一规则中使用多个匹配值。
+  </Step>
+  <Step title="其他错误 → P2（默认）">
+    未匹配任何规则的错误自动归为 P2，按常规流程处理。无需额外配置。
+  </Step>
+</Steps>
+
+<Tip>
+规则数量建议控制在 3-6 条，覆盖最关键的场景即可。过多的规则会增加维护成本，且容易导致优先级混乱。
+</Tip>
+
+## 第三步：在 Flashduty 中精细化处理
+
+RUM 侧的告警分级基于单个 Error 的属性，如需基于 Issue 的整体影响做进一步处理，可以在 Flashduty 的[告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 中配置。
+
+| 处理场景 | 配置方式 |
+|----------|----------|
+| 抑制重复告警 | 同一 `alert_key` 在 1 小时内只告警一次 |
+| 自定义告警标题 | 模板示例：`[RUM] [{{Labels.env}}] {{Labels.error_type}} - {{Labels.view_url}}` |
+| 低影响错误降级 | 当 `labels.affected_users` < 5 时，将严重程度更新为 Info |
+
+## 典型场景方案
+
+<Tabs>
+  <Tab title="电商应用">
+    电商应用的核心是交易流程，告警配置应围绕支付和下单环节展开。
+
+    | 层级 | 配置 |
+    |------|------|
+    | 数据过滤 | 排除：第三方广告脚本错误、`ResizeObserver loop` |
+    | 告警分级 | P0：支付页面错误、崩溃；P1：商品详情页/购物车错误 |
+    | 告警处理 | 抑制窗口：30 分钟；标题模板包含页面路径 |
+    | 告警分派 | P0 → 短信+电话通知，P1 → IM 通知 |
+  </Tab>
+  <Tab title="SaaS 应用">
+    SaaS 应用需要关注不同租户的体验差异。
+
+    | 层级 | 配置 |
+    |------|------|
+    | 数据过滤 | 排除：浏览器扩展错误、非生产环境 |
+    | 告警分级 | P0：企业版租户错误（通过 `context.tenant.plan` 匹配）；P1：核心功能页面错误 |
+    | 告警处理 | 标题模板包含租户信息；低影响告警降级 |
+    | 告警分派 | 按团队分配到不同协作空间 |
+  </Tab>
+  <Tab title="内容型网站">
+    内容型网站对可用性要求相对宽松，重点关注加载和渲染问题。
+
+    | 层级 | 配置 |
+    |------|------|
+    | 数据过滤 | 排除：第三方脚本错误、`Script error` |
+    | 告警分级 | P0：崩溃；P1：首页/搜索页错误 |
+    | 告警处理 | 抑制窗口：1 小时；影响用户数 < 10 的告警降级 |
+    | 告警分派 | P0 → IM 通知，P1/P2 → 邮件通知 |
+  </Tab>
+</Tabs>
+
+## 常见问题
+
+<AccordionGroup>
+  <Accordion title="数据过滤和 Flashduty 告警丢弃有什么区别？">
+    | 对比 | RUM 数据过滤 | Flashduty 告警丢弃 |
+    |------|-------------|-------------------|
+    | 作用时机 | Error 聚合为 Issue 之前 | Issue 投递为告警之后 |
+    | 数据留存 | Error 数据保留，可在查看器中查看 | Issue 数据保留 |
+    | 影响范围 | 被过滤的 Error 不参与 Issue 聚合和告警 | Issue 已存在，只是不产生告警通知 |
+    | 适用场景 | 长期排除的噪音数据 | 灵活的告警控制 |
+  </Accordion>
+  <Accordion title="告警分级规则和 Flashduty Pipeline 如何配合？">
+    两者互补，适用于不同维度的判断：
+
+    - **RUM 告警分级**：基于单个 Error 的属性（用户、页面、环境等），适合在源头快速判定
+    - **Flashduty Pipeline**：基于 Issue 的整体信息（影响用户数、错误数量等），适合做更全面的评估
+
+    建议在 RUM 侧设定基础优先级，在 Flashduty 侧做补充调整。
+  </Accordion>
+  <Accordion title="默认告警行为会改变吗？">
+    不会。如果不配置任何过滤规则和告警分级，所有 Error 仍然会聚合为 Issue 并以默认严重程度投递到 Flashduty。现有行为完全保持不变。
+  </Accordion>
+</AccordionGroup>
+
+## 延伸阅读
+
+<CardGroup cols={2}>
+  <Card title="Issue 告警" icon="bell" href="/zh/rum/error-tracking/issue-alerts">
+    告警触发条件、自定义分级和数据过滤的完整配置说明
+  </Card>
+  <Card title="告警处理 Pipeline" icon="filter" href="/zh/on-call/integration/alert-integration/alert-pipelines">
+    在集成层对告警进行清洗、转换和过滤
+  </Card>
+  <Card title="告警降噪" icon="volume-slash" href="/zh/on-call/channel/noise-reduction">
+    在协作空间层面聚合和抑制告警
+  </Card>
+  <Card title="告警分派" icon="route" href="/zh/on-call/channel/escalation-rule">
+    配置分派策略，将告警路由到正确的值班人员
+  </Card>
+</CardGroup>
