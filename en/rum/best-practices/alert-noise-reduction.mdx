@@ -1,0 +1,183 @@
+---
+title: "Too Many RUM Alerts? Start Here"
+sidebarTitle: "RUM Alert Noise Reduction"
+description: "Reduce unnecessary alert noise and focus on what matters through data filtering, alert grading, and Flashduty integration."
+---
+
+Flashduty RUM provides a complete pipeline from data filtering and alert grading to Flashduty alert processing. Properly configuring this pipeline can effectively reduce alert noise and help your team focus on what truly matters.
+
+This guide covers the core principles and typical scenario configurations to help you quickly reduce unnecessary alert noise.
+
+## Alert Processing Pipeline
+
+RUM alerts pass through four layers from Error generation to human notification:
+
+| Layer | Configuration Location | Core Function |
+|-------|------------------------|---------------|
+| ① Data Filtering | RUM App → Alert Settings | Exclude unwanted Errors at the source, reducing unnecessary Issues |
+| ② Alert Grading | RUM App → Alert Settings | Set Issue priority based on Error attributes |
+| ③ Alert Processing | Flashduty Integration → Alert Pipeline | Adjust priority, drop/suppress based on Issue dimensions |
+| ④ Alert Dispatch | Flashduty Channel | Route to teams, notify responders |
+
+We recommend configuring **from top to bottom**: first filter noise, then grade alerts, and finally fine-tune on the Flashduty side.
+
+## Step 1: Filter Noise Data
+
+Before configuring alert grading, start by cleaning up the data source. Common noise sources include:
+
+<AccordionGroup>
+  <Accordion title="Third-party script errors">
+    Errors from browser extensions or third-party ad/analytics scripts are unrelated to your business and should be excluded:
+
+    - Error Stack contains `chrome-extension://`
+    - Error Stack contains `moz-extension://`
+    - Error Stack contains `cdn.third-party.com`
+  </Accordion>
+  <Accordion title="Known harmless errors">
+    Some errors occur frequently but don't affect user experience:
+
+    - Error Message contains `ResizeObserver loop`
+    - Error Message contains `Script error`
+  </Accordion>
+  <Accordion title="Non-production environment errors">
+    If you only care about production alerts, filter out other environments:
+
+    - Environment not contains `production`
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+Filtered Errors will not participate in Issue aggregation or alerting, but the data is still retained. You can view these filtered errors in the Explorer using filter conditions.
+</Tip>
+
+## Step 2: Configure Alert Grading
+
+After filtering noise, use alert grading rules to differentiate the importance of different errors.
+
+### Grading Strategy Recommendations
+
+| Priority | Use Cases | Expected Response Time |
+|----------|-----------|------------------------|
+| **P0 (Critical)** | Core business disruption, VIP users affected, production crashes | Immediate response |
+| **P1 (Warning)** | Important feature errors, critical page errors | Same-day resolution |
+| **P2 (Info)** | Non-critical feature errors, low-impact issues | Scheduled resolution |
+
+### Recommended Rule Configuration
+
+Here are recommended rules ranked by business priority from high to low:
+
+<Steps>
+  <Step title="Production crashes → P0">
+    A crash means the application is completely unavailable, requiring the highest priority response.
+
+    - Condition: Environment contains `production`, AND Is Crash contains `true`
+    - Alert level: P0
+  </Step>
+  <Step title="VIP user errors → P0">
+    VIP user experience is directly tied to business value.
+
+    - Condition: User ID contains `vip` (or match via custom field `context.user.level` contains `vip`)
+    - Alert level: P0
+  </Step>
+  <Step title="Critical page errors → P1">
+    Errors on payment, login, and checkout pages need priority handling.
+
+    - Condition: Page URL contains `/payment`
+    - Alert level: P1
+
+    You can create separate rules for each critical page, or use multiple match values in a single rule.
+  </Step>
+  <Step title="Other errors → P2 (default)">
+    Errors not matching any rule are automatically classified as P2 and handled through standard processes. No additional configuration needed.
+  </Step>
+</Steps>
+
+<Tip>
+We recommend keeping the number of rules to 3-6, covering the most critical scenarios. Too many rules increase maintenance cost and can lead to priority confusion.
+</Tip>
+
+## Step 3: Fine-Tune in Flashduty
+
+Alert grading on the RUM side is based on individual Error attributes. For further processing based on the overall impact of an Issue, configure it in the Flashduty [Alert Pipeline](/en/on-call/integration/alert-integration/alert-pipelines).
+
+| Processing Scenario | Configuration |
+|---------------------|---------------|
+| Suppress repeated alerts | Same `alert_key` alerts only once within 1 hour |
+| Custom alert title | Template example: `[RUM] [{{Labels.env}}] {{Labels.error_type}} - {{Labels.view_url}}` |
+| Downgrade low-impact errors | When `labels.affected_users` < 5, update severity to Info |
+
+## Typical Scenario Configurations
+
+<Tabs>
+  <Tab title="E-commerce">
+    E-commerce apps focus on the transaction flow, so alert configuration should center on payment and ordering.
+
+    | Layer | Configuration |
+    |-------|---------------|
+    | Data Filtering | Exclude: third-party ad script errors, `ResizeObserver loop` |
+    | Alert Grading | P0: payment page errors, crashes; P1: product detail/cart errors |
+    | Alert Processing | Suppression window: 30 min; title template includes page path |
+    | Alert Dispatch | P0 → SMS + phone call, P1 → IM notification |
+  </Tab>
+  <Tab title="SaaS Application">
+    SaaS apps need to monitor experience differences across tenants.
+
+    | Layer | Configuration |
+    |-------|---------------|
+    | Data Filtering | Exclude: browser extension errors, non-production environments |
+    | Alert Grading | P0: enterprise tenant errors (via `context.tenant.plan`); P1: core feature page errors |
+    | Alert Processing | Title template includes tenant info; downgrade low-impact alerts |
+    | Alert Dispatch | Assign to different channels by team |
+  </Tab>
+  <Tab title="Content Website">
+    Content websites have relatively relaxed availability requirements, focusing on loading and rendering issues.
+
+    | Layer | Configuration |
+    |-------|---------------|
+    | Data Filtering | Exclude: third-party script errors, `Script error` |
+    | Alert Grading | P0: crashes; P1: homepage/search page errors |
+    | Alert Processing | Suppression window: 1 hour; downgrade alerts with affected users < 10 |
+    | Alert Dispatch | P0 → IM notification, P1/P2 → email notification |
+  </Tab>
+</Tabs>
+
+## FAQ
+
+<AccordionGroup>
+  <Accordion title="What's the difference between data filtering and Flashduty alert dropping?">
+    | Comparison | RUM Data Filtering | Flashduty Alert Drop |
+    |------------|-------------------|---------------------|
+    | Timing | Before Error aggregation into Issue | After Issue is delivered as alert |
+    | Data Retention | Error data retained, viewable in Explorer | Issue data retained |
+    | Impact Scope | Filtered Errors don't participate in Issue aggregation or alerting | Issue exists, just no alert notification |
+    | Use Case | Long-term exclusion of noise data | Flexible alert control |
+  </Accordion>
+  <Accordion title="How do alert grading rules work with Flashduty Pipeline?">
+    They complement each other, serving different dimensions:
+
+    - **RUM Alert Grading**: Based on individual Error attributes (user, page, environment, etc.), suitable for quick determination at the source
+    - **Flashduty Pipeline**: Based on overall Issue information (affected user count, error count, etc.), suitable for more comprehensive assessment
+
+    We recommend setting base priority on the RUM side and making supplementary adjustments on the Flashduty side.
+  </Accordion>
+  <Accordion title="Will the default alert behavior change?">
+    No. If you don't configure any filter rules or alert grading, all Errors will still be aggregated into Issues and delivered to Flashduty with default severity. Existing behavior remains completely unchanged.
+  </Accordion>
+</AccordionGroup>
+
+## Further Reading
+
+<CardGroup cols={2}>
+  <Card title="Issue Alerts" icon="bell" href="/en/rum/error-tracking/issue-alerts">
+    Complete configuration guide for alert triggers, custom grading, and data filtering
+  </Card>
+  <Card title="Alert Pipeline" icon="filter" href="/en/on-call/integration/alert-integration/alert-pipelines">
+    Clean, transform, and filter alerts at the integration layer
+  </Card>
+  <Card title="Noise Reduction" icon="volume-slash" href="/en/on-call/channel/noise-reduction">
+    Aggregate and suppress alerts at the channel level
+  </Card>
+  <Card title="Escalation Rules" icon="route" href="/en/on-call/channel/escalation-rule">
+    Configure escalation rules to route alerts to the right responders
+  </Card>
+</CardGroup>
