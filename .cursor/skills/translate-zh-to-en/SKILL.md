@@ -53,7 +53,16 @@ If no uncommitted changes:
 | MDX components | Keep tags unchanged, translate inner text |
 | Code blocks | Keep code unchanged, translate comments only |
 | Internal links | Update path prefix to `en/` |
-| Image paths | Keep unchanged |
+| Image paths | See **Image Handling** below |
+
+### Image Handling
+
+When translating, check whether the target `en/` file already exists:
+
+- **New translation** (no existing en/ file): Keep image paths from the zh/ source as-is.
+- **Retranslation** (en/ file already exists): Compare image paths between the zh/ source and the existing en/ file. Some docs use **language-specific screenshots** (English UI screenshots in en/, Chinese UI screenshots in zh/) with different CDN hashes. If the existing en/ file has a different image URL at the same position, **keep the en/ version** — it is likely an English screenshot that should not be replaced with the Chinese one. Only adopt the zh/ image path if it is a newly added image with no en/ counterpart.
+
+**How to check**: Before writing the translated file, read the existing en/ file and diff the image URLs. Images with identical URLs across both versions are language-neutral and safe to keep. Images with different URLs (different hash in the CDN path) are language-specific — preserve the en/ version.
 
 ## Example
 
@@ -115,5 +124,6 @@ Always read the full glossary before translating: [glossary.md](glossary.md)
 - [ ] Use correct terminology
 - [ ] Preserve MDX component structure
 - [ ] Update internal link paths
+- [ ] Check existing en/ file for language-specific images before overwriting
 - [ ] Apply Sentence case capitalization
 - [ ] Verify output path mirrors source path

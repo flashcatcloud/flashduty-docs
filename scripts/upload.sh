@@ -2,31 +2,33 @@
 #
 # Upload documentation to Meilisearch for AI Q&A bot indexing.
 #
-# Reads markdown/mdx files from zh/ and en/, formats them into JSON,
-# and uploads to Meilisearch. Run from repository root, or the script
-# will cd to repo root automatically.
+# Supports two modes:
+#   - Incremental (default): uses git diff to upload only changed docs and
+#     delete removed ones from the index.
+#   - Full: scans all docs in zh/ and en/ and uploads everything.
 #
 # Required env vars: MEILI_ENDPOINT, MEILI_API_KEY, MEILI_INDEX
-# Optional: BASE_URL (default https://docs.flashcat.cloud)
+# Optional:
+#   FULL_UPLOAD  - set to "true" for full re-upload (default: false)
+#   BASE_URL     - docs base URL (default: https://docs.flashcat.cloud)
 #
 # Usage:
-#   sh scripts/upload.sh [--dry-run] [--help]
+#   sh scripts/upload.sh [--full] [--dry-run] [--help]
 #
 # License: Same as the repository
 
 set -euo pipefail
 
-# Ensure we run from repo root (parent of scripts/)
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
-# --- Constants ---
 SCRIPT_NAME=$(basename "$0")
 BASE_URL="${BASE_URL:-https://docs.flashcat.cloud}"
+FULL_UPLOAD="${FULL_UPLOAD:-false}"
 DRY_RUN=false
+BATCH_SIZE=500
 
-# --- Help ---
 usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME [OPTIONS]
@@ -34,6 +36,7 @@ Usage: $SCRIPT_NAME [OPTIONS]
 Upload documentation (zh/, en/) to Meilisearch for AI Q&A bot indexing.
 
 Options:
+  --full       Re-upload all docs (overrides FULL_UPLOAD env var)
   --dry-run    Validate and list files without uploading
   -h, --help   Show this help
 
@@ -41,39 +44,23 @@ Environment variables:
   MEILI_ENDPOINT   Meilisearch instance URL (required)
   MEILI_API_KEY    API key with documents write permission (required)
   MEILI_INDEX      Target index name (required)
-  BASE_URL         Docs base URL for link construction (default: $BASE_URL)
-
-Examples:
-  MEILI_ENDPOINT=https://meilisearch.example.com \\
-  MEILI_API_KEY=xxx MEILI_INDEX=docs sh scripts/upload.sh
-
-  sh scripts/upload.sh --dry-run
+  FULL_UPLOAD      Set to "true" for full re-upload (default: false)
+  BASE_URL         Docs base URL (default: $BASE_URL)
 EOF
 }
 
-# --- Argument parsing ---
 for arg in "$@"; do
   case "$arg" in
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    --dry-run)
-      DRY_RUN=true
-      ;;
-    *)
-      echo "Unknown option: $arg" >&2
-      usage >&2
-      exit 1
-      ;;
+    -h|--help) usage; exit 0 ;;
+    --full) FULL_UPLOAD=true ;;
+    --dry-run) DRY_RUN=true ;;
+    *) echo "Unknown option: $arg" >&2; usage >&2; exit 1 ;;
   esac
 done
 
-# --- Validation ---
 if [[ "$DRY_RUN" != true ]]; then
   if [[ -z "${MEILI_ENDPOINT:-}" || -z "${MEILI_API_KEY:-}" || -z "${MEILI_INDEX:-}" ]]; then
     echo "Error: MEILI_ENDPOINT, MEILI_API_KEY, and MEILI_INDEX must be set." >&2
-    echo "Run with --help for usage." >&2
     exit 1
   fi
 fi
@@ -83,43 +70,16 @@ if ! command -v jq &> /dev/null; then
   exit 1
 fi
 
-# --- Counters ---
-total_success=0
-total_files=0
-total_errors=0
+# --- Helpers ---
 
-# --- Upload a single document ---
-upload_document() {
-  local json_payload=$1
-  local title=$2
-
-  if [[ "$DRY_RUN" == true ]]; then
-    echo "[dry-run] Would upload: $title"
-    return 0
-  fi
-
-  local response
-  response=$(curl -sS --connect-timeout 30 --max-time 60 -X POST "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents?primaryKey=id" \
-    -H "Authorization: Bearer $MEILI_API_KEY" \
-    -H "Content-Type: application/json" \
-    --data-binary "$json_payload")
-
-  if [[ -z "$response" ]]; then
-    echo "Upload failed: $title (empty response)" >&2
-    return 1
-  fi
-
-  if echo "$response" | jq -e '.taskUid' > /dev/null 2>&1; then
-    echo "Uploaded: $title"
-    return 0
-  else
-    echo "Upload failed: $title" >&2
-    echo "Response: $response" >&2
-    return 1
-  fi
+# Generate a stable document ID from a file path (relative to repo root)
+file_to_id() {
+  local file=$1
+  local rel="${file%.mdx}"
+  rel="${rel%.md}"
+  echo -n "$rel" | openssl md5 | awk '{print $NF}'
 }
 
-# --- Extract title from frontmatter or filename ---
 extract_title() {
   local file=$1
   local title
@@ -137,7 +97,6 @@ extract_title() {
   echo "$title"
 }
 
-# --- Extract URL from frontmatter or construct from path ---
 extract_url() {
   local file=$1
   local dir=$2
@@ -159,103 +118,252 @@ extract_url() {
   echo "$doc_url"
 }
 
-# --- Process a directory ---
-process_directory() {
-  local dir=$1
-  local locale=$2
-  local temp_success temp_error temp_total
+locale_for_file() {
+  local file=$1
+  if [[ "$file" == zh/* ]]; then
+    echo "zh-CN"
+  else
+    echo "en-US"
+  fi
+}
 
-  echo "Processing $dir/..."
+dir_for_file() {
+  local file=$1
+  if [[ "$file" == zh/* ]]; then
+    echo "zh"
+  else
+    echo "en"
+  fi
+}
 
-  temp_success=$(mktemp)
-  temp_error=$(mktemp)
-  temp_total=$(mktemp)
-  echo "0" > "$temp_success"
-  echo "0" > "$temp_error"
-  echo "0" > "$temp_total"
+is_doc_file() {
+  local file=$1
+  [[ "$file" == zh/*.md || "$file" == zh/*.mdx || "$file" == en/*.md || "$file" == en/*.mdx ]] || return 1
+  local base
+  base=$(basename "$file")
+  [[ "$base" != "index.md" && "$base" != "index.mdx" ]] || return 1
+  return 0
+}
 
-  temp_files=$(mktemp)
-  find "$dir" -type f \( -name "*.md" -o -name "*.mdx" \) ! -name "index.md" ! -name "index.mdx" > "$temp_files"
+# Build a JSON document for a single file
+build_doc_json() {
+  local file=$1
+  local dir locale title doc_url id
+  dir=$(dir_for_file "$file")
+  locale=$(locale_for_file "$file")
+  title=$(extract_title "$file")
+  doc_url=$(extract_url "$file" "$dir" "$locale")
+  id=$(file_to_id "$file")
+
+  jq -n \
+    --arg id "$id" \
+    --arg title "$title" \
+    --rawfile content "$file" \
+    --arg locale "$locale" \
+    --arg url "$doc_url" \
+    '{id: $id, title: $title, content: $content, locale: $locale, url: $url}' 2>/dev/null
+}
+
+# Upload a batch of documents (JSON array) to Meilisearch
+upload_batch() {
+  local payload=$1
+  local count=$2
+
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "[dry-run] Would upload batch of $count documents"
+    return 0
+  fi
+
+  local response
+  response=$(curl -sS --connect-timeout 30 --max-time 120 \
+    -X POST "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents?primaryKey=id" \
+    -H "Authorization: Bearer $MEILI_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data-binary "$payload")
+
+  if echo "$response" | jq -e '.taskUid' > /dev/null 2>&1; then
+    echo "Uploaded batch of $count documents (taskUid: $(echo "$response" | jq -r '.taskUid'))"
+    return 0
+  else
+    echo "Batch upload failed" >&2
+    echo "Response: $response" >&2
+    return 1
+  fi
+}
+
+# Delete documents from Meilisearch by IDs
+delete_documents() {
+  local ids_json=$1
+  local count=$2
+
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "[dry-run] Would delete $count documents from index"
+    return 0
+  fi
+
+  local response
+  response=$(curl -sS --connect-timeout 30 --max-time 60 \
+    -X POST "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents/delete-batch" \
+    -H "Authorization: Bearer $MEILI_API_KEY" \
+    -H "Content-Type: application/json" \
+    --data-binary "$ids_json")
+
+  if echo "$response" | jq -e '.taskUid' > /dev/null 2>&1; then
+    echo "Deleted $count documents (taskUid: $(echo "$response" | jq -r '.taskUid'))"
+    return 0
+  else
+    echo "Delete failed" >&2
+    echo "Response: $response" >&2
+    return 1
+  fi
+}
+
+# Collect files into batched JSON arrays and upload
+upload_files() {
+  local file_list=$1
+  local total_files=0
+  local total_success=0
+  local batch_json="["
+  local batch_count=0
 
   while IFS= read -r file; do
-    local title doc_url rel_path id json_payload
-    title=$(extract_title "$file")
-    doc_url=$(extract_url "$file" "$dir" "$locale")
+    [[ -z "$file" ]] && continue
+    total_files=$((total_files + 1))
 
-    rel_path="${file#$dir/}"
-    rel_path="${rel_path%.mdx}"
-    rel_path="${rel_path%.md}"
-    id=$(echo -n "${dir}/${rel_path}" | openssl md5 | awk '{print $NF}')
-
-    if json_payload=$(jq -n \
-      --arg id "$id" \
-      --arg title "$title" \
-      --rawfile content "$file" \
-      --arg locale "$locale" \
-      --arg url "$doc_url" \
-      '{id: $id, title: $title, content: $content, locale: $locale, url: $url}' 2>/dev/null); then
-
-      if upload_document "$json_payload" "$title"; then
-        echo $(($(cat "$temp_success") + 1)) > "$temp_success"
-      else
-        echo $(($(cat "$temp_error") + 1)) > "$temp_error"
-      fi
-    else
-      echo "JSON error: $title ($file)" >&2
-      echo $(($(cat "$temp_error") + 1)) > "$temp_error"
+    local doc_json
+    if ! doc_json=$(build_doc_json "$file"); then
+      echo "JSON error: $file" >&2
+      continue
     fi
 
-    echo $(($(cat "$temp_total") + 1)) > "$temp_total"
-    echo "Progress: $(cat "$temp_total") files"
-  done < "$temp_files"
-  rm -f "$temp_files"
+    if [[ $batch_count -gt 0 ]]; then
+      batch_json="${batch_json},"
+    fi
+    batch_json="${batch_json}${doc_json}"
+    batch_count=$((batch_count + 1))
 
-  local final_success final_error final_total
-  final_success=$(cat "$temp_success")
-  final_error=$(cat "$temp_error")
-  final_total=$(cat "$temp_total")
+    if [[ $batch_count -ge $BATCH_SIZE ]]; then
+      batch_json="${batch_json}]"
+      if upload_batch "$batch_json" "$batch_count"; then
+        total_success=$((total_success + batch_count))
+      fi
+      batch_json="["
+      batch_count=0
+    fi
+  done < "$file_list"
 
-  total_success=$((total_success + final_success))
-  total_errors=$((total_errors + final_error))
-  total_files=$((total_files + final_total))
+  # Upload remaining
+  if [[ $batch_count -gt 0 ]]; then
+    batch_json="${batch_json}]"
+    if upload_batch "$batch_json" "$batch_count"; then
+      total_success=$((total_success + batch_count))
+    fi
+  fi
 
-  echo "Done $dir/: $final_success ok, $final_error failed"
-  rm -f "$temp_success" "$temp_error" "$temp_total"
+  echo ""
+  echo "=== Upload Summary ==="
+  echo "Total files: $total_files"
+  echo "Uploaded: $total_success"
+  echo "Failed: $((total_files - total_success))"
+
+  [[ $total_success -eq $total_files ]] || return 1
 }
 
 # --- Main ---
-echo "Uploading docs to Meilisearch index: ${MEILI_INDEX:-<not set>}"
+
+echo "=== Meilisearch Doc Upload ==="
+echo "Index: ${MEILI_INDEX:-<not set>}"
 echo "Base URL: $BASE_URL"
-echo "Working directory: $(pwd)"
-[[ "$DRY_RUN" == true ]] && echo "(dry-run mode - no uploads)"
+echo "Mode: $([ "$FULL_UPLOAD" = "true" ] && echo "full" || echo "incremental")"
+[[ "$DRY_RUN" == true ]] && echo "(dry-run mode — no uploads)"
 echo ""
 
-if [[ -d "zh" ]]; then
-  process_directory "zh" "zh-CN"
-else
-  echo "Warning: zh/ directory not found"
+if [[ "$FULL_UPLOAD" == "true" ]]; then
+  # Full mode: scan all docs
+  echo "Scanning all documentation files..."
+  temp_files=$(mktemp)
+  {
+    [[ -d "zh" ]] && find zh -type f \( -name "*.md" -o -name "*.mdx" \) ! -name "index.md" ! -name "index.mdx"
+    [[ -d "en" ]] && find en -type f \( -name "*.md" -o -name "*.mdx" \) ! -name "index.md" ! -name "index.mdx"
+  } | sort > "$temp_files"
+
+  file_count=$(wc -l < "$temp_files" | xargs)
+  echo "Found $file_count documentation files"
+  echo ""
+
+  upload_files "$temp_files"
+  result=$?
+  rm -f "$temp_files"
+  exit $result
 fi
 
-if [[ -d "en" ]]; then
-  process_directory "en" "en-US"
-else
-  echo "Warning: en/ directory not found"
+# Incremental mode: use git diff to find changed files
+if ! git rev-parse HEAD~1 > /dev/null 2>&1; then
+  echo "No previous commit found — falling back to full upload"
+  FULL_UPLOAD=true
+  exec bash "$0" --full $([ "$DRY_RUN" = true ] && echo "--dry-run")
 fi
+
+echo "Detecting changed files since last commit..."
+
+# Files added or modified
+changed_files=$(mktemp)
+git diff --name-only --diff-filter=ACMR HEAD~1 -- zh/ en/ | while IFS= read -r file; do
+  is_doc_file "$file" && echo "$file"
+done > "$changed_files" || true
+
+# Files deleted
+deleted_files=$(mktemp)
+git diff --name-only --diff-filter=D HEAD~1 -- zh/ en/ | while IFS= read -r file; do
+  is_doc_file "$file" && echo "$file"
+done > "$deleted_files" || true
+
+changed_count=$(wc -l < "$changed_files" | xargs)
+deleted_count=$(wc -l < "$deleted_files" | xargs)
+
+echo "Changed/added: $changed_count files"
+echo "Deleted: $deleted_count files"
+echo ""
+
+if [[ $changed_count -eq 0 && $deleted_count -eq 0 ]]; then
+  echo "No documentation changes detected. Nothing to do."
+  rm -f "$changed_files" "$deleted_files"
+  exit 0
+fi
+
+result=0
+
+# Upload changed files
+if [[ $changed_count -gt 0 ]]; then
+  echo "--- Uploading changed documents ---"
+  upload_files "$changed_files" || result=1
+fi
+
+# Delete removed files from index
+if [[ $deleted_count -gt 0 ]]; then
+  echo ""
+  echo "--- Removing deleted documents ---"
+
+  ids_json="["
+  first=true
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    id=$(file_to_id "$file")
+    if [[ "$first" == true ]]; then
+      first=false
+    else
+      ids_json="${ids_json},"
+    fi
+    ids_json="${ids_json}\"${id}\""
+    echo "Will delete: $file (id: $id)"
+  done < "$deleted_files"
+  ids_json="${ids_json}]"
+
+  delete_documents "$ids_json" "$deleted_count" || result=1
+fi
+
+rm -f "$changed_files" "$deleted_files"
 
 echo ""
-echo "=== Summary ==="
-echo "Total files: $total_files"
-echo "Uploaded: $total_success"
-echo "Failed: $total_errors"
-
-if [[ $total_files -gt 0 ]]; then
-  success_rate=$((total_success * 100 / total_files))
-  echo "Success rate: ${success_rate}%"
-fi
-
-if [[ $total_errors -gt 0 ]]; then
-  echo "Some uploads failed. Check errors above."
-  exit 1
-fi
-
 echo "All done."
+exit $result
