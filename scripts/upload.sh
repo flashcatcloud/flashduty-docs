@@ -27,7 +27,7 @@ SCRIPT_NAME=$(basename "$0")
 BASE_URL="${BASE_URL:-https://docs.flashcat.cloud}"
 FULL_UPLOAD="${FULL_UPLOAD:-false}"
 DRY_RUN=false
-BATCH_SIZE=500
+BATCH_SIZE=20
 
 usage() {
   cat <<EOF
