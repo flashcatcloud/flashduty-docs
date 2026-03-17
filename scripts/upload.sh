@@ -174,12 +174,17 @@ upload_batch() {
     return 0
   fi
 
+  local tmpfile
+  tmpfile=$(mktemp)
+  echo "$payload" > "$tmpfile"
+
   local response
   response=$(curl -sS --connect-timeout 30 --max-time 120 \
     -X POST "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents?primaryKey=id" \
     -H "Authorization: Bearer $MEILI_API_KEY" \
     -H "Content-Type: application/json" \
-    --data-binary "$payload")
+    --data-binary "@$tmpfile")
+  rm -f "$tmpfile"
 
   if echo "$response" | jq -e '.taskUid' > /dev/null 2>&1; then
     echo "Uploaded batch of $count documents (taskUid: $(echo "$response" | jq -r '.taskUid'))"
@@ -201,12 +206,17 @@ delete_documents() {
     return 0
   fi
 
+  local tmpfile
+  tmpfile=$(mktemp)
+  echo "$ids_json" > "$tmpfile"
+
   local response
   response=$(curl -sS --connect-timeout 30 --max-time 60 \
     -X POST "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents/delete-batch" \
     -H "Authorization: Bearer $MEILI_API_KEY" \
     -H "Content-Type: application/json" \
-    --data-binary "$ids_json")
+    --data-binary "@$tmpfile")
+  rm -f "$tmpfile"
 
   if echo "$response" | jq -e '.taskUid' > /dev/null 2>&1; then
     echo "Deleted $count documents (taskUid: $(echo "$response" | jq -r '.taskUid'))"
