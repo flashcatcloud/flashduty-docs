@@ -14,15 +14,6 @@ flashduty-docs/
 ├── en/                    # English documentation (mirrors zh/ structure)
 ├── logo/                  # Logo assets
 ├── docs.json              # Mintlify configuration
-└── .cursor/
-    └── skills/            # Agent Skills
-        ├── translate-zh-to-en/   # Translation skill
-        │   ├── SKILL.md          # Translation guide
-        │   └── glossary.md       # Terminology glossary
-        └── polish-document/      # Polishing skill
-            ├── SKILL.md          # Polishing guide
-            ├── standards.md      # Writing standards
-            └── components.md     # Component reference
 ```
 
 ## Available Skills
