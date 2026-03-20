@@ -53,6 +53,9 @@ mint dev
 
 # Check broken links
 mint broken-links
+
+# Upload docs to Meilisearch (for AI Q&A bot)
+MEILI_ENDPOINT=... MEILI_API_KEY=... MEILI_INDEX=... bash scripts/upload.sh
 ```
 
 ## Documentation Workflow
