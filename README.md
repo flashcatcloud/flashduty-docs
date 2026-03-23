@@ -1,120 +1,143 @@
-# Flashduty 文档
+# Flashduty Documentation
 
-[English](README.en.md) | 中文
+English | [中文](README_zh.md)
 
-[Flashduty](https://flashcat.cloud/) 官方文档，基于 [Mintlify](https://mintlify.com/) 构建。
+[![Mintlify](https://img.shields.io/badge/Built_with-Mintlify-8B5CF6?style=flat-square)](https://mintlify.com/)
+[![Docs](https://img.shields.io/badge/Live-docs.flashcat.cloud-blue?style=flat-square)](https://docs.flashcat.cloud)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-## 目录结构
+Official documentation for [Flashduty](https://flashcat.cloud/), bilingual (Chinese & English), built with [Mintlify](https://mintlify.com/). Covers On-call incident management, RUM real user monitoring, and Monitors alert rules — **390+** pages in total.
 
-```
-flashduty-docs/
-├── zh/                    # 中文文档
-│   ├── on-call/           # On-call 故障管理
-│   ├── rum/               # 真实用户监控
-│   ├── monitors/          # 告警规则配置
-│   ├── platform/          # 平台配置
-│   ├── openapi/           # API 文档
-│   ├── compliance/        # 安全合规
-│   └── changelog/         # 更新日志
-├── en/                    # 英文文档（与 zh/ 结构一致）
-├── logo/                  # Logo 资源
-├── docs.json              # Mintlify 配置
-└── .cursor/skills/        # AI Agent Skills
-```
+---
 
-## 产品模块
+## Product Modules
 
-| 模块 | 描述 |
-|------|------|
-| **On-call** | 故障管理、告警路由、分派策略、值班管理 |
-| **RUM** | 真实用户监控，前端性能和异常追踪 |
-| **Monitors** | 多数据源告警规则配置 |
+| Module | Description | Docs Path |
+|--------|-------------|-----------|
+| **On-call** | Incident management, alert routing, escalation rules, schedule management | `*/on-call/` |
+| **RUM** | Real User Monitoring, frontend performance and error tracking | `*/rum/` |
+| **Monitors** | Multi-source alert rule configuration | `*/monitors/` |
+| **Platform** | Account management, SSO, permissions, API keys | `*/platform/` |
+| **OpenAPI** | REST API reference | `*/openapi/` |
 
-## 本地开发
+---
 
-### 环境准备
+## Quick Start
+
+### Prerequisites
 
 ```bash
 npm i -g mint
 ```
 
-### 常用命令
+### Local Preview
 
 ```bash
-# 本地预览
 mint dev
+```
 
-# 检查断链
+Visit `http://localhost:3000` to view the docs.
+
+### Check Broken Links
+
+```bash
 mint broken-links
 ```
 
-## 新增文档
+> Run this after every content change to catch dead links early.
 
-### 1. 创建文档
+---
 
-在对应目录创建 `.mdx` 文件：
+## Contributing
+
+We welcome community contributions! Whether it's fixing a typo, improving descriptions, or adding new documentation — every bit helps.
+
+### Adding or Editing Documentation
+
+1. **Edit Chinese docs** — Create or edit `.mdx` files under `zh/` (Chinese is the source language)
+2. **Update navigation** — Add the page path in `docs.json` for both `zh` and `en` sections
+3. **Translate to English** — Create the corresponding file under `en/`, keeping the path structure consistent
+4. **Validate links** — Run `mint broken-links` to confirm no broken links
+
+### Frontmatter Format
+
+Every `.mdx` file must include:
 
 ```yaml
 ---
-title: "清晰、具体的标题"
-description: "简洁说明页面目的"
+title: "Clear, specific title"
+description: "Concise explanation of page purpose"
 ---
 ```
 
-### 2. 更新导航
+### Writing Guidelines
 
-在 `docs.json` 中添加页面路径：
+- Use second person ("you")
+- Use active voice, present tense
+- Use sentence case for English titles (capitalize only first word)
+- Leverage Mintlify components: `<Steps>`, `<Tabs>`, `<Note>`, `<Tip>`, `<Warning>`, `<Frame>`, `<CodeGroup>`
 
-```json
-{
-  "group": "快速开始",
-  "pages": ["zh/on-call/quickstart/quickstart"]
-}
+---
+
+## Directory Structure
+
+```
+flashduty-docs/
+├── zh/                    # Chinese docs (source of truth)
+│   ├── on-call/           # On-call incident management
+│   ├── rum/               # Real User Monitoring
+│   ├── monitors/          # Alert rule configuration
+│   ├── platform/          # Platform settings
+│   ├── openapi/           # API documentation
+│   ├── compliance/        # Security compliance
+│   └── changelog/         # Changelog
+├── en/                    # English docs (mirrors zh/)
+├── docs.json              # Mintlify configuration & navigation
+└── logo/                  # Logo assets
 ```
 
-### 3. 多语言同步
+---
 
-- 中英文文档保持结构一致
-- 英文文档放在 `en/` 目录，路径与 `zh/` 对应
-- 使用 `translate-zh-to-en` Skill 进行翻译
+## Translation
 
-## 写作规范
+Chinese is the source language; English is translated from it. When translating:
 
-### 语言风格
+- Translate frontmatter `title` and `description`
+- Keep MDX component tags unchanged, translate inner text only
+- Keep code blocks unchanged, translate comments only
+- Update internal link paths from `zh/` to `en/`
+- Keep image paths unchanged
 
-- 使用第二人称（"您"）
-- 使用主动语态
-- 保持简洁直接
+### Key Terminology
 
-### 常用组件
+| Chinese | English |
+|---------|---------|
+| 协作空间 | channel |
+| 故障 | incident |
+| 分派策略 | escalation rule |
+| 值班表 | schedule |
+| 认领 | acknowledge |
+| 静默策略 | silence rule |
+| 抑制策略 | inhibit rule |
+| 排除规则 | drop rule |
 
-| 组件 | 用途 |
-|------|------|
-| `<Steps>` | 流程步骤 |
-| `<Tabs>` | 平台差异 |
-| `<CodeGroup>` | 多语言代码 |
-| `<Note>` / `<Tip>` / `<Warning>` | 提示信息 |
-| `<Frame>` | 图片容器 |
+Full glossary: `.cursor/skills/translate-zh-to-en/glossary.md`
 
-### 代码示例
+---
 
-- 提供完整、可运行的示例
-- 指定语言和文件名
-- 不包含真实 API 密钥
+## Related Resources
 
-## AI 辅助
+| Resource | Link |
+|----------|------|
+| Flashduty Docs | [docs.flashcat.cloud](https://docs.flashcat.cloud) |
+| Flashduty Console | [console.flashcat.cloud](https://console.flashcat.cloud/) |
+| Flashduty Website | [flashcat.cloud](https://flashcat.cloud/) |
+| MCP Server | [flashduty-mcp-server](https://github.com/flashcatcloud/flashduty-mcp-server) |
+| Terraform Provider | [terraform-provider-flashduty](https://github.com/flashcatcloud/terraform-provider-flashduty) |
+| Mintlify Docs | [mintlify.com/docs](https://mintlify.com/docs) |
 
-本项目提供两个 AI Skills：
+---
 
-| Skill | 用途 |
-|-------|------|
-| `translate-zh-to-en` | 将中文文档翻译为英文 |
-| `polish-document` | 按规范润色优化文档 |
+## License
 
-详见 [AGENTS.md](AGENTS.md)
-
-## 相关链接
-
-- [Flashduty 控制台](https://console.flashcat.cloud/)
-- [Flashduty 官网](https://flashcat.cloud/)
-- [Mintlify 文档](https://mintlify.com/docs)
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
