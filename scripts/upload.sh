@@ -28,6 +28,9 @@ BASE_URL="${BASE_URL:-https://docs.flashcat.cloud}"
 FULL_UPLOAD="${FULL_UPLOAD:-false}"
 DRY_RUN=false
 BATCH_SIZE=5
+# DashScope text-embedding-v4 accepts up to 8192 tokens per input.
+# Truncate content to stay safely within this limit after cleanup.
+MAX_CONTENT_CHARS=6000
 
 usage() {
   cat <<EOF
@@ -145,20 +148,33 @@ is_doc_file() {
   return 0
 }
 
+# Clean raw MDX content for embedding: strip frontmatter, HTML/MDX tags,
+# import statements, and collapse whitespace, then truncate.
+clean_content() {
+  local file=$1
+  awk 'BEGIN{skip=0} NR==1 && /^---$/{skip=1;next} skip && /^---$/{skip=0;next} !skip' "$file" \
+    | grep -v '^import ' \
+    | sed 's/<[^>]*>//g' \
+    | tr '\n' ' ' \
+    | sed 's/  */ /g' \
+    | cut -c1-"$MAX_CONTENT_CHARS"
+}
+
 # Build a JSON document for a single file
 build_doc_json() {
   local file=$1
-  local dir locale title doc_url id
+  local dir locale title doc_url id content
   dir=$(dir_for_file "$file")
   locale=$(locale_for_file "$file")
   title=$(extract_title "$file")
   doc_url=$(extract_url "$file" "$dir" "$locale")
   id=$(file_to_id "$file")
+  content=$(clean_content "$file")
 
   jq -n \
     --arg id "$id" \
     --arg title "$title" \
-    --rawfile content "$file" \
+    --arg content "$content" \
     --arg locale "$locale" \
     --arg url "$doc_url" \
     '{id: $id, title: $title, content: $content, locale: $locale, url: $url}' 2>/dev/null
