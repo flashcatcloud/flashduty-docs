@@ -53,6 +53,9 @@ These are non-obvious translations that must stay consistent:
 | 抑制策略 | inhibit rule |
 | 排除规则 | drop rule |
 | 环节 | level |
+| 告警聚合 | alert grouping |
+| 规则告警聚合 | pattern alert grouping |
+| 智能告警聚合 | intelligent alert grouping |
 
 Full glossary: `.cursor/skills/translate-zh-to-en/glossary.md`
 
