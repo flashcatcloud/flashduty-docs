@@ -29,6 +29,8 @@ Chinese-English terminology mapping. Maintain consistency during translation.
 |---------|---------|
 | 告警风暴 | alert storm |
 | 告警聚合 | alert grouping |
+| 规则告警聚合 | pattern alert grouping |
+| 智能告警聚合 | intelligent alert grouping |
 | 静默策略 | silence rule |
 | 抑制策略 | inhibit rule |
 | 排除规则 | drop rule |
