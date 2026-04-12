@@ -165,3 +165,95 @@ Chinese-English terminology mapping. Maintain consistency during translation.
 | 手机号 | phone |
 | 邮箱 | email |
 | 北京快猫星云科技有限公司 | Beijing Flashcat Cloud Technology Co.,Ltd. |
+
+## API documentation
+
+Used by the `api-review` skill when generating `api-reference/openapi.{en,zh}.json`. Stay consistent with these terms across operation summaries, descriptions, and field labels so the reference reads uniformly.
+
+### Operation verbs (summary prefix)
+
+| Chinese | English (openapi summary) | Notes |
+|---------|----------|-------|
+| 查看 xxx 详情 | Get xxx detail | Single-item fetch by ID |
+| 查看 xxx 列表 / 获取 xxx 列表 | List xxx | Paginated list |
+| 查询 xxx | Query xxx | Filter-based list |
+| 创建 xxx | Create an xxx | |
+| 新建 xxx | Create an xxx | Same as above — keep English uniform |
+| 变更 xxx 信息 / 修改 xxx / 更新 xxx | Update an xxx | |
+| 删除 xxx | Delete an xxx | Soft-delete unless noted |
+| 启用 xxx | Enable an xxx | |
+| 禁用 xxx | Disable an xxx | |
+| 预览 xxx | Preview an xxx | |
+| 导出 xxx | Export xxx | |
+| 导入 xxx | Import xxx | |
+| 批量 yyy | Bulk yyy / Batch yyy | Use "bulk" for user-facing, "batch" for technical |
+| xxx 操作记录 / 审计记录 | xxx audit log | |
+
+### Reference / structural terms
+
+| Chinese | English |
+|---------|---------|
+| 速率限制 | rate limits |
+| 限流 | rate limiting |
+| 超过限制 | exceed the limit |
+| 账户维度 | account-scoped |
+| 账户下 | under the same account |
+| 全局限流 | global rate limit |
+| 权限要求 | permissions |
+| 权限点 | permission |
+| 数据权限 | data permission |
+| 接口鉴权 | API authentication |
+| 需要鉴权 | requires authentication |
+| 鉴权失败 | authentication failed |
+| 请求头 | request header |
+| 查询参数 | query parameter |
+| 请求体 / 请求参数 | request body |
+| 响应体 / 响应参数 | response body |
+| 响应结构 / 响应格式 | response envelope |
+| 错误码 | error code |
+| 请求 ID | request ID |
+| 返回值 | return value |
+| 分页 | pagination |
+| 分页大小 | page size |
+| 排序字段 | sort field |
+| 升序 / 降序 | ascending / descending |
+| 必填 | required |
+| 选填 / 可选 | optional |
+| 默认值 | default value |
+| 枚举值 | enum values |
+| 取值范围 | value range |
+| 示例 | example |
+| 示例代码 | code sample |
+| 软删除 | soft delete |
+| 幂等 | idempotent |
+| 向后兼容 | backward compatible |
+| 废弃 / 已废弃 | deprecated |
+| 审计日志 | audit log |
+| 高危操作 | high-risk operation |
+| 二次验证 | second-factor verification |
+
+### Permission class names
+
+Permission classes come from `fc-pgy/logic/permission/permission_test.go` — use the `classEn` field there as the authoritative English label. Common ones:
+
+| Chinese (`class`) | English (`classEn`) |
+|---------|---------|
+| 组织管理 | Organization |
+| 配置中心 | Configuration |
+| 协作空间 | Channel |
+| 故障管理 | Incident |
+| 告警管理 | Alert |
+| 集成中心 | Integration |
+| 分析看板 | Insight |
+| 状态页 | Status Page |
+| RUM | RUM |
+| Monitors | Monitors |
+
+When a permission's `classEn` is set in `permission_test.go`, trust it over any guess. The Flashduty product team manages those labels and keeps them consistent with the console UI.
+
+### Notes for the generator
+
+- **Prefer frontend labels over translation.** If the frontend console uses a specific English label for a concept (e.g., "Notification template" vs "Message template"), use the frontend label. Check `fc-foundation-app/src/Packages/saas/pages/...` i18n files as the source of truth for user-facing labels.
+- **Don't translate product names.** "On-call", "RUM", "Monitors", "Flashduty" stay English in both languages.
+- **Don't translate wire values.** Enum values like `"enabled"`, `"InvalidParameter"`, `"updated_at"` are wire-format identifiers and must appear identically in both EN and ZH specs. Only their descriptions get localized.
+- **Verb tense** — English uses imperative ("Create a template", "Delete an incident"), Chinese uses short noun phrases ("创建模板", "删除故障"). Don't prefix Chinese summaries with verbs like "创建一个" when "创建" alone reads naturally.
