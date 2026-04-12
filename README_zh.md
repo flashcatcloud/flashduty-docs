@@ -92,6 +92,8 @@ flashduty-docs/
 │   ├── compliance/        # 安全合规
 │   └── changelog/         # 更新日志
 ├── en/                    # 英文文档（与 zh/ 结构一致）
+├── api-reference/         # OpenAPI 3.1 规范文件（按模块和语言拆分）
+├── glossary.md            # 中英术语对照表
 ├── docs.json              # Mintlify 配置与导航
 └── logo/                  # Logo 资源
 ```
@@ -121,7 +123,7 @@ flashduty-docs/
 | 抑制策略 | inhibit rule |
 | 排除规则 | drop rule |
 
-完整术语表见 `.cursor/skills/translate-zh-to-en/glossary.md`。
+完整术语表见 [`glossary.md`](glossary.md)。
 
 ---
 
