@@ -92,6 +92,8 @@ flashduty-docs/
 │   ├── compliance/        # Security compliance
 │   └── changelog/         # Changelog
 ├── en/                    # English docs (mirrors zh/)
+├── api-reference/         # OpenAPI 3.1 specs (per-module, per-language)
+├── glossary.md            # Chinese-English terminology glossary
 ├── docs.json              # Mintlify configuration & navigation
 └── logo/                  # Logo assets
 ```
@@ -121,7 +123,7 @@ Chinese is the source language; English is translated from it. When translating:
 | 抑制策略 | inhibit rule |
 | 排除规则 | drop rule |
 
-Full glossary: `.cursor/skills/translate-zh-to-en/glossary.md`
+Full glossary: [`glossary.md`](glossary.md)
 
 ---
 
