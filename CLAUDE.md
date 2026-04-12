@@ -27,13 +27,15 @@ Prerequisite: `npm i -g mint`
 
 - **`docs.json`** — Central Mintlify config: navigation structure, tabs, theme. All new pages must be registered here under the correct language → tab → group.
 - **`zh/`** and **`en/`** — Mirror each other. Chinese is the source of truth; English is translated from it.
-- **`.cursor/skills/`** — AI agent skills for translation (`translate-zh-to-en`) and polishing (`polish-document`), with glossary and standards resources.
+- **`glossary.md`** — Chinese-English terminology glossary for translation consistency.
+- **`api-reference/`** — OpenAPI 3.1 spec files (per-module, per-language) powering the API Reference tab.
+- **`.cursor/skills/`** — AI agent skills for translation (`translate-zh-to-en`) and polishing (`polish-document`).
 
 ## Documentation Workflow
 
 1. Create/edit Chinese docs in `zh/` as `.mdx` files
 2. Add the page path to `docs.json` navigation (both `zh` and `en` language sections)
-3. Translate to English using the glossary at `.cursor/skills/translate-zh-to-en/glossary.md`
+3. Translate to English using the glossary at `glossary.md`
 4. Run `mint broken-links` to validate
 
 ## Key Terminology (zh → en)
@@ -57,7 +59,7 @@ These are non-obvious translations that must stay consistent:
 | 规则告警聚合 | pattern alert grouping |
 | 智能告警聚合 | intelligent alert grouping |
 
-Full glossary: `.cursor/skills/translate-zh-to-en/glossary.md`
+Full glossary: `glossary.md`
 
 ## Writing Conventions
 
