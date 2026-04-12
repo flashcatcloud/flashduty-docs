@@ -145,6 +145,9 @@ is_doc_file() {
   local base
   base=$(basename "$file")
   [[ "$base" != "index.md" && "$base" != "index.mdx" ]] || return 1
+  # Exclude api-reference/: auto-generated OpenAPI JSON served via Mintlify's
+  # native OpenAPI integration; it should not be indexed for the AI Q&A bot.
+  [[ "$file" != api-reference/* ]] || return 1
   return 0
 }
 
