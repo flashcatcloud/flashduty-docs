@@ -1,6 +1,6 @@
 # Flashduty 文档
 
-[English](README.md) | 中文
+[English](https://github.com/flashcatcloud/flashduty-docs/blob/main/README.md) | 中文
 
 [![Mintlify](https://img.shields.io/badge/Built_with-Mintlify-8B5CF6?style=flat-square)](https://mintlify.com/)
 [![Docs](https://img.shields.io/badge/Live-docs.flashcat.cloud-blue?style=flat-square)](https://docs.flashcat.cloud)

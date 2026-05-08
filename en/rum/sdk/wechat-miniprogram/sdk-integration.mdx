@@ -1,0 +1,180 @@
+---
+title: "WeChat Mini Program SDK Integration"
+description: "Integrate the RUM SDK into a WeChat Mini Program to collect page, action, request, error, and performance data"
+keywords: ["RUM", "WeChat Mini Program SDK", "Mini Program monitoring", "user monitoring"]
+---
+
+The WeChat Mini Program RUM SDK provides the `flashcatRum` instance through `@flashcatcloud/miniprogram-rum`. After initialization, the SDK automatically collects page lifecycle events, user actions, network requests, app errors, and performance metrics, then reports them to Flashduty RUM.
+
+## Prerequisites
+
+Before integrating the SDK, complete these steps:
+
+- Create or select a RUM application in the Flashduty console, then obtain the **Application ID** and **Client Token**
+- Confirm that your Mini Program can access the RUM intake URL. The default URL is `https://browser.flashcat.cloud/api/v2/rum`; configure `proxy` if your network policy requires forwarding
+- If you use WeChat DevTools, build npm so `miniprogram_npm` can reference the SDK package
+
+## Install the SDK
+
+Install the RUM SDK in the Mini Program project root:
+
+```bash
+npm install @flashcatcloud/miniprogram-rum
+```
+
+After installation, run **Tools > Build npm** in WeChat DevTools.
+
+## Initialize the SDK
+
+Initialize the SDK as early as possible in the Mini Program entry file. The SDK wraps page lifecycle hooks, request methods, and app error listeners during initialization, so initializing it in `app.js` is recommended.
+
+```javascript app.js
+import { flashcatRum } from "@flashcatcloud/miniprogram-rum";
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  service: "wechat-miniprogram",
+  env: "production",
+  version: "1.0.0",
+  sessionSampleRate: 100
+});
+```
+
+<Warning>
+Do not use server-side keys in client code. `clientToken` is the token for client-side reporting, and `applicationId` identifies the RUM application.
+</Warning>
+
+## Initialization Parameters
+
+### Required Parameters
+
+<ParamField body="applicationId" type="string" required>
+RUM application ID. The SDK writes it to `application.id` so Mini Program data is associated with the correct application.
+</ParamField>
+
+<ParamField body="clientToken" type="string" required>
+Client reporting token. The SDK appends this value to RUM intake requests as the `dd-api-key` parameter.
+</ParamField>
+
+### Basic Optional Parameters
+
+<ParamField body="site" type="string" default="browser.flashcat.cloud">
+RUM intake site. When `proxy` is not configured, the SDK sends events to `https://{site}/api/v2/rum`.
+</ParamField>
+
+<ParamField body="proxy" type="string | function">
+Custom reporting proxy. A string proxy produces `{proxy}?ddforward={encodedPath}`. A function proxy receives `{ path, parameters }` and returns the full intake URL.
+</ParamField>
+
+<ParamField body="service" type="string">
+Service name. The SDK writes it as the `service:<value>` tag so you can filter RUM data by service.
+</ParamField>
+
+<ParamField body="env" type="string">
+Environment name. The SDK writes it as the `env:<value>` tag, such as `production` or `staging`.
+</ParamField>
+
+<ParamField body="version" type="string">
+Application version. The SDK writes it as the `version:<value>` tag for release-based error and performance analysis.
+</ParamField>
+
+<ParamField body="sessionSampleRate" type="number" default="100">
+Session sample rate. The value represents the percentage of sessions to collect. `100` collects all sessions, while `0` collects no session events.
+</ParamField>
+
+<ParamField body="flushInterval" type="number" default="15000">
+Batch flush interval in milliseconds. By default, the SDK tries to flush event batches every 15 seconds and also flushes when the Mini Program moves to the background.
+</ParamField>
+
+<ParamField body="beforeSend" type="(event: unknown) => boolean | void">
+Callback executed before an event is sent. Return `false` to prevent the current event from being sent to Flashduty.
+</ParamField>
+
+<ParamField body="debug" type="boolean" default="false">
+Enables debug logs. When enabled, the SDK logs initialization, monitoring startup, event collection, and batch reporting details to the console.
+</ParamField>
+
+<ParamField body="trackAnonymousUser" type="boolean" default="true">
+Controls whether the SDK generates an anonymous user ID when no user information is set. When enabled, the SDK writes the anonymous ID to `usr.id` and `usr.anonymous_id`.
+</ParamField>
+
+## Collection Toggles
+
+The following toggles control automatic collection. They are all enabled by default:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `trackPages` | boolean | `true` | Collects page lifecycle data and creates view events |
+| `trackActions` | boolean | `true` | Collects user actions from page event handlers and creates action events |
+| `trackRequests` | boolean | `true` | Collects `wx.request`, `wx.uploadFile`, and `wx.downloadFile` calls and creates resource events |
+| `trackErrors` | boolean | `true` | Collects errors from `wx.onError` and `wx.onUnhandledRejection` |
+| `trackPerformance` | boolean | `true` | Collects page rendering, startup, and script execution metrics through `wx.getPerformance` |
+
+## Use User Information and Global Context
+
+After sign-in, use `setUser()` to associate events with the current user. The SDK writes these fields to the `usr` object on subsequent RUM events.
+
+```javascript app.js
+flashcatRum.setUser({
+  id: "user-123",
+  name: "Alice",
+  email: "alice@example.com"
+});
+```
+
+You can also use `setGlobalContext()` to add business context. Global context is written to the `context` field on subsequent events.
+
+```javascript app.js
+flashcatRum.setGlobalContext({
+  tenant: "acme",
+  release_channel: "stable"
+});
+```
+
+## Manually Report Events
+
+In addition to automatic collection, you can add business events, errors, actions, and custom timings manually.
+
+```javascript pages/order/detail.js
+import { flashcatRum } from "@flashcatcloud/miniprogram-rum";
+
+Page({
+  onPayTap() {
+    flashcatRum.addAction("pay_button_tap", "tap");
+
+    try {
+      // Run business logic
+    } catch (error) {
+      flashcatRum.addError(error.message, "custom", error.stack);
+    }
+  },
+
+  onCouponLoaded(couponId) {
+    flashcatRum.addCustomEvent("coupon_loaded", { couponId });
+    flashcatRum.addTiming("coupon_loaded");
+  }
+});
+```
+
+| Method | Description |
+|--------|-------------|
+| `addAction(name, type?)` | Manually reports an action event. The default type is `custom` |
+| `addError(message, source?, stack?)` | Manually reports an error event. The public API uses `custom` as the source |
+| `addTiming(name, time?)` | Records a custom timing on the current page view. Invalid characters in the name are replaced with `_` |
+| `addCustomEvent(name, context?)` | Reports a custom event with optional context |
+| `startPage(name)` | Manually starts a page view, useful for overriding the automatic page name or recording a virtual page |
+| `stopSession()` | Clears the current session. The next event creates a new session |
+| `getInitConfiguration()` | Returns the latest initialization configuration |
+
+## Next Steps
+
+<CardGroup cols={2}>
+<Card title="Data Collection" icon="database" href="/en/rum/sdk/wechat-miniprogram/data-collection">
+Learn which event types, fields, and platform APIs the SDK collects automatically.
+</Card>
+
+<Card title="Advanced Configuration" icon="sliders" href="/en/rum/sdk/wechat-miniprogram/advanced-config">
+Configure proxying, distributed tracing, sessions, and manual instrumentation.
+</Card>
+</CardGroup>
