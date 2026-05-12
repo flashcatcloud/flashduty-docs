@@ -163,3 +163,41 @@ Chinese-English terminology mapping. Maintain consistency during translation.
 | 手机号 | phone |
 | 邮箱 | email |
 | 北京快猫星云科技有限公司 | Beijing Flashcat Cloud Technology Co.,Ltd. |
+
+## Do Not Translate (AI SRE domain)
+
+These terms stay in English even inside Chinese copy. Used by the `i18n-review`
+skill in bootstrap mode to decide which substrings of a hardcoded English
+string to preserve verbatim when generating Chinese translations.
+
+Style rule: when a DNT term appears mid-sentence in Chinese, surround it with
+a single half-width space on either side (e.g., `管理你的 Routines`, not
+`管理你的Routines`). For multi-word terms, keep them together verbatim
+(e.g., `创建 Knowledge Pack`).
+
+| Term | Notes |
+|------|-------|
+| MCP | Model Context Protocol |
+| Agent | AI agent — distinct from Subagent |
+| Subagent | Delegated agent spawned by a parent Agent |
+| Skill | Reusable behavior bundle (in the `superpowers` / Claude Code sense) |
+| Routine | Scheduled / recurring agent run |
+| Automation | User-defined automation trigger + action |
+| Runner | Agent execution backend (e.g., `flashduty-runner`) |
+| A2A | Agent-to-Agent protocol |
+| Knowledge Pack | A curated knowledge bundle attached to an Agent |
+| Tool call | A single tool invocation inside an Agent turn |
+| Slash command | UI slash-prefixed command (e.g., `/help`) |
+| Artifact | Output produced by an Agent (file, doc, image) |
+| Reasoning | The reasoning / chain-of-thought block of a model response |
+| Connector | Integration with an external system (Slack, GitHub, etc.) |
+| Environment | Execution environment for runners (env vars, credentials) |
+| Todo | The Todo list shown in agent UI |
+| Mermaid | Mermaid diagram syntax |
+| Prompt | System or user prompt sent to a model |
+
+Translatable companions (do NOT belong in DNT — translate to Chinese):
+
+| English | Chinese |
+|---------|---------|
+| Customize | 自定义 |
