@@ -1,0 +1,293 @@
+---
+title: "告警规则 Description 模板"
+description: "配置 Monitors 告警规则备注描述的 Go Template 变量、关联查询结果和 Sprig 函数。"
+keywords: ["Description 模板", "告警规则", "备注描述", "Go Template", "Sprig", "关联查询"]
+---
+
+Monitors 告警规则的 **备注描述（Description）** 用于定义告警和恢复事件中的说明文本。你可以使用 Go `text/template` 引用告警标签、查询值、关联查询结果和安全的 Sprig 函数，生成 Text 或 Markdown 格式的描述内容。
+
+## 工作方式
+
+规则触发或恢复时，monit-edge 会把完整告警事件作为模板根对象，并额外注入一组常用短变量。模板渲染完成后，结果会写入事件的 `Description` 字段，再继续执行标签增强和事件发送。
+
+<Note>
+日常模板建议优先使用 `$labels`、`$values`、`$value`、`$relates`、`$status` 和 `$checkMode`。其他短变量用于高级模板或兼容场景，只有确实需要时再使用。
+</Note>
+
+## Sprig 函数名
+
+monit-edge 会使用 Sprig 标准函数名注册安全的 Sprig 函数。同一个可用函数也会额外注册一份 `sprig_` 前缀形式，方便在命名冲突时使用。
+
+应该这样写：
+
+```gotemplate
+{{ contains "Unknown column" $msg }}
+{{ regexMatch "Unknown column" $msg }}
+{{ regexFind "Unknown column '[^']+'" $msg }}
+```
+
+也可以使用带前缀的形式：
+
+```gotemplate
+{{ sprig_contains "Unknown column" $msg }}
+{{ sprig_regexMatch "Unknown column" $msg }}
+{{ sprig_regexFind "Unknown column '[^']+'" $msg }}
+```
+
+如果 Sprig 标准函数名与 monit-edge 自定义函数重名，monit-edge 自定义函数会保留标准函数名，Sprig 函数仍可通过 `sprig_` 前缀调用。
+
+## 内置变量
+
+| 变量 | 类型 | 说明 |
+| --- | --- | --- |
+| `$labels` | `map[string]string` | 告警标签，与 `.DataLabels` 相同。 |
+| `$values` | `map[string]float64` | 告警计算中使用到的数值，与 `.Values` 相同。 |
+| `$value` | `float64` | 主告警值，与 `.Value` 相同。 |
+| `$appendLabels` | `map[string]string` | 规则上配置的附加标签。 |
+| `$annotations` | `map[string]string` | 规则自定义字段。 |
+| `$dsType` | `string` | 数据源类型。 |
+| `$dsName` | `string` | 数据源名称。 |
+| `$dsAddress` | `string` | 数据源地址，不包含认证信息。 |
+| `$checkMode` | `string` | 检测模式。 |
+| `$relates` | `map[string][]*ResultRow` | 关联查询结果行。 |
+| `$status` | `string` | `firing` 或 `recovered`。 |
+| `$severity` | `string` | 告警级别。 |
+
+示例：
+
+```gotemplate
+{{- if eq $status "firing" }}
+规则 {{ .RuleName }} 在 {{ $dsName }} 上触发，当前值：{{ printf "%.2f" $value }}
+{{- else }}
+规则 {{ .RuleName }} 已恢复。
+{{- end }}
+```
+
+## 根对象字段
+
+根对象字段使用 `.FieldName` 访问。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `.Hash` | `string` | 稳定的事件 hash。同一个事件的告警和恢复使用相同 hash。 |
+| `.DataSourceType` | `string` | 数据源类型。 |
+| `.DataSourceName` | `string` | 数据源名称。 |
+| `.DataSourceAddress` | `string` | 数据源地址，不包含认证信息。 |
+| `.RuleName` | `string` | 告警规则名称。 |
+| `.RuleID` | `uint64` | 告警规则 ID。 |
+| `.Queries` | `[]Query` | 规则查询定义。 |
+| `.RelateQueries` | `[]RelateQuery` | 关联查询定义。 |
+| `.CheckMode` | `string` | 检测模式。 |
+| `.DataLabels` | `map[string]string` | 告警标签。 |
+| `.AppendLabels` | `map[string]string` | 规则上配置的附加标签。 |
+| `.EnrichLabels` | `map[string]string` | 外部标签增强接口返回的标签。标签增强会先于 `Description` 渲染执行，因此模板可以引用这些标签。 |
+| `.Values` | `map[string]float64` | 告警计算中使用到的数值。 |
+| `.Annotations` | `map[string]string` | 规则自定义字段。 |
+| `.Relates` | `map[string][]*ResultRow` | 关联查询结果行。 |
+| `.Status` | `string` | `firing` 或 `recovered`。 |
+| `.Severity` | `string` | 告警级别。 |
+| `.EvalTime` | `int64` | 本次评估时间，Unix 秒级时间戳。 |
+| `.Description` | `string` | 渲染后的描述。该字段在模板执行完成后才设置。 |
+| `.DescriptionType` | `string` | 描述类型，例如 `text` 或 `markdown`。 |
+| `.Value` | `float64` | 主告警值。 |
+| `.TitleRule` | `string` | edge 上配置的标题规则。 |
+
+`.Queries` 中的 `Query` 对象包含 `.Name`、`.Expr`、`.LabelFields`、`.ValueFields` 和 `.Args`。
+
+`.RelateQueries` 中的 `RelateQuery` 对象包含 `.Name`、`.Expr` 和 `.Args`。
+
+## 关联查询结果行
+
+关联查询结果通过 `$relates` 访问。map 的 key 是关联查询名称，例如 `R1`。
+
+| 字段或方法 | 类型 | 说明 |
+| --- | --- | --- |
+| `$row.Fields` | `map[string]interface{}` | 关联查询返回的非数值字段或展示字段。 |
+| `$row.Values` | `map[string]float64` | 关联查询返回的数值字段。 |
+| `$row.Field "name"` | `interface{}` | 从 `$row.Fields` 读取一个字段。 |
+| `$row.Value` | `float64` | 返回 `$row.Values` 中的第一个数值；如果没有数值则返回 `NaN`。 |
+| `$row.Value "name"` | `float64` | 从 `$row.Values` 读取一个数值；如果 key 不存在则返回 `NaN`。 |
+| `$row.String` | `string` | 返回该行的调试字符串。 |
+
+示例：
+
+```gotemplate
+{{- range $row := $relates.R1 }}
+- 日志：{{ $row.Field "_msg" }}
+- 次数：{{ printf "%.0f" ($row.Value "count") }}
+{{- end }}
+```
+
+## Go Template 内置函数
+
+以下函数由 Go `text/template` 提供。
+
+| 函数 | 说明 | 示例 |
+| --- | --- | --- |
+| `and` | 逻辑 AND。结果确定后停止继续求值。 | `{{ if and $a $b }}yes{{ end }}` |
+| `or` | 逻辑 OR。结果确定后停止继续求值。 | `{{ if or $a $b }}yes{{ end }}` |
+| `not` | 逻辑 NOT。 | `{{ if not $ok }}failed{{ end }}` |
+| `eq` | 等于。 | `{{ if eq $status "firing" }}...{{ end }}` |
+| `ne` | 不等于。 | `{{ if ne $severity "Info" }}...{{ end }}` |
+| `lt` | 小于。 | `{{ if lt $value 10.0 }}...{{ end }}` |
+| `le` | 小于等于。 | `{{ if le $value 10.0 }}...{{ end }}` |
+| `gt` | 大于。 | `{{ if gt $value 10.0 }}...{{ end }}` |
+| `ge` | 大于等于。 | `{{ if ge $value 10.0 }}...{{ end }}` |
+| `index` | 从 map、slice 或 array 中读取元素。 | `{{ index $labels "instance" }}` |
+| `slice` | 对字符串、slice 或 array 做切片。 | `{{ slice "abcdef" 0 3 }}` |
+| `len` | 返回长度。 | `{{ len $relates.R1 }}` |
+| `printf` | 使用 `fmt.Sprintf` 语法格式化文本。 | `{{ printf "%.2f" $value }}` |
+| `print` | 使用默认格式拼接多个值。 | `{{ print $dsName ":" $status }}` |
+| `println` | 类似 `print`，但会追加换行。 | `{{ println $dsName }}` |
+| `call` | 调用函数值。Description 中通常很少使用。 | `{{ call .SomeFunc }}` |
+| `html` | 按 HTML 规则转义文本。 | `{{ html $text }}` |
+| `js` | 按 JavaScript 规则转义文本。 | `{{ js $text }}` |
+| `urlquery` | 按 URL query 规则转义文本。 | `{{ urlquery $text }}` |
+
+## monit-edge 自定义函数
+
+以下函数由 monit-edge 注册，使用时不需要前缀。
+
+| 函数 | 说明 | 示例 |
+| --- | --- | --- |
+| `pathEscape text` | 对 URL path 做转义。 | `{{ pathEscape "a/b c" }}` |
+| `queryEscape text` | 对 URL query 做转义。 | `{{ queryEscape "level=error msg" }}` |
+| `getvalue values key [format]` | 从 `map[string]float64` 中读取数值并格式化。默认格式是 `%.4f`。如果 key 为空或不存在，会返回 `template_function_error: ...` 文本。 | `{{ getvalue $values "$A" "%.2f" }}` |
+| `getfvalue values key` | 从 `map[string]float64` 中读取数值。如果 key 为空或不存在，返回 `NaN`。 | `{{ if gt (getfvalue $values "$A") 10.0 }}high{{ end }}` |
+| `trunc count text` | `truncRune` 的别名。按 Unicode 字符截断，不按字节截断。`count` 为负数时从末尾保留字符。 | `{{ trunc 10 $msg }}` |
+| `truncRune count text` | 按 Unicode 字符截断。 | `{{ truncRune -8 "abcdef你好" }}` |
+| `runeCount text` | 统计 Unicode 字符数。 | `{{ runeCount "你好abc" }}` |
+| `args ...` | 构造一个 map，key 为 `arg0`、`arg1` 等。 | `{{ args "a" 1 }}` |
+| `reReplaceAll pattern repl text` | 正则替换。参数顺序是 `pattern`、`replacement`、`text`。正则非法时会导致模板渲染失败。 | `{{ reReplaceAll ".*id=([0-9]+).*" "$1" $msg }}` |
+| `safeHtml text` | 将文本转换为 `html/template.HTML` 类型。Description 使用 `text/template` 渲染，该函数不会清洗 HTML，也不会改变转义行为。普通 text 或 Markdown 不建议使用。 | `{{ safeHtml "<b>OK</b>" }}` |
+| `match pattern text` | 正则匹配，等价于 Go `regexp.MatchString`。正则非法时会导致模板渲染失败。 | `{{ if match "Unknown column" $msg }}...{{ end }}` |
+| `toUpper text` | 转成大写。 | `{{ toUpper $severity }}` |
+| `toLower text` | 转成小写。 | `{{ toLower $status }}` |
+| `stripPort hostPort` | 从 `host:port` 中去掉端口。如果解析失败，返回原始值。 | `{{ stripPort "example.com:9100" }}` |
+| `stripDomain hostPort` | 去掉主机名中的域名后缀，并保留端口。IP 地址会原样返回。 | `{{ stripDomain "node01.prod.local:9100" }}` |
+| `humanize value` | 使用 SI 单位格式化数字。 | `{{ humanize 12345 }}` |
+| `humanize1024 value` | 使用 1024 进制单位格式化数字。 | `{{ humanize1024 1048576 }}` |
+| `humanizeDuration seconds` | 将秒数格式化为可读时长。 | `{{ humanizeDuration 3661 }}` |
+| `humanizePercentage value` | 将比例格式化为百分比。 | `{{ humanizePercentage 0.1234 }}` |
+| `humanizeTimestamp seconds` | 将 Unix 秒级时间戳转为 UTC 时间文本。 | `{{ humanizeTimestamp .EvalTime }}` |
+| `toTime seconds` | 将 Unix 秒级时间戳转为 `time.Time`。 | `{{ (toTime .EvalTime).Format "2006-01-02 15:04:05" }}` |
+| `nanoTime value [tzOffset]` | 将 Unix 纳秒级时间戳转为 `time.Time`。可选时区偏移单位为小时。 | `{{ (nanoTime $row.Fields.__time__ 8).Format "2006-01-02 15:04:05" }}` |
+| `timeFormat value format [tzOffset]` | 格式化 `time.Time`、`*time.Time`、RFC3339 字符串或 RFC3339Nano 字符串。可选时区偏移单位为小时。 | `{{ timeFormat "2026-01-06T11:48:12Z" "2006-01-02 15:04:05" 8 }}` |
+| `parseDuration duration` | 解析时长字符串并返回秒数。 | `{{ parseDuration "5m" }}` |
+| `add a b` | 数值加法。 | `{{ add 1 2 }}` |
+| `sub a b` | 数值减法。 | `{{ sub 10 3 }}` |
+| `mul a b` | 数值乘法。 | `{{ mul $value 100 }}` |
+| `div a b` | 数值除法。除零会导致模板渲染失败。 | `{{ div $value 1024 }}` |
+| `now` | 当前时间，类型为 `time.Time`。 | `{{ now.Format "2006-01-02 15:04:05" }}` |
+| `toString value` | 使用 `fmt.Sprint` 将值转为字符串。 | `{{ toString $row.Fields._msg }}` |
+
+## Sprig 函数
+
+monit-edge 会使用 Sprig 标准函数名注册安全的 Sprig 函数，同时也注册 `sprig_`
+前缀形式。Sprig 函数来自 [Masterminds/sprig](https://github.com/Masterminds/sprig)；
+需要查看上游函数行为时，可以参考该仓库文档。
+
+常用示例：
+
+```gotemplate
+{{ contains "error" $msg }}
+{{ regexMatch "Unknown column" $msg }}
+{{ regexFind "Unknown column '[^']+'" $msg }}
+```
+
+正则使用注意事项：`regexFind` 和 `sprig_regexFind` 返回的是完整匹配文本，不返回捕获组。如果要提取捕获组，请使用 `regexReplaceAll` 或 `sprig_regexReplaceAll`：
+
+```gotemplate
+{{- $msg := "Unknown column 'community_posts.comment_count' in 'field list'" }}
+{{- regexReplaceAll ".*Unknown column '([^']+)'.*" $msg "$1" }}
+```
+
+结果是：
+
+```text
+community_posts.comment_count
+```
+
+### 常用 Sprig 函数
+
+| 函数 | 说明 | 示例 |
+| --- | --- | --- |
+| `contains substr text` | 判断 `text` 是否包含 `substr`。 | `{{ if contains "Unknown column" $msg }}...{{ end }}` |
+| `hasPrefix prefix text` | 判断前缀。 | `{{ hasPrefix "prod-" $name }}` |
+| `hasSuffix suffix text` | 判断后缀。 | `{{ hasSuffix ".log" $file }}` |
+| `regexMatch pattern text` | 正则匹配。 | `{{ regexMatch "error|failed" $msg }}` |
+| `regexFind pattern text` | 返回第一个完整正则匹配。 | `{{ regexFind "trace_id=[a-z0-9]+" $msg }}` |
+| `regexFindAll pattern text n` | 返回最多 `n` 个完整正则匹配。`-1` 表示全部返回。 | `{{ regexFindAll "id=[0-9]+" $msg -1 }}` |
+| `regexReplaceAll pattern text repl` | 正则替换。参数顺序是 `pattern`、`text`、`replacement`。 | `{{ regexReplaceAll ".*id=([0-9]+).*" $msg "$1" }}` |
+| `trim text` | 去掉首尾空白字符。 | `{{ trim $msg }}` |
+| `lower text` | 转小写。 | `{{ lower $severity }}` |
+| `upper text` | 转大写。 | `{{ upper $severity }}` |
+| `default default value` | 当 `value` 为空时使用默认值。 | `{{ default "unknown" (index $labels "instance") }}` |
+| `toJson value` | 将值转为 JSON。 | `{{ toJson $labels }}` |
+| `dict ...` | 创建字典。 | `{{ dict "name" $dsName "status" $status }}` |
+| `list ...` | 创建列表。 | `{{ list "a" "b" "c" }}` |
+
+同一个函数也可以使用 `sprig_` 前缀调用，例如 `sprig_contains` 和 `sprig_regexReplaceAll`。
+
+### 禁用的 Sprig 函数
+
+为了保证告警描述渲染过程可预测且安全，monit-edge 不会注册会读取进程环境变量、执行 DNS 解析、生成随机输出、创建凭证或证书、加解密数据，或者主动让模板失败的 Sprig 函数。
+
+以下 Sprig 函数的标准形式和 `sprig_` 前缀形式都不可用：
+
+```text
+env / sprig_env
+expandenv / sprig_expandenv
+getHostByName / sprig_getHostByName
+bcrypt / sprig_bcrypt
+htpasswd / sprig_htpasswd
+derivePassword / sprig_derivePassword
+genPrivateKey / sprig_genPrivateKey
+buildCustomCert / sprig_buildCustomCert
+genCA / sprig_genCA
+genCAWithKey / sprig_genCAWithKey
+genSelfSignedCert / sprig_genSelfSignedCert
+genSelfSignedCertWithKey / sprig_genSelfSignedCertWithKey
+genSignedCert / sprig_genSignedCert
+genSignedCertWithKey / sprig_genSignedCertWithKey
+encryptAES / sprig_encryptAES
+decryptAES / sprig_decryptAES
+randBytes / sprig_randBytes
+uuidv4 / sprig_uuidv4
+randAlphaNum / sprig_randAlphaNum
+randAlpha / sprig_randAlpha
+randAscii / sprig_randAscii
+randNumeric / sprig_randNumeric
+randInt / sprig_randInt
+shuffle / sprig_shuffle
+fail / sprig_fail
+```
+
+如果模板使用这些函数，解析阶段会报类似 `function "env" not defined` 或 `function "sprig_env" not defined` 的错误。
+
+## 完整示例：提取 MySQL Unknown Column 字段名
+
+```gotemplate
+{{- if eq $status "firing" }}
+在过去5分钟的时间内，数据库操作出现缺失字段错误 {{ $value | printf "%.0f" }} 次；
+{{- range $x := $relates.R1 }}
+  {{- $msg := printf "%v" ($x.Field "_msg") }}
+  {{- if contains "Unknown column" $msg }}
+    {{- $field := regexReplaceAll ".*Unknown column '([^']+)'.*" $msg "$1" }}
+
+- 缺失字段：{{ $field }}
+- 查看地址：https://example.com/logs?query={{ queryEscape "Unknown column" }}
+  {{- end }}
+{{- end }}
+{{- else }}
+数据库缺字段错误已恢复
+{{- end }}
+```
+
+## 排障
+
+`function "contains" not defined` 表示规则运行在较旧的 monit-edge 版本上，该版本尚未启用 Sprig 标准函数名。请升级 monit-edge；如果该版本支持前缀形式，也可以临时改用 `sprig_contains`。
+
+`function "env" not defined` 或 `function "sprig_env" not defined` 表示模板使用了被禁用的 Sprig 函数。请删除该函数，或改用确定性的模板逻辑。
+
+`regexFind` 或 `sprig_regexFind` 返回 `Unknown column 'x'` 而不是 `x` 是预期行为。提取捕获组请使用 `regexReplaceAll` 或 `sprig_regexReplaceAll`。
