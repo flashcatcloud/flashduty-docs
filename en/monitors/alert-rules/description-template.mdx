@@ -1,0 +1,315 @@
+---
+title: "Alert Rule Description Templates"
+description: "Configure Go Template variables, related query results, and Sprig functions for Monitors alert rule descriptions."
+keywords: ["Description templates", "alert rules", "Go Template", "Sprig", "related queries"]
+---
+
+Use an alert rule **Description** to define the text shown on firing and recovery events. You can reference alert labels, query values, related query results, and safe Sprig functions with Go `text/template`, then render the result as Text or Markdown.
+
+## How It Works
+
+When a rule fires or recovers, monit-edge passes the full alert event as the template root object and injects short variables for common fields. After rendering, monit-edge writes the result to the event `Description`, then runs label enrichment and sends the event.
+
+<Note>
+For day-to-day templates, prefer `$labels`, `$values`, `$value`, `$relates`, `$status`, and `$checkMode`. Use the other short variables only for advanced templates or compatibility cases.
+</Note>
+
+## Sprig Function Names
+
+monit-edge registers safe Sprig functions with their standard Sprig names. The
+same supported functions are also registered with a `sprig_` prefix so templates
+can avoid naming conflicts when needed.
+
+Use:
+
+```gotemplate
+{{ contains "Unknown column" $msg }}
+{{ regexMatch "Unknown column" $msg }}
+{{ regexFind "Unknown column '[^']+'" $msg }}
+```
+
+The prefixed form is also valid:
+
+```gotemplate
+{{ sprig_contains "Unknown column" $msg }}
+{{ sprig_regexMatch "Unknown column" $msg }}
+{{ sprig_regexFind "Unknown column '[^']+'" $msg }}
+```
+
+If a standard Sprig name conflicts with a monit-edge custom function, the
+monit-edge custom function keeps the standard name and the Sprig function remains
+available through the `sprig_` prefix.
+
+## Built-in Variables
+
+| Variable | Type | Description |
+| --- | --- | --- |
+| `$labels` | `map[string]string` | Alert labels. Same data as `.DataLabels`. |
+| `$values` | `map[string]float64` | Numeric values used by alert evaluation. Same data as `.Values`. |
+| `$value` | `float64` | Main alert value. Same data as `.Value`. |
+| `$appendLabels` | `map[string]string` | Extra labels configured on the alert rule. |
+| `$annotations` | `map[string]string` | Rule annotations. |
+| `$dsType` | `string` | Data source type. |
+| `$dsName` | `string` | Data source name. |
+| `$dsAddress` | `string` | Data source address without credentials. |
+| `$checkMode` | `string` | Check mode. |
+| `$relates` | `map[string][]*ResultRow` | Related query result rows. |
+| `$status` | `string` | `firing` or `recovered`. |
+| `$severity` | `string` | Alert severity. |
+
+Example:
+
+```gotemplate
+{{- if eq $status "firing" }}
+Alert {{ .RuleName }} fired on {{ $dsName }}. Value: {{ printf "%.2f" $value }}
+{{- else }}
+Alert {{ .RuleName }} recovered.
+{{- end }}
+```
+
+## Root Object Fields
+
+Access root object fields with `.FieldName`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `.Hash` | `string` | Stable event hash. Firing and recovery events share the same hash. |
+| `.DataSourceType` | `string` | Data source type. |
+| `.DataSourceName` | `string` | Data source name. |
+| `.DataSourceAddress` | `string` | Data source address without credentials. |
+| `.RuleName` | `string` | Alert rule name. |
+| `.RuleID` | `uint64` | Alert rule ID. |
+| `.Queries` | `[]Query` | Rule query definitions. |
+| `.RelateQueries` | `[]RelateQuery` | Related query definitions. |
+| `.CheckMode` | `string` | Check mode. |
+| `.DataLabels` | `map[string]string` | Alert labels. |
+| `.AppendLabels` | `map[string]string` | Extra labels configured on the rule. |
+| `.EnrichLabels` | `map[string]string` | Always empty while rendering `Description`; label enrichment runs after description rendering. Do not rely on it in Description templates. |
+| `.Values` | `map[string]float64` | Numeric values used by alert evaluation. |
+| `.Annotations` | `map[string]string` | Rule annotations. |
+| `.Relates` | `map[string][]*ResultRow` | Related query result rows. |
+| `.Status` | `string` | `firing` or `recovered`. |
+| `.Severity` | `string` | Alert severity. |
+| `.EvalTime` | `int64` | Evaluation timestamp in Unix seconds. |
+| `.Description` | `string` | Rendered description. This is set after template execution. |
+| `.DescriptionType` | `string` | Description type, for example `text` or `markdown`. |
+| `.Value` | `float64` | Main alert value. |
+| `.TitleRule` | `string` | Title rule configured on the edge. |
+
+`Query` objects in `.Queries` have `.Name`, `.Expr`, `.LabelFields`,
+`.ValueFields`, and `.Args`.
+
+`RelateQuery` objects in `.RelateQueries` have `.Name`, `.Expr`, and `.Args`.
+
+## Related Query Rows
+
+Related query results are available through `$relates`. The map key is the
+related query name, such as `R1`.
+
+| Field or Method | Type | Description |
+| --- | --- | --- |
+| `$row.Fields` | `map[string]interface{}` | Non-numeric or display fields returned by the related query. |
+| `$row.Values` | `map[string]float64` | Numeric fields returned by the related query. |
+| `$row.Field "name"` | `interface{}` | Returns one field from `$row.Fields`. |
+| `$row.Value` | `float64` | Returns the first numeric value in `$row.Values`, or `NaN` if no value exists. |
+| `$row.Value "name"` | `float64` | Returns one numeric value from `$row.Values`, or `NaN` if the key does not exist. |
+| `$row.String` | `string` | Returns a debug-style string representation of the row. |
+
+Example:
+
+```gotemplate
+{{- range $row := $relates.R1 }}
+- msg: {{ $row.Field "_msg" }}
+- count: {{ printf "%.0f" ($row.Value "count") }}
+{{- end }}
+```
+
+## Go Template Built-in Functions
+
+These functions are provided by Go `text/template`.
+
+| Function | Description | Example |
+| --- | --- | --- |
+| `and` | Boolean AND. Evaluation stops when the result is known. | `{{ if and $a $b }}yes{{ end }}` |
+| `or` | Boolean OR. Evaluation stops when the result is known. | `{{ if or $a $b }}yes{{ end }}` |
+| `not` | Boolean NOT. | `{{ if not $ok }}failed{{ end }}` |
+| `eq` | Equal. | `{{ if eq $status "firing" }}...{{ end }}` |
+| `ne` | Not equal. | `{{ if ne $severity "Info" }}...{{ end }}` |
+| `lt` | Less than. | `{{ if lt $value 10.0 }}...{{ end }}` |
+| `le` | Less than or equal. | `{{ if le $value 10.0 }}...{{ end }}` |
+| `gt` | Greater than. | `{{ if gt $value 10.0 }}...{{ end }}` |
+| `ge` | Greater than or equal. | `{{ if ge $value 10.0 }}...{{ end }}` |
+| `index` | Reads an item from a map, slice, or array. | `{{ index $labels "instance" }}` |
+| `slice` | Slices a string, slice, or array. | `{{ slice "abcdef" 0 3 }}` |
+| `len` | Returns length. | `{{ len $relates.R1 }}` |
+| `printf` | Formats text with `fmt.Sprintf` syntax. | `{{ printf "%.2f" $value }}` |
+| `print` | Concatenates values with default formatting. | `{{ print $dsName ":" $status }}` |
+| `println` | Like `print`, with a trailing newline. | `{{ println $dsName }}` |
+| `call` | Calls a function value. Rarely needed in descriptions. | `{{ call .SomeFunc }}` |
+| `html` | Escapes text for HTML. | `{{ html $text }}` |
+| `js` | Escapes text for JavaScript. | `{{ js $text }}` |
+| `urlquery` | Escapes text for URL query usage. | `{{ urlquery $text }}` |
+
+## monit-edge Custom Functions
+
+These functions are registered by monit-edge without a prefix.
+
+| Function | Description | Example |
+| --- | --- | --- |
+| `pathEscape text` | URL path escaping. | `{{ pathEscape "a/b c" }}` |
+| `queryEscape text` | URL query escaping. | `{{ queryEscape "level=error msg" }}` |
+| `getvalue values key [format]` | Reads a numeric value from a `map[string]float64` and formats it. Default format is `%.4f`. Returns `template_function_error: ...` text if the key is invalid or missing. | `{{ getvalue $values "$A" "%.2f" }}` |
+| `getfvalue values key` | Reads a numeric value from a `map[string]float64`. Returns `NaN` if the key is invalid or missing. | `{{ if gt (getfvalue $values "$A") 10.0 }}high{{ end }}` |
+| `trunc count text` | Alias of `truncRune`. Truncates by Unicode characters, not bytes. Negative count keeps characters from the end. | `{{ trunc 10 $msg }}` |
+| `truncRune count text` | Truncates by Unicode characters. | `{{ truncRune -8 "abcdef hello" }}` |
+| `runeCount text` | Counts Unicode characters. | `{{ runeCount "hello" }}` |
+| `args ...` | Builds a map with keys `arg0`, `arg1`, and so on. | `{{ args "a" 1 }}` |
+| `reReplaceAll pattern repl text` | Regex replacement. Argument order is `pattern`, `replacement`, `text`. Invalid regex fails rendering. | `{{ reReplaceAll ".*id=([0-9]+).*" "$1" $msg }}` |
+| `safeHtml text` | Converts text to `html/template.HTML`. Description templates are rendered with `text/template`, so this does not sanitize HTML or change escaping behavior. Avoid it for normal text or Markdown. | `{{ safeHtml "<b>OK</b>" }}` |
+| `match pattern text` | Regex match. Equivalent to Go `regexp.MatchString`. Invalid regex fails rendering. | `{{ if match "Unknown column" $msg }}...{{ end }}` |
+| `toUpper text` | Converts text to uppercase. | `{{ toUpper $severity }}` |
+| `toLower text` | Converts text to lowercase. | `{{ toLower $status }}` |
+| `stripPort hostPort` | Removes port from `host:port`. If parsing fails, returns the original value. | `{{ stripPort "example.com:9100" }}` |
+| `stripDomain hostPort` | Removes domain suffix from hostname while preserving port. IP addresses are returned unchanged. | `{{ stripDomain "node01.prod.local:9100" }}` |
+| `humanize value` | Formats a number using SI units. | `{{ humanize 12345 }}` |
+| `humanize1024 value` | Formats a number using base-1024 units. | `{{ humanize1024 1048576 }}` |
+| `humanizeDuration seconds` | Formats seconds as a readable duration. | `{{ humanizeDuration 3661 }}` |
+| `humanizePercentage value` | Formats a ratio as a percentage. | `{{ humanizePercentage 0.1234 }}` |
+| `humanizeTimestamp seconds` | Converts a Unix timestamp in seconds to UTC time text. | `{{ humanizeTimestamp .EvalTime }}` |
+| `toTime seconds` | Converts a Unix timestamp in seconds to a `time.Time`. | `{{ (toTime .EvalTime).Format "2006-01-02 15:04:05" }}` |
+| `nanoTime value [tzOffset]` | Converts a Unix nanosecond timestamp to `time.Time`. Optional timezone offset is in hours. | `{{ (nanoTime $row.Fields.__time__ 8).Format "2006-01-02 15:04:05" }}` |
+| `timeFormat value format [tzOffset]` | Formats a `time.Time`, `*time.Time`, RFC3339 string, or RFC3339Nano string. Optional timezone offset is in hours. | `{{ timeFormat "2026-01-06T11:48:12Z" "2006-01-02 15:04:05" 8 }}` |
+| `parseDuration duration` | Parses a duration string and returns seconds. | `{{ parseDuration "5m" }}` |
+| `add a b` | Numeric addition. | `{{ add 1 2 }}` |
+| `sub a b` | Numeric subtraction. | `{{ sub 10 3 }}` |
+| `mul a b` | Numeric multiplication. | `{{ mul $value 100 }}` |
+| `div a b` | Numeric division. Division by zero fails rendering. | `{{ div $value 1024 }}` |
+| `now` | Current time as `time.Time`. | `{{ now.Format "2006-01-02 15:04:05" }}` |
+| `toString value` | Converts a value to string using `fmt.Sprint`. | `{{ toString $row.Fields._msg }}` |
+
+## Sprig Functions
+
+monit-edge registers safe Sprig functions with standard Sprig names and also
+with a `sprig_` prefix. Sprig functions come from
+[Masterminds/sprig](https://github.com/Masterminds/sprig). Check that repository
+for upstream function behavior.
+
+Common examples:
+
+```gotemplate
+{{ contains "error" $msg }}
+{{ regexMatch "Unknown column" $msg }}
+{{ regexFind "Unknown column '[^']+'" $msg }}
+```
+
+Important regex note: `regexFind` and `sprig_regexFind` return the full matched
+substring. They do not return a capture group. To extract a capture group, use
+`regexReplaceAll` or `sprig_regexReplaceAll`:
+
+```gotemplate
+{{- $msg := "Unknown column 'community_posts.comment_count' in 'field list'" }}
+{{- regexReplaceAll ".*Unknown column '([^']+)'.*" $msg "$1" }}
+```
+
+The result is:
+
+```text
+community_posts.comment_count
+```
+
+### Common Sprig Functions
+
+| Function | Description | Example |
+| --- | --- | --- |
+| `contains substr text` | Checks whether `text` contains `substr`. | `{{ if contains "Unknown column" $msg }}...{{ end }}` |
+| `hasPrefix prefix text` | Checks prefix. | `{{ hasPrefix "prod-" $name }}` |
+| `hasSuffix suffix text` | Checks suffix. | `{{ hasSuffix ".log" $file }}` |
+| `regexMatch pattern text` | Regex match. | `{{ regexMatch "error|failed" $msg }}` |
+| `regexFind pattern text` | Returns the first full regex match. | `{{ regexFind "trace_id=[a-z0-9]+" $msg }}` |
+| `regexFindAll pattern text n` | Returns up to `n` full regex matches. Use `-1` for all. | `{{ regexFindAll "id=[0-9]+" $msg -1 }}` |
+| `regexReplaceAll pattern text repl` | Regex replacement. Argument order is `pattern`, `text`, `replacement`. | `{{ regexReplaceAll ".*id=([0-9]+).*" $msg "$1" }}` |
+| `trim text` | Trims leading and trailing whitespace. | `{{ trim $msg }}` |
+| `lower text` | Lowercase. | `{{ lower $severity }}` |
+| `upper text` | Uppercase. | `{{ upper $severity }}` |
+| `default default value` | Uses a default value when `value` is empty. | `{{ default "unknown" (index $labels "instance") }}` |
+| `toJson value` | Converts a value to JSON. | `{{ toJson $labels }}` |
+| `dict ...` | Creates a dictionary. | `{{ dict "name" $dsName "status" $status }}` |
+| `list ...` | Creates a list. | `{{ list "a" "b" "c" }}` |
+
+The same functions can also be called with `sprig_` prefixes, such as
+`sprig_contains` and `sprig_regexReplaceAll`.
+
+### Disabled Sprig Functions
+
+For predictable and safe alert rendering, monit-edge does not register Sprig
+functions that can read process environment variables, perform DNS lookup,
+generate random output, create credentials or certificates, encrypt or decrypt
+data, or intentionally fail rendering.
+
+The following Sprig functions are unavailable in both standard and `sprig_`
+forms:
+
+```text
+env / sprig_env
+expandenv / sprig_expandenv
+getHostByName / sprig_getHostByName
+bcrypt / sprig_bcrypt
+htpasswd / sprig_htpasswd
+derivePassword / sprig_derivePassword
+genPrivateKey / sprig_genPrivateKey
+buildCustomCert / sprig_buildCustomCert
+genCA / sprig_genCA
+genCAWithKey / sprig_genCAWithKey
+genSelfSignedCert / sprig_genSelfSignedCert
+genSelfSignedCertWithKey / sprig_genSelfSignedCertWithKey
+genSignedCert / sprig_genSignedCert
+genSignedCertWithKey / sprig_genSignedCertWithKey
+encryptAES / sprig_encryptAES
+decryptAES / sprig_decryptAES
+randBytes / sprig_randBytes
+uuidv4 / sprig_uuidv4
+randAlphaNum / sprig_randAlphaNum
+randAlpha / sprig_randAlpha
+randAscii / sprig_randAscii
+randNumeric / sprig_randNumeric
+randInt / sprig_randInt
+shuffle / sprig_shuffle
+fail / sprig_fail
+```
+
+If a template uses one of these functions, parsing fails with an error like
+`function "env" not defined` or `function "sprig_env" not defined`.
+
+## Complete Example: Extract MySQL Unknown Column
+
+```gotemplate
+{{- if eq $status "firing" }}
+In the last 5 minutes, database operations produced missing-field errors {{ $value | printf "%.0f" }} times.
+{{- range $x := $relates.R1 }}
+  {{- $msg := printf "%v" ($x.Field "_msg") }}
+  {{- if contains "Unknown column" $msg }}
+    {{- $field := regexReplaceAll ".*Unknown column '([^']+)'.*" $msg "$1" }}
+
+- Missing field: {{ $field }}
+- View logs: https://example.com/logs?query={{ queryEscape "Unknown column" }}
+  {{- end }}
+{{- end }}
+{{- else }}
+The database missing-field error has recovered.
+{{- end }}
+```
+
+## Troubleshooting
+
+`function "contains" not defined` means the rule is running on an older
+monit-edge build that has not enabled standard Sprig names. Upgrade monit-edge,
+or use `sprig_contains` as a compatibility workaround if that build supports the
+prefixed form.
+
+`function "env" not defined` or `function "sprig_env" not defined` means the
+template used a disabled Sprig function. Remove it or replace it with
+deterministic template logic.
+
+`regexFind` or `sprig_regexFind` returning `Unknown column 'x'` instead of `x`
+is expected. Use `regexReplaceAll` or `sprig_regexReplaceAll` to extract capture
+groups.
