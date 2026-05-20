@@ -1,0 +1,184 @@
+---
+title: "SDK 接入指南"
+description: "在微信小程序中接入 RUM SDK，采集页面、操作、请求、错误和性能数据"
+keywords: ["RUM", "微信小程序 SDK", "小程序监控", "用户监控"]
+---
+
+微信小程序 RUM SDK 通过 `@flashcatcloud/miniprogram-rum` 提供 `flashcatRum` 实例。初始化后，SDK 会自动采集页面生命周期、用户操作、网络请求、应用错误和性能指标，并上报到 Flashduty RUM。
+
+## 前提条件
+
+在接入 SDK 前，请先完成以下准备：
+
+- 在 Flashduty 控制台创建或选择一个 RUM 应用，并获取 **Application ID** 和 **Client Token**
+- 确认小程序可以访问 RUM 数据上报地址。默认地址为 `https://browser.flashcat.cloud/api/v2/rum`；如果你的网络策略需要转发，请配置 `proxy`
+- 如果使用微信开发者工具，请在工具中构建 npm，使 `miniprogram_npm` 可以引用 SDK 包
+
+## 安装 SDK
+
+在小程序项目根目录安装 RUM SDK：
+
+```bash
+npm install @flashcatcloud/miniprogram-rum
+```
+
+安装后，在微信开发者工具中执行 **工具 > 构建 npm**。
+
+## 初始化 SDK
+
+在小程序入口文件中尽早初始化 SDK。SDK 会在初始化时包装小程序的页面生命周期、请求方法和应用错误监听，所以建议在 `app.js` 中完成初始化。
+
+```javascript app.js
+import { flashcatRum } from "@flashcatcloud/miniprogram-rum";
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  service: "wechat-miniprogram",
+  env: "production",
+  version: "1.0.0",
+  sessionSampleRate: 100
+});
+```
+
+<Warning>
+请不要在客户端代码中使用服务端密钥。`clientToken` 是用于客户端数据上报的令牌，`applicationId` 是 RUM 应用标识。
+</Warning>
+
+## 初始化参数
+
+### 必填参数
+
+<ParamField body="applicationId" type="string" required>
+RUM 应用 ID。事件上报时会写入 `application.id`，用于将小程序数据归属到对应应用。
+</ParamField>
+
+<ParamField body="clientToken" type="string" required>
+客户端上报令牌。SDK 会将该值作为 `dd-api-key` 参数附加到 RUM 上报请求中。
+</ParamField>
+
+### 基础可选参数
+
+<ParamField body="site" type="string" default="browser.flashcat.cloud">
+RUM 数据接收站点。未配置 `proxy` 时，SDK 会将事件发送到 `https://{site}/api/v2/rum`。
+</ParamField>
+
+<ParamField body="proxy" type="string | function">
+自定义上报代理。字符串形式会生成 `{proxy}?ddforward={encodedPath}`；函数形式会接收 `{ path, parameters }` 并返回完整上报 URL。
+</ParamField>
+
+<ParamField body="service" type="string">
+服务名称。SDK 会将该值写入 `service:<value>` 标签，便于在 RUM 中按服务筛选。
+</ParamField>
+
+<ParamField body="env" type="string">
+环境标识。SDK 会将该值写入 `env:<value>` 标签，例如 `production`、`staging`。
+</ParamField>
+
+<ParamField body="version" type="string">
+应用版本。SDK 会将该值写入 `version:<value>` 标签，用于按发布版本分析错误和性能。
+</ParamField>
+
+<ParamField body="sessionSampleRate" type="number" default="100">
+会话采样率，取值表示要采集的会话百分比。`100` 表示全部采集，`0` 表示不采集会话事件。
+</ParamField>
+
+<ParamField body="flushInterval" type="number" default="15000">
+批量上报间隔，单位为毫秒。SDK 默认每 15 秒尝试刷新一次事件批次，也会在小程序进入后台时触发刷新。
+</ParamField>
+
+<ParamField body="beforeSend" type="(event: unknown) => boolean | void">
+事件发送前的回调。返回 `false` 时，当前事件不会发送到 Flashduty。
+</ParamField>
+
+<ParamField body="debug" type="boolean" default="false">
+启用调试日志。开启后，SDK 会在控制台输出初始化、监控启动、事件采集和批量上报信息。
+</ParamField>
+
+<ParamField body="trackAnonymousUser" type="boolean" default="true">
+是否为未设置用户信息的会话生成匿名用户 ID。启用后，SDK 会在 `usr.id` 和 `usr.anonymous_id` 中写入匿名 ID。
+</ParamField>
+
+## 采集开关
+
+以下开关用于控制自动采集能力，默认都处于开启状态：
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `trackPages` | boolean | `true` | 采集页面生命周期并生成 view 事件 |
+| `trackActions` | boolean | `true` | 采集页面事件处理函数中的用户操作并生成 action 事件 |
+| `trackRequests` | boolean | `true` | 采集 `wx.request`、`wx.uploadFile` 和 `wx.downloadFile` 并生成 resource 事件 |
+| `trackErrors` | boolean | `true` | 采集 `wx.onError` 和 `wx.onUnhandledRejection` 产生的错误 |
+| `trackPerformance` | boolean | `true` | 通过 `wx.getPerformance` 采集页面渲染、启动和脚本执行指标 |
+
+## 使用用户信息和全局上下文
+
+登录后，你可以使用 `setUser()` 关联当前用户。SDK 会把这些字段写入后续 RUM 事件的 `usr` 对象。
+
+```javascript app.js
+flashcatRum.setUser({
+  id: "user-123",
+  name: "Alice",
+  email: "alice@example.com"
+});
+```
+
+你也可以使用 `setGlobalContext()` 添加业务上下文。全局上下文会写入后续事件的 `context` 字段。
+
+```javascript app.js
+flashcatRum.setGlobalContext({
+  tenant: "acme",
+  release_channel: "stable"
+});
+```
+
+## 手动上报事件
+
+除了自动采集，你还可以主动补充业务事件、错误、操作和自定义耗时。
+
+```javascript pages/order/detail.js
+import { flashcatRum } from "@flashcatcloud/miniprogram-rum";
+
+Page({
+  onPayTap() {
+    flashcatRum.addAction("pay_button_tap", "tap");
+
+    try {
+      // 执行业务逻辑
+    } catch (error) {
+      flashcatRum.addError(error.message, "custom", error.stack);
+    }
+  },
+
+  onCouponLoaded(couponId) {
+    flashcatRum.addCustomEvent("coupon_loaded", { couponId });
+    flashcatRum.addTiming("coupon_loaded");
+  }
+});
+```
+
+| 方法 | 说明 |
+|------|------|
+| `addAction(name, type?)` | 手动上报操作事件，默认类型为 `custom` |
+| `addError(message, source?, stack?)` | 手动上报错误事件，公开 API 的 `source` 固定为 `custom` |
+| `addTiming(name, time?)` | 在当前页面 view 上记录自定义耗时，名称中的非法字符会替换为 `_` |
+| `addCustomEvent(name, context?)` | 上报自定义事件，并附带可选上下文 |
+| `startPage(name)` | 手动开始一个页面 view，用于覆盖自动页面名称或记录虚拟页面 |
+| `stopSession()` | 清除当前会话，下一次事件会创建新会话 |
+| `getInitConfiguration()` | 返回最近一次初始化时传入的配置 |
+
+## 下一步
+
+<CardGroup cols={3}>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/wechat-miniprogram/advanced-config">
+配置代理、分布式追踪、会话和手动埋点。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/wechat-miniprogram/compatible">
+了解小程序基础库版本、开发工具和平台 API 要求。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/wechat-miniprogram/data-collection">
+了解 SDK 自动采集的事件类型、字段和平台 API。
+</Card>
+</CardGroup>
