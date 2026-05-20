@@ -1,0 +1,201 @@
+---
+title: "数据收集"
+description: "了解微信小程序 RUM SDK 自动采集的页面、操作、请求、错误和性能数据"
+keywords: ["RUM", "微信小程序", "数据收集", "小程序监控"]
+---
+
+微信小程序 RUM SDK 初始化后，会通过小程序运行时 API 自动采集用户体验数据。你可以通过初始化参数关闭某类采集，也可以用手动 API 补充业务事件。
+
+## 采集概览
+
+| 数据类型 | 默认状态 | 采集来源 | 事件类型 |
+|----------|----------|----------|----------|
+| 页面访问 | 开启 | `Page` 生命周期：`onLoad`、`onShow`、`onReady`、`onHide`、`onUnload` | `view` |
+| 用户操作 | 开启 | 页面方法收到带有 `type` 的事件对象时自动记录 | `action` |
+| 网络请求 | 开启 | `wx.request`、`wx.uploadFile`、`wx.downloadFile` | `resource` |
+| 应用错误 | 开启 | `wx.onError`、`wx.onUnhandledRejection` | `error` |
+| 性能指标 | 开启 | `wx.getPerformance` 和页面 `setUpdatePerformanceListener` | `view` |
+| 自定义事件 | 手动上报 | `addCustomEvent()` | `custom` |
+
+## 通用事件属性
+
+SDK 会在发送前为每条 RUM 事件补充应用、会话、页面、网络、用户和上下文信息。这些字段用于在查看器中关联同一个用户会话、同一个页面 view 以及同一次网络状态。
+
+| 字段 | 说明 |
+|------|------|
+| `application.id` | RUM 应用 ID，来自初始化参数 `applicationId` |
+| `session.id` | SDK 生成的会话 ID |
+| `session.type` | 固定为 `user` |
+| `session.has_replay` | 固定为 `false` |
+| `session.sampled_for_replay` | 固定为 `false` |
+| `source` | 固定为 `miniprogram` |
+| `view.id` | 当前事件关联的页面 view ID |
+| `view.name` / `view.url` | 当前事件关联的页面名称，默认来自小程序页面路由 |
+| `connectivity.status` | 网络连接状态，包含 `connected` 或 `not_connected` |
+| `connectivity.interfaces` | 网络类型，例如 `wifi`、`cellular`、`none` 或 `unknown` |
+| `connectivity.effective_type` | 蜂窝网络类型，例如 `2g`、`3g`、`4g` |
+| `usr` | 通过 `setUser()` 设置的用户信息，或 SDK 生成的匿名用户信息 |
+| `context` | 通过 `setGlobalContext()` 设置的全局上下文 |
+
+SDK 会通过 `wx.getNetworkType` 获取初始网络类型，并通过 `wx.onNetworkStatusChange` 更新后续事件的网络状态。
+
+## 页面访问
+
+启用 `trackPages` 后，SDK 会包装全局 `Page` 构造函数，并监听页面生命周期。每个页面会生成 view 事件，页面名称默认使用页面实例的 `route`。
+
+SDK 会记录以下页面信息：
+
+| 字段 | 说明 |
+|------|------|
+| `view.id` | SDK 为页面生成的唯一 ID |
+| `view.name` / `view.url` | 页面路由名称；无法获取时为 `unknown` |
+| `view.referrer` | 上一个页面名称 |
+| `view.loading_type` | 页面加载类型，包含 `initial_load` 或 `route_change` |
+| `view.loading_time` | 从 `onLoad` 到 `onReady` 的耗时 |
+| `view.time_spent` | 页面处于前台激活状态的累计时间 |
+| `view.onload_to_onshow` | 从 `onLoad` 到首次 `onShow` 的耗时 |
+| `view.onshow_to_onready` | 从首次 `onShow` 到 `onReady` 的耗时 |
+| `view.action.count` | 当前 view 中关联的操作数量 |
+| `view.error.count` | 当前 view 中关联的错误数量 |
+| `view.resource.count` | 当前 view 中关联的资源请求数量 |
+
+SDK 每 3 秒更新一次活跃页面的停留时长。页面进入后台、隐藏或卸载时，SDK 会发送带有 `hidden` 或 `terminated` 状态的 view 更新。
+
+## 用户操作
+
+启用 `trackActions` 后，SDK 会包装页面配置中的函数。当函数收到第一个参数，且该参数包含字符串类型的 `type` 字段时，SDK 会记录一次用户操作。
+
+操作事件会包含以下信息：
+
+| 字段 | 说明 |
+|------|------|
+| `action.type` | 小程序事件类型，例如 `tap` |
+| `action.target.name` | 取自 `event.currentTarget.dataset.name`、`dataset.content` 或 `dataset.type`；无法获取时为 `unknown` |
+| `_dd.action.position` | 当事件包含坐标时，记录 `x` 和 `y` |
+| `action.loading_time` | 操作后页面活动稳定所需时间 |
+| `action.error.count` | 操作期间产生的错误数量 |
+| `action.resource.count` | 操作期间产生的资源请求数量 |
+
+<Tip>
+为可点击组件设置 `data-name` 可以让操作名称更容易识别，例如 `<button data-name="submit_order">提交订单</button>`。
+</Tip>
+
+## 网络请求
+
+启用 `trackRequests` 后，SDK 会包装 `wx.request`、`wx.uploadFile` 和 `wx.downloadFile`。SDK 上报自身数据的 intake 请求和标记为内部请求的调用会被跳过，避免产生循环采集。
+
+网络请求会生成 resource 事件：
+
+| 字段 | 说明 |
+|------|------|
+| `resource.type` | `xhr`、`upload` 或 `download` |
+| `resource.url` | 请求 URL |
+| `resource.method` | 请求方法；`wx.request` 默认 `GET`，上传固定为 `POST`，下载固定为 `GET` |
+| `resource.status_code` | 请求成功时的 HTTP 状态码 |
+| `resource.duration` | 请求耗时 |
+| `resource.error_message` | 请求失败时的错误信息 |
+| `resource.trace_id` / `resource.span_id` | 启用分布式追踪并命中采样时生成的链路标识 |
+
+## 错误采集
+
+启用 `trackErrors` 后，SDK 会订阅小程序应用错误和未处理 Promise 拒绝。
+
+| 来源 | SDK 标记 | 说明 |
+|------|----------|------|
+| `wx.onError` | `app` | 小程序运行时错误 |
+| `wx.onUnhandledRejection` | `promise` | 未处理的 Promise 拒绝 |
+| `addError()` | `custom` | 你手动上报的业务错误 |
+
+错误事件会包含错误消息、可选堆栈和来源。手动上报错误时，可以把 `error.stack` 作为第三个参数传入 `addError()`。
+
+## 性能指标
+
+启用 `trackPerformance` 后，SDK 会读取小程序性能 API。运行时支持对应 API 时，SDK 会把性能指标写入 view 事件。
+
+| 指标 | 说明 |
+|------|------|
+| `view.app_launch` | 小程序启动耗时，来自 `navigation` 类型的 `appLaunch` 记录 |
+| `view.evaluate_script` | 主包脚本执行耗时，来自 `script` 类型的 `evaluateScript` 记录 |
+| `view.first_render` | 页面首屏渲染耗时，来自 `render` 类型的 `firstRender` 记录 |
+| `view.first_render_detail` | 首屏渲染拆分指标，包括视图层准备、初始数据发送、初始数据接收、渲染开始和渲染结束 |
+| `view.performance.fcp.timestamp` | First Contentful Paint 时间 |
+| `view.performance.lcp.timestamp` | Largest Contentful Paint 时间 |
+| `view.setdata.count` | 当前 view 中 `setData` 更新次数 |
+| `view.setdata.duration` | 当前 view 中 `setData` 更新累计耗时 |
+
+如果当前小程序基础库不支持 `wx.getPerformance` 或 `setUpdatePerformanceListener`，SDK 会跳过对应指标，不会影响其他数据采集。
+
+## 自定义事件
+
+调用 `addCustomEvent(name, context?)` 会生成 custom 事件。你可以用它记录无法从页面生命周期、操作或请求中自动推断的业务事件。
+
+| 字段 | 说明 |
+|------|------|
+| `event.name` | 自定义事件名称 |
+| `event.context` | 自定义事件上下文对象 |
+
+```javascript pages/order/detail.js
+import { flashcatRum } from "@flashcatcloud/miniprogram-rum";
+
+flashcatRum.addCustomEvent("order_status_changed", {
+  orderId: "order-123",
+  status: "paid"
+});
+```
+
+## 事件关联
+
+SDK 会把非 view 事件关联到事件发生时间对应的页面和会话：
+
+- 页面事件用于建立当前 view，并定期更新页面停留时长
+- action、resource 和 error 事件会增加当前 view 的计数
+- 如果事件发生时当前会话已过期，SDK 会创建新会话
+- 历史 view 更新和延迟产生的事件会优先按事件时间查找对应页面，避免归属到错误页面
+
+## 关闭某类自动采集
+
+你可以在初始化时关闭不需要的采集类型：
+
+```javascript app.js
+import { flashcatRum } from "@flashcatcloud/miniprogram-rum";
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackActions: false,
+  trackRequests: false,
+  trackPerformance: false
+});
+```
+
+关闭某类自动采集只影响对应的自动监听逻辑。手动 API 仍可使用，例如关闭 `trackActions` 后，你仍然可以调用 `addAction()` 上报自定义操作。
+
+## 上报批次
+
+SDK 会把采集到的 RUM 事件加入批次后发送：
+
+| 配置 | 值 |
+|------|----|
+| 默认刷新间隔 | `15000` 毫秒，可通过 `flushInterval` 调整 |
+| 单批最大消息数 | `50` |
+| 单批最大大小 | `64 KB` |
+| 单条消息最大大小 | `256 KB` |
+| 后台刷新 | 小程序触发 `onAppHide` 时会刷新批次 |
+
+未发送成功的 payload 会通过小程序存储能力持久化，并在下次启动批量上报模块时重新发送。SDK 最多保留 `10` 个待重试 payload，总大小不超过 `64 KB`，超过 `24` 小时的 payload 会被丢弃。
+
+## 相关页面
+
+<CardGroup cols={3}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/wechat-miniprogram/sdk-integration">
+完成微信小程序 RUM SDK 安装和初始化。
+</Card>
+
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/wechat-miniprogram/advanced-config">
+配置代理、链路追踪、会话和手动埋点。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/wechat-miniprogram/compatible">
+了解小程序基础库版本、开发工具和平台 API 要求。
+</Card>
+</CardGroup>

@@ -1,0 +1,202 @@
+---
+title: "高级配置"
+description: "配置微信小程序 RUM SDK 的代理、分布式追踪、会话、上下文和手动埋点"
+keywords: ["RUM", "微信小程序", "高级配置", "分布式追踪", "代理"]
+---
+
+微信小程序 RUM SDK 的高级配置用于处理网络转发、链路追踪、会话控制、上下文补充和手动埋点。你可以在初始化时设置采集行为，也可以在运行时通过公开 API 补充事件。
+
+## 上报地址和代理
+
+SDK 默认将 RUM 数据发送到 `https://browser.flashcat.cloud/api/v2/rum`。如果小程序无法直接访问默认地址，或你需要先经过自己的网关，可以使用 `proxy`。
+
+### 使用字符串代理
+
+当 `proxy` 是字符串时，SDK 会去掉末尾多余的 `/`，并生成 `{proxy}?ddforward={encodedPath}`。其中 `ddforward` 是编码后的 `/api/v2/rum` 路径和查询参数。
+
+```javascript app.js
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  proxy: "https://rum-proxy.example.com/forward"
+});
+```
+
+### 使用函数代理
+
+当 `proxy` 是函数时，SDK 会把 `path` 和 `parameters` 交给你拼接完整 URL。`path` 固定为 `/api/v2/rum`，`parameters` 包含 `ddsource`、`ddtags`、`dd-api-key`、SDK 版本和批次时间等上报参数。
+
+```javascript app.js
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  proxy({ path, parameters }) {
+    return `https://rum-proxy.example.com${path}?${parameters}`;
+  }
+});
+```
+
+<Info>
+未配置 `proxy` 时，SDK 使用 `site` 拼接上报地址：`https://{site}/api/v2/rum`。`site` 默认值为 `browser.flashcat.cloud`。
+</Info>
+
+## 分布式追踪
+
+SDK 可以为小程序网络请求注入 W3C Trace Context 格式的追踪头。启用后，命中采样的 `wx.request`、`wx.uploadFile` 和 `wx.downloadFile` 会携带 trace header，同时 resource 事件中会写入 `trace_id` 和 `span_id`。
+
+```javascript app.js
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  tracing: {
+    enabled: true,
+    sampleRate: 1,
+    headerName: "traceparent"
+  }
+});
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `tracing.enabled` | boolean | `false` | 是否启用请求追踪头注入 |
+| `tracing.sampleRate` | number | `1` | 请求追踪采样率。`1` 表示 100% 采样，`0.5` 表示约 50% 采样 |
+| `tracing.headerName` | string | `traceparent` | 注入到请求 header 中的字段名 |
+| `tracing.rootTraceContext` | object | - | 可选根 Trace Context。配置后，SDK 会基于该上下文创建子 span |
+
+SDK 生成的默认 header 值遵循 `00-{traceId}-{spanId}-{traceFlags}` 格式。例如：
+
+```text
+traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01
+```
+
+如果配置了 `rootTraceContext`，SDK 会继承根上下文的 `traceId` 和 `traceFlags`，并生成新的 `spanId`；否则每个采样请求会创建新的 trace context。
+
+## 会话行为
+
+SDK 使用小程序存储保存当前会话，并把会话 ID 写入每个 RUM 事件。
+
+| 行为 | 值 | 说明 |
+|------|----|------|
+| 会话过期时间 | 15 分钟 | 当前会话在最后一次扩展后 15 分钟过期 |
+| 会话最长持续时间 | 4 小时 | 即使持续活跃，单个会话也不会超过 4 小时 |
+| 会话扩展节流 | 1 分钟 | SDK 最多每分钟扩展一次会话过期时间 |
+| 匿名用户 | 默认开启 | 未调用 `setUser()` 时，SDK 会为会话生成匿名 ID |
+
+你可以在退出登录、切换账号或需要切分会话时调用 `stopSession()`。调用后，SDK 会清除当前会话；下一次事件会创建新的会话。
+
+```javascript app.js
+flashcatRum.stopSession();
+```
+
+## 事件限流
+
+SDK 会按事件类型进行每分钟限流，默认阈值为每种事件类型每分钟 `3000` 条。超过阈值后，SDK 会丢弃该类型后续事件，并生成一条来源为 `custom` 的错误事件说明限流情况。
+
+```javascript app.js
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  eventRateLimiterThreshold: 1000
+});
+```
+
+<Tip>
+如果你在短时间内主动上报大量自定义事件，请根据实际流量调整 `eventRateLimiterThreshold`，避免业务事件被限流。
+</Tip>
+
+## 发送前处理
+
+`beforeSend` 会在 RUM 事件发送前执行。你可以在这里补充字段、脱敏上下文，或返回 `false` 丢弃当前事件。
+
+```javascript app.js
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend(event) {
+    if (event.type === "resource" && event.resource?.url?.includes("/health")) {
+      return false;
+    }
+
+    event.context = {
+      ...event.context,
+      source: "wechat-miniprogram"
+    };
+  }
+});
+```
+
+## 用户和全局上下文
+
+`setUser()` 设置当前用户信息。启用 `trackAnonymousUser` 且用户上下文为空时，SDK 会自动将匿名 ID 写入 `usr.id` 和 `usr.anonymous_id`；如果你设置了用户信息，SDK 会保留你的用户字段，并补充 `usr.anonymous_id`。
+
+```javascript app.js
+flashcatRum.setUser({
+  id: "user-123",
+  name: "Alice",
+  role: "member"
+});
+```
+
+`setGlobalContext()` 设置全局上下文。SDK 会把该对象写入后续事件的 `context` 字段。
+
+```javascript app.js
+flashcatRum.setGlobalContext({
+  tenant: "acme",
+  region: "cn"
+});
+```
+
+## 手动页面和自定义耗时
+
+自动页面名称来自页面实例的 `route`。如果你需要记录虚拟页面，或希望用业务名称覆盖当前页面，可以调用 `startPage()`。
+
+```javascript pages/product/detail.js
+flashcatRum.startPage("product_detail");
+```
+
+`addTiming()` 会把自定义耗时写入当前 view 的 `custom_timings`。如果传入 `time`，SDK 使用该时间点相对于当前页面开始时间的差值；未传入时使用当前时间。
+
+```javascript pages/product/detail.js
+const start = Date.now();
+
+loadProduct().then(() => {
+  flashcatRum.addTiming("product_loaded", Date.now());
+});
+```
+
+自定义 timing 名称只保留字母、数字、`-`、`_`、`.`、`@` 和 `$`，其他字符会替换为 `_`。
+
+## 手动操作、错误和自定义事件
+
+```javascript pages/order/detail.js
+flashcatRum.addAction("submit_order", "tap");
+
+flashcatRum.addError("payment failed", "custom");
+
+flashcatRum.addCustomEvent("coupon_selected", {
+  couponId: "coupon-123",
+  discount: 20
+});
+```
+
+| 方法 | 事件类型 | 说明 |
+|------|----------|------|
+| `addAction(name, type?)` | `action` | 记录一次业务操作，`type` 默认是 `custom` |
+| `addError(message, source?, stack?)` | `error` | 记录一次业务错误；公开 API 会把未传入的来源设置为 `custom` |
+| `addCustomEvent(name, context?)` | `custom` | 记录自定义业务事件和上下文 |
+
+## 相关页面
+
+<CardGroup cols={3}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/wechat-miniprogram/sdk-integration">
+完成微信小程序 RUM SDK 安装和初始化。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/wechat-miniprogram/compatible">
+了解小程序基础库版本、开发工具和平台 API 要求。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/wechat-miniprogram/data-collection">
+了解 SDK 自动采集的页面、操作、请求、错误和性能数据。
+</Card>
+</CardGroup>
