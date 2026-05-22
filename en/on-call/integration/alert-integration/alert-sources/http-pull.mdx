@@ -1,0 +1,113 @@
+---
+title: "HTTP Pull Alert Integration"
+description: "Flashduty periodically polls an external HTTP endpoint and ingests the returned alert events. Use this for systems that cannot push alerts, or when you prefer to decouple ingestion from the source."
+keywords: ["Alert Integration", "HTTP Pull", "Polling", "Cursor Pagination", "Data Ingestion"]
+---
+
+By configuring an HTTP endpoint, Flashduty issues a request on the schedule you define and parses the response into events conforming to the [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard%20alert) protocol, which are then written into the alert channel. Your system does not need to support push delivery — it only needs to expose a readable alert query endpoint.
+
+:::tips
+HTTP Pull is the right choice when your source **cannot send webhooks**, **is query-only by nature**, or when you **do not want to modify the upstream system**. If your system already supports webhook delivery, prefer the corresponding push-based integration (Prometheus, Zabbix, etc.) — it has lower latency and a smaller resource footprint.
+:::
+
+## Setup Steps
+---
+
+### In Flashduty
+
+<details>
+<summary>Using Dedicated Integration</summary>
+
+When you don't need to route alert events to different channels, this method is preferred — it's simpler.
+
+1. Enter the Flashduty console, select **Channel**, and enter the details page of a channel.
+2. Select the **Integrations** tab, click **Add Integration** to enter the add integration page.
+3. Select the **HTTP Pull** integration.
+4. Fill in the form as described in the "Configuration" section below and click **Save**.
+</details>
+
+<details>
+<summary>Using Shared Integration</summary>
+
+When you need to route alert events to different channels based on the alert payload, choose this method.
+
+1. Enter the Flashduty console, select **Integration Center => Alert Events** to enter the integration selection page.
+2. Select the **HTTP Pull** integration and fill in the **Integration Name**.
+3. Configure the **Default Route** and select the corresponding channel (after the integration is created, go to **Route** to add finer-grained routing rules).
+4. Fill in the form as described in the "Configuration" section below and click **Save**.
+</details>
+
+## Configuration
+---
+
+### HTTP Request
+
+| Field | Required | Default | Description |
+| :-: | :-: | :-: | :--- |
+| URL | Yes | - | The target URL to poll. Must start with `http` or `https`. Supports Go template variables — see "Template Variables" below. Example: `https://example.com/api/alerts?cursor={{.PageValue}}`. |
+| Method | Yes | `GET` | Only `GET` or `POST` is supported. |
+| Headers | No | - | Key-value list, typically used to carry auth (`Authorization`, `X-Api-Key`, etc.). |
+| Body | Required when method is `POST` | - | Arbitrary string, typically JSON. When cursor pagination is enabled and **Inject To** is `Body`, the body **must** contain the `{{.PageValue}}` placeholder, e.g. `{"cursor":"{{.PageValue}}"}` — otherwise form validation fails. |
+| Timeout (seconds) | Yes | `10` | Timeout for a single HTTP request, range `1 ~ 300`. |
+| Retry Count | Yes | `0` | Number of retries on a single failed request, range `0 ~ 10`. |
+| Polling Cycle (seconds) | Yes | `60` | Interval between successive polls. **Minimum 30 seconds.** |
+
+### Pagination
+
+Many query-style endpoints cap the number of records returned per call and require cursor-based pagination to walk through the full result set. Flashduty supports cursor pagination: on each response it extracts the next-page cursor, injects it into the next request, and repeats until the cursor is missing or the page cap is reached.
+
+| Field | Required | Default | Description |
+| :-: | :-: | :-: | :--- |
+| Pagination Mode | Yes | `None` | `None`: stop after a single request; `Cursor`: enable cursor-based pagination. |
+| Cursor Path | Required when pagination is on | - | Dot-delimited path used to extract the next-page cursor from the response JSON, e.g. `pagination.next_cursor`. |
+| Inject To | Required when pagination is on | `URL Query` | Where to place the cursor on the next request. `URL Query`: append as a query parameter; `Body`: merge into the request body. Forced to `URL Query` when the method is `GET`. |
+| Param Name | Required when Inject To is `URL Query` | - | The query-string parameter name used to carry the cursor, e.g. `cursor`. When **Inject To** is `Body`, the parameter name is whatever your body template specifies — no separate value is needed here. |
+| Max Pages | Required when pagination is on | `20` | Maximum pages to walk per polling cycle, range `1 ~ 100`. Pagination stops once the cap is hit or no next-page cursor can be extracted from the response. |
+
+### Severity Mapping
+
+External systems use different field names and values for alert severity. **Severity Mapping** translates the external value into Flashduty's standard `Critical / Warning / Info`.
+
+- Flashduty reads the `event_status` field from each event in the response (the severity field defined by the Standard Alert Event protocol) and looks it up in the mapping table to find the corresponding Flashduty severity.
+- **Default mapping**: `P1 → Critical`, `P2 → Warning`, `P3 → Info`. You may remove the defaults or add any number of custom entries.
+- **Fallback when no match**: if the `event_status` value does not match any key in the mapping, it falls back to `Warning`.
+
+### Response Format
+
+The response must conform to Flashduty's [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard%20alert) protocol (`response_mode = standard`). Key fields include `event_status`, `title_rule`, `alert_key`, `description`, `labels`, etc. Refer to the Standard Alert Event documentation for the semantics and length limits of each field.
+
+When pagination is enabled, the response must additionally expose a field for the next-page cursor, located at the path you set in **Cursor Path**. A typical shape:
+
+```json
+{
+  "alerts": [
+    { "event_status": "Critical", "title_rule": "cpu idle low than 20%", "alert_key": "host-1" },
+    { "event_status": "Warning",  "title_rule": "disk usage > 80%",      "alert_key": "host-2" }
+  ],
+  "pagination": {
+    "next_cursor": "eyJvZmZzZXQiOjEwMH0="
+  }
+}
+```
+
+## Default Route
+---
+
+When creating a "Shared Integration" (under **Integration Center => Alert Events**), you must configure a default route — otherwise newly pulled events will be dropped. After creation, you can add finer-grained rules under **Route**.
+
+A "Dedicated Integration" (created under the **Integrations** tab of a specific channel) is automatically bound to that channel and does not need a separate default route.
+
+## Template Variables
+---
+
+The URL and request body support Go template syntax. There is currently **one** built-in variable:
+
+| Variable | Description |
+| :-: | :--- |
+| `{{.PageValue}}` | The pagination cursor value to send on the current request. **It is an empty string on the first request**; every subsequent request renders the variable with the value extracted from the previous response using **Cursor Path**. |
+
+Usage rules:
+
+- When cursor pagination is enabled, `{{.PageValue}}` must appear at least once in the URL (when **Inject To** is `URL Query`) or the body (when **Inject To** is `Body`) — otherwise the next-page cursor cannot take effect.
+- `GET` requests force **Inject To** to `URL Query`, but you still decide which query parameter the variable lives in, or you can use **Param Name** to let Flashduty append it for you.
+- When pagination is `None`, the variable always renders as an empty string.
