@@ -28,6 +28,10 @@
     {
       "name": "Monitors/规则集",
       "description": "管理 Monitors 规则仓库中的共享规则集，规则集可在账户内或公开共享。"
+    },
+    {
+      "name": "Monitors/诊断分析",
+      "description": "Flashduty AI SRE 使用的诊断与查询接口——数据源即席查询、日志/指标诊断,以及监控对象侧的工具调用。"
     }
   ],
   "paths": {
@@ -2427,6 +2431,556 @@
           }
         }
       }
+    },
+    "/monit/query/rows": {
+      "post": {
+        "operationId": "monit-read-query-rows",
+        "summary": "查询数据源原始行",
+        "description": "对已配置的数据源执行同步即席查询并返回原始行。供 Flashduty AI SRE 及 UI 预览使用。请求通过 WebSocket 转发至 monit-edge,由其对底层数据源(Prometheus / Loki / VictoriaLogs / SLS / MySQL / Postgres / Oracle / ClickHouse / Elasticsearch)执行查询。",
+        "tags": [
+          "Monitors/诊断分析"
+        ],
+        "x-mint": {
+          "content": "## 调用限制\n\n| 项 | 值 |\n| ------ | ----- |\n| 速率限制 | **600 次/分钟**;**10 次/秒** 每账户 |\n| 权限 | 任意有效的 `app_key`(只读;不受特定权限分类约束) |\n\n## 使用说明\n\n- 请求通过 WebSocket 转发至 `monit-edge`;`ds_type` + `ds_name` 指定的数据源必须已在调用方账户下存在。\n- 请求体中的 `account_id` 为可选;若提供,必须与已认证账户一致,否则拒绝。\n- 存在两层错误:webapi 层失败使用标准错误信封返回,而 `monit-edge` 执行查询时抛出的错误以 HTTP 200 返回,并在响应体中携带 `error` 对象。除 HTTP 状态外,务必同时检查响应体中的 `error`。\n- monit-edge 强制行数上限;过大结果集会返回 `error.message = \"too many rows\"`。请收窄时间范围或在数据源端聚合。\n- `args` 是一个多态 `string→string` 映射,原样转发。语义取决于 `ds_type`(SLS 需要 `sls.project` + `sls.logstore`;Loki / VictoriaLogs 原始模式需要通过 `*.start`/`*.end` 或 `*.timespan.value`/`*.timespan.unit` 指定时间范围;Prometheus 与 SQL 类数据源忽略该字段)。各数据源的键列表见 monit-webapi query-api 文档。",
+          "href": "/zh/api-reference/monitors/diagnostics/monit-read-query-rows",
+          "metadata": {
+            "sidebarTitle": "查询数据源原始行"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRowsRequest"
+              },
+              "example": {
+                "account_id": 10001,
+                "ds_type": "prometheus",
+                "ds_name": "prod-prom",
+                "expr": "up",
+                "delay_seconds": 30
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/QueryRowsResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": [
+                    {
+                      "fields": {
+                        "__name__": "up",
+                        "instance": "10.0.0.1:9100",
+                        "job": "node"
+                      },
+                      "values": {
+                        "__value__": 1
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/monit/query/diagnose": {
+      "post": {
+        "operationId": "monit-read-query-diagnose",
+        "summary": "数据源诊断",
+        "description": "执行同步诊断查询(Loki/VictoriaLogs 使用 `log_patterns`,Prometheus 使用 `metric_trends`)。Flashduty AI SRE 用于日志模式聚类与时间序列趋势分析。长耗时——最长可达 35 秒。",
+        "tags": [
+          "Monitors/诊断分析"
+        ],
+        "x-mint": {
+          "content": "## 调用限制\n\n| 项 | 值 |\n| ------ | ----- |\n| 速率限制 | **600 次/分钟**;**10 次/秒** 每账户 |\n| 权限 | 任意有效的 `app_key`(只读;不受特定权限分类约束) |\n\n## 使用说明\n\n- 这是诊断 / RCA 接口,而非原始数据查询接口——如需查看明细行,请配合 `/monit/query/rows` 使用。\n- `operation` 由 `ds_type` 推导:`loki` / `victorialogs` → `log_patterns`,`prometheus` → `metric_trends`。其他数据源必须显式传入 `operation`。\n- `methods` 选择要执行的分析方法;省略时,`log_patterns` 默认为 `pattern_snapshot + pattern_compare(previous_window)`,`metric_trends` 默认为 `single_window_shape + window_compare(previous_window)`。\n- `time_range` 单位为 Unix 秒;缺失或无效时默认最近 15 分钟;窗口宽度超过 6 小时将被拒绝。\n- 请求通过 WebSocket 转发至 `monit-edge`。长耗时:边缘侧执行可能耗时约 30 秒,叠加 webapi 开销。客户端超时应至少设置为 **35 秒**。\n- `options.*` 由边缘侧设置上限(`max_logs_scanned` ≤ 50 000,`max_patterns` ≤ 50,`examples_per_pattern` ≤ 3,`step_seconds` ∈ [15, 300],`max_series` ≤ 200,`topk` ≤ 50,`timeout_seconds` ≤ 30)。\n- 与 `/monit/query/rows` 一样存在两层错误:边缘侧执行错误以 HTTP 200 返回,响应体中带 `error` 对象——务必同时检查两层。\n- 日志样例在返回前会经过基础脱敏处理,响应中会带 `warnings: [\"examples redacted\"]`。不可作为原始日志使用。",
+          "href": "/zh/api-reference/monitors/diagnostics/monit-read-query-diagnose",
+          "metadata": {
+            "sidebarTitle": "数据源诊断"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DiagnoseRequest"
+              },
+              "example": {
+                "account_id": 10001,
+                "ds_type": "victorialogs",
+                "ds_name": "vmlogs-read",
+                "operation": "log_patterns",
+                "time_range": {
+                  "start": 1776847544,
+                  "end": 1776849344
+                },
+                "methods": [
+                  {
+                    "name": "pattern_snapshot"
+                  },
+                  {
+                    "name": "pattern_compare",
+                    "baseline": "same_window_yesterday"
+                  }
+                ],
+                "input": {
+                  "query": "_stream:{status='500'}"
+                },
+                "options": {
+                  "max_logs_scanned": 10000,
+                  "max_patterns": 20,
+                  "examples_per_pattern": 2,
+                  "timeout_seconds": 25
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/DiagnoseResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "operation": "log_patterns",
+                    "ds_type": "victorialogs",
+                    "ds_name": "vmlogs-read",
+                    "query": "_stream:{status='500'}",
+                    "window": {
+                      "start": 1776847544,
+                      "end": 1776849344
+                    },
+                    "results": [
+                      {
+                        "method": "pattern_snapshot",
+                        "window": {
+                          "start": 1776847544,
+                          "end": 1776849344
+                        },
+                        "summary": {
+                          "logs_scanned": 405,
+                          "baseline_logs_scanned": 0,
+                          "current_truncated": false,
+                          "baseline_truncated": false,
+                          "patterns_total": 2,
+                          "returned_patterns": 2,
+                          "new_patterns": 0,
+                          "surging_patterns": 0,
+                          "surging_threshold": {
+                            "change_ratio_min": 3,
+                            "count_min": 5
+                          }
+                        },
+                        "patterns": [
+                          {
+                            "pattern_hash": "239fa5da",
+                            "template": "POST /api/v<number>/orders/<number> HTTP/<number>",
+                            "count": 213,
+                            "first_seen": 1776847562,
+                            "last_seen": 1776849336,
+                            "severity": "unknown",
+                            "approximate": false,
+                            "sources": [
+                              {
+                                "field": "pod",
+                                "value": "order-api-7f69d8d9b6-m4x9n",
+                                "count": 130
+                              }
+                            ],
+                            "examples": [
+                              "POST /api/v<number>/orders/<number> HTTP/<number>"
+                            ]
+                          }
+                        ],
+                        "warnings": [
+                          "examples redacted"
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/monit/tools/catalog": {
+      "post": {
+        "operationId": "monit-read-tools-catalog",
+        "summary": "查询监控对象工具能力清单",
+        "description": "根据 `target_locator`(host、mysql 等)查询该监控对象上 monit-agent 当前暴露的工具能力。返回每个工具的名称、描述以及 JSON-Schema `input_schema`。配合 `/monit/tools/invoke` 驱动 AI-SRE 的工具调用。",
+        "tags": [
+          "Monitors/诊断分析"
+        ],
+        "x-mint": {
+          "content": "## 调用限制\n\n| 项 | 值 |\n| ------ | ----- |\n| 速率限制 | **600 次/分钟**;**10 次/秒** 每账户 |\n| 权限 | 任意有效的 `app_key`(只读;不受特定权限分类约束) |\n\n## 使用说明\n\n- 使用 `target_locator` 标识监控对象;`target_kind` 可选,省略时自动推断。内置的 target kind 包括 `host` 与 `mysql`。\n- 若同一 locator 匹配多个 kind,响应为 HTTP 200,`data.error.code = \"ambiguous_target_kind\"`,并附带 `target_kinds` 列表——请带上显式的 `target_kind` 重试。\n- 工具能力清单是*候选能力*视图,并非执行保证。目标 Agent 可能在拿到清单与发起调用之间下线,本地 Agent 策略也可能在调用时拦截某些工具。\n- 设置 `include_output_shape: true` 可额外返回每个工具的 `output_shape`。默认为 `false`,以便为 LLM 消费保持响应精简。\n- 业务错误(`target_unavailable`、`unknown_toolset_hash`、`ambiguous_target_kind`)以 HTTP 200 返回,`data.error` 非空。只有协议 / 鉴权 / 内部错误才使用标准错误信封。",
+          "href": "/zh/api-reference/monitors/diagnostics/monit-read-tools-catalog",
+          "metadata": {
+            "sidebarTitle": "查询监控对象工具能力清单"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolCatalogRequest"
+              },
+              "example": {
+                "account_id": 10001,
+                "target_locator": "web-01",
+                "include_output_shape": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/ToolCatalogResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "target": {
+                      "kind": "host",
+                      "locator": "web-01"
+                    },
+                    "tools": [
+                      {
+                        "name": "os.overview",
+                        "target_kind": "host",
+                        "description": "Returns a bounded overview of host health (CPU, memory, disk, network, top processes).",
+                        "input_schema": {
+                          "type": "object",
+                          "additionalProperties": false,
+                          "properties": {}
+                        },
+                        "output_shape": {
+                          "type": "object",
+                          "required": [
+                            "data",
+                            "summary",
+                            "truncated"
+                          ],
+                          "properties": {
+                            "data": {
+                              "type": "object"
+                            },
+                            "summary": {
+                              "type": "string"
+                            },
+                            "truncated": {
+                              "type": "object"
+                            }
+                          }
+                        }
+                      }
+                    ],
+                    "error": null
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/monit/tools/invoke": {
+      "post": {
+        "operationId": "monit-read-tools-invoke",
+        "summary": "调用监控对象工具",
+        "description": "在单个监控对象上并发调用至多 8 个 monit-agent 工具。结果按入参 `tools` 数组顺序返回。长耗时——单个工具在 Agent 上有自己的超时,整体请求可能耗时数十秒。",
+        "tags": [
+          "Monitors/诊断分析"
+        ],
+        "x-mint": {
+          "content": "## 调用限制\n\n| 项 | 值 |\n| ------ | ----- |\n| 速率限制 | **600 次/分钟**;**10 次/秒** 每账户 |\n| 权限 | 任意有效的 `app_key`(只读;不受特定权限分类约束) |\n\n## 使用说明\n\n- 单次调用至多 **8** 个工具(`MaxToolsPerInvoke`);超出需在客户端拆分。8 个工具的上限与单监控对象 Agent 的并发能力对齐。\n- 工具在 Agent 上并行执行;webapi 返回的 `results[]` 与请求中的 `tools[]` 顺序对齐。\n- 长耗时:客户端超时至少设置 **35 秒**。该接口面向 AI-SRE / 人工排障流程,不适用于交互式 UI。\n- 请求级错误(`target_unavailable`、`ambiguous_target_kind`、`unknown_toolset_hash`、`forward_failed`)以 HTTP 200 返回,`data.error` 不为空,`data.results = []`。\n- 单工具失败以 HTTP 200 返回,`data.error = null`,`results[i].error` 被填充——务必同时检查**三层**(外层信封 `error`、`data.error`、再到每个 `results[i].error`)。\n- 每条结果带两个耗时字段:`agent_elapsed_ms`(Agent 自报,不含网络)与 `e2e_elapsed_ms`(webapi 观测的端到端)。两者差距较大表示网络 / 边缘侧慢,而非工具执行慢。\n- 按 `/monit/tools/catalog` 返回的 `input_schema` 构造 `tools[].params`。对于无参工具,务必显式传 `params: {}`。",
+          "href": "/zh/api-reference/monitors/diagnostics/monit-read-tools-invoke",
+          "metadata": {
+            "sidebarTitle": "调用监控对象工具"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ToolInvokeRequest"
+              },
+              "example": {
+                "account_id": 10001,
+                "target_locator": "web-01",
+                "tools": [
+                  {
+                    "tool": "os.overview",
+                    "params": {}
+                  },
+                  {
+                    "tool": "net.tcp_ping",
+                    "params": {
+                      "host": "10.0.0.10",
+                      "port": 3306
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/ToolInvokeResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "target": {
+                      "kind": "host",
+                      "locator": "web-01"
+                    },
+                    "results": [
+                      {
+                        "tool": "os.overview",
+                        "tool_version": "0.5.0",
+                        "data": {
+                          "data": {
+                            "sample_interval_sec": 3,
+                            "degraded": false,
+                            "degradation_reasons": []
+                          },
+                          "summary": "os.overview ...",
+                          "truncated": {
+                            "truncated": false
+                          }
+                        },
+                        "error": null,
+                        "agent_elapsed_ms": 3120,
+                        "e2e_elapsed_ms": 3188
+                      },
+                      {
+                        "tool": "net.tcp_ping",
+                        "tool_version": "0.5.0",
+                        "data": null,
+                        "error": {
+                          "code": "target_unreachable",
+                          "message": "dial tcp 10.0.0.10:3306: i/o timeout"
+                        },
+                        "agent_elapsed_ms": 0,
+                        "e2e_elapsed_ms": 2008
+                      }
+                    ],
+                    "error": null
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
+    },
+    "/monit/targets": {
+      "post": {
+        "operationId": "monit-read-targets-list",
+        "summary": "监控对象列表",
+        "description": "列出当前租户下被 monit-agent 路由投影所观测到的监控对象。支持 `target_locator` 前缀搜索与游标分页。用于为 `/monit/tools/catalog` 与 `/monit/tools/invoke` 选择 `target_locator`。",
+        "tags": [
+          "Monitors/诊断分析"
+        ],
+        "x-mint": {
+          "content": "## 调用限制\n\n| 项 | 值 |\n| ------ | ----- |\n| 速率限制 | **600 次/分钟**;**10 次/秒** 每账户 |\n| 权限 | 任意有效的 `app_key`(只读;不受特定权限分类约束) |\n\n## 使用说明\n\n- 这是一个 **UI 投影视图**,不是 `/monit/tools/invoke` 所依赖的实时数据源。列表中存在不代表对应监控对象当前可被调用。\n- `keyword` 是对 `target_locator` 的**前缀匹配**(仅 ASCII,不含空白,不含 `|`,最长 256 字节)。v1 不支持子串搜索。\n- `limit` 默认 50,最大 200。分页基于游标:将上次响应中的 `next_cursor` 传入即可拉取下一页;`next_cursor` 为空或缺失表示已到末页。\n- 重置 `keyword`、`limit` 或租户上下文时必须重置 `cursor`;切勿在不同筛选条件之间复用游标。\n- `total` 是当前 `(account_id, keyword)` 组合下未受游标影响的匹配总数,跨页保持稳定。\n- 字段中暴露 `cluster_name` / `edge_ipport` 供排障使用;`updated_at` 表示\"最近一次被观测到\",而非实时在线指标。",
+          "href": "/zh/api-reference/monitors/diagnostics/monit-read-targets-list",
+          "metadata": {
+            "sidebarTitle": "监控对象列表"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TargetsListRequest"
+              },
+              "example": {
+                "keyword": "db-prod",
+                "limit": 50
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/TargetsListResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "items": [
+                      {
+                        "target_kind": "host",
+                        "target_locator": "db-prod-01",
+                        "agent_version": "2.0.0",
+                        "cluster_name": "edge-a",
+                        "edge_ipport": "10.0.0.1:19090",
+                        "updated_at": 1710000000
+                      }
+                    ],
+                    "total": 120,
+                    "next_cursor": "eyJ0YXJnZXRfbG9jYXRvciI6ImRiLXByb2QtMDEiLCJpZCI6MTIzNDV9"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4458,6 +5012,595 @@
           "request_id",
           "data"
         ]
+      },
+      "QueryRowsRequest": {
+        "type": "object",
+        "required": [
+          "ds_type",
+          "ds_name",
+          "expr"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "可选的一致性校验。若提供,必须等于已认证账户;不一致将被拒绝。业务执行始终使用已认证账户。"
+          },
+          "ds_type": {
+            "type": "string",
+            "description": "数据源类型;必须匹配租户下已配置的数据源。示例:`prometheus`、`loki`、`victorialogs`、`sls`、`elasticsearch`、`mysql`、`postgres`、`oracle`、`clickhouse`。"
+          },
+          "ds_name": {
+            "type": "string",
+            "description": "数据源名称;必须匹配租户下已配置的数据源。"
+          },
+          "expr": {
+            "type": "string",
+            "description": "查询表达式。语法取决于 `ds_type`,由对应的 monit-edge 客户端解释(Prometheus 用 PromQL,Loki 用 LogQL,SQL 类数据源用 SQL,等等)。"
+          },
+          "delay_seconds": {
+            "type": "integer",
+            "description": "应用于点查询(Prometheus、Loki stats、VictoriaLogs stats)的回看偏移,单位秒。明细 / raw 查询忽略该字段。",
+            "default": 0
+          },
+          "args": {
+            "type": "object",
+            "description": "多态键值扩展参数,原样转发给 monit-edge。所有值必须为字符串。语义取决于 `ds_type`:SLS 需要 `sls.project` + `sls.logstore`;Loki / VictoriaLogs 原始模式需要通过 `<source>.start`/`<source>.end` 或 `<source>.timespan.value` + `<source>.timespan.unit` 指定时间范围;Prometheus 与 SQL 类数据源忽略该字段。键务必按数据源命名空间区分(如 `sls.project`、`loki.type`)。",
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "QueryRowsResponse": {
+        "type": "array",
+        "description": "结果行。不同数据源对 `fields` 与 `values` 的填充方式不同——指标类数据源(Prometheus、*-stats)将数字放入 `values`;明细类数据源(SQL、SLS、原始日志)将数据放入 `fields`,`values` 可能为 `null`。",
+        "items": {
+          "$ref": "#/components/schemas/QueryRow"
+        }
+      },
+      "QueryRow": {
+        "type": "object",
+        "properties": {
+          "fields": {
+            "type": "object",
+            "description": "字符串值字段(标签、日志字段、SQL 列)。",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "values": {
+            "type": "object",
+            "nullable": true,
+            "description": "数值字段。对于指标查询,规范键名为 `__value__`。对于明细类数据源可能为 `null`。",
+            "additionalProperties": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "DiagnoseRequest": {
+        "type": "object",
+        "required": [
+          "ds_type",
+          "ds_name",
+          "input"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "可选的一致性校验。若提供,必须等于已认证账户。"
+          },
+          "ds_type": {
+            "type": "string",
+            "description": "数据源类型。`log_patterns` 支持 `loki` 与 `victorialogs`;`metric_trends` 支持 `prometheus`。"
+          },
+          "ds_name": {
+            "type": "string",
+            "description": "租户下已配置的数据源名称。"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "log_patterns",
+              "metric_trends"
+            ],
+            "description": "诊断操作类型。省略时根据 `ds_type` 推断(loki / victorialogs → `log_patterns`,prometheus → `metric_trends`)。其他数据源必须显式指定。"
+          },
+          "time_range": {
+            "type": "object",
+            "description": "诊断窗口,Unix 秒。缺失或无效时默认最近 15 分钟;窗口宽度超过 6 小时将被拒绝。",
+            "properties": {
+              "start": {
+                "type": "integer",
+                "format": "int64",
+                "description": "窗口起点,Unix 秒。"
+              },
+              "end": {
+                "type": "integer",
+                "format": "int64",
+                "description": "窗口终点,Unix 秒。"
+              }
+            }
+          },
+          "methods": {
+            "type": "array",
+            "description": "要执行的诊断方法。省略时,`log_patterns` 默认为 `pattern_snapshot + pattern_compare(previous_window)`,`metric_trends` 默认为 `single_window_shape + window_compare(previous_window)`。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "`log_patterns` 支持 `pattern_snapshot`、`pattern_compare`。`metric_trends` 支持 `single_window_shape`、`window_compare`。"
+                },
+                "baseline": {
+                  "type": "string",
+                  "enum": [
+                    "previous_window",
+                    "same_window_yesterday",
+                    "same_window_last_week"
+                  ],
+                  "description": "仅对 compare 类方法有意义。默认 `previous_window`。"
+                }
+              }
+            }
+          },
+          "input": {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "查询表达式。`log_patterns` 使用 LogQL / VictoriaLogs 查询语法;`metric_trends` 使用 PromQL。"
+              }
+            }
+          },
+          "options": {
+            "type": "object",
+            "description": "执行选项,所有值均受 monit-edge 上限约束。",
+            "properties": {
+              "max_logs_scanned": {
+                "type": "integer",
+                "description": "单窗口日志扫描上限。默认 10 000,硬上限 50 000。"
+              },
+              "max_patterns": {
+                "type": "integer",
+                "description": "返回的最大模式数。默认 20,硬上限 50。"
+              },
+              "examples_per_pattern": {
+                "type": "integer",
+                "description": "每个模式返回的脱敏样例最大条数。默认 2,硬上限 3。"
+              },
+              "step_seconds": {
+                "type": "integer",
+                "description": "`metric_trends` 的 query_range 步长。默认 60,取值范围 [15, 300]。"
+              },
+              "max_series": {
+                "type": "integer",
+                "description": "`metric_trends` 考察的最大序列数。默认 50,硬上限 200。"
+              },
+              "topk": {
+                "type": "integer",
+                "description": "`metric_trends` 返回的显著序列最大数量。默认 10,硬上限 50。"
+              },
+              "timeout_seconds": {
+                "type": "integer",
+                "description": "边缘侧诊断超时,单位秒。默认 25,硬上限 30。"
+              }
+            }
+          }
+        }
+      },
+      "DiagnoseResponse": {
+        "type": "object",
+        "description": "按 operation 区分的诊断结果。请先检查 `operation`,再处理 `results[]`。`results[].patterns`(对应 `log_patterns`)与 `results[].series`(对应 `metric_trends`)的结构因 operation 不同而不同;完整 schema 见 monit-webapi diagnose-api 文档。",
+        "properties": {
+          "operation": {
+            "type": "string",
+            "enum": [
+              "log_patterns",
+              "metric_trends"
+            ]
+          },
+          "ds_type": {
+            "type": "string"
+          },
+          "ds_name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string",
+            "description": "从请求中回显的查询字符串。"
+          },
+          "window": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "end": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          },
+          "results": {
+            "type": "array",
+            "description": "与请求中的 `methods[]` 一一对应,顺序一致。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "method": {
+                  "type": "string",
+                  "description": "`log_patterns` 对应 `pattern_snapshot` / `pattern_compare`;`metric_trends` 对应 `single_window_shape` / `window_compare`。"
+                },
+                "baseline": {
+                  "type": "string",
+                  "description": "仅在 compare 类方法中出现。"
+                },
+                "window": {
+                  "type": "object",
+                  "properties": {
+                    "start": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "end": {
+                      "type": "integer",
+                      "format": "int64"
+                    }
+                  }
+                },
+                "baseline_window": {
+                  "type": "object",
+                  "description": "仅在 compare 类方法中出现。",
+                  "properties": {
+                    "start": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "end": {
+                      "type": "integer",
+                      "format": "int64"
+                    }
+                  }
+                },
+                "summary": {
+                  "type": "object",
+                  "description": "该方法的聚合摘要。结构因方法而异:`log_patterns` 包含 logs_scanned、patterns_total、surging_threshold 等;`metric_trends` 包含 series_total、data_quality、observations 等。"
+                },
+                "patterns": {
+                  "type": "array",
+                  "description": "仅 `log_patterns` 返回。按 RCA 优先级排序;每项包含 pattern_hash、template、count、severity、sources、examples,以及(compare 情形下)baseline_count、change_ratio、is_new、is_gone。",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "series": {
+                  "type": "array",
+                  "description": "仅 `metric_trends` 返回。显著序列,带 current / baseline / change / notable_period 字段。",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "warnings": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "单方法的提示信息(如 `examples redacted`、采样提示等)。"
+                }
+              }
+            }
+          }
+        }
+      },
+      "ToolCatalogRequest": {
+        "type": "object",
+        "required": [
+          "target_locator"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "可选的一致性校验。若提供,必须等于已认证账户。"
+          },
+          "target_locator": {
+            "type": "string",
+            "description": "监控对象标识(主机名、MySQL 地址等)。最长 256 字节;不允许空白、控制字符或 `|`。"
+          },
+          "target_kind": {
+            "type": "string",
+            "description": "可选的 target kind。省略时 webapi 在当前已知的 kind 中自动推断。内置 kind:`host`、`mysql`。上次返回 `ambiguous_target_kind` 时,重试必须传入此字段。"
+          },
+          "include_output_shape": {
+            "type": "boolean",
+            "description": "为 true 时,每个工具条目额外返回其 `output_shape` JSON Schema。默认 false,以便为 LLM 消费保持响应精简。",
+            "default": false
+          }
+        }
+      },
+      "ToolCatalogResponse": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "nullable": true,
+            "description": "解析出的监控对象。若 locator 无法唯一解析,则为 `null`。",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "locator": {
+                "type": "string"
+              }
+            }
+          },
+          "tools": {
+            "type": "array",
+            "description": "工具能力清单条目。当 `error` 不为空时为空。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "工具名;作为 `/monit/tools/invoke` 的 `tools[].tool` 传入。"
+                },
+                "target_kind": {
+                  "type": "string",
+                  "description": "该工具适用的 target kind。"
+                },
+                "description": {
+                  "type": "string",
+                  "description": "工具能力描述,供 UI / AI-SRE 使用。"
+                },
+                "input_schema": {
+                  "type": "object",
+                  "description": "用于 `tools[].params` 的 JSON Schema。"
+                },
+                "output_shape": {
+                  "type": "object",
+                  "description": "可选的输出 JSON Schema;仅当 `include_output_shape=true` 时返回。"
+                }
+              }
+            }
+          },
+          "error": {
+            "type": "object",
+            "nullable": true,
+            "description": "业务错误。成功时为 `null`。",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "target_unavailable",
+                  "unknown_toolset_hash",
+                  "ambiguous_target_kind"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "target_kinds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "在 `ambiguous_target_kind` 时返回;列出候选的 kind。"
+              }
+            }
+          }
+        }
+      },
+      "ToolInvokeRequest": {
+        "type": "object",
+        "required": [
+          "target_locator",
+          "tools"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "可选的一致性校验。若提供,必须等于已认证账户。"
+          },
+          "target_locator": {
+            "type": "string",
+            "description": "监控对象标识。校验规则与 `/monit/tools/catalog` 相同。"
+          },
+          "target_kind": {
+            "type": "string",
+            "description": "可选的 target kind;省略时自动推断。"
+          },
+          "tools": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 8,
+            "description": "至多 8 个工具调用;webapi 会并发执行,并按入参顺序返回结果。",
+            "items": {
+              "type": "object",
+              "required": [
+                "tool"
+              ],
+              "properties": {
+                "tool": {
+                  "type": "string",
+                  "description": "工具名,通常来自 `/monit/tools/catalog`。"
+                },
+                "params": {
+                  "type": "object",
+                  "description": "符合工具能力清单中 `input_schema` 的参数。无参工具请显式传 `{}`。",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "ToolInvokeResponse": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "object",
+            "nullable": true,
+            "description": "解析出的监控对象。",
+            "properties": {
+              "kind": {
+                "type": "string"
+              },
+              "locator": {
+                "type": "string"
+              }
+            }
+          },
+          "results": {
+            "type": "array",
+            "description": "按入参 `tools[]` 顺序对齐的单工具结果。当 `error` 不为空时为空。",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "tool_version": {
+                  "type": "string",
+                  "description": "Agent 执行的工具版本。若执行在 Agent 选定版本之前就失败了,则为空。"
+                },
+                "data": {
+                  "type": "object",
+                  "nullable": true,
+                  "description": "工具执行成功时的负载——monit-agent `ToolResultPayload.data` 的透传(通常包含 `data` / `summary` / `truncated`)。当单工具 `error` 被设置时为 `null`。"
+                },
+                "error": {
+                  "type": "object",
+                  "nullable": true,
+                  "description": "单工具错误。与 `data` 互斥。",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "description": "常见取值:`timeout`、`target_unavailable`、`edge_unsupported`、`invalid_tool_result`、`internal`、`invalid_args`、`unknown_tool`、`unknown_tool_version`、`unknown_toolset_hash`、`target_not_owned`、`wrong_agent`、`overloaded`、`denied`、`permission_denied`、`credential_unavailable`、`target_unreachable`。"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "agent_elapsed_ms": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "Agent 自报的工具执行耗时,单位毫秒,不含网络。当失败发生在 Agent 开始执行之前时可能为 0。"
+                },
+                "e2e_elapsed_ms": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "webapi 观测的端到端耗时,单位毫秒(webapi → ws → edge → agent → ws → webapi)。与 `agent_elapsed_ms` 差距较大表示网络 / 边缘侧慢。"
+                }
+              }
+            }
+          },
+          "error": {
+            "type": "object",
+            "nullable": true,
+            "description": "请求级业务错误。成功时为 `null`。",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "target_unavailable",
+                  "unknown_toolset_hash",
+                  "forward_failed",
+                  "invalid_tool_result",
+                  "ambiguous_target_kind"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "target_kinds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "TargetsListRequest": {
+        "type": "object",
+        "properties": {
+          "account_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "可选的一致性校验。若提供,必须等于已认证账户。"
+          },
+          "keyword": {
+            "type": "string",
+            "description": "对 `target_locator` 的前缀匹配。仅 ASCII,不含空白,不含 `|`,最长 256 字节。不支持子串搜索。"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "分页大小。默认 50,最大 200。",
+            "default": 50,
+            "maximum": 200
+          },
+          "cursor": {
+            "type": "string",
+            "description": "来自上次响应的 `next_cursor` 的不透明游标。首页请省略或传空串。变更 `keyword`、`limit` 或租户时必须重置。"
+          }
+        }
+      },
+      "TargetsListResponse": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "target_kind": {
+                  "type": "string",
+                  "description": "Target kind,如 `host`、`mysql`。v1 不支持按 kind 过滤。"
+                },
+                "target_locator": {
+                  "type": "string",
+                  "description": "监控对象标识;列表按此字段升序排序。"
+                },
+                "agent_version": {
+                  "type": "string",
+                  "description": "最近一次观测到的 Agent 版本。"
+                },
+                "cluster_name": {
+                  "type": "string",
+                  "description": "边缘集群名。"
+                },
+                "edge_ipport": {
+                  "type": "string",
+                  "description": "边缘实例地址(`ip:port`),供排障使用。"
+                },
+                "updated_at": {
+                  "type": "integer",
+                  "format": "int64",
+                  "description": "最近一次路由投影写入时间,Unix 秒。视为\"最近一次被观测到\",而非实时在线指标。"
+                }
+              }
+            }
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "当前 `(account_id, keyword)` 组合下的匹配总数,与 `cursor` 无关。"
+          },
+          "next_cursor": {
+            "type": "string",
+            "description": "下一页的不透明游标。缺失 / 为空表示已到末页。"
+          }
+        }
       }
     }
   }
