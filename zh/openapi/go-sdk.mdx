@@ -1,0 +1,160 @@
+---
+title: "Go SDK"
+description: "go-flashduty —— Flashduty Open API 官方 Go 客户端"
+keywords: ["Go SDK", "go-flashduty", "Golang", "Open API", "客户端", "SDK"]
+---
+
+[`go-flashduty`](https://github.com/flashcatcloud/go-flashduty) 是 Flashduty Open API 的官方 Go 客户端：一个轻量、强类型的 SDK。它由本文档所依据的 OpenAPI 规范自动生成，覆盖全部 Open API 接口，并经过单元测试与线上环境端到端校验。
+
+如果你的服务使用 Go 编写，推荐用该 SDK 调用 Flashduty，而不是手写 HTTP 请求 —— 你可以直接拿到类型化的请求参数、响应结构和错误码，省去手动拼装 JSON 和解析响应的工作。
+
+<Tip>
+SDK 与 Open API 共用一套接口语义。本文档每个接口的请求/响应结构，都能在 SDK 中找到对应的类型。鉴权同样使用 [APP Key](/zh/openapi/introduction#认证方式)。
+</Tip>
+
+## 安装
+
+需要 Go 1.24 及以上版本。
+
+```bash
+go get github.com/flashcatcloud/go-flashduty
+```
+
+## 快速开始
+
+用 APP Key 创建客户端，按服务（`client.Incidents`、`client.Alerts`……）调用对应接口。每个方法对应一次 HTTP 调用，返回 `(*T, *Response, error)`：
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	flashduty "github.com/flashcatcloud/go-flashduty"
+)
+
+func main() {
+	client, err := flashduty.NewClient("YOUR_APP_KEY")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	list, resp, err := client.Incidents.List(context.Background(), &flashduty.ListIncidentsRequest{
+		Progress:    "Triggered",
+		ListOptions: flashduty.ListOptions{Limit: 20},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("request_id=%s total=%d has_next=%t\n", resp.RequestID, resp.Total, resp.HasNextPage)
+	for _, inc := range list.Items {
+		fmt.Printf("[%s] %s\n", inc.IncidentSeverity, inc.Title)
+	}
+}
+```
+
+## 设计理念
+
+<CardGroup cols={2}>
+  <Card title="轻量、强类型" icon="feather">
+    每个方法只映射一次 HTTP 调用，返回 `(*T, *Response, error)`，不做跨接口的隐式数据拼装。
+  </Card>
+  <Card title="按服务分组" icon="layer-group">
+    所有接口按服务挂在客户端上（`client.Incidents`、`client.Alerts`……），由 OpenAPI 规范生成。
+  </Card>
+  <Card title="可组合传输层" icon="puzzle-piece">
+    重试、缓存、链路追踪、限流处理等横切能力，通过 `http.RoundTripper` 中间件用 `WithTransport` 组合。
+  </Card>
+  <Card title="可读的时间戳" icon="clock">
+    响应中的时间字段类型为 `Timestamp` / `TimestampMilli`，JSON、日志和 LLM 输出中呈现为 RFC3339，原始 epoch 仍可一键取回。
+  </Card>
+</CardGroup>
+
+## 配置选项
+
+`NewClient` 接受一组可选项：
+
+```go
+client, err := flashduty.NewClient("YOUR_APP_KEY",
+	flashduty.WithBaseURL("https://api.flashcat.cloud"),
+	flashduty.WithTimeout(10*time.Second),
+	flashduty.WithUserAgent("my-app/1.0"),
+	flashduty.WithHTTPClient(customHTTPClient),
+	flashduty.WithTransport(customRoundTripper),
+	flashduty.WithLogger(myLogger),
+	flashduty.WithRequestHeaders(staticHeaders),
+	flashduty.WithRequestHook(func(req *http.Request) { /* 例如注入 traceparent */ }),
+)
+```
+
+## 错误与限流
+
+SDK 返回类型化的错误，可用 `errors.As` 解析，也提供便捷断言函数（自动穿透被包装的错误）：
+
+```go
+_, _, err := client.Incidents.Info(ctx, &flashduty.IncidentInfoRequest{IncidentID: "does-not-exist"})
+
+var apiErr *flashduty.ErrorResponse
+if errors.As(err, &apiErr) {
+	fmt.Println(apiErr.Code, apiErr.RequestID)
+}
+
+var rl *flashduty.RateLimitError
+if errors.As(err, &rl) {
+	time.Sleep(rl.RetryAfter)
+}
+
+// 便捷断言
+if flashduty.IsNotFound(err) { /* ... */ }
+if flashduty.IsRateLimited(err) { /* ... */ }
+switch flashduty.ErrorCodeOf(err) {
+case flashduty.ErrorCodeAccessDenied, flashduty.ErrorCodeUnauthorized:
+	// 处理鉴权失败
+}
+```
+
+错误码与 [错误码列表](/zh/openapi/introduction#错误码列表) 一一对应。
+
+## 时间戳
+
+响应中的时间字段类型为 `Timestamp`（Unix 秒）或 `TimestampMilli`（毫秒）。它们序列化为本地时区的 RFC3339 字符串，反序列化时既接受数字 epoch 也接受 RFC3339 字符串，可无损往返。零值保持数字 `0`（不会变成 1970 年），并被 `omitempty` 丢弃。
+
+```go
+inc := list.Items[0]
+fmt.Println(inc.StartTime)          // 2026-05-30T14:37:11+08:00  (String / fmt / TOON)
+b, _ := json.Marshal(inc.StartTime) // "2026-05-30T14:37:11+08:00"
+epoch := inc.StartTime.Unix()       // 1779514631  (原始 wire 值)
+t := inc.StartTime.Time()           // time.Time
+```
+
+<Note>
+请求中的时间字段仍为普通 `int64` —— API 在 wire 上期望数字 epoch。多数接口使用**秒**，但 RUM 和 webhook 历史类接口使用**毫秒**。
+</Note>
+
+## 重试
+
+核心库默认**不**内置重试。可用可选的 `retry` 子包在传输层组合：一个安全默认的重试 `http.RoundTripper`（对 429 和 5xx 重试，遵循 `Retry-After`，确定性指数退避，仅重放 body 可重放的请求 —— SDK 的请求都满足）：
+
+```go
+import "github.com/flashcatcloud/go-flashduty/retry"
+
+client, err := flashduty.NewClient("YOUR_APP_KEY",
+	flashduty.WithTransport(retry.New(
+		retry.WithMaxRetries(3),
+	)),
+)
+```
+
+## 相关资源
+
+<CardGroup cols={2}>
+  <Card title="GitHub 仓库" icon="github" href="https://github.com/flashcatcloud/go-flashduty">
+    源码、完整 README 与 Issue。开源协议 Apache-2.0。
+  </Card>
+  <Card title="API 总览" icon="list" href="/zh/openapi/api-catalog">
+    浏览全部接口 —— 每个接口都能在 SDK 中找到对应的类型化方法。
+  </Card>
+</CardGroup>
