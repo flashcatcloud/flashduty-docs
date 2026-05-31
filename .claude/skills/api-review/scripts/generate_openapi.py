@@ -1708,11 +1708,39 @@ def update_docs_json(modules: list[dict], mapping: dict) -> None:
     DOCS_JSON.write_text(json.dumps(docs, ensure_ascii=False, indent=2) + "\n")
 
 
+def guard_no_path_drop(new_spec: dict, out_path, allow_drop: bool) -> None:
+    """Abort if writing new_spec to out_path would remove any path present in
+    the file already on disk. The module inputs under .api-review/ are
+    gitignored and may be stale/incomplete, so the committed output spec is the
+    source of truth — a rerun from incomplete inputs would silently drop
+    endpoints (e.g. the hand-merged safari module). This makes that loud."""
+    from pathlib import Path as _P
+    p = _P(out_path)
+    if not p.exists():
+        return
+    try:
+        existing = json.loads(p.read_text())
+    except Exception:
+        return
+    dropped = set(existing.get("paths", {})) - set(new_spec.get("paths", {}))
+    if dropped and not allow_drop:
+        raise SystemExit(
+            f"\nERROR: regenerating {p.name} would DROP {len(dropped)} path(s) "
+            f"present in the committed spec:\n"
+            + "\n".join(f"  - {x}" for x in sorted(dropped))
+            + "\n\nThe module inputs under .api-review/ are gitignored and may be "
+            "stale/incomplete; the committed output spec is the source of truth. "
+            "Rebuild the missing module inputs first, or pass --allow-drop to "
+            "override (only if the removal is intentional).\n"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate Flashduty OpenAPI specs")
     parser.add_argument("--scope", help="Only include modules matching this scope prefix")
     parser.add_argument("--validate", action="store_true", help="Validate only, don't write files")
     parser.add_argument("--skip-docs-json", action="store_true", help="Don't touch docs.json — only write openapi files")
+    parser.add_argument("--allow-drop", action="store_true", help="permit removing paths present in the committed spec (use only when a removal is intentional)")
     args = parser.parse_args()
 
     mapping = load_mapping()
@@ -1733,6 +1761,8 @@ def main() -> None:
         print("--validate: no files written.")
         return
 
+    guard_no_path_drop(en, OUT_EN, args.allow_drop)
+    guard_no_path_drop(zh, OUT_ZH, args.allow_drop)
     OUT_EN.write_text(json.dumps(en, ensure_ascii=False, indent=2) + "\n")
     OUT_ZH.write_text(json.dumps(zh, ensure_ascii=False, indent=2) + "\n")
     print(f"Wrote {OUT_EN}: paths={len(en['paths'])} schemas={len(en['components']['schemas'])}")
@@ -1745,10 +1775,12 @@ def main() -> None:
     zh_splits = split_spec_by_parent(zh, modules)
     for pkey, sub in en_splits.items():
         out = SPLIT_DIR / f"{pkey}.openapi.en.json"
+        guard_no_path_drop(sub, out, args.allow_drop)
         out.write_text(json.dumps(sub, ensure_ascii=False, indent=2) + "\n")
         print(f"Wrote {out}: paths={len(sub['paths'])} schemas={len(sub['components']['schemas'])}")
     for pkey, sub in zh_splits.items():
         out = SPLIT_DIR / f"{pkey}.openapi.zh.json"
+        guard_no_path_drop(sub, out, args.allow_drop)
         out.write_text(json.dumps(sub, ensure_ascii=False, indent=2) + "\n")
         print(f"Wrote {out}: paths={len(sub['paths'])} schemas={len(sub['components']['schemas'])}")
 
