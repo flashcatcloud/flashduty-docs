@@ -1,0 +1,165 @@
+---
+title: "Performance Impact"
+description: "Learn about the performance impact of the Flashduty Web RUM SDK on page load, runtime CPU, memory, and network reporting, along with optimization recommendations."
+keywords: ["Web SDK", "performance impact", "RUM", "performance optimization", "Session Replay", "frontend monitoring"]
+---
+
+## Overview
+
+When integrating a RUM SDK into a web application, understanding its performance impact is crucial for maintaining a good user experience. The Flashduty Web RUM SDK is designed to minimize page overhead and provides transparent, reproducible benchmark data to help you evaluate whether the SDK fits your page's performance budget.
+
+Integrating the SDK introduces three categories of overhead:
+
+1. **Load overhead**: downloading, parsing, and initializing the SDK JS, affecting first paint and time to interactive.
+2. **Runtime overhead**: main-thread CPU and memory consumed by event collection, automatic instrumentation (resources, long tasks, user interactions), and Session Replay recording.
+3. **Network overhead**: the number and size of requests produced by periodic batched reporting.
+
+<Check>
+Overall, **basic RUM overhead is very small** and negligible for most pages; **Session Replay is the main source of overhead**, especially on pages with large or frequently-changing DOM, and should be controlled via sampling rate and privacy configuration.
+</Check>
+
+## Performance Impact at a Glance
+
+The table below shows the overall impact (p50) relative to a no-SDK baseline for a **typical business page** (with clicks, input, and XHR), under the **recommended production configuration** (RUM + resource + long-task collection, Session Replay sampled on demand):
+
+| Metric | Without SDK (baseline) | With SDK (recommended) | Impact | Assessment |
+| --- | --- | --- | --- | --- |
+| SDK size (gzip) | — | 50.0 KB | +50.0 KB (async / CDN cached) | Minimal |
+| SDK init time | — | 7.8 ms | +7.8 ms | Minimal |
+| First paint (FCP) | 20 ms | 44 ms | +24 ms | Minimal |
+| Main-thread CPU (runtime) | 42 ms | 78 ms | +36 ms | Small |
+| JS heap peak | 1.24 MB | 3.07 MB | +1.83 MB | Small |
+| Report size (per session window) | 0 KB | 30.5 KB | +30.5 KB | Small |
+
+<Note>
+Assessment scale: Minimal (negligible) < Small < Moderate < Large. CPU/memory are cumulative over the entire 10s interaction window, which amortizes to very low per-second values; the SDK is loaded asynchronously via CDN and does not block the critical rendering path. These are reference values for typical scenarios; actual impact varies with page complexity, device performance, and SDK configuration.
+</Note>
+
+## SDK Bundle Size
+
+The default integration loads the full RUM bundle (including Session Replay). If you don't need recording, switch to the slim bundle to significantly reduce size.
+
+| Bundle | Description | Raw | Gzip | Brotli |
+| --- | --- | --- | --- | --- |
+| `flashcat-rum.js` | Full RUM (with Session Replay) | 145.3 KB | 50.0 KB | 43.6 KB |
+| `flashcat-rum-slim.js` | Slim RUM (without Session Replay) | 104.9 KB | 36.2 KB | 31.7 KB |
+
+<Tip>
+Actual transfer size is governed by the **Gzip / Brotli compressed size**. When loaded asynchronously via CDN, the SDK does not block the critical rendering path; the Session Replay recorder is lazy-loaded on demand and only downloaded when recording is enabled.
+</Tip>
+
+## Session Replay Additional Overhead
+
+Session Replay is a separate optional capability whose overhead is strongly correlated with page characteristics. The table below shows the **additional** increment (p50) over the recommended configuration when Session Replay is enabled at 100%:
+
+| Scenario | CPU delta (ms) | JS heap delta (MB) | Recording report size (KB) | Assessment |
+| --- | --- | --- | --- | --- |
+| Typical business page | +11 | +0.3 | 35 | Minimal |
+| SPA route page | +45 | +1.5 | 125 | Small |
+| High-frequency DOM update page | +73 | +0.7 | 10 | Minimal |
+| Large table page (large DOM) | +757 | +39.5 | 1757 | Large |
+
+<Warning>
+Session Replay overhead is manageable on ordinary pages, but is significantly amplified on **large-DOM / high-churn** pages — a larger DOM makes the initial snapshot serialization heavier, and more frequent mutations increase incremental recording and report size. We strongly recommend lowering the recording ratio via `sessionReplaySampleRate`, combined with privacy masking and region exclusion to control overhead.
+</Warning>
+
+## Performance Impact Details
+
+<AccordionGroup>
+<Accordion title="Initialization (init)" icon="rocket">
+Runs once synchronously early in the page lifecycle to parse configuration, collect context, and register features. It typically takes milliseconds and has minimal impact on FCP/LCP.
+</Accordion>
+
+<Accordion title="Resource collection (trackResources)" icon="wifi">
+Uses PerformanceObserver to observe resource timing. Overhead grows with the number of page requests, but it is passive observation with low CPU usage.
+</Accordion>
+
+<Accordion title="Long-task collection (trackLongTasks)" icon="clock">
+Observes `longtask` entries and only records long tasks that have already occurred; it introduces almost no additional long tasks of its own.
+</Accordion>
+
+<Accordion title="User-interaction collection (trackUserInteractions)" icon="hand-pointer">
+Listens for events such as clicks and infers element names. The cost per interaction is minimal.
+</Accordion>
+
+<Accordion title="Session Replay — main source of overhead" icon="video">
+- The initial full snapshot serializes the entire DOM tree, so the **larger the DOM, the higher the first recording cost** (see the large table page).
+- Incremental mutations are recorded continuously via MutationObserver, so the **more frequent the DOM changes, the higher the CPU and report size** (see the high-frequency DOM update page).
+- Recording data is compressed in a Web Worker before reporting; compression runs on the Worker thread to avoid blocking the main thread, but still adds memory and network overhead.
+</Accordion>
+</AccordionGroup>
+
+## Performance Optimization Recommendations
+
+<Steps>
+<Step title="Choose the bundle on demand">
+When recording is not needed, use `flashcat-rum-slim` for a smaller size (gzip 36.2 KB vs 50.0 KB).
+</Step>
+
+<Step title="Control session and replay sampling rates">
+`sessionSampleRate` controls the proportion of sessions included in RUM; `sessionReplaySampleRate` **separately controls the recording ratio** (recommended well below 100%):
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  site: "rum-server.flashcat.cloud",
+  sessionSampleRate: 100,        // proportion of sessions collected by RUM
+  sessionReplaySampleRate: 10,   // record only 10% of sessions, greatly reducing overhead
+  trackResources: true,
+  trackLongTasks: true,
+  trackUserInteractions: true,
+  defaultPrivacyLevel: "mask-user-input",
+});
+flashcatRum.startSessionReplayRecording();
+```
+</Step>
+
+<Step title="Reduce recording size with privacy and trimming">
+Use `defaultPrivacyLevel` (`mask` / `mask-user-input` / `allow`) to mask data; use privacy markers to exclude very large or high-churn regions, reducing serialization and report size.
+</Step>
+
+<Step title="Use beforeSend carefully">
+`beforeSend` is invoked for **every** RUM event; avoid heavy logic or synchronous blocking operations inside it.
+</Step>
+
+<Step title="Disable unneeded automatic instrumentation">
+If you don't care about resources or long tasks, disable `trackResources` / `trackLongTasks` respectively.
+</Step>
+
+<Step title="Load the SDK asynchronously">
+Load via CDN with `async` to avoid blocking the critical rendering path.
+</Step>
+</Steps>
+
+## Offline Caching and Reporting
+
+The SDK first writes events to a local buffer, and a background batch processor reports them in batches at a steady cadence (with backoff retries). On page unload (`visibilitychange` / `beforeunload`), it falls back to `sendBeacon` to reduce data loss. Failed reports back off according to the retry strategy and never occupy the network indefinitely.
+
+## Test Methodology
+
+- **Device/environment**: Apple M4 (10 cores / 16 GB), Darwin 24.5.0 arm64, Chromium 147.
+- **Tools**: Playwright drives Chromium; CDP `Performance.getMetrics` collects CPU / memory / DOM nodes; `PerformanceObserver` collects FCP / LCP / CLS / INP / Long Task.
+- **Control groups**: A = no SDK (baseline), B = basic RUM, C = RUM + resources + long tasks (recommended production config), D = + Session Replay 100%. When comparing readings: `B − A` = basic RUM overhead, `C − B` = automatic-instrumentation increment, `D − C` = Session Replay additional overhead.
+- **Statistic**: reported as **p50**, not the mean; JS heap is read as the post-GC "retained" value after a forced GC; report request count and size are measured from the live network, independent of transport (fetch / beacon); the no-SDK group loads zero SDK bytes.
+
+<Note>
+Impact varies with **page complexity, device performance, and SDK configuration**; we recommend measuring on your own key pages with the benchmark tool.
+</Note>
+
+## Related Documentation
+
+<CardGroup cols={2}>
+<Card title="SDK Integration Guide" icon="plug" href="/en/rum/sdk/web/sdk-integration">
+  Learn how to integrate the Web SDK
+</Card>
+<Card title="Advanced Configuration" icon="sliders" href="/en/rum/sdk/web/advanced-config">
+  Learn about SDK advanced configuration options
+</Card>
+<Card title="Data Collection" icon="database" href="/en/rum/sdk/web/data-collection">
+  Learn what data the SDK collects
+</Card>
+<Card title="Compatibility" icon="check-circle" href="/en/rum/sdk/web/compatible">
+  Learn about supported platform versions
+</Card>
+</CardGroup>

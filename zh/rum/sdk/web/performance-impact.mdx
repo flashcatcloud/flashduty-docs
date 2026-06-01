@@ -1,0 +1,162 @@
+---
+title: "Web SDK 性能影响"
+description: "了解 Flashduty Web RUM SDK 接入后对页面加载、运行时 CPU、内存与网络上报的影响，以及性能优化建议。"
+keywords: ["Web SDK", "性能影响", "RUM", "性能优化", "Session Replay", "前端监控"]
+---
+
+## 概述
+
+在 Web 应用中接入 RUM SDK 时，了解其性能影响对于维护良好的用户体验至关重要。Flashduty Web RUM SDK 在设计时以最小化页面开销为目标，并提供透明、可复现的基准数据，帮助您评估 SDK 是否符合页面的性能预算。
+
+接入 SDK 主要会引入三类开销：
+
+1. **加载开销**：SDK JS 的下载、解析与初始化，影响首屏与可交互时间。
+2. **运行时开销**：事件采集、自动埋点（资源、长任务、用户交互）与 Session Replay 录制占用的主线程 CPU 与内存。
+3. **网络开销**：周期性批量上报产生的请求数量与体积。
+
+<Check>
+整体而言，**基础 RUM 的开销很小**，对绝大多数页面可忽略；**Session Replay（会话录制）是开销的主要来源**，尤其在 DOM 规模大、变更频繁的页面上更为明显，应通过采样率与隐私配置加以控制。
+</Check>
+
+## 综合性能影响一览
+
+下表为**典型业务页面**（含点击、输入、XHR）在**推荐生产配置**（RUM + 资源 + 长任务采集，Session Replay 按需采样）下相对无 SDK 基线的整体影响（p50）：
+
+| 指标 | 无 SDK（基线） | 接入 SDK（推荐配置） | 影响 | 评估 |
+| --- | --- | --- | --- | --- |
+| SDK 体积（gzip） | — | 50.0 KB | +50.0 KB（异步/CDN 缓存） | 极小 |
+| SDK 初始化耗时 | — | 7.8 ms | +7.8 ms | 极小 |
+| 首屏 FCP | 20 ms | 44 ms | +24 ms | 极小 |
+| 主线程 CPU（运行期） | 42 ms | 78 ms | +36 ms | 较小 |
+| JS Heap 峰值 | 1.24 MB | 3.07 MB | +1.83 MB | 较小 |
+| 上报体积（每会话窗口） | 0 KB | 30.5 KB | +30.5 KB | 较小 |
+
+<Note>
+评估口径：极小（可忽略）< 较小 < 中等 < 较大。CPU/内存为整个 10s 交互窗口的累计值，折算到每秒均极低；SDK 体积通过 CDN 异步加载，不阻塞首屏关键渲染路径。以上为典型场景参考值，实际影响会因页面复杂度、设备性能与 SDK 配置不同而有所差异。
+</Note>
+
+## SDK 资源体积
+
+| Bundle | 说明 | 原始 | Gzip | Brotli |
+| --- | --- | --- | --- | --- |
+| `flashcat-rum.js` | 完整 RUM（含 Session Replay） | 145.3 KB | 50.0 KB | 43.6 KB |
+
+<Tip>
+实际传输以 **Gzip / Brotli 压缩后体积** 为准。SDK 通过 CDN 异步加载时不阻塞首屏关键路径；Session Replay 的录制器（recorder）为按需懒加载，仅在开启录制时才下载。
+</Tip>
+
+## Session Replay 额外开销
+
+会话录制是独立可选能力，开销与页面特征强相关。下表为开启 Session Replay 100% 录制后，相对推荐配置的**额外**增量（p50）：
+
+| 场景 | CPU 增量 (ms) | JS Heap 增量 (MB) | 录制上报体积 (KB) | 评估 |
+| --- | --- | --- | --- | --- |
+| 典型业务页 | +11 | +0.3 | 35 | 极小 |
+| SPA 路由页 | +45 | +1.5 | 125 | 较小 |
+| 高频 DOM 更新页 | +73 | +0.7 | 10 | 极小 |
+| 大表格页（大 DOM） | +757 | +39.5 | 1757 | 较大 |
+
+<Warning>
+Session Replay 在普通页面上开销可控，但在**大 DOM / 高频变更**页面上会显著放大——DOM 越大首次快照序列化越重，变更越频繁增量录制与上报体积越大。强烈建议通过 `sessionReplaySampleRate` 降低录制比例，并配合隐私脱敏与区域排除控制开销。
+</Warning>
+
+## 性能影响详解
+
+<AccordionGroup>
+<Accordion title="初始化（init）" icon="rocket">
+在页面早期同步执行一次，完成配置解析、上下文采集与各 feature 注册，耗时通常毫秒级，对 FCP/LCP 影响极小。
+</Accordion>
+
+<Accordion title="资源采集（trackResources）" icon="wifi">
+通过 PerformanceObserver 监听 resource timing，开销随页面请求数量增长，但属被动监听，CPU 占用低。
+</Accordion>
+
+<Accordion title="长任务采集（trackLongTasks）" icon="clock">
+监听 `longtask` entry，仅记录已发生的长任务，本身几乎不引入额外长任务。
+</Accordion>
+
+<Accordion title="用户交互采集（trackUserInteractions）" icon="hand-pointer">
+监听点击等事件并推断元素名称，单次交互开销极小。
+</Accordion>
+
+<Accordion title="Session Replay（会话录制）—— 主要开销来源" icon="video">
+- 初始全量快照需序列化整棵 DOM 树，**DOM 越大，首次录制开销越高**（见大表格页）。
+- 通过 MutationObserver 持续记录增量变更，**DOM 变更越频繁，CPU 与上报体积越高**（见高频 DOM 更新页）。
+- 录制数据经 Web Worker 压缩后上报，压缩在 Worker 线程进行避免阻塞主线程，但仍带来内存与网络增量。
+</Accordion>
+</AccordionGroup>
+
+## 性能优化建议
+
+<Steps>
+<Step title="按需选择 bundle">
+不需要会话录制时使用 `flashcat-rum-slim`，体积更小（gzip 36.2 KB vs 50.0 KB）。
+</Step>
+
+<Step title="控制会话与录制采样率">
+`sessionSampleRate` 控制纳入 RUM 的会话比例；`sessionReplaySampleRate` **单独控制录制比例**（建议远低于 100%）：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  site: "rum-server.flashcat.cloud",
+  sessionSampleRate: 100,        // 采集 RUM 的会话比例
+  sessionReplaySampleRate: 10,   // 仅 10% 会话录制，显著降低录制开销
+  trackResources: true,
+  trackLongTasks: true,
+  trackUserInteractions: true,
+  defaultPrivacyLevel: "mask-user-input",
+});
+flashcatRum.startSessionReplayRecording();
+```
+</Step>
+
+<Step title="隐私与裁剪降低录制体积">
+用 `defaultPrivacyLevel`（`mask` / `mask-user-input` / `allow`）脱敏；对超大/高频变更区域使用隐私标记排除，减少序列化与上报体积。
+</Step>
+
+<Step title="谨慎使用 beforeSend">
+`beforeSend` 对**每个** RUM 事件回调，避免在其中编写重逻辑或同步阻塞操作。
+</Step>
+
+<Step title="关闭不需要的自动埋点">
+不关注资源或长任务时，可分别关闭 `trackResources` / `trackLongTasks`。
+</Step>
+
+<Step title="异步加载 SDK">
+通过 CDN `async` 加载，避免阻塞首屏关键渲染路径。
+</Step>
+</Steps>
+
+## 离线缓存与上报
+
+SDK 将事件先写入本地缓冲，由后台批处理按节奏批量上报（带退避重试），并在页面卸载（`visibilitychange` / `beforeunload`）时通过 `sendBeacon` 兜底发送，降低数据丢失。上报失败按重试策略退避，不会无限占用网络。
+
+## 测试方法
+
+- **设备/环境**：Apple M4（10 核 / 16 GB），Darwin 24.5.0 arm64，Chromium 147。
+- **工具**：Playwright 驱动 Chromium，配合 CDP `Performance.getMetrics` 采集 CPU / 内存 / DOM 节点；`PerformanceObserver` 采集 FCP / LCP / CLS / INP / Long Task。
+- **对照组**：A 无 SDK（基线）、B 基础 RUM、C RUM + 资源 + 长任务（推荐生产配置）、D + Session Replay 100%。读数对比时：`B − A` = 基础 RUM 开销，`C − B` = 自动埋点增量，`D − C` = Session Replay 额外开销。
+- **口径**：取 **p50**，而非平均值；JS Heap 在强制 GC 后读取"回收后"值；上报请求数与体积从真实网络统计，与传输方式（fetch / beacon）无关；无 SDK 组不加载任何 SDK 字节。
+
+<Note>
+影响随**页面复杂度、设备性能、SDK 配置**变化，建议在自身关键页面上用基准工具实测。
+</Note>
+
+## 相关文档
+
+<CardGroup cols={2}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/web/sdk-integration">
+  了解如何接入 Web SDK
+</Card>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/web/advanced-config">
+  了解如何配置 SDK 的高级功能
+</Card>
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/web/data-collection">
+  了解 SDK 收集的数据类型
+</Card>
+<Card title="兼容性" icon="check-circle" href="/zh/rum/sdk/web/compatible">
+  了解 SDK 支持的平台版本
+</Card>
+</CardGroup>
