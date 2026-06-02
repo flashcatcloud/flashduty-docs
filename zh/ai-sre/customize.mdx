@@ -1,0 +1,232 @@
+---
+title: 自定义资源与作用域
+description: 了解 AI SRE 的三大自定义入口（插件、知识库、运行环境），以及账户与团队两级作用域、权限模型与运行时按需加载机制。
+keywords: ["AI SRE", "自定义资源", "作用域", "团队", "权限", "技能", "知识库", "MCP", "智能体", "运行环境"]
+sidebarTitle: 自定义资源与作用域
+---
+
+<Info>
+  **内测功能**：AI SRE 目前处于内测阶段，仅对受邀账户开放。如需参与白名单测试，请联系 Flashduty 商务团队申请开通；内测期间功能与界面可能调整。
+</Info>
+
+## 概述
+
+---
+
+AI SRE 的能力可以通过自定义资源来扩展。您在控制台中为 Agent 装配技能、接入外部工具、沉淀团队知识、指定运行位置，Agent 在诊断故障时便会按需调用这些资源。
+
+所有自定义资源集中在三大入口，对应 AI SRE 左侧菜单：
+
+<CardGroup cols={2}>
+  <Card title="插件" icon="puzzle-piece">
+    `Plugins` 菜单。下设三个标签页：**Skill**（技能）、**Agents**（子智能体与 A2A 智能体）、**MCP**（连接器）。为 Agent 扩展可执行的能力与可委派的对象。
+  </Card>
+  <Card title="知识库" icon="book">
+    `Knowledges` 菜单。以 Knowledge Pack 形式沉淀 DUTY.md、runbook 等运维知识，会话开始或按需挂载，供 Agent 检索。
+  </Card>
+  <Card title="环境" icon="server">
+    `Environments` 菜单。管理您自托管的运行环境（BYOC Runner）。Agent 的工具调用、MCP 连接与 Skill 执行都在所选环境中完成。
+  </Card>
+</CardGroup>
+
+<Note>
+菜单中是否显示某一入口，取决于您在该账户下是否拥有对应的访问权限（详见下文 [权限模型](#权限模型)）。无权限的入口不会出现在导航中。
+</Note>
+
+## 作用域：账户与团队
+
+---
+
+Customize 下的**每一类**资源（技能、知识库、连接器/MCP、子智能体、A2A 智能体、运行环境）都携带同一个两级作用域字段 `team_id`：
+
+- `team_id = 0` —— **账户作用域**：在整个账户内可见。
+- `team_id > 0` —— **团队作用域**：仅对该团队的成员可见。
+
+控制台中这一选择呈现为「账户或团队…」的范围选择器；列表的「范围」列会显示该行属于「账户」还是某个具体团队。
+
+| 资源类型 | 控制台入口 | 账户作用域（team_id=0） | 团队作用域（team_id>0） |
+|---|---|---|---|
+| 技能 Skill | 插件 → Skill | 账户内所有会话可见、可加载 | 仅该团队成员可见，仅在该团队会话中加载 |
+| 连接器 MCP | 插件 → MCP | 账户内所有 Agent 可调用 | 仅该团队成员可见、可编辑 |
+| 智能体（子智能体 / A2A） | 插件 → Agents | 账户内可见，可被编排智能体委派 | 仅该团队成员可见、可编辑 |
+| 知识库 Knowledge Pack | 知识库 | 对账户内所有 Agent 可见 | 仅在该团队的会话中加载 |
+| 运行环境 Environment | 环境 | 账户内所有会话可选用 | 仅该团队成员可见、可编辑 |
+
+<Tip>
+控制台对此的原话是：「账户范围在整个账户内可见；团队范围仅对该团队成员可见。」对于知识库，则是：「账户范围的知识对账户内所有 Agent 可见。团队范围的知识仅在该团队的会话中加载。每个目标最多可拥有一个 Pack。」
+</Tip>
+
+当某资源不属于您所在的团队时，列表会以「只读（其他团队）」标识——您可以查看，但无法编辑。
+
+## 权限模型
+
+---
+
+编辑权限镜像了 Flashduty 集成（fc-datasource）的团队权限规则，但**去掉了「创建者保留权利」这一条**。规则按以下顺序判定：
+
+1. **账户所有者** 或 **账户管理员**（RBAC 角色 id = `2`）→ 可编辑账户内的**任意**资源（任意作用域）。
+2. **团队成员** → 可编辑**本团队**的团队作用域资源。
+3. **无创建者特权** → 创建者不会因为创建过某资源而获得额外的编辑权。
+
+<Note>
+账户作用域（team_id=0）的资源只有账户所有者或账户管理员能编辑；普通团队成员即便能看见，也不能修改。当编辑被拒绝时，Agent 会收到一条说明性消息，指出资源归属、您的角色，以及您可写入的团队（便于「fork 到您所在团队」）。
+</Note>
+
+### List 接口约定
+
+每一类资源的列表接口都遵循同一信封：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `team_ids` | `[]int64` | 空 | 按团队过滤；不传则不限制 |
+| `include_account` | `bool` | `true` | 是否同时包含账户作用域（team_id=0）的行 |
+
+列表与详情的每一行响应都会回带 `team_id`、`team_name` 与 `can_edit`，控制台据此渲染「范围」列与按钮的可用状态。创建 / 更新时，`team_id` 为必填字段，且可在更新时重新归属到其它作用域。
+
+### 权限点（RBAC）
+
+控制台对每个操作做细粒度的权限校验。访问类权限决定菜单与标签页是否展示，操作类权限决定按钮是否可用：
+
+<AccordionGroup>
+  <Accordion title="访问类（控制菜单 / 标签页可见性）" icon="eye">
+    | 权限点 | 控制内容 |
+    |---|---|
+    | `aiSreChat:visit` | 对话入口 |
+    | `aiSrePluginSkills:visit` | 插件 → Skill 标签页 |
+    | `aiSrePluginMcp:visit` | 插件 → MCP 标签页 |
+    | `aiSrePluginAgents:visit` | 插件 → Agents 标签页 |
+    | `aiSreKnowledges:visit` | 知识库菜单 |
+    | `aiSreEnvironments:visit` | 环境菜单 |
+  </Accordion>
+  <Accordion title="技能 Skill 操作权限" icon="bug">
+    | 权限点 | 操作 |
+    |---|---|
+    | `skill:write:upload` | 上传 Skill |
+    | `skill:write:installFromSession` | 从会话安装 Skill |
+    | `skill:write:update` | 更新 Skill |
+    | `skill:read:enable` | 启用 Skill |
+    | `skill:write:disable` | 禁用 Skill |
+    | `skill:write:delete` | 卸载 Skill |
+  </Accordion>
+  <Accordion title="连接器 MCP 操作权限" icon="plug">
+    | 权限点 | 操作 |
+    |---|---|
+    | `mcp:write:serverCreate` | 添加 MCP 服务器 |
+    | `mcp:write:serverUpdate` | 编辑 MCP 服务器 |
+    | `mcp:write:serverDelete` | 删除 MCP 服务器 |
+    | `mcp:write:serverSync` | 同步 MCP 工具 |
+    | `mcp:write:serverEnable` | 启用 MCP 服务器 |
+    | `mcp:write:serverDisable` | 禁用 MCP 服务器 |
+  </Accordion>
+  <Accordion title="A2A 智能体操作权限" icon="robot">
+    | 权限点 | 操作 |
+    |---|---|
+    | `remoteAgent:write:create` | 添加 A2A Agent |
+    | `remoteAgent:write:update` | 编辑 A2A Agent |
+    | `remoteAgent:write:enable` | 启用 A2A Agent |
+    | `remoteAgent:write:disable` | 禁用 A2A Agent |
+    | `remoteAgent:write:delete` | 删除 A2A Agent |
+  </Accordion>
+  <Accordion title="知识库 Knowledge Pack 操作权限" icon="book">
+    | 权限点 | 操作 |
+    |---|---|
+    | `knowledgePack:write:ensure` | 新建 Knowledge Pack |
+    | `knowledgePack:write:update` | 更新 Knowledge Pack |
+    | `knowledgePack:write:enable` | 启用 Knowledge Pack |
+    | `knowledgePack:write:disable` | 禁用 Knowledge Pack |
+    | `knowledgePack:write:deletePack` | 删除 Knowledge Pack |
+    | `knowledgePack:write:putFile` | 写入知识文件 |
+    | `knowledgePack:write:deleteFile` | 删除知识文件 |
+    | `knowledgePack:write:saveFromSession` | 从会话保存到知识库 |
+  </Accordion>
+  <Accordion title="运行环境 Environment 操作权限" icon="server">
+    | 权限点 | 操作 |
+    |---|---|
+    | `environment:write:create` | 创建运行环境 |
+    | `environment:write:update` | 编辑运行环境 / 查看 Environment Token |
+    | `environment:write:delete` | 删除运行环境 |
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+作用域（团队归属）是**编辑与所有权的标签**，权限点（RBAC）是**操作的开关**。两者叠加判定：先看您是否有该操作的权限点，再看您能否编辑该作用域的这一行。
+</Warning>
+
+## 运行时如何加载
+
+---
+
+资源的可见性在「编辑界面」与「会话运行时」是两套规则——理解这一点，能帮您预期 Agent 在一次会话中究竟能用到哪些资源。
+
+**会话开始时**，提示词中向 Agent 暴露的资源被限定为：
+
+- 所有**账户作用域**的资源（team_id=0）；
+- 加上**当前会话所绑定团队**的资源（例如由作战室故障带入、或在控制台中显式选定的团队）。
+
+其它团队的技能 / MCP 在会话伊始**不会**出现在 `<available_skills>` / `<available_mcp_servers>` 中。
+
+**会话进行中按需挂载**：当 Agent 读取某个团队的知识入口（`.flashduty/knowledge/team_<id>/DUTY.md`）时，该团队的整套资源——技能、MCP 与知识——会作为一条常驻的 `<system-reminder>` 挂载进**当前会话**，从该刻起对 Agent 可见可用。
+
+<Note>
+**账户是运行时唯一的安全边界**；团队只是所有权与编辑的标签。也就是说，同一账户内任何团队的资源，Agent 都可能在会话过程中通过读取对应团队的知识而合法地挂载；跨账户的资源则在任何情况下都不可见。
+</Note>
+
+下面这个流程直观地说明了「按需挂载」：
+
+<Steps>
+  <Step title="会话启动">
+    Agent 看到账户级资源，以及会话绑定团队的资源。
+  </Step>
+  <Step title="诊断中引用某团队知识">
+    故障定位过程中，Agent 读取 `.flashduty/knowledge/team_<id>/DUTY.md`——通常因为该故障归属或牵涉到这个团队。
+  </Step>
+  <Step title="该团队资源挂载进会话">
+    这个团队的技能、MCP、知识随即挂载到当前会话，Agent 可立即调用。
+  </Step>
+  <Step title="资源在本次会话内持续可用">
+    挂载以常驻 system-reminder 的形式保留，直到会话结束。
+  </Step>
+</Steps>
+
+## 资源一览
+
+---
+
+各类自定义资源的详细配置与使用，见对应专页：
+
+<CardGroup cols={2}>
+  <Card title="技能 Skill" icon="bug" href="/zh/ai-sre/skills">
+    可被 Agent 调用的 Skill 包，扩展 AI 处理复杂场景的能力；可设为账户或团队范围，启用后在会话中加载。
+  </Card>
+  <Card title="知识库 Knowledge" icon="book" href="/zh/ai-sre/knowledge">
+    以 Knowledge Pack 沉淀 DUTY.md 与 runbook，每个目标最多一个 Pack，供 Agent 检索与按需挂载。
+  </Card>
+  <Card title="连接器与 MCP" icon="plug" href="/zh/ai-sre/connectors">
+    您的 Agent 可调用的 MCP 服务器；连接在 Agent 运行时按每个 Environment 建立。
+  </Card>
+  <Card title="智能体：子智能体与 A2A" icon="robot" href="/zh/ai-sre/agents">
+    管理可委派的远端 A2A（Agent-to-Agent）智能体，由 AI SRE 通过 A2A 协议委派任务。
+  </Card>
+  <Card title="运行环境 BYOC" icon="server" href="/zh/ai-sre/environments">
+    部署在您自己机器上的常驻进程，执行 Agent 的工具调用、连接 MCP 与运行 Skill；无可用项时回退到云端沙箱。
+  </Card>
+</CardGroup>
+
+## 相关页面
+
+---
+
+<CardGroup cols={2}>
+  <Card title="产品概述" icon="rocket" href="/zh/ai-sre/overview">
+    了解 AI SRE 的整体能力与定位。
+  </Card>
+  <Card title="对话与会话" icon="comments" href="/zh/ai-sre/sessions">
+    在会话中查看 Agent 调用了哪些资源、绑定了哪个团队。
+  </Card>
+  <Card title="技能" icon="bug" href="/zh/ai-sre/skills">
+    上传、启用与管理 Skill 包。
+  </Card>
+  <Card title="知识库" icon="book" href="/zh/ai-sre/knowledge">
+    构建 Knowledge Pack，沉淀团队运维知识。
+  </Card>
+</CardGroup>

@@ -1,0 +1,232 @@
+---
+title: Environments (BYOC)
+description: An Environment is your self-hosted, long-running Runner process that executes tools, runs Skills, and connects MCP; when no self-hosted Runner is online, the AI SRE session falls back to the cloud sandbox automatically. This page covers connecting a Runner, selecting an environment in a session, configuring scope, and troubleshooting.
+keywords: ["AI SRE", "environment", "BYOC", "Runner", "self-hosted", "cloud sandbox", "heartbeat", "scope"]
+sidebarTitle: Environments
+---
+
+<Info>
+  **Beta feature**: AI SRE is in private beta and open to invited accounts only. To join the whitelist, contact the Flashduty sales team to request access. Features and the UI may change during the beta.
+</Info>
+
+## Overview
+
+---
+
+An **Environment** is where the AI SRE agent actually performs its actions. Every tool call the agent makes — running a command, reading or writing files, running a Skill, connecting to an MCP service — happens inside some Environment.
+
+AI SRE offers two kinds of environment:
+
+<CardGroup cols={2}>
+  <Card title="Self-hosted Environment (BYOC)" icon="server">
+    A long-running Runner process deployed **on your own machine**. It keeps a persistent connection (WebSocket) to AI SRE, ready to receive tasks at any time. You fully control which machine it runs on and which internal resources it can reach.
+  </Card>
+  <Card title="Cloud sandbox" icon="cloud">
+    A temporary, system-hosted container. No installation required, ready out of the box. It pauses automatically when the session is idle and wakes on your next message. It is the **default fallback** when no Runner is online.
+  </Card>
+</CardGroup>
+
+The selection logic is simple: **when your account has an online self-hosted Runner, AI SRE prefers it; otherwise it falls back to the cloud sandbox.** You can also pin a specific Runner or force the cloud sandbox in the chat composer.
+
+<Note>
+On this page, "Environment" and "Runner" refer to the same thing: the record you manage in the console is the **Environment**, while the process actually running on your machine is the **Runner**. One Environment record corresponds to one Runner process.
+</Note>
+
+## Why self-host (BYOC)
+
+---
+
+The cloud sandbox is great for quick onboarding and troubleshooting with no network requirements; when troubleshooting needs to reach your real environment, a self-hosted Runner is what makes it work. BYOC (Bring Your Own Compute) hands the execution location back to you:
+
+<AccordionGroup>
+<Accordion title="Data residency" icon="key">
+  The Runner runs on your own machine, so command output, logs, and files produced by tool execution stay inside your environment. Sensitive data can be read and analyzed by the agent without leaving your network perimeter.
+</Accordion>
+<Accordion title="Network reachability / low latency" icon="server">
+  The cloud sandbox can by default only reach controlled public domains and cannot get to services behind your VPC, intranet, or private links. Deploy the Runner on a machine that can connect directly to those targets, and the agent can query intranet databases, call intranet APIs, and log into bastion hosts directly — with one less public-network round trip, latency is lower too.
+</Accordion>
+<Accordion title="Security & compliance" icon="users">
+  You control the OS account, filesystem permissions, and egress policy of the machine the Runner runs on. Combined with the scope and permission model, you can restrict a Runner to be visible only to a specific team, meeting least-privilege and audit requirements.
+</Accordion>
+</AccordionGroup>
+
+<Tip>
+A self-hosted Environment is your own machine, and AI SRE does not take over its egress control — the cloud sandbox's "configure allowed domains per environment" proxy policy does not apply to BYOC, so the self-hosted Environment form **does not provide network-access configuration**. Egress is determined entirely by your machine's own network and firewall policy.
+</Tip>
+
+## Connect a Runner
+
+---
+
+Open **`Environments`** in the AI SRE left-hand menu to create and connect a self-hosted Runner. The whole flow has two parts: "create the record in the console and get the Token" and "install and start on the target machine."
+
+<Steps>
+<Step title="Create the Environment record">
+  Click **Create Environment** in the top-right corner and fill in the form:
+
+  | Field | Type | Required | Description |
+  |---|---|---|---|
+  | Name | string | Yes | A unique name identifying this Environment; must be unique within the account, up to 128 characters |
+  | Scope | account / team | Yes | Account scope is visible across the entire account; team scope is visible and editable only by that team's members (see [Scope](#scope) below) |
+  | Tags | string list | No | Tags for task routing, comma-separated, e.g. `linux, docker, gpu` |
+
+  On success, an **onboarding guide** pops up containing this Environment's connection credential **Token** and a one-line install command.
+</Step>
+
+<Step title="Get the Token (connection credential)">
+  The Token is the Runner's **only credential** for connecting to AI SRE — keep it safe and do not share it. It is injected into the Runner process along with the install command.
+
+  <Warning>
+  A Token is equivalent to granting execution capability to a Runner; if leaked, others can impersonate this Environment and connect. If you suspect a leak, delete the Environment from the list and recreate it. The Token can be viewed again at any time via the **Token button** (key icon) on the list row.
+  </Warning>
+</Step>
+
+<Step title="Install and start on the target machine">
+  The onboarding guide offers two install methods, with `TOKEN` and `URL` in the command already filled with this Environment's real values:
+
+  <Tabs>
+  <Tab title="Linux (systemd)">
+    Run a single command as root / sudo on the target machine; the script installs the binary and registers it as a long-running systemd service:
+
+    ```bash
+    curl -fsSL <install.sh> | sudo TOKEN=<your-token> URL=<connect-url> bash
+    ```
+
+    The install script is **idempotent**: the same command works for both first install and upgrade — if already on the latest version it skips automatically.
+  </Tab>
+  <Tab title="Manual / macOS">
+    Two steps: first install only the binary (without registering a systemd service), then start the process manually:
+
+    ```bash
+    # ① Install the binary only
+    curl -fsSL <install.sh> | sudo bash -s -- --no-service
+
+    # ② Start manually
+    FLASHDUTY_RUNNER_TOKEN=<your-token> FLASHDUTY_RUNNER_URL=<connect-url> flashduty-runner run
+    ```
+  </Tab>
+  </Tabs>
+
+  <Note>
+  `connect-url` is the WebSocket address the Runner dials into AI SRE (defaults to something like `wss://api.flashcat.cloud/safari/environment/ws`), injected by the deployment-side config — you don't fill it in by hand, the onboarding guide already shows the complete, copy-paste-ready command.
+  </Note>
+</Step>
+
+<Step title="Verify the online status">
+  After the Runner starts and handshakes successfully, it continuously sends **heartbeats** to AI SRE. Back on the Environments list, the row's status changes from **Pending** (never connected) to **Online**:
+
+  | Status | Meaning |
+  |---|---|
+  | Pending | The record is created, but the Runner has never connected. The list shows a "View onboarding guide" entry |
+  | Online | The Runner is currently connected, heartbeats are healthy, and it can take on tasks |
+  | Offline | The Runner connected before, but its heartbeat is currently down |
+
+  Once online, the list also backfills the machine's **machine info** (OS / architecture / hostname), the Runner **version**, and the **last heartbeat** time ("just now," "N minutes ago," "N hours ago," etc.). When a newer version exists, the version column shows an "Upgrade available" hint; click it to reopen the onboarding guide and upgrade with the same idempotent command.
+</Step>
+</Steps>
+
+<Tip>
+Upgrade and uninstall are both in the same onboarding guide: rerun the install command on an installed Runner to upgrade; uninstall offers two commands — `--uninstall` to uninstall while keeping config, and `--purge` to remove config and data for a full uninstall.
+</Tip>
+
+## Select an environment in a session
+
+---
+
+An **environment selector** (environment chip) is pinned at the **bottom of the chat composer** to choose which environment this session executes in. Click it to expand three kinds of option:
+
+| Option | Meaning |
+|---|---|
+| **Auto** | AI SRE automatically picks the best available environment: when the account has an online Runner it prefers the Runner, otherwise it falls back to the cloud sandbox. The default for new sessions |
+| **Cloud sandbox · default** | Force the system-hosted cloud sandbox, ignoring self-hosted Runners |
+| **Self-hosted Environment** | Lists the Runners visible in the account; pick a specific Runner. **Offline / unconnected Runners are grayed out and not selectable** — you can see one exists, but cannot select a Runner that has already dropped off |
+
+The bottom of the selector also offers an "**Add self-hosted Environment**" entry that jumps straight to the Environments page to create a new Runner.
+
+<Warning>
+The environment selection **persists to the session** and is **locked once** for a session: the environment determined when the session first sends a message is recorded, and subsequent turns always reuse it — it does **not** change if you switch the selector afterward. To use a different environment, create a new session.
+</Warning>
+
+When a historical session is opened, the selector displays the environment that session originally locked, and its current status, in **read-only** form. If the original binding was a Runner that is now offline / deleted, the chip is marked with a red dot reading "offline / deleted"; click it to expand the reason and a "Go to Environments" link — in this case the session cannot send more messages, and you must reconnect the Runner or create a new session on the cloud sandbox.
+
+## Scope
+
+---
+
+Like the other Customize resources (Skills, Knowledge Packs, Connectors/MCP, subagents, A2A agents), each Environment carries a two-level scope field, `team_id`:
+
+| Scope | `team_id` | Visibility |
+|---|---|---|
+| Account | `0` | Visible to all members of the entire account |
+| Team | `>0` | Visible and editable only by that team's members |
+
+In the "Scope" column of the Environment list, account scope shows an "**Account**" chip, and team scope shows the corresponding **team name**. The ScopeBar above the list filters which Environments you view by account / team.
+
+**Edit permission** follows the unified rules:
+
+1. Account owner or account admin → can edit any Environment;
+2. Team member → can edit team-scoped Environments of their own team;
+3. There is no "creator extra privilege" — a non-creator can edit per the rules above.
+
+**How a session picks a Runner (runtime visibility)**:
+
+<Note>
+Scope is a label for **editing and ownership**, while **the account is the only security perimeter at runtime**. When a session needs to fall back or auto-select a Runner, the system picks one by tag match among **all online BYOC Runners in the account**; auto-selection does not hard-filter by team. So tagging a Runner with a team scope mainly constrains "who can see and edit it in the console," not "which sessions can use its compute."
+</Note>
+
+If a session is **bound to a team** (for example, started from a war-room incident or with a team explicitly specified in the UI), that team's Skills, MCP, and knowledge are equipped first within the session, while environment/compute scheduling is still bounded by the account. For the full mechanism of team binding and on-demand mounting, see [Customize resources and scope](/en/ai-sre/customize).
+
+## Troubleshooting
+
+---
+
+When troubleshooting Runner issues, first look at the **status** and **last heartbeat** of that row in the Environments list — these two fields directly reflect whether AI SRE recognizes this Runner right now.
+
+<AccordionGroup>
+<Accordion title="Runner shows 'Offline'" icon="bug">
+  An **offline** status means the Runner connected before, but AI SRE has not received its heartbeat for about **90 seconds**, so it judges the Runner as dropped. Common causes and checks:
+
+  - **Process has exited**: Log into the target machine and check whether the Runner process or systemd service is running (`systemctl status flashduty-runner`). A crash or OOM kill interrupts the heartbeat.
+  - **Machine or network outage**: A powered-off, sleeping, or disconnected machine, or egress to AI SRE blocked by a firewall, prevents the heartbeat from arriving.
+  - **Recovery**: Restart the Runner and keep it running — it reconnects and resends heartbeats automatically, and the list status returns to "Online" after the next heartbeat.
+</Accordion>
+
+<Accordion title="Runner stays at 'Pending / not connected'" icon="wrench">
+  A **pending** status means this Environment record has **never** connected successfully since creation. Check item by item:
+
+  - **Whether the install command ran fully**: Confirm that `curl ... | sudo TOKEN=... URL=... bash` ran through with no errors and the binary landed.
+  - **Whether the Token matches**: The `TOKEN` the Runner uses must be exactly this Environment's Token. Copying an old Token or a different Environment's Token causes auth failure and the connection cannot be established. Re-fetch and verify it via the Token button on the list row.
+  - **Whether the connect address is reachable**: The `URL` (WebSocket address) the Runner dials must be **reachable via egress** from the target machine. Verify connectivity to that address from the machine first, then look further up.
+</Accordion>
+
+<Accordion title="Sending a message shows 'connection timeout' or hangs with no response" icon="server">
+  Session execution depends on an **online** environment. When the selector is pinned to a specific Runner and that Runner is not online, AI SRE does not quietly reroute the session elsewhere (the session is locked once); instead it blocks and reports that the Environment is unavailable. How to handle it:
+
+  - Confirm the selected Runner is indeed **online** in the Environments list; if it is offline / unconnected, recover it with the two items above first.
+  - Temporary workaround: switch the selector to **Auto** or **Cloud sandbox** to let the session take the cloud fallback. Note that environment binding is one-time — an **old session** already locked to an offline Runner cannot be rerouted; you need to **create a new session** and then switch.
+  - If the Runner shows online but execution still times out, the issue is most likely the leg from the Runner's machine to the target resource (database, intranet API, etc.), not the link between the Runner and AI SRE — troubleshoot the network and permissions on the target-resource side.
+</Accordion>
+</AccordionGroup>
+
+<Tip>
+The fastest way to tell "which leg the problem is on": look at the status first. **Offline / pending** means the link between the Runner and AI SRE has a problem (check heartbeat, process, egress); **online but execution fails** means the link between the Runner and the target being troubleshot has a problem (check the target resource's network and permissions).
+</Tip>
+
+## Related pages
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Customize resources and scope" icon="sliders" href="/en/ai-sre/customize">
+    The unified explanation of account / team two-level scope, the permission model, and runtime on-demand loading.
+  </Card>
+  <Card title="Chat and sessions" icon="comments" href="/en/ai-sre/sessions">
+    See the bound environment, team, and which resources the agent used in a session.
+  </Card>
+  <Card title="Connectors & MCP" icon="plug" href="/en/ai-sre/connectors">
+    MCP connections are established per Environment at Agent runtime.
+  </Card>
+  <Card title="Skills" icon="bug" href="/en/ai-sre/skills">
+    Skills execute in the selected environment; learn how to upload and enable a Skill.
+  </Card>
+</CardGroup>
