@@ -1,0 +1,184 @@
+---
+title: Connectors and MCP
+description: Connectors are built on the Model Context Protocol (MCP), letting the AI SRE agent reach external tools and data sources — GitHub, Slack, Kubernetes, observability platforms, and more. Configure MCP servers, authentication, and scope in the console, and the agent calls their tools on demand during a session.
+keywords: ["AI SRE", "connector", "MCP", "Model Context Protocol", "MCP server", "tools", "OAuth", "API Key", "agent"]
+sidebarTitle: Connectors & MCP
+---
+
+<Info>
+  **Beta feature**: AI SRE is in private beta and open to invited accounts only. To join the whitelist, contact the Flashduty sales team to request access. Features and the UI may change during the beta.
+</Info>
+
+## Overview
+
+---
+
+**Connectors** let the AI SRE agent reach external tools and data sources. Each connector is an **MCP server** — a standardized endpoint that exposes a set of tools (functions), such as querying GitHub issues, sending Slack messages, reading Kubernetes resources, or retrieving observability metrics.
+
+Once you configure and enable a connector in the console, the agent **decides on its own** when it needs an external capability while troubleshooting an incident, and calls the corresponding tool directly — no manual data shuttling required.
+
+<Warning>
+This page is about **the "Connectors" in the AI SRE console** — the **third-party MCP servers the agent calls** (you plug external tools in for the agent to use).
+
+This is a **different thing** from the [Flashduty MCP Server](/en/developer/mcp-server) in the developer docs: that is **Flashduty's own MCP service**, which lets you plug **Flashduty's capabilities into third-party AI clients** (such as Claude or Cursor). One is "the agent calls outward," the other is "the outside calls Flashduty" — opposite directions, don't confuse them.
+</Warning>
+
+## What is MCP
+
+---
+
+**MCP (Model Context Protocol)** is an open protocol that describes, in a uniform way, "which tools a server provides, what parameters each tool accepts, and what result it returns." It is like a "USB port" for the world of AI agents — any MCP-compliant server can be discovered and called by an agent plug-and-play, with no need to write adapter code for each external system.
+
+In AI SRE, MCP extends the agent's capabilities from "built-in tools" to "any external system":
+
+- You add an MCP server in the console (declaring its endpoint, transport, and authentication).
+- At session start, enabled servers that are visible in the current scope appear in the agent's `<available_mcp_servers>` list.
+- When needed, the agent first uses `mcp_load` to fetch that server's tool schema, then uses `mcp_call` to execute a specific tool.
+
+<Tip>
+**Connectors vs. Skills**: connectors provide **access to external tools**, while a Skill provides the **methodology for orchestrating those tools to accomplish a class of task**. A Skill can declare which connector tool it needs in `SKILL.md` as `mcp:server-name/tool-name`. See [Skills](/en/ai-sre/skills).
+</Tip>
+
+## Add a connector
+
+---
+
+Go to **Customize → MCP**, click **Add server** in the top-right corner, and define an MCP server in the form that opens.
+
+### Basic fields
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| Name | string | Yes | The server name, used as the identifier when the agent calls it (e.g. `sqlite-explorer` in `mcp:sqlite-explorer/query`). Must start with a letter and contain only letters, digits, `-`, and `_`, length 1–255. Within one account it is **case-insensitive and must be unique**, and cannot collide with a built-in server name |
+| Transport | enum | Yes | How the agent communicates with the server — see "Transports" below |
+| Scope | account / team | Yes | The connector's scope: **account** (visible across the account) or a **team** (visible only to that team's members). See "Scope" below |
+| Description | string | Yes | Describe what the server does, to identify it in the list |
+
+<Note>
+A connector also has an **AI description**: after the agent first lists a server's tools via `mcp_load`, the system asynchronously calls an LLM to generate a capability summary from the tool list and displays it in the list. It refreshes automatically as the toolset changes — no manual maintenance required.
+</Note>
+
+### Transports
+
+| Transport | When to use | Required fields |
+| --- | --- | --- |
+| HTTP streaming (recommended) | Remote MCP servers reached over an HTTP endpoint | URL (endpoint), optional Headers (JSON) |
+| SSE (standalone, legacy) | Legacy remote servers that only support Server-Sent Events | URL (endpoint), optional Headers (JSON) |
+| stdio (local command) | MCP servers launched as a local subprocess on the machine where the Runner lives | Command, args (one per line), env vars (JSON) |
+
+<Warning>
+**stdio only works with BYOC environments** (the Runner deployed on your own machine). The cloud Sandbox cannot launch local subprocesses; if you use a cloud environment, use **HTTP streaming** or **SSE** instead and make sure the MCP server is reachable from the Sandbox network. For the difference between environments, see [Environments (BYOC)](/en/ai-sre/environments).
+</Warning>
+
+Connection and invocation each have a default timeout: the connection timeout defaults to 10 seconds, and the tool-call timeout defaults to 60 seconds.
+
+### Authentication
+
+A connector supports three **authentication modes**, which determine how credentials are provided to the MCP server:
+
+<Tabs>
+  <Tab title="Shared (default)">
+    All users share one set of credentials. Credentials are written directly into the connector config — for HTTP/SSE transports into **Headers (JSON)** (e.g. `{ "Authorization": "Bearer xxx" }`), and for stdio transport into **env vars (JSON)** (e.g. `{ "API_KEY": "xxx" }`). Best for internal systems accessed with an account-level service token.
+  </Tab>
+  <Tab title="Per-user key (API Key)">
+    Each user provides their own key on their **first call** to the connector's tools; the key is encrypted, stored at the account level, and isolated per user.
+
+    This mode requires a **Key Schema**:
+
+    | Field | Required | Description |
+    | --- | --- | --- |
+    | Header name | Yes | Which HTTP header the credential is injected into for MCP requests (e.g. `X-Api-Key`) |
+    | Placeholder | No | Input-field placeholder hint (e.g. `sk-...`) |
+    | Help link | No | A link to documentation on "how to obtain this key" |
+
+    Best for third-party SaaS where each engineer uses their own API key (such as a personal GitHub token).
+  </Tab>
+  <Tab title="Per-user OAuth">
+    Users each authorize through an **OAuth 2.1** flow; an authorization window pops up automatically on the first call to the connector's tools. Authorization server discovery and dynamic client registration (DCR) happen on demand, tokens are stored per user and refreshed automatically as they near expiry. Best for services that support OAuth.
+  </Tab>
+</Tabs>
+
+<Note>
+For "per-user key" and "per-user OAuth," when credentials are missing the agent's tool call pauses and prompts the current user with a credential-entry / authorization screen; once provided, it continues. Shared mode never asks the user for credentials.
+</Note>
+
+## Manage and inspect
+
+---
+
+The MCP list shows each server's **Name** (including the AI description; built-in servers carry a "Built-in" badge), **Scope** (account or team name), **Transport**, **Enable** toggle, and **Actions** column. The scope filter bar (ScopeBar) at the top switches the view between "All / Account / Team."
+
+<AccordionGroup>
+  <Accordion title="Enable / disable" icon="toggle-on">
+    Toggle with the switch in the list. Only **enabled** connectors enter a session's `<available_mcp_servers>` list; once disabled, the agent cannot see or call it. Built-in servers are **always enabled** and the toggle is not operable.
+  </Accordion>
+  <Accordion title="Edit" icon="pen-to-square">
+    Click the edit button (or the row itself) to open the form, where you can change the name, transport, description, endpoint / command, authentication mode, and scope. Without edit permission the form opens in **read-only** mode and explains why; built-in servers are also read-only.
+  </Accordion>
+  <Accordion title="Delete" icon="trash">
+    Remove the connector from the current scope. **Agents that depend on it can no longer access its tools**, and active sessions using it will fail. This action has a confirmation prompt.
+  </Accordion>
+</AccordionGroup>
+
+### Inspect: view exposed tools and schemas
+
+Which tools a connector exposes, and the parameter schema of each tool, are inspected **at session runtime** by the agent on demand, rather than displayed statically in the console — because the same MCP server may have different reachability and toolsets under different environments (Runners), so connection status and tool count are "per-environment" rather than "global" properties.
+
+In a session, the agent inspects and calls MCP through two built-in tools:
+
+| Tool | Purpose |
+| --- | --- |
+| `mcp_load(server[, tools])` | Fetch the server's tool info. When the server has ≤ 30 tools it returns **the full schema of all tools**; with > 30 it returns only the **tool list (name + description)**, and the agent can fetch the full schema of specific tools with `tools=[...]` |
+| `mcp_call(server, tool, arguments)` | Execute a tool. Before calling, the agent **must** first `mcp_load` to obtain the schema, to avoid guessing parameters |
+
+<Tip>
+To confirm which tools a connector actually exposes under a given environment, the most direct way is to ask the agent in **chat** to run `mcp_load` against that server; it will list the tools and their parameter schemas. See [Chat and sessions](/en/ai-sre/sessions).
+</Tip>
+
+<Note>
+The account ships with a **built-in Flashduty MCP** connector (marked with a "Built-in" badge in the list, read-only, always enabled), letting the agent read Flashduty's incident, alert, and other data directly. It is maintained by the platform and requires no configuration from you.
+</Note>
+
+## Scope
+
+---
+
+Connectors share the same **two-level scope** model as the other Customize resources (Skills, Knowledge Packs, subagents, A2A agents, Environments), determined by the `team_id` field on each row:
+
+| `team_id` | Scope | Visibility |
+| --- | --- | --- |
+| `0` | Account | Visible to all members of the account |
+| `>0` | Team | Visible only to that team's members |
+
+**Edit permission**: the account owner or an account admin can edit any connector; a team member can edit team-scoped connectors of **their own team**; there is no "creator keeps rights" exception. Without edit permission, the toggle and actions on that row appear **read-only**.
+
+**Runtime visibility**: at session start, the agent's `<available_mcp_servers>` list surfaces only **account-scoped** connectors and the connectors of the **team the current session is bound to**. After the agent reads a team's knowledge (`.flashduty/knowledge/team_<id>/DUTY.md`), that team's connectors and Skills are mounted into the current session on demand. **The account is the only security perimeter at runtime; team is merely an ownership and editing label.**
+
+<Note>
+For the full description of the scope model (including permission rules and runtime loading details), see [Customize resources and scope](/en/ai-sre/customize).
+</Note>
+
+## Related pages
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Customize resources and scope" icon="sliders" href="/en/ai-sre/customize">
+    Learn about account- and team-level scope, edit permissions, and runtime loading.
+  </Card>
+  <Card title="Skills" icon="wrench" href="/en/ai-sre/skills">
+    Skills call connector tools in SKILL.md as `mcp:server-name/tool-name`.
+  </Card>
+  <Card title="Agents: subagents & A2A" icon="robot" href="/en/ai-sre/agents">
+    A2A agents share the same authentication modes and scope model as connectors.
+  </Card>
+  <Card title="Environments (BYOC)" icon="server" href="/en/ai-sre/environments">
+    stdio connectors must run on a BYOC Runner; learn the difference between the cloud Sandbox and self-hosted environments.
+  </Card>
+  <Card title="Chat and sessions" icon="comments" href="/en/ai-sre/sessions">
+    Watch how the agent inspects and calls connector tools with mcp_load / mcp_call in a session.
+  </Card>
+  <Card title="Flashduty MCP Server (developer)" icon="code" href="/en/developer/mcp-server">
+    The opposite-direction capability: the official MCP service that plugs Flashduty into third-party AI clients.
+  </Card>
+</CardGroup>

@@ -82,7 +82,8 @@ flashduty config set base_url URL  # 覆盖 API 地址
 
 | 参数 | 说明 |
 |------|------|
-| `--json` | 以 JSON 格式输出，便于通过 `jq` 等工具解析 |
+| `--output-format` | 输出格式：`table`（默认）、`json` 或 `toon`（紧凑、更省 token） |
+| `--json` | 以 JSON 格式输出，是 `--output-format json` 的别名，便于通过 `jq` 等工具解析 |
 | `--no-trunc` | 表格输出时不截断长字段 |
 | `--base-url` | 覆盖 API 地址（私有部署场景） |
 
@@ -209,6 +210,62 @@ flashduty template functions [--type custom|sprig|all]        # 列出可用模�
 
 支持的通知渠道：`dingtalk`、`dingtalk_app`、`feishu`、`feishu_app`、`wecom`、`wecom_app`、`slack`、`slack_app`、`telegram`、`teams_app`、`email`、`sms`、`zoom`。
 
+### session — AI SRE 会话
+
+用于巡查 AI SRE（以及其他 Flashduty 智能体）的会话：`session list` 列出调用者可见的会话，`session export` 将单个会话的完整事件流式导出，便于离线分析。
+
+```bash
+flashduty session list [flags]            # 列出智能体会话（默认按 updated_at 倒序，最新在前）
+flashduty session export <session_id>     # 以 NDJSON 流式导出单个会话的完整事件
+```
+
+`session list` 常用参数：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--app` | 列出哪个智能体应用的会话 | `ai-sre` |
+| `--scope` | 可见范围：`all`（自己 + 所属团队，默认）、`personal`、`team` | `all` |
+| `--status` | 归档状态：`active`（默认）、`archived`、`all` | `active` |
+| `--team-id` | 仅保留指定团队 ID 的会话 | - |
+| `--since` | 仅保留在该时间窗口内有更新的会话（客户端过滤），如 `30d`、`24h`、`2026-05-01` | - |
+| `--limit` | 最多拉取的会话数 | `200` |
+| `--page` | 起始页码（1 开始） | `1` |
+| `--format` | 输出格式：`jsonl`（默认，每行一个会话对象，可直接管道给 `jq`）、`json`（完整信封）、`toon`（紧凑编码） | `jsonl` |
+
+<Note>
+服务端 `/safari/session/list` 单页上限为 100 条，超出 `--limit` 时 CLI 会自动向服务端翻页拉取，无需手动分页。API 本身没有时间窗口过滤，`--since` 是在拉取后于客户端按会话的 `updated_at` 进行过滤的。
+</Note>
+
+`session export` 将会话事件以换行分隔 JSON（NDJSON）流式写入标准输出：第一行始终是 `session_meta` 信封，其后每行是一个事件（`user_message`、`llm_call`、`tool_call`、`subagent_dispatch`、`final_answer`、`agent_text`、`error`）。导出内容可能很大，建议重定向到文件而非直接打印到终端：
+
+```bash
+flashduty session export <session_id> > session.ndjson
+flashduty session export <session_id> --include-subagents > session.ndjson
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--include-subagents` | 在每条 `subagent_dispatch` 之后递归内联该子智能体自身的完整事件流 |
+
+### 全量命令覆盖
+
+除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的「全量覆盖」（约 248 条命令），并按资源组织为顶层命令组。除 On-call 域（incident、change、channel、escalation-rule、field、statuspage、template 等）外，还覆盖了：
+
+- **AI SRE（`safari`）**：a2a-agents、mcp-servers、sessions、skills 等
+- **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
+- **On-call 与日程**：calendar、schedule
+- **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
+- **监控与 RUM**：monit、rum、sourcemap
+- **集成与 Webhook**：datasource（IM 集成）、webhook（integrations）
+
+这些生成命令的叶子名称采用「资源-动作」形式（如 `flashduty safari a2a-agent-get`、`flashduty safari session-list`），其入参与返回字段直接映射到对应 API。鼓励用 `flashduty <资源> --help` 逐层探索：
+
+```bash
+flashduty --help                 # 查看全部顶层命令组
+flashduty safari --help          # 查看 AI SRE 相关的生成命令
+flashduty alert --help           # 查看告警相关的生成命令
+```
+
 ### 工具命令
 
 ```bash
@@ -227,7 +284,7 @@ flashduty completion zsh > "${fpath[1]}/_flashduty"
 
 ## 输出格式
 
-CLI 提供三种输出形态，便于在不同场景下消费：
+通过 `--output-format` 选择输出形态（`--json` 是 `--output-format json` 的别名），便于在不同场景下消费：
 
 <Tabs>
 <Tab title="表格（默认）">
@@ -241,12 +298,24 @@ Showing 2 results (page 1, total 2).
 ```
 </Tab>
 
-<Tab title="JSON（--json）">
+<Tab title="JSON（--json / --output-format json）">
 机器可解析，完整数据，不截断。适合脚本、CI/CD 流水线消费。
 
 ```bash
 flashduty incident list --json | jq '.[].title'
 ```
+</Tab>
+
+<Tab title="TOON（--output-format toon）">
+TOON（Token-Oriented Object Notation）输出完整数据且不截断，但对同构数组省去了 JSON 中每行重复的字段名，列表输出可显著减少 token 消耗，更适合喂给 AI / 智能体消费。
+
+```bash
+flashduty incident list --output-format toon
+```
+
+<Note>
+TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
+</Note>
 </Tab>
 
 <Tab title="完整表格（--no-trunc）">

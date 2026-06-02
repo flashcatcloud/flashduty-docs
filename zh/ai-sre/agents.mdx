@@ -1,0 +1,245 @@
+---
+title: 智能体：子智能体与 A2A
+description: AI SRE 提供两类智能体资源——子智能体（Subagents）执行可委派的自包含任务，A2A 智能体（Agent-to-Agent）连接外部智能体实现跨智能体路由与故障联动。
+keywords: ["AI SRE", "子智能体", "Subagent", "A2A", "Agent-to-Agent", "agent_dispatch", "Agent Card", "智能体", "委派", "自定义资源"]
+sidebarTitle: 智能体（子智能体与 A2A）
+---
+
+<Info>
+  **内测功能**：AI SRE 目前处于内测阶段，仅对受邀账户开放。如需参与白名单测试，请联系 Flashduty 商务团队申请开通；内测期间功能与界面可能调整。
+</Info>
+
+## 概述
+
+---
+
+AI SRE 有两类「智能体」资源，它们都用来**扩展主智能体（AI SRE）的协作与分工能力**，但方向和形态不同：
+
+<CardGroup cols={2}>
+  <Card title="子智能体（Subagents）" icon="robot">
+    在**本平台内部**派生的专精工作者，被主对话或技能调用来执行一个**自包含的任务**——查日志、跑一段检索、完成一个改动等。完成后把结果回传给父智能体。
+  </Card>
+  <Card title="A2A 智能体（Agent-to-Agent）" icon="satellite-dish">
+    指向**外部智能体**的注册项。AI SRE 通过标准 A2A 协议把任务**委派给远端智能体**；同时本平台的 AI SRE 也对外暴露一张 Agent Card，可被外部 A2A 客户端反向调用，用于故障 / 作战室联动与双向事件流。
+  </Card>
+</CardGroup>
+
+两者都通过同一个内置工具 **`agent_dispatch`** 派发：主智能体给出 `agent_name`、`prompt` 和一句简短的 `title`，平台立即返回一个 `task_id` 并恢复父对话的回合；被派发的智能体在独立的子会话中运行，完成后以 `<task-notification>` 的形式把最终结果作为一条新消息回注给父智能体。
+
+<Note>
+子智能体与 A2A 智能体的派发结果，在对话中都以同一种「任务卡片（chip）」呈现：图标区分类型（子智能体 🤖、A2A 🛰️），卡片上显示智能体名、本次任务意图（`title`）、运行状态（初始化 / 进行中 / 完成 / 失败 / 中断 / 等待输入 / 等待授权）以及工具调用数、Token、耗时等用量。点击卡片可在右侧面板里查看该子会话的完整过程。
+</Note>
+
+<Tip>
+**描述（description）是智能体选择的核心信号**。主智能体在派发前看到的是一份「可用智能体清单」，每一项是 `名称（类型）：描述`。描述应写成有指导性的祈使句（例如「USE THIS FIRST for ...」「prefer-over-X when ...」），明确指出**何时应当优先选用它、它擅长什么、不适合做什么**——描述写得越精准，主智能体越能在正确的场景把任务派发给正确的智能体。
+</Tip>
+
+## 子智能体 Subagents
+
+---
+
+子智能体是一类**可被主对话或技能调用来执行任务**的专精工作者。它在本平台内派生，拥有自己的系统提示词（角色与方法论）、工具集与（可选的）模型，运行在与父对话隔离的子会话里，完成后只把**最终消息**回传给父智能体——中间的工具输出留在子会话内，不污染父对话的上下文。
+
+### 内置子智能体
+
+AI SRE 预置了开箱即用的运行时子智能体，无需配置即可被 `agent_dispatch` 调用：
+
+<CardGroup cols={2}>
+  <Card title="general" icon="user-gear">
+    通用工作者。拥有完整工具权限（读、写、执行、Web、技能、MCP），用于承接一个自包含、可一次性描述清楚的任务，并返回一份父智能体可直接采用的、自解释的结果。
+  </Card>
+  <Card title="explore" icon="magnifying-glass">
+    只读探索者。仅能使用 `grep`、`glob`、`read`，用于在代码库或知识转储中快速定位证据并返回紧凑摘要；不分析、不假设、不建议——把结论留给父智能体。
+  </Card>
+</CardGroup>
+
+<Note>
+内置子智能体在会话启动时由运行时注入，不出现在资源列表里，也无法被删除或编辑。它们与您自定义的子智能体共享同一套 `agent_dispatch` 派发机制。
+</Note>
+
+### 子智能体的可配置项
+
+每个自定义子智能体由下列字段定义。`description` 与 `prompt` 是塑造其行为的关键——前者决定它**何时被选中**，后者决定它**被选中后如何工作**。
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `subagent_name` | string | — | 子智能体标识，`agent_dispatch` 以此名称派发。账户内唯一 |
+| `description` | string | — | 子智能体描述，是主智能体选择它的核心信号，建议写成「USE THIS FIRST / prefer-over-X」式的祈使句 |
+| `prompt` | string | — | 子智能体的系统提示词，作为其角色与方法论的正文；被派发后以此为其运行说明。平台会在其后统一追加通用的工作者规范（路径用绝对路径、不使用 emoji、每次工具调用工作目录重置等） |
+| `max_steps` | int | `20` | 单次任务允许的最大推理 / 工具调用步数，到达上限即停止 |
+| `model` | string | 继承默认 | 可选的模型覆盖（`provider/model` 形式），留空表示沿用账户默认模型 |
+| `tool_allowlist` | string[] | 空（不额外限制） | 进一步收窄该子智能体可用的工具白名单。留空表示继承默认（除被平台抑制的工具外全部可用）；非空则**仅**暴露列出的工具。例如把一个只做三角定位的子智能体限制为不能触碰 `bash`。列入已被抑制的工具（如 `agent_dispatch`）不生效 |
+| `status` | enum | `enabled` | `enabled` / `disabled`。仅启用的子智能体可被派发 |
+| `team_id` | int64 | `0` | 作用域：`0`=账户级，`>0`=团队级。详见下文「作用域」 |
+
+<Warning>
+子智能体目前以**账户内的资源**形式存在，通过 `agent_dispatch` 在对话中被调用，并在派发卡片与子会话面板中可视化。它**尚未提供独立的图形化管理页面**；内测期间如需创建或调整自定义子智能体，请联系 Flashduty 协助配置。内置的 `general` / `explore` 子智能体无需任何配置即可使用。
+</Warning>
+
+### 派发与子会话面板
+
+主智能体调用 `agent_dispatch` 时：
+
+<Steps>
+  <Step title="派发">
+    给出 `agent_name`、`prompt` 与一句 4–8 词的祈使式 `title`。平台立即返回 `task_id`（状态 `async_launched`）并恢复父对话回合——父智能体**不阻塞等待**，可以继续工作或同时派发多个并行任务。
+  </Step>
+  <Step title="运行">
+    子智能体在独立子会话 `sub-<task_id>` 中执行。父对话里出现一张实时刷新的任务卡片，显示进行中状态与累积用量。
+  </Step>
+  <Step title="查看过程">
+    点击任务卡片，在右侧**子智能体面板**中打开该子会话的完整对话（复用主聊天区组件）。面板可放大为全宽，或随主聊天分屏并排。运行中可点「停止子代理」请求中断。
+  </Step>
+  <Step title="回传结果">
+    子智能体完成后，其**最终消息**以 `<task-notification>` 形式回注到父对话，主智能体据此继续作答。失败 / 中断时，卡片与面板会展示完整的终态错误信息。
+  </Step>
+</Steps>
+
+## A2A 智能体
+
+---
+
+A2A（Agent-to-Agent）智能体用于把 AI SRE 接入**外部智能体生态**。它有两个方向：
+
+<CardGroup cols={2}>
+  <Card title="出站（Outbound）" icon="arrow-up-right-from-square">
+    在列表中注册的**远端 A2A 智能体**。AI SRE 通过 A2A 协议把任务委派给它们——同样经由 `agent_dispatch`，与子智能体共用一套派发与卡片机制（任务卡片以 🛰️ 标记 A2A 类型）。
+  </Card>
+  <Card title="入站（Inbound）" icon="arrow-down-to-bracket">
+    本平台的 AI SRE 自身也是一个 A2A 智能体，对外暴露一张 **Agent Card**。外部 A2A 客户端把该 Card 地址填入即可反向调用 Flashduty 的 AI SRE，用于故障 / 作战室联动与双向事件流。
+  </Card>
+</CardGroup>
+
+A2A 智能体的列表与管理入口在 **Customize → Agents** 页面（菜单标签为 **Agents**）。
+
+### 注册出站 A2A 智能体
+
+在 A2A Agents 列表页点击 **添加 A2A Agent**，在表单中填写：
+
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| 名称 | string | — | A2A 智能体标识（如 `metrics-analyzer`）。必填 |
+| 范围 | 账户 / 团队 | — | 作用域：**账户**（账户内全局可见）或某个**团队**（仅该团队成员可见和可编辑）。必填，详见下文「作用域」 |
+| 描述 | string | — | 简要描述此 A2A 智能体的功能。它会进入主智能体的「可用智能体清单」，是选择信号——建议写成有指导性的祈使句 |
+| Card URL | string | — | 远端 A2A 智能体的基础 URL（如 `https://flashai.flashcat.cloud`）。必填。平台会校验它是合法的 http/https 地址，并拒绝指向回环、内网、链路本地或云元数据等受限地址（防 SSRF） |
+| 认证类型 | enum | `none` | 出站请求附带的凭证类型：`none`（无）/ `bearer`（Bearer Token）/ `api_key`（自定义 Header + Key） |
+| 流式传输 | bool | 开 | 是否以流式方式与远端交互 |
+| 用户级认证模式 | enum | `shared` | 见下表「认证模式」 |
+
+#### 认证模式
+
+A2A 智能体支持三种凭证供给方式，决定不同用户调用同一个远端智能体时如何提供凭证：
+
+<AccordionGroup>
+  <Accordion title="共享（shared，默认）" icon="users">
+    所有用户共用同一组凭证，凭证在「认证类型」中配置（Bearer Token 或 API Key）。适合团队共享同一个远端账号的场景。
+  </Accordion>
+  <Accordion title="每用户密钥（per_user_secret）" icon="key">
+    每个用户在首次调用时单独提供自己的密钥，密钥加密存储在账户级别。需在「密钥 Schema」中配置 Header 名称（必填）、占位符与帮助链接（可选），供首次调用时引导用户填写。
+  </Accordion>
+  <Accordion title="每用户 OAuth（per_user_oauth）" icon="shield-halved">
+    用户通过 OAuth 2.1 流程各自授权；首次调用该 A2A 智能体时自动弹出授权窗口，完成后凭证按用户隔离保存。
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+出于安全考虑，已保存的敏感字段（如 `token`、`api_key`、`client_secret`）在读取时会被**掩码**返回。编辑时若把敏感字段留空，表示「保留当前值」而非「清空」——只有当您显式修改它时才会覆盖已存储的凭证。
+</Note>
+
+### 入站：让外部智能体调用 AI SRE
+
+在 A2A Agents 页面顶部展开「**让外部 Agent 调用 Flashduty 的 AI SRE**」面板，即可获取本账户 AI SRE 的 **Agent Card** 地址：
+
+```
+<你的接入域名>/safari/a2a/ai-sre/agent-card
+```
+
+把该地址填入任意 A2A 客户端，即可经 A2A 协议调用 Flashduty 的 AI SRE 智能体。
+
+**鉴权**：在请求头加上 `Fd-App-Key: <你的 app_key>`（或使用 `?app_key=` 查询参数）。Agent Card 对外声明的能力包括：
+
+| 能力（Skill） | 说明 |
+| --- | --- |
+| `investigate_incident` | 端到端地为一个 Flashduty 故障定位根因，关联日志、指标与近期变更 |
+| `analyze_logs` | 在指定时间窗内查询并总结目标服务的日志 |
+| `analyze_metrics` | 在指定时间窗内查询并总结目标服务的指标 |
+
+<Tip>
+Agent Card 同时声明了 Flashduty 的「运行选项」A2A 扩展：调用方可在 `message.metadata` 中按需覆盖 `incognito`（是否在会话列表中隐藏，默认隐藏）、`visibility`（`private` / `account`）、以及运行环境（`cloud` / `byoc` 与具体 `environment_id`）。该扩展为可选项，朴素的 A2A 客户端无需理会即可正常调用。
+</Tip>
+
+### 故障与作战室联动
+
+当一个会话**经由故障路由进入**（例如从故障或作战室触发 AI SRE）时，平台会把对应的 `incident_id` 绑定到本次运行，并在主智能体的提示词中将其作为会话上下文呈现，让排障从一开始就锚定在正确的故障上。基于此，AI SRE 可在对话中借助内置技能进一步操作故障——读取故障详情、查询时间线、创建 / 查看作战室、关联变更等。
+
+<Warning>
+A2A 与故障的**自动联动**目前在概念上受支持、并在持续演进中：故障自动绑定当前为占位实现，跨智能体的双向事件流会随版本逐步完善。请勿将其视为已完整可用的能力——内测期间以实际开通的功能为准。
+</Warning>
+
+## 创建与管理
+
+---
+
+A2A 智能体的完整生命周期可在 **Customize → Agents** 页面管理。子智能体的内置项开箱即用；自定义子智能体内测期间由 Flashduty 协助配置（见上文）。
+
+<AccordionGroup>
+  <Accordion title="创建" icon="plus">
+    A2A：点击 **添加 A2A Agent**，填写名称、范围、Card URL、认证等并保存。创建时需选定一个明确的作用域（账户或团队），未选定前提交按钮保持禁用。
+  </Accordion>
+  <Accordion title="启用 / 禁用" icon="toggle-on">
+    用列表中的开关切换 A2A 智能体的启用状态。仅**已启用**的智能体会进入主智能体的可用清单、可被 `agent_dispatch` 派发；禁用后立即对派发不可见。子智能体同样以 `status` 字段控制启用与否。
+  </Accordion>
+  <Accordion title="检视 / 编辑" icon="pen-to-square">
+    点击列表中的任意一行打开表单，可查看与编辑名称、描述、范围、Card URL、认证配置、流式与认证模式。无编辑权限时表单显示为**只读**。
+  </Accordion>
+  <Accordion title="删除" icon="trash">
+    从当前范围移除一个 A2A 智能体。**委派给它的活跃会话将会失败。** 删除有确认提示。
+  </Accordion>
+  <Accordion title="按范围筛选" icon="filter">
+    列表顶部的范围筛选条可在「全部」「仅账户级」「指定团队」之间切换，便于在大量资源中聚焦查看。每行还会以标签标注其范围（账户 / 团队名）。
+  </Accordion>
+</AccordionGroup>
+
+## 作用域
+
+---
+
+子智能体、A2A 智能体与其他自定义资源（技能、知识库、连接器/MCP、运行环境）共用同一套**两级作用域**模型，由每行资源上的 `team_id` 字段决定：
+
+| `team_id` | 作用域 | 可见性 |
+| --- | --- | --- |
+| `0` | 账户级 | 账户内所有成员可见 |
+| `>0` | 团队级 | 仅该团队成员可见 |
+
+**编辑权限**：账户所有者或账户管理员可编辑任意智能体；团队成员可编辑**本团队**的团队级智能体；没有「创建者保留权限」这一例外。无编辑权限时，列表对应行显示为**只读**。
+
+**运行时可见性**：会话开始时，主智能体的可用智能体清单中只会呈现**账户级**资源，以及**当前会话所绑定团队**的资源（如故障 / 作战室带入的团队，或界面上显式选择的团队）。当智能体读取某团队的知识（`.flashduty/knowledge/team_<id>/DUTY.md`）后，该团队的技能、连接器与智能体才会被按需挂载进当前会话。**账户是运行时唯一的安全边界，团队只是归属与编辑的标记。**
+
+<Note>
+作用域模型的完整说明（含权限规则与运行时加载细节）见 [自定义资源与作用域](/zh/ai-sre/customize)。
+</Note>
+
+## 相关页面
+
+---
+
+<CardGroup cols={2}>
+  <Card title="自定义资源与作用域" icon="sliders" href="/zh/ai-sre/customize">
+    了解账户级与团队级作用域、编辑权限与运行时加载机制。
+  </Card>
+  <Card title="对话与会话" icon="comments" href="/zh/ai-sre/sessions">
+    在会话中观察 `agent_dispatch` 派发的子智能体与 A2A 任务卡片及子会话面板。
+  </Card>
+  <Card title="技能" icon="wrench" href="/zh/ai-sre/skills">
+    子智能体与主智能体共享同一份技能目录，可按需加载技能体。
+  </Card>
+  <Card title="连接器与 MCP" icon="plug" href="/zh/ai-sre/connectors">
+    为智能体接入外部工具，扩展其在任务中的能力边界。
+  </Card>
+  <Card title="知识库" icon="book" href="/zh/ai-sre/knowledge">
+    用 DUTY.md 与知识包为智能体提供团队上下文与排障经验。
+  </Card>
+  <Card title="产品概述" icon="gauge-high" href="/zh/ai-sre/overview">
+    了解 AI SRE 的整体能力与定位。
+  </Card>
+</CardGroup>

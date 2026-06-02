@@ -1,0 +1,176 @@
+---
+title: Operations Insight Report (/insight)
+description: Type /insight in any AI SRE session to automatically analyze your last 30 days of sessions and produce a read-only operations friction report — a quantitative overview, a narrative summary, and friction cards ranked by importance.
+keywords: ["AI SRE", "insight", "operations insight", "friction report", "knowledge base", "retrospective"]
+sidebarTitle: Operations Insight Report
+---
+
+<Info>
+  **Beta feature**: AI SRE is currently in beta and is only available to invited accounts. To join the whitelist, contact the Flashduty sales team to request access. Features and UI may change during the beta period.
+</Info>
+
+## Overview
+
+---
+
+Type `/insight` in the input box of any AI SRE session, and AI SRE will look back at **your** sessions from the past 30 days and produce a single-page operations insight report. The report is rendered as a parchment-styled HTML chat card directly inside the session, where you can preview and download it.
+
+This report answers three questions: **how much you accomplished with AI SRE this month, what you were mainly working on, and which recurring "frictions" are most worth eliminating right now.** Friction refers to patterns that repeatedly consume your time — for example, a database connection string you paste across multiple sessions, a runbook the Agent is missing that it should already know, or a data source it keeps querying incorrectly.
+
+<Note>
+`/insight` is **read-only**. It only analyzes and presents findings — it will **not** automatically modify any knowledge base, skill, or MCP configuration. Every suggestion is copyable text; whether to act on it is entirely your decision. See [How to act on suggestions](#how-to-act-on-suggestions).
+</Note>
+
+`/insight` is a built-in AI SRE skill implemented on Google ADK and a bash executor. It runs a collection script inside the sandbox to export sessions, uses deterministic scripts to compute quantitative metrics, then dispatches subagents in MAP-REDUCE batches to analyze session content, and finally renders the report. The entire process is transparent to you — just type `/insight`.
+
+## How to generate a report
+
+---
+
+<Steps>
+  <Step title="Type /insight in a session">
+    Type `/insight` in the input box of any AI SRE session and send it. No parameters are needed.
+  </Step>
+  <Step title="AI SRE automatically determines the analysis scope">
+    The scope is determined by whether the current session is bound to a team (see the table below). AI SRE will state the analysis scope and time window (default: last 30 days) at the top of the report.
+  </Step>
+  <Step title="Wait for the report to render">
+    AI SRE exports sessions, computes metrics, runs batched analysis, and then renders the parchment-styled report as a chat card along with a 2–3 sentence verbal summary. You can preview or download the full report from the card.
+  </Step>
+</Steps>
+
+### Analysis scope
+
+`/insight` always uses the **account** as its security boundary — it only sees sessions that the current `app_key` is authorized to read, and never crosses that boundary. Within that constraint, the specific scope is determined by whether the session is bound to a team:
+
+| Session state | Analysis scope | Notes |
+|---|---|---|
+| Bound to a team (e.g. a war-room incident or a team selected in the UI) | **That team** | The report focuses on that team's sessions over the past 30 days |
+| Not bound to a team | **Entire account** | Analyzes your own sessions plus sessions belonging to your teams |
+
+<Tip>
+When a session is not bound to a team but you only want to see a specific team, you can name the team directly when typing `/insight` (by team name or ID). AI SRE will ask for confirmation and then narrow the scope to that team.
+</Tip>
+
+### What happens behind the scenes
+
+Understanding the collection process helps you see where the numbers in the report come from:
+
+<AccordionGroup>
+  <Accordion title="Export and filter sessions" icon="download">
+    The collection script lists AI SRE sessions within the scope from the past 30 days (default: up to 200 sessions), then **concurrently** exports each session's full record to files on the sandbox disk (high-byte raw records never enter the Agent context). It then retains only **multi-turn sessions** — sessions with ≥ 2 user turns. Single-turn sessions have no learnable friction and are excluded from friction analysis. The turn count is derived from the exported session records, since the session list itself does not carry per-session turn counts.
+  </Accordion>
+  <Accordion title="Compute quantitative metrics (stats.json)" icon="gauge-high">
+    The script uses deterministic computation across **all exported** sessions to produce the first tier of the report (quantitative overview): session count, your turn count, tool call count, average turns per session, daily activity distribution, tool and skill distribution, model distribution, and result distribution. These numbers are computed by the script — not estimated by the model — so they are reliable and always present, even if no friction is found.
+  </Accordion>
+  <Accordion title="Generate a compact manifest (manifest.jsonl)" icon="list">
+    The script writes one compact record per **retained** session (session ID, session name, team, creation time, user turn count, path to the record file). The Agent reads only this manifest to get record file paths and never loads raw records into its own context.
+  </Accordion>
+  <Accordion title="MAP-REDUCE batched analysis" icon="robot">
+    The Agent splits session records into **batches of ~8 files** and dispatches `general` subagents in parallel to read them. Each subagent reads only its own batch and returns structured "per-session topics" and "friction findings" — it never sends back raw records. Once all batches return, the Agent merges the results: it aggregates topics into a narrative summary, then deduplicates, clusters, and ranks findings into friction cards.
+  </Accordion>
+</AccordionGroup>
+
+## Report contents
+
+---
+
+The report is organized into three tiers from top to bottom. The first tier (quantitative overview) is always present regardless of whether any friction is found.
+
+### Tier 1: Quantitative overview
+
+Computed deterministically by the collection script; the model only transcribes the numbers into the report. Includes:
+
+| Metric | Description |
+|---|---|
+| Sessions | Number of sessions analyzed (`sessions`) |
+| Your turns | Total number of messages you sent across these sessions (`your turns`) |
+| Tool calls | Total number of tool calls made by the Agent (`tool calls`) |
+| Avg turns | Average turns per session (`avg turns / session`, one decimal place) |
+| Activity | Daily session activity bar chart, with start and end dates marked |
+| Tool distribution | Ranking of the tools the Agent relied on most (top ~6) |
+| Skill distribution | Ranking of skills invoked during sessions; shows "No skills invoked" if none were used |
+| Model distribution | How many sessions used each model, in the form `model name (N sessions)` |
+| Result distribution | Count of completed / incomplete / errored sessions (omits any category at zero) |
+
+### Tier 2: Narrative summary
+
+A **2–4 sentence** second-person summary of what you were mainly doing this month — the most common domains, recurring entities (the same incident analyzed twice, a cluster or host that kept appearing), and the overall shape of your work. This section is aggregated from the per-session topics returned by subagents.
+
+### Tier 3: Friction cards
+
+Friction cards ranked **from highest to lowest importance**, up to ~8 cards. Each card contains:
+
+- **Rank** and **friction type label** (one of five types; see the next section);
+- A **frequency badge** indicating how many distinct sessions this friction consumed your time in (deduplicated evidence session count);
+- A one-sentence title and a second-person explanation;
+- **Evidence**: all real session IDs that matched this friction (listed in full, never truncated);
+- **Copyable suggestion**: text you can paste directly;
+- **Destination**: which file under `knowledge/<scope>/` this text should go into.
+
+<Note>
+Every friction card must cite at least one real session ID as evidence — the report never fabricates sessions, facts, or runbook gaps. If no rankable friction is found, the third tier shows an empty-state message while the first and second tiers are still present — in that case, "the overview itself is the report."
+</Note>
+
+## Friction types
+
+---
+
+`/insight` recognizes exactly five friction types, each corresponding to a clear, actionable "knob" you can turn. Listed in default importance order:
+
+| Friction type | What it looks like in sessions | Suggested destination |
+|---|---|---|
+| `repeated_context` (repeated context) | **Strongest signal.** A long-lived fact that you provided in **≥ 2 different sessions** (database connection string, service-to-team mapping, dashboard URL, escalation path, cluster name, etc.) | Write into DUTY.md / `services.md` so it auto-loads every session |
+| `missing_runbook` (missing runbook) | The Agent had to improvise a multi-step investigation that you clearly expected it to already know | Add a runbook: `knowledge/<scope>/runbooks/<topic>.md` |
+| `wrong_data_source` (wrong data source) | The Agent queried the wrong data source / cluster / namespace and you corrected it | Pin the correct data source in `observability.md` / `clusters.md` |
+| `hallucinated_entity` (hallucinated entity) | The Agent referenced a service / host / metric / change that does not exist and you denied it | Add the real entity inventory to `services.md` |
+| `stale_knowledge` (stale knowledge) | A fact from the knowledge base / DUTY.md was outdated or wrong and you corrected it on the spot | Update that outdated file |
+
+<Tip>
+`repeated_context` ranks first because it is the **most persistent** — the same fact being provided again and again across multiple sessions means that writing it into the knowledge base once benefits every future session. When its evidence count ties with another friction type, it still ranks ahead.
+</Tip>
+
+## How to act on suggestions
+
+---
+
+The report is **read-only**: it surfaces problems and provides copyable fix text, but **never** applies any change automatically. During the beta period, all suggestions are copy-paste style and require you to confirm them before manually applying them to the corresponding resource.
+
+<Steps>
+  <Step title="Read the report and pick what's worth doing">
+    Friction cards are already ranked by importance. Start with the top-ranked cards with the highest frequency badge numbers — those are the patterns consuming your time most repeatedly.
+  </Step>
+  <Step title="Copy the suggestion text">
+    The "copyable suggestion" in each card is text you can paste directly. The "destination" line tells you which file under `knowledge/<scope>/` it belongs to.
+  </Step>
+  <Step title="Apply it manually in the corresponding resource">
+    Depending on the friction type, paste and save in the appropriate custom resource: repeated context and hallucinated entities go into the knowledge base's `services.md` or DUTY.md; missing runbooks mean adding a new runbook to the knowledge base; wrong data sources get pinned in `observability.md` / `clusters.md`; stale knowledge means updating that file directly. All of these are standard edits to [Knowledge Base](/en/ai-sre/knowledge) and [Customize resources](/en/ai-sre/customize).
+  </Step>
+</Steps>
+
+<Warning>
+`/insight` will never perform writes on your behalf — it does not invoke any sync or install actions, and it does not modify the knowledge base, skills, or MCP. If you later want AI SRE to "add this runbook," that is a separate natural-language instruction and is outside the scope of `/insight`.
+</Warning>
+
+<Note>
+`/insight` runs on demand, one report at a time — it does not "continuously watch" or generate reports on a schedule. We recommend running it again after a few more incident investigations to see which frictions have been resolved and which new ones have emerged.
+</Note>
+
+## Related pages
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Conversations and sessions" icon="comments" href="/en/ai-sre/sessions">
+    Learn about session creation, team binding, and war-room incidents — these determine the analysis scope of `/insight`.
+  </Card>
+  <Card title="Knowledge Base" icon="book" href="/en/ai-sre/knowledge">
+    Most suggestions from the report land in the knowledge base's DUTY.md / `services.md` / runbooks. This page explains how to edit them.
+  </Card>
+  <Card title="Customize resources and scope" icon="sliders" href="/en/ai-sre/customize">
+    Understand the account and team two-level scope so you know which scope each suggestion belongs to.
+  </Card>
+  <Card title="Product overview" icon="robot" href="/en/ai-sre/overview">
+    A high-level view of AI SRE's capabilities and how it works.
+  </Card>
+</CardGroup>
