@@ -1,202 +1,126 @@
 ---
-title: "Agents: subagents and A2A"
-description: AI SRE offers two kinds of agent resources — subagents execute delegatable self-contained tasks, and A2A (Agent-to-Agent) agents connect external agents for cross-agent routing and incident coordination.
-keywords: ["AI SRE", "subagent", "A2A", "Agent-to-Agent", "agent_dispatch", "Agent Card", "agent", "delegation", "customize"]
-sidebarTitle: Agents (subagents & A2A)
+title: A2A Agents
+description: A2A (Agent-to-Agent) agents connect AI SRE to an external agent ecosystem — you can delegate tasks to remote agents, and expose an Agent Card so external clients can call back into Flashduty's AI SRE for incident / war room integration and bidirectional event streaming.
+keywords: ["AI SRE", "A2A", "Agent-to-Agent", "Agent Card", "agent", "delegation", "outbound", "inbound", "custom resources"]
+sidebarTitle: A2A Agents
 ---
 
 <Info>
-  **Beta feature**: AI SRE is in private beta and open to invited accounts only. To join the whitelist, contact the Flashduty sales team to request access. Features and the UI may change during the beta.
+  **Private beta**: AI SRE is currently in private beta and available to invited accounts only. To join the whitelist test, contact the Flashduty sales team to request access; features and the UI may change during the beta.
 </Info>
 
 ## Overview
 
 ---
 
-AI SRE has two kinds of "agent" resources. Both **extend the main agent's (AI SRE's) ability to collaborate and divide work**, but differ in direction and form:
-
-<CardGroup cols={2}>
-  <Card title="Subagents" icon="robot">
-    Specialized workers spawned **inside this platform**, invoked by the main conversation or a Skill to execute a **self-contained task** — read logs, run a search, make a change, and so on. When done, they return the result to the parent agent.
-  </Card>
-  <Card title="A2A agents (Agent-to-Agent)" icon="satellite-dish">
-    Registrations that point to **external agents**. AI SRE **delegates tasks to a remote agent** over the standard A2A protocol; at the same time, this platform's AI SRE also exposes an Agent Card that external A2A clients can call back into, for incident / war-room coordination and bidirectional event streams.
-  </Card>
-</CardGroup>
-
-Both are dispatched through the same built-in tool, **`agent_dispatch`**: the main agent provides an `agent_name`, a `prompt`, and a short `title`; the platform immediately returns a `task_id` and resumes the parent conversation's turn. The dispatched agent runs in an isolated sub-session, and on completion re-injects its final result into the parent agent as a new message in the form of a `<task-notification>`.
-
-<Note>
-The dispatch result of both subagents and A2A agents appears in the conversation as the same kind of "task card (chip)": the icon distinguishes the type (subagent 🤖, A2A 🛰️), and the card shows the agent name, the intent of this task (`title`), the run status (initializing / in progress / completed / failed / interrupted / waiting for input / waiting for authorization), and usage such as tool-call count, tokens, and duration. Click the card to view the sub-session's full process in the right-hand panel.
-</Note>
-
-<Tip>
-**The description is the core signal for agent selection.** Before dispatching, the main agent sees a "list of available agents," each item being `name (type): description`. Descriptions should be written as prescriptive imperatives (e.g. "USE THIS FIRST for ...", "prefer-over-X when ...") that state clearly **when it should be preferred, what it is good at, and what it is not suited for** — the more precise the description, the better the main agent dispatches the right task to the right agent.
-</Tip>
-
-## Subagents
-
----
-
-A subagent is a specialized worker that **the main conversation or a Skill can invoke to execute a task**. It is spawned within this platform, has its own system prompt (role and methodology), toolset, and (optionally) model, runs in a sub-session isolated from the parent conversation, and returns only its **final message** to the parent agent — the intermediate tool output stays in the sub-session and does not pollute the parent conversation's context.
-
-### Built-in subagents
-
-AI SRE ships with out-of-the-box runtime subagents that `agent_dispatch` can call without any configuration:
-
-<CardGroup cols={2}>
-  <Card title="general" icon="user-gear">
-    A general-purpose worker. It has full tool access (read, write, execute, web, skills, MCP), used to take on a self-contained task that can be described fully in one shot and return a self-explanatory result the parent agent can adopt directly.
-  </Card>
-  <Card title="explore" icon="magnifying-glass">
-    A read-only explorer. It can only use `grep`, `glob`, and `read`, used to quickly locate evidence in a code base or knowledge dump and return a compact summary; it does not analyze, assume, or recommend — it leaves the conclusion to the parent agent.
-  </Card>
-</CardGroup>
-
-<Note>
-Built-in subagents are injected by the runtime at session start, do not appear in the resource list, and cannot be deleted or edited. They share the same `agent_dispatch` mechanism as your custom subagents.
-</Note>
-
-### Subagent configuration
-
-Each custom subagent is defined by the fields below. `description` and `prompt` are key to shaping its behavior — the former decides **when it is selected**, the latter decides **how it works once selected**.
-
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `subagent_name` | string | — | The subagent identifier; `agent_dispatch` dispatches by this name. Unique within the account |
-| `description` | string | — | The subagent description, the core signal for the main agent's selection; write it as a "USE THIS FIRST / prefer-over-X"-style imperative |
-| `prompt` | string | — | The subagent's system prompt, the body of its role and methodology; once dispatched, this is its operating brief. The platform appends a common worker spec afterward (use absolute paths, no emoji, working directory resets on each tool call, etc.) |
-| `max_steps` | int | `20` | The max number of reasoning / tool-call steps allowed per task; it stops on reaching the limit |
-| `model` | string | inherits default | An optional model override (`provider/model` form); leave empty to use the account default model |
-| `tool_allowlist` | string[] | empty (no extra restriction) | Further narrows the allowlist of tools available to this subagent. Empty means inherit the default (all available except platform-suppressed tools); non-empty exposes **only** the listed tools. For example, restrict a triangulation-only subagent so it cannot touch `bash`. Listing an already-suppressed tool (such as `agent_dispatch`) has no effect |
-| `status` | enum | `enabled` | `enabled` / `disabled`. Only enabled subagents can be dispatched |
-| `team_id` | int64 | `0` | Scope: `0` = account, `>0` = team. See "Scope" below |
-
-<Warning>
-Subagents currently exist as **account resources**, invoked in conversation via `agent_dispatch` and visualized in dispatch cards and the sub-session panel. They **do not yet have a standalone graphical management page**; during the beta, to create or adjust custom subagents, contact Flashduty for help configuring them. The built-in `general` / `explore` subagents work with no configuration.
-</Warning>
-
-### Dispatch and the sub-session panel
-
-When the main agent calls `agent_dispatch`:
-
-<Steps>
-  <Step title="Dispatch">
-    Provide `agent_name`, `prompt`, and a 4–8 word imperative `title`. The platform immediately returns a `task_id` (status `async_launched`) and resumes the parent turn — the parent agent **does not block waiting**, and can keep working or dispatch several parallel tasks at once.
-  </Step>
-  <Step title="Run">
-    The subagent runs in an isolated sub-session `sub-<task_id>`. A live-refreshing task card appears in the parent conversation, showing in-progress status and accumulating usage.
-  </Step>
-  <Step title="View the process">
-    Click the task card to open the sub-session's full conversation in the right-hand **subagent panel** (reusing the main chat-area components). The panel can expand to full width or split side by side with the main chat. While running, click "Stop subagent" to request an interruption.
-  </Step>
-  <Step title="Return the result">
-    When the subagent finishes, its **final message** is re-injected into the parent conversation as a `<task-notification>`, and the main agent continues its answer accordingly. On failure / interruption, the card and panel show the full terminal error.
-  </Step>
-</Steps>
-
-## A2A agents
-
----
-
-A2A (Agent-to-Agent) agents connect AI SRE to the **external agent ecosystem**. There are two directions:
+A2A (Agent-to-Agent) is a standard protocol that lets different agents call one another. In AI SRE, the **A2A Agents** resource connects AI SRE to an external agent ecosystem in two directions:
 
 <CardGroup cols={2}>
   <Card title="Outbound" icon="arrow-up-right-from-square">
-    The **remote A2A agents** registered in the list. AI SRE delegates tasks to them over the A2A protocol — also via `agent_dispatch`, sharing the same dispatch and card mechanism as subagents (task cards mark the A2A type with 🛰️).
+    **Remote A2A agents** registered in the list. AI SRE **delegates** tasks to them via the standard A2A protocol — for example, an external agent that specializes in metrics analysis or integrates with an internal system.
   </Card>
   <Card title="Inbound" icon="arrow-down-to-bracket">
-    This platform's AI SRE is itself an A2A agent and exposes an **Agent Card**. An external A2A client that fills in the Card address can call Flashduty's AI SRE back, for incident / war-room coordination and bidirectional event streams.
+    AI SRE itself is an A2A agent and exposes an **Agent Card**. External A2A clients can add the Card URL to **call back into** Flashduty's AI SRE for incident / war room integration and bidirectional event streaming.
   </Card>
 </CardGroup>
 
-The list and management entry for A2A agents is the **Customize → Agents** page (the menu tab is **Agents**).
+Delegation is **asynchronous**: after AI SRE hands a task to a remote agent it does **not block**, the conversation turn resumes immediately and can continue working or dispatch multiple tasks in parallel. When the remote agent finishes, its result is injected back into the conversation as a new message. Each A2A delegation appears in the conversation as a **task card** (🛰️) showing the remote agent name, task intent, run status (initializing / in progress / completed / failed / interrupted), and usage metrics such as tool call count, tokens, and elapsed time. Click the card to view the full delegation trace in the right-hand panel.
 
-### Register an outbound A2A agent
+<Tip>
+**Description is the core signal for agent selection.** Before delegating, AI SRE sees a list of available agents where each entry is `name: description`. Write descriptions as prescriptive imperatives (e.g. "USE THIS FIRST for ...", "prefer-over-X when ..."), clearly stating **when to prefer it, what it excels at, and what it is not suited for** — the more precise the description, the better AI SRE can route tasks to the right agent in the right context.
+</Tip>
 
-On the A2A Agents list page, click **Add A2A agent** and fill in the form:
+The A2A Agents list and management UI are in the **Customize → Agents** page (menu tab: **Agents**).
+
+## Register an Outbound A2A Agent
+
+---
+
+On the A2A Agents list page, click **Add A2A Agent** and fill in the form:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| Name | string | — | The A2A agent identifier (e.g. `metrics-analyzer`). Required |
-| Scope | account / team | — | The scope: **account** (visible across the account) or a **team** (visible and editable only by that team's members). Required; see "Scope" below |
-| Description | string | — | Briefly describe what this A2A agent does. It enters the main agent's "list of available agents" as a selection signal — write it as a prescriptive imperative |
-| Card URL | string | — | The base URL of the remote A2A agent (e.g. `https://flashai.flashcat.cloud`). Required. The platform validates that it is a legal http/https address and rejects ones pointing at loopback, intranet, link-local, or cloud-metadata addresses (SSRF protection) |
-| Auth type | enum | `none` | The credential type attached to outbound requests: `none` / `bearer` (Bearer Token) / `api_key` (custom Header + Key) |
-| Streaming | bool | on | Whether to interact with the remote in streaming mode |
-| Per-user auth mode | enum | `shared` | See the "Authentication modes" table below |
+| Name | string | — | Identifier for the A2A agent (e.g. `metrics-analyzer`). Required. |
+| Scope | Account / Team | — | Visibility scope: **Account** (visible to all members in the account) or a specific **Team** (visible and editable only by members of that team). Required — see "Scope" below. |
+| Description | string | — | A brief description of what this A2A agent does. It appears in AI SRE's available-agent list as a selection signal — write it as a prescriptive imperative. |
+| Card URL | string | — | The base URL of the remote A2A agent (e.g. `https://flashai.flashcat.cloud`). Required. The platform validates that it is a valid http/https address and rejects loopback, private, link-local, or cloud-metadata addresses (SSRF prevention). |
+| Auth type | enum | `none` | Credential type attached to outbound requests: `none` / `bearer` (Bearer Token) / `api_key` (custom header + key). |
+| Streaming | bool | On | Whether to interact with the remote agent in streaming mode. |
+| User-level auth mode | enum | `shared` | See "Auth Modes" below. |
 
-#### Authentication modes
+### Auth Modes
 
-A2A agents support three ways of supplying credentials, determining how different users provide credentials when calling the same remote agent:
+A2A agents support three credential-supply modes that determine how credentials are provided when different users call the same remote agent:
 
 <AccordionGroup>
   <Accordion title="Shared (shared, default)" icon="users">
-    All users share one set of credentials, configured under "Auth type" (Bearer Token or API Key). Best when a team shares a single remote account.
+    All users share a single set of credentials configured under "Auth type" (Bearer Token or API Key). Suitable when the whole team shares one remote account.
   </Accordion>
-  <Accordion title="Per-user key (per_user_secret)" icon="key">
-    Each user provides their own key on the first call; the key is encrypted and stored at the account level. Configure a "Key Schema" with a Header name (required), placeholder, and help link (optional) to guide the user on the first call.
+  <Accordion title="Per-user secret (per_user_secret)" icon="key">
+    Each user provides their own secret key on first use; the key is encrypted and stored at the account level. Configure the header name (required), placeholder, and help link (optional) in "Secret Schema" to guide users on first call.
   </Accordion>
   <Accordion title="Per-user OAuth (per_user_oauth)" icon="shield-halved">
-    Users each authorize through an OAuth 2.1 flow; an authorization window pops up automatically on the first call to the A2A agent, and credentials are stored per user once complete.
+    Each user authorizes individually via an OAuth 2.1 flow. An authorization popup appears automatically on first use of the A2A agent, and credentials are stored per user after completion.
   </Accordion>
 </AccordionGroup>
 
 <Note>
-For security, saved sensitive fields (such as `token`, `api_key`, `client_secret`) are returned **masked** when read. When editing, leaving a sensitive field empty means "keep the current value" rather than "clear it" — the stored credential is overwritten only when you explicitly change it.
+For security, sensitive fields that have already been saved (such as `token`, `api_key`, and `client_secret`) are returned **masked** when you read them back. When editing, leaving a sensitive field blank means "keep the current value" — not "clear it." The stored credential is only overwritten when you explicitly change the field.
 </Note>
 
-### Inbound: let external agents call AI SRE
-
-On the A2A Agents page, expand the "**Let external agents call Flashduty's AI SRE**" panel at the top to get this account's AI SRE **Agent Card** address:
-
-```
-<your-endpoint-domain>/safari/a2a/ai-sre/agent-card
-```
-
-Fill this address into any A2A client to call Flashduty's AI SRE agent over the A2A protocol.
-
-**Authentication**: add `Fd-App-Key: <your app_key>` to the request header (or use the `?app_key=` query parameter). The capabilities the Agent Card declares include:
-
-| Skill | Description |
-| --- | --- |
-| `investigate_incident` | End-to-end root-cause a Flashduty incident, correlating logs, metrics, and recent changes |
-| `analyze_logs` | Query and summarize a target service's logs within a given time window |
-| `analyze_metrics` | Query and summarize a target service's metrics within a given time window |
-
-<Tip>
-The Agent Card also declares Flashduty's "run options" A2A extension: the caller can override `incognito` (whether to hide it in the session list, hidden by default), `visibility` (`private` / `account`), and the run environment (`cloud` / `byoc` with a specific `environment_id`) on demand in `message.metadata`. The extension is optional, and a plain A2A client can call normally without dealing with it.
-</Tip>
-
-### Incident and war-room coordination
-
-When a session **enters via incident routing** (for example, AI SRE triggered from an incident or war room), the platform binds the corresponding `incident_id` to the run and surfaces it as session context in the main agent's prompt, so troubleshooting is anchored to the right incident from the start. Building on this, AI SRE can operate on the incident further within the conversation using built-in skills — read incident details, query the timeline, create / view a war room, correlate changes, and so on.
-
-<Warning>
-The **automatic coordination** between A2A and incidents is currently supported in concept and still evolving: incident auto-binding is a stub implementation today, and the bidirectional cross-agent event stream will be filled out version by version. Do not treat it as a fully available capability — during the beta, rely on the features actually enabled.
-</Warning>
-
-## Create and manage
+## Inbound: Let External Agents Call AI SRE
 
 ---
 
-The full lifecycle of A2A agents is managed on the **Customize → Agents** page. The built-in subagents work out of the box; custom subagents are configured with Flashduty's help during the beta (see above).
+Expand the "**Let external agents call Flashduty's AI SRE**" panel at the top of the A2A Agents page to get your account's AI SRE **Agent Card** URL:
+
+```
+<your access domain>/safari/a2a/ai-sre/agent-card
+```
+
+Add this URL to any A2A client to call Flashduty's AI SRE agent via the A2A protocol.
+
+**Authentication**: include `Fd-App-Key: <your app_key>` in the request header (or use the `?app_key=` query parameter). The Agent Card advertises the following skills:
+
+| Skill | Description |
+| --- | --- |
+| `investigate_incident` | End-to-end root-cause analysis for a Flashduty incident, correlating logs, metrics, and recent changes. |
+| `analyze_logs` | Query and summarize logs for a target service within a specified time window. |
+| `analyze_metrics` | Query and summarize metrics for a target service within a specified time window. |
+
+<Tip>
+The Agent Card also advertises Flashduty's "run options" A2A extension. Callers can override `incognito` (whether to hide the session in the session list; hidden by default), `visibility` (`private` / `account`), and the environment (`cloud` / `byoc` with a specific `environment_id`) in `message.metadata`. This extension is optional — plain A2A clients can ignore it and call normally.
+</Tip>
+
+### Incident and War Room Integration
+
+When a session **arrives via an incident route** (for example, triggered from an incident or war room), the platform binds the corresponding `incident_id` to the run and surfaces it as session context in AI SRE's prompt, anchoring troubleshooting to the correct incident from the start. From there, AI SRE can use built-in skills to further act on the incident — reading incident details, querying timelines, creating / viewing war rooms, linking changes, and more. For IM-side war room auto-diagnosis, see [IM Integration](/en/ai-sre/im).
+
+<Warning>
+**Automatic incident integration** via A2A is conceptually supported and actively evolving: incident auto-binding is currently a placeholder implementation, and bidirectional event streaming across agents will be incrementally completed in future releases. Do not treat this as a fully production-ready capability — during the beta, only features that have been explicitly enabled should be relied upon.
+</Warning>
+
+## Create and Manage
+
+---
+
+The full lifecycle of A2A agents is managed on the **Customize → Agents** page.
 
 <AccordionGroup>
   <Accordion title="Create" icon="plus">
-    A2A: click **Add A2A agent**, fill in name, scope, Card URL, authentication, and save. You must choose a definite scope (account or team) on creation; the submit button stays disabled until one is selected.
+    Click **Add A2A Agent**, fill in the name, scope, Card URL, and authentication settings, then save. You must select an explicit scope (account or team) before the submit button becomes active.
   </Accordion>
-  <Accordion title="Enable / disable" icon="toggle-on">
-    Toggle an A2A agent's enabled state with the switch in the list. Only **enabled** agents enter the main agent's available list and can be dispatched by `agent_dispatch`; once disabled, they are immediately invisible to dispatch. Subagents are likewise controlled by the `status` field.
+  <Accordion title="Enable / Disable" icon="toggle-on">
+    Use the toggle in the list to switch an A2A agent's enabled state. Only **enabled** agents appear in AI SRE's available-agent list and can receive delegated tasks; disabling an agent makes it immediately invisible to delegation.
   </Accordion>
-  <Accordion title="Inspect / edit" icon="pen-to-square">
-    Click any row in the list to open the form, where you can view and edit name, description, scope, Card URL, authentication config, streaming, and auth mode. Without edit permission the form is **read-only**.
+  <Accordion title="Inspect / Edit" icon="pen-to-square">
+    Click any row in the list to open the form, where you can view and edit the name, description, scope, Card URL, auth configuration, streaming setting, and auth mode. If you do not have edit permission, the form is displayed as **read-only**.
   </Accordion>
   <Accordion title="Delete" icon="trash">
-    Remove an A2A agent from the current scope. **Active sessions that delegate to it will fail.** Deletion has a confirmation prompt.
+    Remove an A2A agent from the current scope. **Active sessions that have delegated tasks to it will fail.** A confirmation prompt is shown before deletion.
   </Accordion>
   <Accordion title="Filter by scope" icon="filter">
-    The scope filter bar at the top of the list switches between "All," "Account only," and "a specific team," to focus the view amid many resources. Each row is also labeled with its scope (account / team name).
+    The scope filter bar at the top of the list lets you switch between "All", "Account-level only", and a specific team, making it easy to focus on a subset of resources. Each row also shows a tag indicating its scope (account or team name).
   </Accordion>
 </AccordionGroup>
 
@@ -204,42 +128,42 @@ The full lifecycle of A2A agents is managed on the **Customize → Agents** page
 
 ---
 
-Subagents, A2A agents, and the other Customize resources (Skills, Knowledge Packs, Connectors/MCP, Environments) share the same **two-level scope** model, determined by the `team_id` field on each row:
+A2A agents share the same **two-level scope** model as other custom resources (Skills, Knowledge Packs, MCP, Environments), determined by the `team_id` field on each row:
 
 | `team_id` | Scope | Visibility |
 | --- | --- | --- |
-| `0` | Account | Visible to all members of the account |
-| `>0` | Team | Visible only to that team's members |
+| `0` | Account-level | Visible to all members in the account |
+| `>0` | Team-level | Visible to members of that team only |
 
-**Edit permission**: the account owner or an account admin can edit any agent; a team member can edit team-scoped agents of **their own team**; there is no "creator keeps rights" exception. Without edit permission, the row appears **read-only** in the list.
+**Edit permission**: the account owner or account admin can edit any agent; team members can edit team-level agents within **their own team**. There is no creator-retains-rights exception. When you do not have edit permission, the corresponding row in the list is displayed as **read-only**.
 
-**Runtime visibility**: at session start, the main agent's list of available agents surfaces only **account-scoped** resources and the resources of the **team the current session is bound to** (such as the team brought in by an incident / war room, or one explicitly selected in the UI). After the agent reads a team's knowledge (`.flashduty/knowledge/team_<id>/DUTY.md`), that team's Skills, connectors, and agents are mounted into the current session on demand. **The account is the only security perimeter at runtime; team is merely an ownership and editing label.**
+**Runtime visibility**: at session start, AI SRE's available-agent list only includes **account-level** resources and resources belonging to the **team bound to the current session** (e.g. the team brought in by an incident / war room, or explicitly selected in the UI). A team's Skills, MCP, and A2A agents are only mounted into the current session on demand after the agent reads that team's knowledge (`.flashduty/knowledge/team_<id>/DUTY.md`). **The account is the only security boundary at runtime; team is an ownership and editing tag.**
 
 <Note>
-For the full description of the scope model (including permission rules and runtime loading details), see [Customize resources and scope](/en/ai-sre/customize).
+For the full scope model specification — including permission rules and runtime loading details — see [Custom Resources & Scope](/en/ai-sre/customize).
 </Note>
 
-## Related pages
+## Related Pages
 
 ---
 
 <CardGroup cols={2}>
-  <Card title="Customize resources and scope" icon="sliders" href="/en/ai-sre/customize">
-    Learn about account- and team-level scope, edit permissions, and runtime loading.
+  <Card title="Custom Resources & Scope" icon="sliders" href="/en/ai-sre/customize">
+    Learn about account-level and team-level scope, edit permissions, and runtime loading mechanics.
   </Card>
-  <Card title="Chat and sessions" icon="comments" href="/en/ai-sre/sessions">
-    Watch the subagent and A2A task cards dispatched by `agent_dispatch`, and the sub-session panel.
+  <Card title="Chat & Sessions" icon="comments" href="/en/ai-sre/sessions">
+    Observe A2A delegation task cards and their sub-session panels inside a session.
   </Card>
-  <Card title="Skills" icon="wrench" href="/en/ai-sre/skills">
-    Subagents share the same skill catalog as the main agent and can load Skills on demand.
+  <Card title="MCP (External Tools)" icon="plug" href="/en/ai-sre/mcp">
+    Connect external tools to agents to expand their capability boundaries in tasks.
   </Card>
-  <Card title="Connectors & MCP" icon="plug" href="/en/ai-sre/connectors">
-    Connect external tools for the agent, extending its capability boundary within a task.
+  <Card title="Knowledge Packs" icon="book" href="/en/ai-sre/knowledge">
+    Use DUTY.md and Knowledge Packs to provide agents with team context and troubleshooting experience.
   </Card>
-  <Card title="Knowledge" icon="book" href="/en/ai-sre/knowledge">
-    Use DUTY.md and Knowledge Packs to give the agent team context and troubleshooting experience.
+  <Card title="IM Integration" icon="comment-dots" href="/en/ai-sre/im">
+    Mention AI SRE in IM groups and learn about incident war room auto-diagnosis.
   </Card>
-  <Card title="Overview" icon="gauge-high" href="/en/ai-sre/overview">
-    Learn the overall capabilities and positioning of AI SRE.
+  <Card title="Product Overview" icon="gauge-high" href="/en/ai-sre/overview">
+    Learn about AI SRE's overall capabilities and positioning.
   </Card>
 </CardGroup>
