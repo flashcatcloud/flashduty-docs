@@ -1,0 +1,357 @@
+---
+title: Go SDK
+sidebarTitle: Go SDK
+description: "go-flashduty 是 Flashduty 官方开源的 Go SDK，与 Open API 严格 1:1 的类型化封装，覆盖全部 253 个接口、27 个服务。"
+keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "客户端"]
+---
+
+## 概述
+
+---
+
+`go-flashduty` 是 Flashduty 官方开源的 Go 客户端，覆盖 Flashduty Open API 的每一个 REST 接口。它采用与 [go-github](https://github.com/google/go-github) 一致的设计风格——服务分组、类型化请求与响应、可组合传输层——并与 OpenAPI 规范保持严格 1:1：每个方法对应且仅对应一次 HTTP 调用，返回 `(*T, *Response, error)`，不做任何跨接口的隐式聚合或增强。
+
+SDK 当前覆盖 **253 个接口**、**27 个服务**,全部由 Flashduty OpenAPI 规范生成,经单元测试覆盖,并针对线上 API 做过端到端验证。
+
+<Note>
+SDK 故意保持"薄"。诸如短 ID 解析、跨接口编排等消费侧逻辑应放在调用方（CLI / MCP）中，而不是塞进 SDK 或滥用某个接口。这样 SDK 始终与 API 一一对应,可预测、可生成、可校验。
+</Note>
+
+模块路径为 `github.com/flashcatcloud/go-flashduty`,包名为 `flashduty`,源码遵循 Apache-2.0 协议开源在 [flashcatcloud/go-flashduty](https://github.com/flashcatcloud/go-flashduty)。
+
+<CardGroup cols={2}>
+  <Card title="Open API 参考" icon="book" href="/zh/openapi/introduction">
+    全部接口的请求参数与响应字段说明。
+  </Card>
+  <Card title="命令行工具" icon="code" href="/zh/developer/cli">
+    在终端中直接操作 Flashduty 的 CLI。
+  </Card>
+</CardGroup>
+
+## 安装
+
+---
+
+<Steps>
+<Step title="要求 Go 1.24+">
+请确认本地 Go 工具链版本不低于 1.24。
+</Step>
+<Step title="获取依赖">
+```bash
+go get github.com/flashcatcloud/go-flashduty
+```
+</Step>
+<Step title="导入包">
+```go
+import flashduty "github.com/flashcatcloud/go-flashduty"
+```
+</Step>
+</Steps>
+
+## 快速开始
+
+---
+
+以下是一个最小可运行示例：构造客户端、列出处于"已触发"状态的故障，并处理返回的三元组 `(数据, *Response, error)`。
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	flashduty "github.com/flashcatcloud/go-flashduty"
+)
+
+func main() {
+	client, err := flashduty.NewClient("YOUR_APP_KEY")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	list, resp, err := client.Incidents.List(context.Background(), &flashduty.ListIncidentsRequest{
+		Progress:    "Triggered",
+		ListOptions: flashduty.ListOptions{Limit: 20},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("request_id=%s total=%d has_next=%t\n", resp.RequestID, resp.Total, resp.HasNextPage)
+	for _, inc := range list.Items {
+		fmt.Printf("[%s] %s\n", inc.IncidentSeverity, inc.Title)
+	}
+}
+```
+
+每次调用都返回三个值：
+
+| 返回值 | 类型 | 说明 |
+|--------|------|------|
+| 数据 | `*T` | 接口对应的类型化响应体（如 `*ListIncidentsResponse`）；调用失败时为 `nil` |
+| `*Response` | `*flashduty.Response` | 包裹 `*http.Response`,并附带 `RequestID`、分页等信封元信息 |
+| `error` | `error` | 失败时为 `*ErrorResponse`,429 时为 `*RateLimitError` |
+
+<Tip>
+`app_key` 用于鉴权,SDK 会自动将其作为查询参数注入每个请求。请在 Flashduty 控制台的"推送集成"或团队配置中获取对应的 `app_key`。
+</Tip>
+
+## 创建客户端
+
+---
+
+`NewClient` 接收 `app_key` 与零到多个 `Option`。`app_key` 为空会直接返回错误。默认 Base URL 为 `https://api.flashcat.cloud`,默认 HTTP 超时为 30 秒,默认 User-Agent 为 `go-flashduty`。
+
+```go
+client, err := flashduty.NewClient("YOUR_APP_KEY",
+	flashduty.WithBaseURL("https://api.flashcat.cloud"),
+	flashduty.WithTimeout(10*time.Second),
+	flashduty.WithUserAgent("my-app/1.0"),
+	flashduty.WithHTTPClient(customHTTPClient),
+	flashduty.WithTransport(customRoundTripper),
+	flashduty.WithLogger(myLogger),
+	flashduty.WithRequestHeaders(staticHeaders),
+	flashduty.WithRequestHook(func(req *http.Request) { /* 例如注入 traceparent */ }),
+)
+```
+
+| Option | 说明 |
+|--------|------|
+| `WithBaseURL(raw string)` | 覆盖 API 基础地址（默认 `https://api.flashcat.cloud`）。私有化部署用它指向自有网关；非法 URL 会在 `NewClient` 阶段报错 |
+| `WithTimeout(d time.Duration)` | 设置底层 HTTP 客户端的整体超时 |
+| `WithUserAgent(ua string)` | 设置每个请求携带的 `User-Agent` 头 |
+| `WithHTTPClient(hc *http.Client)` | 替换底层 `*http.Client`;传入 `nil` 时忽略 |
+| `WithTransport(rt http.RoundTripper)` | 设置自定义 `http.RoundTripper`,是接入重试、缓存、链路追踪、限流等中间件的惯用切入点;传入 `nil` 时忽略 |
+| `WithLogger(l Logger)` | 设置自定义日志器;传入 `nil` 时忽略 |
+| `WithRequestHeaders(h http.Header)` | 设置追加到每个请求的静态头,在 SDK 自身的头（`Content-Type`、`Accept`、`User-Agent`）之后应用 |
+| `WithRequestHook(hook func(*http.Request))` | 注册回调,在每个请求发出前调用,用于注入逐请求的头（如 W3C `traceparent`） |
+
+<Info>
+**私有化部署**：用 `WithBaseURL` 将客户端指向您自有的 Flashduty 网关地址即可,其余调用方式完全不变。
+</Info>
+
+## 服务与方法
+
+---
+
+接口按服务分组挂在客户端上：调用约定统一为 `client.<Service>.<Method>(ctx, req)`,返回 `(*T, *Response, error)`。例如 `client.Incidents.List(ctx, req)`、`client.Sessions.Info(ctx, req)`。
+
+| 服务字段 | 说明 |
+|----------|------|
+| `client.Incidents` | 故障 |
+| `client.Alerts` | 告警 |
+| `client.Channels` | 协作空间 |
+| `client.Schedules` | 排班 |
+| `client.Calendars` | 日历 |
+| `client.StatusPages` | 状态页 |
+| `client.Members` | 成员 |
+| `client.Teams` | 团队 |
+| `client.RolesPermissions` | 角色与权限 |
+| `client.Account` | 账户 |
+| `client.AuditLogs` | 审计日志 |
+| `client.AlertRules` | 告警规则 |
+| `client.RuleSets` | 规则集 |
+| `client.AlertEnrichment` | 告警字段加工 |
+| `client.DataSources` | 数据源 |
+| `client.Integrations` | 集成 |
+| `client.ImIntegrations` | IM 集成 |
+| `client.NotificationTemplates` | 通知模板 |
+| `client.Changes` | 变更 |
+| `client.Diagnostics` | 诊断 |
+| `client.Analytics` | 分析 |
+| `client.A2aAgents` | A2A Agents |
+| `client.McpServers` | MCP Servers |
+| `client.Sessions` | AI SRE 会话 |
+| `client.Skills` | Skills |
+| `client.Applications` | RUM 应用 |
+| `client.Issues` | RUM 问题 |
+| `client.Sourcemaps` | RUM Sourcemap |
+
+<Note>
+所有标识符、服务字段名与方法名均与生成代码保持一致。具体每个服务有哪些方法、请求与响应类型,请以 `services_gen.go` 与各服务文件,以及 [Open API 参考](/zh/openapi/introduction) 为准。
+</Note>
+
+## 响应时间戳
+
+---
+
+响应中的时间字段不再是裸整数,而是自描述的 `Timestamp`（Unix 秒）或 `TimestampMilli`（毫秒）类型。它们序列化为本地时区的 RFC3339 字符串,因此 JSON、日志以及面向 LLM 的输出都直接可读;原始 epoch 仍只需一次方法调用即可取到。
+
+- **序列化（出站）**：非零值序列化为带引号的 RFC3339 字符串（`TimestampMilli` 用 RFC3339Nano 以保留毫秒精度）。零值序列化为裸整数 `0`——一个"未设置"哨兵,而非 1970 年的日期,并被 `json:",omitempty"` 丢弃。
+- **反序列化（入站）**：既兼容数字 epoch（线上原始形态),也兼容 RFC3339 字符串(使序列化后的值可无损往返),还接受 `null`（→ 0）。
+
+```go
+inc := list.Items[0]
+
+fmt.Println(inc.StartTime)            // 2026-05-30T14:37:11+08:00  （String / fmt / TOON）
+b, _ := json.Marshal(inc.StartTime)   // "2026-05-30T14:37:11+08:00"
+epoch := inc.StartTime.Unix()         // 1779514631  （原始 wire 值）
+t := inc.StartTime.Time()             // time.Time
+zero := inc.StartTime.IsZero()        // 是否为未设置哨兵
+```
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `.Time()` | `time.Time` | 取为标准时间值 |
+| `.Unix()` | `int64` | 取原始 wire 值（`Timestamp` 为秒,`TimestampMilli` 为毫秒） |
+| `.IsZero()` | `bool` | 是否为未设置哨兵（0） |
+| `.String()` | `string` | 本地时区 RFC3339,未设置时为 `"0"` |
+
+<Warning>
+**请求侧时间字段仍为 `int64`**,API 在 wire 上要求数字 epoch。注意:多数接口取**秒**,但 RUM 与 webhook 历史相关接口取**毫秒**。
+</Warning>
+
+## 分页
+
+---
+
+所有列表接口共享 `ListOptions`,将其内嵌在请求结构体中即可。零值会被省略,不会覆盖服务端默认值（后端默认 `p=1`、`limit=20`）。
+
+| 字段 | 类型 | wire 字段 | 说明 |
+|------|------|-----------|------|
+| `Page` | `int` | `p` | 从 1 开始的页码 |
+| `Limit` | `int` | `limit` | 每页返回条数上限 |
+| `SearchAfterCtx` | `string` | `search_after_ctx` | 上一页回显的不透明游标,用于深分页;回传它即可取下一页 |
+
+响应侧,`*Response` 携带 `Total`、`HasNextPage` 与 `SearchAfterCtx`。推荐用 search-after 游标逐页遍历：
+
+```go
+req := &flashduty.ListIncidentsRequest{
+	ListOptions: flashduty.ListOptions{Limit: 50},
+}
+
+// 设上限,避免游标异常时无限循环。
+for page := 0; page < 100; page++ {
+	list, resp, err := client.Incidents.List(ctx, req)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, inc := range list.Items {
+		fmt.Printf("%s: %s\n", inc.IncidentID, inc.Title)
+	}
+
+	if !resp.HasNextPage {
+		break
+	}
+	// 推进游标,取下一页。
+	req.ListOptions.SearchAfterCtx = list.SearchAfterCtx
+}
+```
+
+## 错误处理
+
+---
+
+任何未成功的调用——无论是信封中携带了错误,还是 HTTP 状态非 2xx——都会返回 `*ErrorResponse`。它带有 `Code`、`Message` 与 `RequestID` 字段,排障时把 `RequestID` 提供给支持团队即可定位。
+
+当 API 返回 429 时,错误被提升为 `*RateLimitError`：它内嵌 `*ErrorResponse`（所以 `errors.As` 取 `*ErrorResponse` 仍然成立),并额外带上 `RetryAfter` 提示。
+
+```go
+_, _, err := client.Incidents.Info(ctx, &flashduty.IncidentInfoRequest{
+	IncidentID: "does-not-exist",
+})
+
+var rl *flashduty.RateLimitError
+if errors.As(err, &rl) {
+	// 按服务端要求退避后再重试。
+	time.Sleep(rl.RetryAfter)
+	return
+}
+
+var apiErr *flashduty.ErrorResponse
+if errors.As(err, &apiErr) {
+	fmt.Printf("api error code=%s request_id=%s\n", apiErr.Code, apiErr.RequestID)
+	return
+}
+```
+
+类型化判定函数能省去字符串比较,并能穿透被包裹的错误（内部用 `errors.As`）：
+
+| 辅助函数 | 说明 |
+|----------|------|
+| `IsNotFound(err)` | 是否为资源不存在 |
+| `IsRateLimited(err)` | 是否为请求过于频繁（429） |
+| `IsUnauthorized(err)` | 是否为未授权 |
+| `IsAccessDenied(err)` | 是否为访问被拒 |
+| `IsInvalidParameter(err)` | 是否为参数非法 |
+| `ErrorCodeOf(err)` | 提取错误码,返回 `ErrorCode` 常量(如 `ErrorCodeAccessDenied`、`ErrorCodeUnauthorized`) |
+
+```go
+switch flashduty.ErrorCodeOf(err) {
+case flashduty.ErrorCodeAccessDenied, flashduty.ErrorCodeUnauthorized:
+	// 处理鉴权失败
+}
+```
+
+## 重试
+
+---
+
+核心客户端**不内置**自动重试。请通过传输层组合可选的 `retry` 子包——一个安全默认的重试型 `http.RoundTripper`。
+
+`github.com/flashcatcloud/go-flashduty/retry` 的特性：
+
+- **重试条件**：HTTP 429、任意 5xx（状态码 ≥ 500),以及传输错误。其他 4xx 与所有 2xx/3xx 立即返回。
+- **退避策略**：确定性指数退避（`MinWait * 2^attempt`,每次上限为 `MaxWait`);无随机抖动。存在合法的整数 `Retry-After` 头时,以其为准（同样不超过 `MaxWait`）。
+- **安全回放**：仅当请求体可回放（`req.Body` 为 nil 或 `req.GetBody` 非空）时才重试,每次重试都在请求的克隆上重建请求体,绝不修改调用方的原始 `*http.Request`。SDK 构造的所有请求都设置了 `GetBody`,因此 POST 请求体都可安全回放。
+- **尊重取消**：等待退避期间若请求 context 被取消,立即返回 context 错误。
+
+```go
+import "github.com/flashcatcloud/go-flashduty/retry"
+
+client, err := flashduty.NewClient("YOUR_APP_KEY",
+	flashduty.WithTransport(retry.New(
+		retry.WithMaxRetries(3),
+	)),
+)
+```
+
+| 配置项 | 默认值 | 说明 |
+|--------|--------|------|
+| `retry.WithMaxRetries(n int)` | `3` | 首次尝试之后的最大重试次数;负数表示禁用重试 |
+| `retry.WithMinWait(d time.Duration)` | `500ms` | 基础退避时长（首次重试前的等待） |
+| `retry.WithMaxWait(d time.Duration)` | `30s` | 单次退避等待的上限 |
+| `retry.WithBase(base http.RoundTripper)` | `http.DefaultTransport` | 底层实际执行请求的 RoundTripper |
+
+<Tip>
+`retry` 子包是纯 `net/http` 实现,刻意不导入父级 `flashduty` 包,因此永远不会引入循环依赖。`retry.New()` 与 `&retry.Transport{}`（零值）都开箱即用。
+</Tip>
+
+## 流式导出
+
+---
+
+`client.Sessions.Export` 用于导出一个 AI SRE 会话的完整事件转录,返回的是 `io.ReadCloser`（NDJSON 流,`application/x-ndjson`),而非 JSON 信封。首行始终是一条 `session_meta` 信封,其后每行是一个会话事件;当 `req.IncludeSubagents` 为 true 时,每条 `subagent_dispatch` 行后会跟随子会话自身的完整事件流。
+
+由于响应体可能很大,应当逐行读取并直接写入文件,**不要**把整段转录缓冲进内存。返回的 `io.ReadCloser` 是活动 HTTP 响应体,由调用方持有并**必须** `Close`(`defer` 关闭即正确)。配合 `NewExportScanner` 可按行扫描,`DecodeExportLine` 可将一行解码为 `ExportLine`：
+
+```go
+rc, _, err := client.Sessions.Export(ctx, &flashduty.SessionExportRequest{
+	SessionID:        "your-session-id",
+	IncludeSubagents: true,
+})
+if err != nil {
+	return err
+}
+defer rc.Close()
+
+sc := flashduty.NewExportScanner(rc)
+for sc.Scan() {
+	line, err := flashduty.DecodeExportLine(sc.Bytes())
+	if err != nil {
+		return err
+	}
+	// 用 line.Type 区分：session_meta、user_message、llm_call、
+	// tool_call、subagent_dispatch、final_answer、agent_text、error
+	_ = line
+	// 也可以把 sc.Bytes() 原样写入文件。
+}
+return sc.Err()
+```
+
+<Note>
+`NewExportScanner` 配置的单行缓冲区足以容纳转录中较宽的事件行（如 tool 输出、LLM 调用),不受默认 64KB token 上限限制。任何非 2xx 状态下,响应体仍是常规 JSON 错误信封——`Export` 会读取并关闭它,返回类型化错误（`*ErrorResponse`,429 时为 `*RateLimitError`),此时 `io.ReadCloser` 为 `nil`,与其他生成接口行为一致。
+</Note>
