@@ -1,0 +1,170 @@
+---
+title: MCP (External Tool Connections)
+description: Use the Model Context Protocol (MCP) to connect AI SRE agents to external tools and data sources — such as GitHub, Slack, Kubernetes, and observability platforms. Configure MCP servers, authentication, and scope in the console; agents will call their tools on demand during a session.
+keywords: ["AI SRE", "MCP", "Model Context Protocol", "MCP server", "external tools", "OAuth", "API Key", "agent"]
+sidebarTitle: MCP
+---
+
+<Info>
+  **Private beta**: AI SRE is currently in private beta and available to invited accounts only. To join the whitelist test, contact the Flashduty sales team to request access; features and the UI may change during the beta.
+</Info>
+
+## Overview
+
+---
+
+**MCP** (Model Context Protocol) lets AI SRE agents connect to external tools and data sources. Each **MCP server** is a standardized endpoint that exposes a set of tools (functions) — for example, querying GitHub issues, sending Slack messages, reading Kubernetes resources, or retrieving metrics from an observability platform.
+
+Once you configure and enable an MCP server in the console, agents will **autonomously decide** when they need an external capability during incident investigation and call the corresponding tool directly — no manual data-shuttling required.
+
+<Warning>
+This page covers the **"MCP" section inside the AI SRE console** — that is, **third-party MCP servers that agents call** (you bring external tools in for agents to use).
+
+This is **different** from the [Flashduty MCP Server](/en/developer/mcp-server) in the developer docs: that is **Flashduty's own outbound MCP service**, which lets you connect **Flashduty's capabilities into third-party AI clients** (such as Claude or Cursor). One direction is "agents calling external services"; the other is "external clients calling Flashduty" — they are opposite flows, not the same thing.
+</Warning>
+
+## What Is MCP
+
+---
+
+**MCP** (Model Context Protocol) is an open protocol that describes in a uniform way "what tools a server exposes, what parameters each tool accepts, and what it returns." Think of it as the "USB port" of the AI agent world — any MCP-compliant server can be discovered and called plug-and-play by an agent, with no per-system adapter code required.
+
+In AI SRE, MCP extends an agent's capability from "built-in tools" to "any external system":
+
+- You add an MCP server in the console (declaring its endpoint, transport, and authentication).
+- At session start, enabled servers visible in the current scope become available to the agent.
+- When needed, the agent discovers the tools that server provides and calls them directly.
+
+<Tip>
+**MCP vs. Skills**: MCP provides **the ability to connect external tools**; a Skill provides **the methodology for orchestrating those tools to accomplish a class of tasks**. A Skill can declare which MCP server tool it needs inside `SKILL.md` using `mcp:server/tool` notation. See [Skills](/en/ai-sre/skills) for details.
+</Tip>
+
+## Adding an MCP Server
+
+---
+
+Go to **Plugins → MCP**, click **Add Server** in the top-right corner, and fill in the form to define an MCP server.
+
+### Basic Fields
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| Name | string | Yes | The server name, used as the identifier when agents call it (e.g., `sqlite-explorer` in `mcp:sqlite-explorer/query`). Must start with a letter; may only contain letters, digits, `-`, and `_`; length 1–255. **Case-insensitive and unique** within an account; cannot duplicate a built-in server name. |
+| Transport | enum | Yes | How the agent communicates with the server. See "Transport" below. |
+| Scope | Account / Team | Yes | The scope of this MCP server: **Account** (visible account-wide) or a specific **Team** (visible only to members of that team). See "Scope" below. |
+| Description | string | Yes | Describes what this server does, for identification in the list. |
+
+<Note>
+Each MCP server also has an **AI description**: after an agent first lists a server's tools, the system automatically generates a capability summary from the tool list and displays it in the console. This summary refreshes automatically as the tool set changes — no manual maintenance needed.
+</Note>
+
+### Transport
+
+| Transport | Use Case | Required Fields |
+| --- | --- | --- |
+| HTTP Streaming (recommended) | Remote MCP server accessed via an HTTP endpoint | URL (endpoint), optional Headers (JSON) |
+| SSE (standalone, legacy) | Legacy remote servers that only support Server-Sent Events | URL (endpoint), optional Headers (JSON) |
+| stdio (local command) | MCP server launched as a local subprocess on the machine where the Runner runs | Command, arguments (one per line), environment variables (JSON) |
+
+<Warning>
+**stdio is only available for BYOC environments** (Runner deployed on your own machine). Cloud Sandboxes cannot launch local subprocesses. If you are using a cloud environment, use **HTTP Streaming** or **SSE** instead, and ensure the MCP server is reachable from the Sandbox network. For differences between environments, see [Environments (BYOC)](/en/ai-sre/environments).
+</Warning>
+
+There is a default timeout for both connection and tool calls: 10 seconds for connection, 60 seconds for tool invocation.
+
+### Authentication
+
+MCP servers support three **authentication modes** that determine how credentials are provided to the server:
+
+<Tabs>
+  <Tab title="Shared (default)">
+    All users share the same credentials. Credentials are written directly into the server configuration — for HTTP/SSE transport, in the **Headers** (JSON) (e.g., `{ "Authorization": "Bearer xxx" }`); for stdio transport, in the **environment variables** (JSON) (e.g., `{ "API_KEY": "xxx" }`). Suitable for internal systems accessed with account-level service tokens.
+  </Tab>
+  <Tab title="Per-User API Key">
+    Each user provides their own key the **first time** they invoke a tool on this server. Keys are encrypted and stored at the account level, isolated per user.
+
+    Selecting this mode requires filling in a **Key Schema**:
+
+    | Field | Required | Description |
+    | --- | --- | --- |
+    | Header Name | Yes | The HTTP header into which the credential is injected in MCP requests (e.g., `X-Api-Key`) |
+    | Placeholder | No | Placeholder hint for the input field (e.g., `sk-...`) |
+    | Help Link | No | Link to documentation explaining how to obtain the key |
+
+    Suitable for third-party SaaS where each engineer uses their own API key (e.g., a personal GitHub token).
+  </Tab>
+  <Tab title="Per-User OAuth">
+    Each user authorizes individually via **OAuth 2.1**. An authorization window pops up automatically the first time a tool on this server is invoked. Server discovery and Dynamic Client Registration (DCR) are performed as needed; tokens are stored per user and refreshed automatically near expiry. Suitable for services that support OAuth.
+  </Tab>
+</Tabs>
+
+<Note>
+For "Per-User API Key" and "Per-User OAuth", if credentials are missing the agent's tool call is paused and a credential entry or authorization dialog is shown to the current user; execution resumes once credentials are supplied. In Shared mode, no credentials are requested from the user.
+</Note>
+
+## Management & Inspection
+
+---
+
+The MCP list displays each server's **name** (including its AI description; built-in servers are labeled with a "Built-in" badge), **scope** (account or team name), **transport**, an **enabled** toggle, and an **actions** column. The scope filter bar at the top lets you switch between All / Account / Team views.
+
+<AccordionGroup>
+  <Accordion title="Enable / Disable" icon="toggle-on">
+    Toggle the switch in the list. Only **enabled** servers are available to the agent; disabled servers are invisible to agents and cannot be called. Built-in servers are **always enabled** and their toggles cannot be changed.
+  </Accordion>
+  <Accordion title="Edit" icon="pen-to-square">
+    Click the edit button (or click the row) to open the form. You can modify the name, transport, description, endpoint/command, authentication mode, and scope. If you do not have edit permission, the form opens in **read-only** mode with an explanation; built-in servers are likewise read-only.
+  </Accordion>
+  <Accordion title="Delete" icon="trash">
+    Removes the MCP server from the current scope. **Agents that depend on it will no longer be able to access its tools**, and active sessions currently using it will fail. A confirmation prompt is shown before deletion.
+  </Accordion>
+</AccordionGroup>
+
+### Inspection: Viewing the Tools a Server Exposes
+
+Which tools an MCP server exposes are discovered **during a session** by agents on demand — not displayed statically in the console. This is because the same MCP server may have different reachability and tool sets across different environments (Runners); connection state and tool count are per-environment properties, not global ones.
+
+<Tip>
+To confirm which tools a given MCP server actually exposes in a particular environment, the most direct way is to ask the agent in **Chat** to list that server's tools — it will show the tools and how to use each one. See [Conversations](/en/ai-sre/sessions).
+</Tip>
+
+<Note>
+Every account comes pre-configured with a **built-in Flashduty MCP server** (labeled "Built-in" in the list, read-only, always enabled), which lets agents read Flashduty incidents, alerts, and other data directly. It is maintained by the platform and requires no configuration on your part.
+</Note>
+
+## Scope
+
+---
+
+MCP shares the same **two-level scope** model as other resources (Skills, Knowledge Packs, Agents, Environments), divided into account level and team level:
+
+| Scope | Visibility |
+| --- | --- |
+| Account-level | Visible to all members of the account |
+| Team-level | Visible only to members of that team |
+
+**Edit permissions**: Account owners or account admins can edit any MCP server; team members can edit team-level MCP servers that belong to **their team**. There is no creator-retains-rights exception. When you lack edit permission, the toggle and action buttons for that row appear as **read-only**.
+
+**Runtime visibility**: At session start, the agent is offered only **account-level** MCP servers and servers belonging to the **team bound to the current session**. Once the agent reads a team's knowledge during an investigation, that team's MCP servers and Skills are mounted into the session on demand. **The account is the only security boundary at runtime; the team is an ownership and editing tag only.**
+
+## Related Pages
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Skills" icon="wrench" href="/en/ai-sre/skills">
+    Skills call MCP-provided tools inside SKILL.md using the `mcp:server/tool` notation.
+  </Card>
+  <Card title="Agent" icon="satellite-dish" href="/en/ai-sre/agents">
+    Agents share the same authentication modes and scope model as MCP.
+  </Card>
+  <Card title="BYOC" icon="server" href="/en/ai-sre/environments">
+    stdio MCP servers must run on a BYOC Runner; learn the difference between cloud Sandbox and self-hosted environments.
+  </Card>
+  <Card title="Console" icon="comments" href="/en/ai-sre/sessions">
+    Observe how agents inspect and invoke MCP tools during a session.
+  </Card>
+  <Card title="Flashduty MCP Server (Developer)" icon="code" href="/en/developer/mcp-server">
+    The opposite direction: the official MCP service for connecting Flashduty into third-party AI clients.
+  </Card>
+</CardGroup>

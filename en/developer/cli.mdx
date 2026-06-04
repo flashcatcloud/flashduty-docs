@@ -82,7 +82,8 @@ All subcommands accept these flags:
 
 | Flag | Description |
 |------|-------------|
-| `--json` | Output as JSON for parsing with `jq` or similar tools |
+| `--output-format` | Output format: `table` (default), `json`, or `toon` (compact, token-efficient) |
+| `--json` | Alias for `--output-format json`; emit JSON for parsing with `jq` or similar tools |
 | `--no-trunc` | Disable column truncation in table output |
 | `--base-url` | Override the API endpoint (for private deployments) |
 
@@ -209,6 +210,62 @@ flashduty template functions [--type custom|sprig|all]        # List available t
 
 Supported channels: `dingtalk`, `dingtalk_app`, `feishu`, `feishu_app`, `wecom`, `wecom_app`, `slack`, `slack_app`, `telegram`, `teams_app`, `email`, `sms`, `zoom`.
 
+### session — AI SRE sessions
+
+Inspect AI SRE (and other Flashduty agent) sessions: `session list` lists the sessions visible to the caller, and `session export` streams a single session's full event log for offline analysis.
+
+```bash
+flashduty session list [flags]            # List agent sessions (sorted by updated_at desc, newest first)
+flashduty session export <session_id>     # Stream a single session's full events as NDJSON
+```
+
+Common flags for `session list`:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--app` | Which agent app's sessions to list | `ai-sre` |
+| `--scope` | Visibility: `all` (your own + your teams, default), `personal`, `team` | `all` |
+| `--status` | Archive status: `active` (default), `archived`, `all` | `active` |
+| `--team-id` | Keep only sessions for the given team ID | - |
+| `--since` | Keep only sessions updated within the window (client-side filter), e.g. `30d`, `24h`, `2026-05-01` | - |
+| `--limit` | Max sessions to fetch | `200` |
+| `--page` | Start page (1-based) | `1` |
+| `--format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope), `toon` (compact) | `jsonl` |
+
+<Note>
+The server endpoint `/safari/session/list` caps each page at 100 rows; when `--limit` exceeds that, the CLI paginates automatically — no manual paging required. The API has no time-window filter, so `--since` is applied client-side against each session's `updated_at` after fetching.
+</Note>
+
+`session export` streams session events as newline-delimited JSON (NDJSON) to stdout: the first line is always a `session_meta` envelope, and each subsequent line is one event (`user_message`, `llm_call`, `tool_call`, `subagent_dispatch`, `final_answer`, `agent_text`, `error`). Exports can be large, so redirect to a file instead of printing to the terminal:
+
+```bash
+flashduty session export <session_id> > session.ndjson
+flashduty session export <session_id> --include-subagents > session.ndjson
+```
+
+| Flag | Description |
+|------|-------------|
+| `--include-subagents` | After each `subagent_dispatch`, recursively inline that subagent's own full event stream |
+
+### Full command coverage
+
+Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI (~248 commands) via a spec-driven code generator, organized into top-level command groups by resource. In addition to the On-call domain (incident, change, channel, escalation-rule, field, statuspage, template, and more), it also covers:
+
+- **AI SRE (`safari`)**: a2a-agents, mcp-servers, sessions, skills, and more
+- **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
+- **On-call & scheduling**: calendar, schedule
+- **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
+- **Monitoring & RUM**: monit, rum, sourcemap
+- **Integrations & webhooks**: datasource (IM integrations), webhook (integrations)
+
+These generated leaf commands use a `resource-action` naming form (e.g. `flashduty safari a2a-agent-get`, `flashduty safari session-list`); their inputs and response fields map directly to the corresponding API. Explore them level by level with `flashduty <resource> --help`:
+
+```bash
+flashduty --help                 # List all top-level command groups
+flashduty safari --help          # AI SRE generated commands
+flashduty alert --help           # Alert-related generated commands
+```
+
 ### Utility commands
 
 ```bash
@@ -227,7 +284,7 @@ flashduty completion zsh > "${fpath[1]}/_flashduty"
 
 ## Output formats
 
-The CLI emits output in three shapes so it fits different consumers:
+Select the output shape with `--output-format` (`--json` is an alias for `--output-format json`) to fit different consumers:
 
 <Tabs>
 <Tab title="Table (default)">
@@ -241,12 +298,24 @@ Showing 2 results (page 1, total 2).
 ```
 </Tab>
 
-<Tab title="JSON (--json)">
+<Tab title="JSON (--json / --output-format json)">
 Machine-parseable, full payload, no truncation. Ideal for scripts and CI/CD pipelines.
 
 ```bash
 flashduty incident list --json | jq '.[].title'
 ```
+</Tab>
+
+<Tab title="TOON (--output-format toon)">
+TOON (Token-Oriented Object Notation) emits the full payload without truncation, but for homogeneous arrays it drops the per-row field names that JSON repeats — cutting token usage substantially on list output, which suits feeding to AI agents.
+
+```bash
+flashduty incident list --output-format toon
+```
+
+<Note>
+TOON cannot be parsed directly by `jq`; use `--json` when you need to pipe into `jq`.
+</Note>
 </Tab>
 
 <Tab title="Full table (--no-trunc)">

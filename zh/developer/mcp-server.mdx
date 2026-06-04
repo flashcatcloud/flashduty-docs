@@ -1,6 +1,298 @@
 ---
 title: MCP Server
-description: "通过 MCP 协议将 Flashduty API 接入 AI 工具，实现智能化故障管理"
-keywords: ["MCP", "Model Context Protocol", "AI", "Claude", "Cursor"]
-url: https://github.com/flashcatcloud/flashduty-mcp-server
+sidebarTitle: MCP Server
+description: "通过 MCP 协议将 Flashduty API 接入 AI 工具，在 Cursor、Claude 等客户端中实现智能化故障管理与自动化。"
+keywords: ["MCP", "Model Context Protocol", "AI", "Claude", "Cursor", "Flashduty", "故障管理"]
 ---
+
+Flashduty MCP Server 是一个 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) 服务端，将 Flashduty API 无缝接入支持 MCP 的 AI 工具（如 Cursor、Claude Desktop）。借助它，您可以让大模型直接查询故障、确认与关闭故障、检索协作空间与成员、校验通知模板，把故障管理与自动化能力嵌入 AI 工作流。
+
+<Info>
+  Flashduty MCP Server 底层基于 [go-flashduty SDK](/zh/developer/go-sdk) 实现，所有工具均是对 Flashduty 开放 API 的薄封装。
+</Info>
+
+## 适用场景
+
+---
+
+<CardGroup cols={2}>
+  <Card title="自动化故障流程" icon="robot">
+    将 Flashduty 的故障创建、确认、关闭等操作交给 AI 编排，串联到您的运维工作流中。
+  </Card>
+  <Card title="数据提取与分析" icon="gauge-high">
+    让大模型按时间范围、状态、严重程度等条件检索故障、告警与变更记录并归纳分析。
+  </Card>
+  <Card title="构建 AI 运维工具" icon="code">
+    在自研 AI 应用中调用 Flashduty 能力，构建智能值守、故障复盘等场景。
+  </Card>
+  <Card title="模板校验与调试" icon="wrench">
+    在编辑通知模板时，实时校验渲染结果、查询可用变量与函数。
+  </Card>
+</CardGroup>
+
+## 部署方式
+
+---
+
+Flashduty MCP Server 提供三种部署方式，您可以根据 MCP 客户端的能力与运行环境选择。
+
+<Tabs>
+  <Tab title="远程服务（推荐）">
+    无需本地安装，直接连接官方远程实例 `https://mcp.flashcat.cloud/mcp`，使用 `Authorization: Bearer` 携带您的 APP Key 进行认证。这是最快的接入方式。
+
+    以 Cursor 为例，在 MCP 配置中添加：
+
+    ```json
+    {
+      "mcpServers": {
+        "flashduty": {
+          "url": "https://mcp.flashcat.cloud/mcp",
+          "headers": {
+            "Authorization": "Bearer <your_flashduty_app_key>"
+          }
+        }
+      }
+    }
+    ```
+
+    <Note>
+      远程服务仅支持 Streamable HTTP 传输（`POST /mcp`）。请参考您所用 MCP 客户端的文档，确认远程 MCP 服务的配置语法与位置。
+    </Note>
+  </Tab>
+  <Tab title="Docker">
+    在本地通过 Docker 运行，使用 `FLASHDUTY_APP_KEY` 环境变量认证，采用 stdio 传输。
+
+    ```json
+    {
+      "mcpServers": {
+        "flashduty": {
+          "command": "docker",
+          "args": [
+            "run", "-i", "--rm",
+            "-e", "FLASHDUTY_APP_KEY",
+            "registry.flashcat.cloud/public/flashduty-mcp-server"
+          ],
+          "env": {
+            "FLASHDUTY_APP_KEY": "your_flashduty_app_key"
+          }
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="源码构建">
+    从 [GitHub Releases](https://github.com/flashcatcloud/flashduty-mcp-server/releases) 下载预编译版本，或在 `cmd/flashduty-mcp-server` 目录下用 `go build` 自行构建。APP Key 既可通过环境变量传入，也可通过命令行参数传入。
+
+    **通过环境变量：**
+
+    ```json
+    {
+      "mcpServers": {
+        "flashduty": {
+          "command": "/path/to/flashduty-mcp-server",
+          "args": ["stdio"],
+          "env": {
+            "FLASHDUTY_APP_KEY": "your_app_key_here"
+          }
+        }
+      }
+    }
+    ```
+
+    **通过命令行参数：**
+
+    ```json
+    {
+      "mcpServers": {
+        "flashduty": {
+          "command": "/path/to/flashduty-mcp-server",
+          "args": ["stdio", "--app-key", "your_app_key_here"]
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## 认证与传输
+
+---
+
+| 项目 | 说明 |
+| --- | --- |
+| 认证（本地） | 通过 `FLASHDUTY_APP_KEY` 环境变量或 `--app-key` 命令行参数提供 Flashduty APP Key。 |
+| 认证（远程） | 通过请求头 `Authorization: Bearer <your_flashduty_app_key>` 提供 APP Key。 |
+| Streamable HTTP | `flashduty-mcp-server http`，端点为 `POST /mcp`。官方远程实例为 `https://mcp.flashcat.cloud/mcp`。 |
+| stdio | `flashduty-mcp-server stdio`，用于 Cursor、Claude Desktop 等本地客户端。 |
+
+<Warning>
+  服务端不支持旧版独立 SSE 传输（单独的 `GET /sse` 端点），对 `GET` 请求会返回 `405 Method Not Allowed`。Streamable HTTP 已按 MCP 规范在 `POST` 上完成流式响应，请直接使用它；若客户端仅支持旧版 SSE，请升级客户端或在本地改用 stdio。
+</Warning>
+
+## 配置项
+
+---
+
+Flashduty MCP Server 支持工具集裁剪、只读模式、输出格式等配置，以适配不同使用场景。本地部署可通过环境变量或命令行参数配置；远程服务可通过在 URL 上追加查询参数动态配置。
+
+### 环境变量
+
+<table>
+  <thead>
+    <tr><th>字段</th><th>默认值</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>`FLASHDUTY_APP_KEY`</td><td>-</td><td>Flashduty APP Key（必填）。</td></tr>
+    <tr><td>`FLASHDUTY_TOOLSETS`</td><td>全部工具集</td><td>以逗号分隔，指定启用的工具集（如 `incidents,users,channels`）；可用 `all` 启用全部。</td></tr>
+    <tr><td>`FLASHDUTY_READ_ONLY`</td><td>`false`</td><td>开启只读模式（`1` 或 `true`），仅保留查询类工具，禁止任何写操作。</td></tr>
+    <tr><td>`FLASHDUTY_OUTPUT_FORMAT`</td><td>`json`</td><td>工具结果输出格式，可选 `json` 或 `toon`。</td></tr>
+    <tr><td>`FLASHDUTY_BASE_URL`</td><td>`https://api.flashcat.cloud`</td><td>Flashduty API 的基础地址。</td></tr>
+  </tbody>
+</table>
+
+<Tip>
+  仅启用您需要的工具集，既能帮助大模型更准确地选择工具，也能减小上下文体积。开启只读模式可在数据分析、值守巡检等只需读取的场景下提升安全性。
+</Tip>
+
+**Docker 示例：**
+
+```bash
+docker run -i --rm \
+  -e FLASHDUTY_APP_KEY=<your-app-key> \
+  -e FLASHDUTY_TOOLSETS="incidents,users,channels" \
+  -e FLASHDUTY_READ_ONLY=1 \
+  registry.flashcat.cloud/public/flashduty-mcp-server
+```
+
+### 命令行参数
+
+从源码构建并直接运行二进制时，可使用以下命令行参数（优先级高于同名环境变量）：
+
+```bash
+./flashduty-mcp-server stdio \
+  --app-key your_app_key_here \
+  --toolsets incidents,users,channels \
+  --read-only \
+  --output-format toon
+```
+
+- `--app-key`：Flashduty APP Key（等价于 `FLASHDUTY_APP_KEY`）。
+- `--toolsets`：以逗号分隔的启用工具集列表。
+- `--read-only`：开启只读模式。
+- `--output-format`：工具结果输出格式（`json` 或 `toon`）。
+- `--base-url`：Flashduty API 基础地址。
+
+### 远程服务配置
+
+使用官方远程实例时，可在 URL 上追加查询参数动态配置工具集与只读模式：
+
+```json
+{
+  "mcpServers": {
+    "flashduty": {
+      "url": "https://mcp.flashcat.cloud/mcp?toolsets=incidents,users&read_only=true",
+      "headers": {
+        "Authorization": "Bearer <your_flashduty_app_key>"
+      }
+    }
+  }
+}
+```
+
+### 输出格式（TOON）
+
+服务端支持 [TOON（Token-Oriented Object Notation）](https://github.com/toon-format/toon)格式输出工具结果。对于字段统一的对象数组（如成员列表、故障列表），TOON 相比 JSON 可显著减少 30%-50% 的 Token 消耗，且现代大模型可直接解析。设置 `FLASHDUTY_OUTPUT_FORMAT=toon`（或 `--output-format toon`）即可启用。
+
+## 工具集与工具
+
+---
+
+服务端共提供 **8 个工具集、23 个工具**，默认全部启用。下表为各工具集概览：
+
+| 工具集 | 工具数 | 说明 |
+| --- | --- | --- |
+| `incidents` | 8 | 故障全生命周期管理与查询 |
+| `status_page` | 4 | 状态页（Status Page）管理 |
+| `templates` | 4 | 通知模板校验与变量、函数查询 |
+| `users` | 2 | 成员与团队查询 |
+| `channels` | 2 | 协作空间与升级规则查询 |
+| `alerts` | 1 | 告警原始事件查询 |
+| `changes` | 1 | 变更记录查询 |
+| `fields` | 1 | 自定义字段定义查询 |
+
+<Note>
+  工具集名称（`incidents`、`status_page` 等）为程序内部标识，配置时请保持英文原样。
+</Note>
+
+各工具集包含的工具如下：
+
+<AccordionGroup>
+  <Accordion title="incidents — 故障生命周期管理（8 个工具）" icon="bug">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `query_incidents` | 按 ID、短号、时间范围、状态、严重程度、协作空间或自由文本查询故障，返回故障列表及每条故障的告警总数。 |
+    | `query_incident_timeline` | 查询故障的时间线事件（创建、分派、确认、解决、通知等），含发生时间与操作者 ID。 |
+    | `query_incident_alerts` | 查询故障关联的告警，返回标题、严重程度、状态与标签。 |
+    | `create_incident` | 创建故障，指定标题与严重程度，可选分派到协作空间或响应人。 |
+    | `update_incident` | 更新故障的内置字段（标题、描述、严重程度、影响、根因、解决方案）及自定义字段，仅更新提供的字段。 |
+    | `ack_incident` | 确认故障，将状态从「已触发」转为「处理中」。 |
+    | `close_incident` | 关闭（解决）故障，将状态转为「已关闭」。 |
+    | `list_similar_incidents` | 查找历史相似故障，用于复盘既往处置方案、识别重复问题。 |
+  </Accordion>
+  <Accordion title="status_page — 状态页管理（4 个工具）" icon="server">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `query_status_pages` | 查询状态页及其完整配置。 |
+    | `list_status_changes` | 列出状态页上的变更事件。 |
+    | `create_status_incident` | 在状态页上创建事件。 |
+    | `create_change_timeline` | 为状态页变更追加时间线更新。 |
+  </Accordion>
+  <Accordion title="templates — 通知模板（4 个工具）" icon="book">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `get_preset_template` | 获取指定协作空间的预置（默认）通知模板，返回可作为定制起点的 Go 模板代码。 |
+    | `validate_template` | 校验通知模板：解析并以故障数据渲染，返回渲染预览、校验状态与大小信息，支持 mock 数据或基于 `incident_id` 的真实预览。 |
+    | `list_template_variables` | 列出通知模板中可用的所有变量，返回带类型、说明与示例值的变量结构。 |
+    | `list_template_functions` | 列出通知模板中可用的所有函数，含 Flashduty 自定义函数与常用 Sprig 函数。 |
+  </Accordion>
+  <Accordion title="users — 成员与团队查询（2 个工具）" icon="users">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `query_members` | 查询成员，支持可选过滤条件。 |
+    | `query_teams` | 查询团队及其成员详情。 |
+  </Accordion>
+  <Accordion title="channels — 协作空间与升级规则（2 个工具）" icon="comments">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `query_channels` | 查询协作空间，返回团队、创建者等增强数据。 |
+    | `query_escalation_rules` | 查询某个协作空间的升级规则。 |
+  </Accordion>
+  <Accordion title="alerts — 告警事件查询（1 个工具）" icon="gauge-high">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `query_alert_events` | 查询单条告警的原始事件，返回产生该告警的上游事件流（如每次 Prometheus 触发）。 |
+  </Accordion>
+  <Accordion title="changes — 变更记录查询（1 个工具）" icon="sliders">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `query_changes` | 按过滤条件查询变更记录。 |
+  </Accordion>
+  <Accordion title="fields — 自定义字段（1 个工具）" icon="key">
+    | 工具 | 说明 |
+    | --- | --- |
+    | `query_fields` | 查询自定义字段定义。 |
+  </Accordion>
+</AccordionGroup>
+
+## 相关资源
+
+---
+
+<CardGroup cols={2}>
+  <Card title="go-flashduty SDK" icon="code" href="/zh/developer/go-sdk">
+    MCP Server 底层依赖的 Go SDK，覆盖 Flashduty 全部开放 API。
+  </Card>
+  <Card title="GitHub 仓库" icon="rocket" href="https://github.com/flashcatcloud/flashduty-mcp-server">
+    查看源码、Release 与问题反馈。
+  </Card>
+</CardGroup>

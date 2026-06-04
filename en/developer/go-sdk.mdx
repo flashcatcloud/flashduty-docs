@@ -1,0 +1,357 @@
+---
+title: Go SDK
+sidebarTitle: Go SDK
+description: "go-flashduty is the official open-source Go SDK for Flashduty — a typed, strictly 1:1 wrapper over the Open API covering all 253 endpoints across 27 services."
+keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "client"]
+---
+
+## Overview
+
+---
+
+`go-flashduty` is the official open-source Go client for Flashduty, covering every REST endpoint of the Flashduty Open API. It follows the same design as [go-github](https://github.com/google/go-github) — service groups, typed requests and responses, a composable transport layer — and stays strictly 1:1 with the OpenAPI spec: each method maps to exactly one HTTP call, returns `(*T, *Response, error)`, and performs no implicit cross-endpoint aggregation or enrichment.
+
+The SDK currently covers **253 endpoints** across **27 services**, all generated from the Flashduty OpenAPI spec, covered by unit tests, and end-to-end verified against the live API.
+
+<Note>
+The SDK is deliberately "thin." Consumer-side logic such as short-ID resolution and cross-endpoint orchestration belongs in the caller (CLI / MCP), not stuffed into the SDK or shoehorned into an endpoint. This keeps the SDK strictly one-to-one with the API — predictable, generatable, and verifiable.
+</Note>
+
+The module path is `github.com/flashcatcloud/go-flashduty`, the package name is `flashduty`, and the source is open-sourced under Apache-2.0 at [flashcatcloud/go-flashduty](https://github.com/flashcatcloud/go-flashduty).
+
+<CardGroup cols={2}>
+  <Card title="Open API reference" icon="book" href="/en/openapi/introduction">
+    Request parameters and response fields for every endpoint.
+  </Card>
+  <Card title="Command-line tool" icon="code" href="/en/developer/cli">
+    The CLI for operating Flashduty directly from your terminal.
+  </Card>
+</CardGroup>
+
+## Installation
+
+---
+
+<Steps>
+<Step title="Requires Go 1.24+">
+Make sure your local Go toolchain is at least 1.24.
+</Step>
+<Step title="Get the dependency">
+```bash
+go get github.com/flashcatcloud/go-flashduty
+```
+</Step>
+<Step title="Import the package">
+```go
+import flashduty "github.com/flashcatcloud/go-flashduty"
+```
+</Step>
+</Steps>
+
+## Quick start
+
+---
+
+Here is a minimal runnable example: construct the client, list incidents in the "Triggered" state, and handle the returned triple `(data, *Response, error)`.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	flashduty "github.com/flashcatcloud/go-flashduty"
+)
+
+func main() {
+	client, err := flashduty.NewClient("YOUR_APP_KEY")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	list, resp, err := client.Incidents.List(context.Background(), &flashduty.ListIncidentsRequest{
+		Progress:    "Triggered",
+		ListOptions: flashduty.ListOptions{Limit: 20},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("request_id=%s total=%d has_next=%t\n", resp.RequestID, resp.Total, resp.HasNextPage)
+	for _, inc := range list.Items {
+		fmt.Printf("[%s] %s\n", inc.IncidentSeverity, inc.Title)
+	}
+}
+```
+
+Every call returns three values:
+
+| Return value | Type | Description |
+|--------|------|------|
+| data | `*T` | The endpoint's typed response body (e.g. `*ListIncidentsResponse`); `nil` on failure |
+| `*Response` | `*flashduty.Response` | Wraps `*http.Response` and carries envelope metadata such as `RequestID` and pagination |
+| `error` | `error` | `*ErrorResponse` on failure, `*RateLimitError` on 429 |
+
+<Tip>
+`app_key` is used for authentication, and the SDK injects it as a query parameter on every request automatically. Obtain the `app_key` from "Push integrations" or team configuration in the Flashduty console.
+</Tip>
+
+## Create a client
+
+---
+
+`NewClient` takes an `app_key` plus zero or more `Option`s. An empty `app_key` returns an error directly. The default Base URL is `https://api.flashcat.cloud`, the default HTTP timeout is 30 seconds, and the default User-Agent is `go-flashduty`.
+
+```go
+client, err := flashduty.NewClient("YOUR_APP_KEY",
+	flashduty.WithBaseURL("https://api.flashcat.cloud"),
+	flashduty.WithTimeout(10*time.Second),
+	flashduty.WithUserAgent("my-app/1.0"),
+	flashduty.WithHTTPClient(customHTTPClient),
+	flashduty.WithTransport(customRoundTripper),
+	flashduty.WithLogger(myLogger),
+	flashduty.WithRequestHeaders(staticHeaders),
+	flashduty.WithRequestHook(func(req *http.Request) { /* e.g. inject traceparent */ }),
+)
+```
+
+| Option | Description |
+|--------|------|
+| `WithBaseURL(raw string)` | Override the API base URL (default `https://api.flashcat.cloud`). Use it to point at your own gateway for private deployments; an invalid URL errors at the `NewClient` stage |
+| `WithTimeout(d time.Duration)` | Set the overall timeout of the underlying HTTP client |
+| `WithUserAgent(ua string)` | Set the `User-Agent` header carried on every request |
+| `WithHTTPClient(hc *http.Client)` | Replace the underlying `*http.Client`; ignored when `nil` |
+| `WithTransport(rt http.RoundTripper)` | Set a custom `http.RoundTripper`, the idiomatic hook for middleware such as retry, caching, tracing, and rate limiting; ignored when `nil` |
+| `WithLogger(l Logger)` | Set a custom logger; ignored when `nil` |
+| `WithRequestHeaders(h http.Header)` | Set static headers appended to every request, applied after the SDK's own headers (`Content-Type`, `Accept`, `User-Agent`) |
+| `WithRequestHook(hook func(*http.Request))` | Register a callback invoked before each request is sent, for injecting per-request headers (such as W3C `traceparent`) |
+
+<Info>
+**Private deployment**: point the client at your own Flashduty gateway address with `WithBaseURL` — everything else stays exactly the same.
+</Info>
+
+## Services and methods
+
+---
+
+Endpoints are grouped by service and hang off the client: the call convention is uniformly `client.<Service>.<Method>(ctx, req)`, returning `(*T, *Response, error)`. For example, `client.Incidents.List(ctx, req)` or `client.Sessions.Info(ctx, req)`.
+
+| Service field | Description |
+|----------|------|
+| `client.Incidents` | Incidents |
+| `client.Alerts` | Alerts |
+| `client.Channels` | Channels |
+| `client.Schedules` | Schedules |
+| `client.Calendars` | Calendars |
+| `client.StatusPages` | Status pages |
+| `client.Members` | Members |
+| `client.Teams` | Teams |
+| `client.RolesPermissions` | Roles and permissions |
+| `client.Account` | Account |
+| `client.AuditLogs` | Audit logs |
+| `client.AlertRules` | Alert rules |
+| `client.RuleSets` | Rule sets |
+| `client.AlertEnrichment` | Alert enrichment |
+| `client.DataSources` | Data sources |
+| `client.Integrations` | Integrations |
+| `client.ImIntegrations` | IM integrations |
+| `client.NotificationTemplates` | Notification templates |
+| `client.Changes` | Changes |
+| `client.Diagnostics` | Diagnostics |
+| `client.Analytics` | Analytics |
+| `client.A2aAgents` | A2A Agents |
+| `client.McpServers` | MCP Servers |
+| `client.Sessions` | AI SRE sessions |
+| `client.Skills` | Skills |
+| `client.Applications` | RUM applications |
+| `client.Issues` | RUM issues |
+| `client.Sourcemaps` | RUM sourcemaps |
+
+<Note>
+All identifiers, service field names, and method names match the generated code. For exactly which methods each service has and their request and response types, rely on `services_gen.go` and the per-service files, plus the [Open API reference](/en/openapi/introduction).
+</Note>
+
+## Response timestamps
+
+---
+
+Time fields in responses are no longer bare integers but self-describing `Timestamp` (Unix seconds) or `TimestampMilli` (milliseconds) types. They serialize to RFC3339 strings in the local time zone, so JSON, logs, and LLM-facing output are directly readable; the raw epoch is still one method call away.
+
+- **Serialization (outbound)**: a non-zero value serializes to a quoted RFC3339 string (`TimestampMilli` uses RFC3339Nano to preserve millisecond precision). A zero value serializes to the bare integer `0` — an "unset" sentinel rather than a 1970 date, and dropped by `json:",omitempty"`.
+- **Deserialization (inbound)**: it accepts both numeric epoch (the raw wire form) and RFC3339 strings (so a serialized value round-trips losslessly), and also accepts `null` (→ 0).
+
+```go
+inc := list.Items[0]
+
+fmt.Println(inc.StartTime)            // 2026-05-30T14:37:11+08:00  (String / fmt / TOON)
+b, _ := json.Marshal(inc.StartTime)   // "2026-05-30T14:37:11+08:00"
+epoch := inc.StartTime.Unix()         // 1779514631  (raw wire value)
+t := inc.StartTime.Time()             // time.Time
+zero := inc.StartTime.IsZero()        // whether it's the unset sentinel
+```
+
+| Method | Returns | Description |
+|------|------|------|
+| `.Time()` | `time.Time` | Get the standard time value |
+| `.Unix()` | `int64` | Get the raw wire value (`Timestamp` in seconds, `TimestampMilli` in milliseconds) |
+| `.IsZero()` | `bool` | Whether it's the unset sentinel (0) |
+| `.String()` | `string` | RFC3339 in the local time zone; `"0"` when unset |
+
+<Warning>
+**Request-side time fields are still `int64`** — the API expects a numeric epoch on the wire. Note: most endpoints take **seconds**, but RUM and webhook history-related endpoints take **milliseconds**.
+</Warning>
+
+## Pagination
+
+---
+
+All list endpoints share `ListOptions`, which you embed in the request struct. Zero values are omitted and never override server defaults (the backend defaults to `p=1`, `limit=20`).
+
+| Field | Type | Wire field | Description |
+|------|------|-----------|------|
+| `Page` | `int` | `p` | 1-based page number |
+| `Limit` | `int` | `limit` | Max items returned per page |
+| `SearchAfterCtx` | `string` | `search_after_ctx` | The opaque cursor echoed by the previous page, for deep pagination; pass it back to fetch the next page |
+
+On the response side, `*Response` carries `Total`, `HasNextPage`, and `SearchAfterCtx`. We recommend walking page by page with the search-after cursor:
+
+```go
+req := &flashduty.ListIncidentsRequest{
+	ListOptions: flashduty.ListOptions{Limit: 50},
+}
+
+// Cap iterations to avoid an infinite loop if the cursor misbehaves.
+for page := 0; page < 100; page++ {
+	list, resp, err := client.Incidents.List(ctx, req)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, inc := range list.Items {
+		fmt.Printf("%s: %s\n", inc.IncidentID, inc.Title)
+	}
+
+	if !resp.HasNextPage {
+		break
+	}
+	// Advance the cursor to fetch the next page.
+	req.ListOptions.SearchAfterCtx = list.SearchAfterCtx
+}
+```
+
+## Error handling
+
+---
+
+Any unsuccessful call — whether the envelope carries an error or the HTTP status is non-2xx — returns `*ErrorResponse`. It has `Code`, `Message`, and `RequestID` fields; when troubleshooting, give `RequestID` to the support team to pinpoint the request.
+
+When the API returns 429, the error is promoted to `*RateLimitError`: it embeds `*ErrorResponse` (so `errors.As` for `*ErrorResponse` still matches) and additionally carries a `RetryAfter` hint.
+
+```go
+_, _, err := client.Incidents.Info(ctx, &flashduty.IncidentInfoRequest{
+	IncidentID: "does-not-exist",
+})
+
+var rl *flashduty.RateLimitError
+if errors.As(err, &rl) {
+	// Back off as the server requests, then retry.
+	time.Sleep(rl.RetryAfter)
+	return
+}
+
+var apiErr *flashduty.ErrorResponse
+if errors.As(err, &apiErr) {
+	fmt.Printf("api error code=%s request_id=%s\n", apiErr.Code, apiErr.RequestID)
+	return
+}
+```
+
+Typed predicate functions save string comparisons and see through wrapped errors (using `errors.As` internally):
+
+| Helper | Description |
+|----------|------|
+| `IsNotFound(err)` | Whether the resource does not exist |
+| `IsRateLimited(err)` | Whether requests are too frequent (429) |
+| `IsUnauthorized(err)` | Whether unauthorized |
+| `IsAccessDenied(err)` | Whether access is denied |
+| `IsInvalidParameter(err)` | Whether a parameter is invalid |
+| `ErrorCodeOf(err)` | Extract the error code, returning an `ErrorCode` constant (such as `ErrorCodeAccessDenied`, `ErrorCodeUnauthorized`) |
+
+```go
+switch flashduty.ErrorCodeOf(err) {
+case flashduty.ErrorCodeAccessDenied, flashduty.ErrorCodeUnauthorized:
+	// Handle auth failure
+}
+```
+
+## Retry
+
+---
+
+The core client has **no** built-in automatic retry. Compose the optional `retry` subpackage through the transport layer — a safe-by-default retrying `http.RoundTripper`.
+
+Features of `github.com/flashcatcloud/go-flashduty/retry`:
+
+- **Retry conditions**: HTTP 429, any 5xx (status ≥ 500), and transport errors. Other 4xx and all 2xx/3xx return immediately.
+- **Backoff policy**: deterministic exponential backoff (`MinWait * 2^attempt`, capped at `MaxWait` each time); no random jitter. When a valid integer `Retry-After` header is present, it takes precedence (also capped at `MaxWait`).
+- **Safe replay**: retries only when the request body is replayable (`req.Body` is nil or `req.GetBody` is non-nil), rebuilds the body on a clone of the request for each retry, and never mutates the caller's original `*http.Request`. All requests the SDK builds set `GetBody`, so POST bodies are safely replayable.
+- **Respects cancellation**: if the request context is canceled while waiting out a backoff, it returns the context error immediately.
+
+```go
+import "github.com/flashcatcloud/go-flashduty/retry"
+
+client, err := flashduty.NewClient("YOUR_APP_KEY",
+	flashduty.WithTransport(retry.New(
+		retry.WithMaxRetries(3),
+	)),
+)
+```
+
+| Option | Default | Description |
+|--------|--------|------|
+| `retry.WithMaxRetries(n int)` | `3` | Max retries after the first attempt; a negative number disables retry |
+| `retry.WithMinWait(d time.Duration)` | `500ms` | Base backoff duration (the wait before the first retry) |
+| `retry.WithMaxWait(d time.Duration)` | `30s` | Upper bound on a single backoff wait |
+| `retry.WithBase(base http.RoundTripper)` | `http.DefaultTransport` | The underlying RoundTripper that actually performs the request |
+
+<Tip>
+The `retry` subpackage is pure `net/http` and deliberately does not import the parent `flashduty` package, so it never introduces a circular dependency. Both `retry.New()` and `&retry.Transport{}` (zero value) work out of the box.
+</Tip>
+
+## Streaming export
+
+---
+
+`client.Sessions.Export` exports the full event transcript of an AI SRE session, returning an `io.ReadCloser` (an NDJSON stream, `application/x-ndjson`) rather than a JSON envelope. The first line is always a `session_meta` envelope, and each subsequent line is a session event; when `req.IncludeSubagents` is true, each `subagent_dispatch` line is followed by the subagent's own full event stream.
+
+Because the response body can be large, read it line by line and write directly to a file — do **not** buffer the whole transcript into memory. The returned `io.ReadCloser` is the live HTTP response body, held by the caller and which you **must** `Close` (a `defer` close is correct). Pair it with `NewExportScanner` to scan line by line and `DecodeExportLine` to decode a line into an `ExportLine`:
+
+```go
+rc, _, err := client.Sessions.Export(ctx, &flashduty.SessionExportRequest{
+	SessionID:        "your-session-id",
+	IncludeSubagents: true,
+})
+if err != nil {
+	return err
+}
+defer rc.Close()
+
+sc := flashduty.NewExportScanner(rc)
+for sc.Scan() {
+	line, err := flashduty.DecodeExportLine(sc.Bytes())
+	if err != nil {
+		return err
+	}
+	// Use line.Type to distinguish: session_meta, user_message, llm_call,
+	// tool_call, subagent_dispatch, final_answer, agent_text, error
+	_ = line
+	// You can also write sc.Bytes() to a file as-is.
+}
+return sc.Err()
+```
+
+<Note>
+`NewExportScanner` is configured with a per-line buffer large enough to hold the wider event lines in a transcript (such as tool output or LLM calls), free of the default 64KB token limit. On any non-2xx status, the response body is still a regular JSON error envelope — `Export` reads and closes it and returns a typed error (`*ErrorResponse`, or `*RateLimitError` on 429), with the `io.ReadCloser` being `nil`, consistent with the other generated endpoints.
+</Note>

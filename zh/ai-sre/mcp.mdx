@@ -1,0 +1,170 @@
+---
+title: MCP（外部工具连接）
+description: 通过 Model Context Protocol（MCP），让 AI SRE Agent 接入外部工具与数据源——如 GitHub、Slack、Kubernetes、可观测平台等。在控制台中配置 MCP 服务器、认证方式与作用域，Agent 即可在会话中按需调用其工具。
+keywords: ["AI SRE", "MCP", "Model Context Protocol", "MCP 服务器", "外部工具", "OAuth", "API Key", "Agent"]
+sidebarTitle: MCP
+---
+
+<Info>
+  **内测功能**：AI SRE 目前处于内测阶段，仅对受邀账户开放。如需参与白名单测试，请联系 Flashduty 商务团队申请开通；内测期间功能与界面可能调整。
+</Info>
+
+## 概述
+
+---
+
+**MCP**（Model Context Protocol）让 AI SRE Agent 接入外部工具与数据源。每台 **MCP 服务器**是一个对外暴露一组工具（函数）的标准化端点，例如查询 GitHub Issue、向 Slack 发消息、读取 Kubernetes 资源、检索可观测平台指标等。
+
+在控制台里配置好 MCP 服务器并启用后，Agent 会在排障故障时**自主判断**何时需要外部能力，并直接调用对应工具，无需您手工搬运数据。
+
+<Warning>
+本页讲的是 **AI SRE 控制台里的「MCP」**——也就是**Agent 去调用的第三方 MCP 服务器**（您把外部工具接进来给 Agent 用）。
+
+这与开发者文档里的 [Flashduty MCP Server](/zh/developer/mcp-server) 是**两回事**：后者是 **Flashduty 自家对外暴露的 MCP 服务**，供您把 **Flashduty 的能力接入到第三方 AI 客户端**（如 Claude、Cursor）。一个是「Agent 调外部」，一个是「外部调 Flashduty」，方向相反，不要混淆。
+</Warning>
+
+## 什么是 MCP
+
+---
+
+**MCP**（Model Context Protocol，模型上下文协议）是一套开放协议，用统一的方式描述「一台服务器对外提供哪些工具、每个工具接收什么参数、返回什么结果」。它就像 AI Agent 世界的「USB 接口」——任何遵循 MCP 的服务器都能被 Agent 即插即用地发现和调用，无需为每个外部系统单独写适配代码。
+
+在 AI SRE 中，MCP 的作用是把 Agent 的能力从「内置工具」扩展到「任意外部系统」：
+
+- 您在控制台添加一台 MCP 服务器（声明它的端点、传输方式与认证）。
+- 会话开始时，已启用且在当前作用域可见的服务器即对 Agent 可见、可调用。
+- Agent 在需要时即可发现该服务器提供的工具并直接调用。
+
+<Tip>
+**MCP 与 Skill 的区别**：MCP 提供**外部工具的接入能力**，Skill 提供**如何编排这些工具完成一类任务的方法论**。Skill 可以在 `SKILL.md` 中以 `mcp:服务名/工具名` 的形式声明它需要哪台 MCP 服务器的哪个工具。详见 [Skill](/zh/ai-sre/skills)。
+</Tip>
+
+## 添加 MCP 服务器
+
+---
+
+进入 **插件 → MCP** 页面，点击右上角的 **添加服务器**，在弹出的表单中定义一台 MCP 服务器。
+
+### 基础字段
+
+| 字段 | 类型 | 是否必填 | 说明 |
+| --- | --- | --- | --- |
+| 名称 | string | 是 | 服务器名，会作为 Agent 调用时的标识（如 `mcp:sqlite-explorer/query` 中的 `sqlite-explorer`）。须以字母开头，仅含字母、数字、`-`、`_`，长度 1–255。同一账户内**不区分大小写、不可重名**，也不能与内置服务器同名 |
+| 传输方式 | 枚举 | 是 | Agent 与服务器通信的方式，见下文「传输方式」 |
+| 范围 | 账户 / 团队 | 是 | 该 MCP 服务器的作用域：**账户**（账户内全局可见）或某个**团队**（仅该团队成员可见）。详见下文「作用域」 |
+| 描述 | string | 是 | 描述此服务器的功能，便于在列表中识别 |
+
+<Note>
+MCP 服务器还有一个 **AI 描述**：Agent 首次列出某服务器的工具后，系统会根据工具清单自动生成一段服务器能力摘要并展示在列表中。它随工具集变化自动刷新，无需您手工维护。
+</Note>
+
+### 传输方式
+
+| 传输方式 | 适用场景 | 需填字段 |
+| --- | --- | --- |
+| HTTP 流式（推荐） | 远程 MCP 服务器，通过 HTTP 端点连接 | URL（端点）、可选 Headers（JSON） |
+| SSE（独立、旧版） | 仅支持 Server-Sent Events 的旧版远程服务器 | URL（端点）、可选 Headers（JSON） |
+| stdio（本地命令） | 在 Runner 所在机器上以本地子进程方式启动的 MCP 服务器 | 命令、参数（每行一个）、环境变量（JSON） |
+
+<Warning>
+**stdio 仅适用于 BYOC 运行环境**（Runner 部署在您自己的机器上）。云 Sandbox 不能启动本地子进程；如果使用云端运行环境，请改用 **HTTP 流式**或 **SSE**，并确保该 MCP 服务器对 Sandbox 网络可达。运行环境的区别见 [运行环境（BYOC）](/zh/ai-sre/environments)。
+</Warning>
+
+连接与调用各有一个默认超时：连接超时默认 10 秒，工具调用超时默认 60 秒。
+
+### 认证
+
+MCP 服务器支持三种**认证模式**，决定凭证如何提供给服务器：
+
+<Tabs>
+  <Tab title="共享（默认）">
+    所有用户共用同一组凭证。凭证直接写在服务器配置里——HTTP/SSE 传输写进 **Headers**（JSON）（如 `{ "Authorization": "Bearer xxx" }`），stdio 传输写进**环境变量**（JSON）（如 `{ "API_KEY": "xxx" }`）。适合用账户级服务令牌访问的内部系统。
+  </Tab>
+  <Tab title="每用户密钥（API Key）">
+    每个用户在**首次调用**该服务器的工具时单独提供自己的密钥，密钥加密存储在账户级别、按用户隔离。
+
+    选择此模式需要填写**密钥 Schema**：
+
+    | 字段 | 是否必填 | 说明 |
+    | --- | --- | --- |
+    | Header 名称 | 是 | 凭证注入到 MCP 请求的哪个 HTTP header（如 `X-Api-Key`） |
+    | 占位符 | 否 | 输入框占位提示（如 `sk-...`） |
+    | 帮助链接 | 否 | 指向「如何获取该密钥」的文档链接 |
+
+    适合每个工程师使用各自 API Key 的第三方 SaaS（如个人 GitHub Token）。
+  </Tab>
+  <Tab title="每用户 OAuth">
+    用户通过 **OAuth 2.1** 流程各自授权；首次调用该服务器的工具时自动弹出授权窗口，授权服务器的发现（discovery）与动态客户端注册（DCR）按需进行，令牌按用户存储并在临近过期时自动刷新。适合支持 OAuth 的服务。
+  </Tab>
+</Tabs>
+
+<Note>
+对于「每用户密钥」与「每用户 OAuth」，缺失凭证时 Agent 的工具调用会暂停，并向当前用户弹出凭证录入 / 授权界面；补齐后继续。共享模式下不会向用户索取凭证。
+</Note>
+
+## 管理与检视
+
+---
+
+MCP 列表以表格展示每台服务器的**名称**（含 AI 描述、内置服务器以「内置」角标标识）、**范围**（账户或团队名）、**传输方式**、**启用**开关与**操作**列。顶部的范围筛选条（ScopeBar）可在「全部 / 账户 / 团队」之间切换查看。
+
+<AccordionGroup>
+  <Accordion title="启用 / 禁用" icon="toggle-on">
+    用列表里的开关切换。只有**已启用**的服务器才会对 Agent 可见；禁用后 Agent 看不到、也无法调用它。内置服务器**始终启用**，开关不可操作。
+  </Accordion>
+  <Accordion title="编辑" icon="pen-to-square">
+    点击编辑按钮（或直接点击行）打开表单，可修改名称、传输方式、描述、端点 / 命令、认证模式与作用域。无编辑权限时表单以**只读**模式打开，并提示原因；内置服务器同样只读。
+  </Accordion>
+  <Accordion title="删除" icon="trash">
+    将 MCP 服务器从当前范围移除。**依赖它的 Agent 将无法再访问其工具**，正在使用它的活跃会话会随之失败。此操作有确认提示。
+  </Accordion>
+</AccordionGroup>
+
+### 检视：查看某台服务器暴露的工具
+
+一台 MCP 服务器暴露哪些工具，是在**会话中**由 Agent 按需发现的，而不是在控制台静态展示——因为同一台 MCP 服务器在不同运行环境（Runner）下可达性与工具集可能不同，连接状态与工具数量是「按运行环境」而非「全局」的属性。
+
+<Tip>
+想确认某台 MCP 服务器在某个运行环境下实际暴露了哪些工具，最直接的方式是在**对话**里让 Agent 列出该服务器的工具，它会把工具清单与每个工具的用法列出来。详见 [对话](/zh/ai-sre/sessions)。
+</Tip>
+
+<Note>
+账户预置了一台**内置 Flashduty MCP 服务器**（在列表中以「内置」角标标识、只读、始终启用），让 Agent 可以直接读取 Flashduty 的故障、告警等数据。它由平台维护，无需您配置。
+</Note>
+
+## 作用域
+
+---
+
+MCP 与其他资源（Skill、知识库、Agent、运行环境）共用同一套**两级作用域**模型，分为账户级与团队级：
+
+| 作用域 | 可见性 |
+| --- | --- |
+| 账户级 | 账户内所有成员可见 |
+| 团队级 | 仅该团队成员可见 |
+
+**编辑权限**：账户所有者或账户管理员可编辑任意 MCP 服务器；团队成员可编辑**本团队**的团队级 MCP 服务器；没有「创建者保留权限」这一例外。无编辑权限时，列表对应行的开关与操作显示为**只读**。
+
+**运行时可见性**：会话开始时，只会向 Agent 提供**账户级** MCP 服务器，以及**当前会话所绑定团队**的服务器。当 Agent 在排障中读取另一个团队的知识后，该团队的 MCP 服务器与 Skill 才会被按需挂载进当前会话。**账户是运行时唯一的安全边界，团队只是归属与编辑的标记。**
+
+## 相关页面
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Skill" icon="wrench" href="/zh/ai-sre/skills">
+    Skill 在 SKILL.md 中以 `mcp:服务名/工具名` 调用 MCP 提供的工具。
+  </Card>
+  <Card title="Agent" icon="satellite-dish" href="/zh/ai-sre/agents">
+    Agent 与 MCP 共用同一套认证模式与作用域模型。
+  </Card>
+  <Card title="BYOC" icon="server" href="/zh/ai-sre/environments">
+    stdio MCP 服务器需运行在 BYOC Runner 上；了解云 Sandbox 与自托管运行环境的区别。
+  </Card>
+  <Card title="控制台" icon="comments" href="/zh/ai-sre/sessions">
+    在会话中观察 Agent 如何检视并调用 MCP 工具。
+  </Card>
+  <Card title="Flashduty MCP Server（开发者）" icon="code" href="/zh/developer/mcp-server">
+    方向相反的能力：把 Flashduty 接入第三方 AI 客户端的官方 MCP 服务。
+  </Card>
+</CardGroup>
