@@ -1,0 +1,137 @@
+---
+title: "安装 monit-agent"
+description: "下载、启动并以系统服务方式运行 monit-agent，接入第一台主机监控对象"
+keywords: ["monit-agent", "Agent 安装", "Edge 地址", "系统服务", "监控对象"]
+---
+
+本文说明如何准备接入信息、安装 `monit-agent`，并将 Agent 启动为系统服务。
+
+## 接入前准备
+
+开始安装前，请准备以下信息：
+
+| 准备项 | 说明 |
+|---|---|
+| Agent 安装包下载地址 | `https://static.flashcat.cloud/monitagent/monitagent-v0.0.11-linux-amd64.tar.gz`。如果是 arm 的 CPU，则把 `amd64` 换成 `arm64`。 |
+| Edge 地址 | 例如 `ws://edge.example.com:6868` 或 `wss://edge.example.com:6868`。Edge 版本需要 `>= v0.44.0`，Edge 列表和安装方法[点此查看](https://console.flashcat.cloud/monit/engine/list)。 |
+| 本机对象地址 | 建议使用当前主机的固定内网 IP 或 DNS 名称，例如 `10.0.1.12`。不指定的话默认会使用本机默认路由对应的 IP。 |
+| 数据库/中间件只读账号 | 如需诊断 MySQL、Redis、PostgreSQL、MongoDB、Kafka、Elasticsearch 等服务，需提前准备对应的只读账号和凭据。 |
+
+Edge 地址必须带协议前缀，支持 `ws://`、`wss://`、`http://`、`https://`。生产环境建议使用 `wss://`，内网亦可使用 `ws://` 和 `http://`。
+
+## 安装 monit-agent
+
+以下步骤以 Linux 为例。
+
+```bash
+sudo mkdir -p /opt/monit-agent
+cd /opt/monit-agent
+
+sudo curl -sfLO "https://static.flashcat.cloud/monitagent/monitagent-v0.0.11-linux-amd64.tar.gz"
+sudo tar -xzf monitagent-v0.0.11-linux-amd64.tar.gz --strip-components=1
+sudo chmod +x ./monitagent
+```
+
+解压后目录中应包含：
+
+```text
+/opt/monit-agent/monitagent
+/opt/monit-agent/agent.yaml
+```
+
+确认二进制可执行：
+
+```bash
+/opt/monit-agent/monitagent --version
+```
+
+## 前台启动
+
+最小启动命令如下：
+
+```bash
+sudo /opt/monit-agent/monitagent \
+  --agent.edgeAddresses="ws://<EDGE_HOST>:<EDGE_PORT>" \
+  --agent.configFile="/opt/monit-agent/agent.yaml" \
+  --agent.hostLocator="<THIS_HOST_LOCATOR>"
+```
+
+| 参数 | 是否必填 | 说明 |
+|---|---|---|
+| `--agent.edgeAddresses` | 是 | Agent 要连接的 Edge 地址。 |
+| `--agent.configFile` | 建议填写 | Agent 配置文件路径。 |
+| `--agent.hostLocator` | 否 | 页面上显示的当前主机对象地址。 |
+
+如果不填写 `--agent.hostLocator`，Agent 会自动选择本机默认出口 IP 作为主机对象地址。建议和你的监控系统中的机器标识保持一致。
+
+## 配置多个 Edge 地址
+
+如果有多个 Edge 地址，用英文逗号分隔：
+
+```bash
+sudo /opt/monit-agent/monitagent \
+  --agent.edgeAddresses="ws://edge-a.example.com:6872,ws://edge-b.example.com:6872" \
+  --agent.configFile="/opt/monit-agent/agent.yaml" \
+  --agent.hostLocator="10.0.1.12"
+```
+
+Agent 会自动重连。当前连接不可用时，会继续尝试其它 Edge 地址。
+
+## 使用 Basic Auth 或 TLS
+
+如果 Edge 开启了 Basic Auth，需要同时传入用户名和密码：
+
+```bash
+sudo /opt/monit-agent/monitagent \
+  --agent.edgeAddresses="wss://edge.example.com:6872" \
+  --agent.edgeBasicUser="<EDGE_BASIC_USER>" \
+  --agent.edgeBasicPass="<EDGE_BASIC_PASSWORD>" \
+  --agent.configFile="/opt/monit-agent/agent.yaml" \
+  --agent.hostLocator="10.0.1.12"
+```
+
+如果 Edge 使用私有 CA 证书，可以指定 CA 文件：
+
+```bash
+sudo /opt/monit-agent/monitagent \
+  --agent.edgeAddresses="wss://edge.example.com:6872" \
+  --agent.edgeTLSCAFile="/etc/monit-agent/edge-ca.pem" \
+  --agent.configFile="/opt/monit-agent/agent.yaml" \
+  --agent.hostLocator="10.0.1.12"
+```
+
+配置 TLS 参数时，Edge 地址应使用 `wss://` 或 `https://`。
+
+## 安装为系统服务
+
+确认前台启动正常后，建议安装为系统服务：
+
+```bash
+cd /opt/monit-agent
+
+sudo ./monitagent \
+  --agent.edgeAddresses="ws://<EDGE_HOST>:<EDGE_PORT>" \
+  --agent.configFile="/opt/monit-agent/agent.yaml" \
+  --agent.hostLocator="<THIS_HOST_LOCATOR>" \
+  --audit.dir="/var/log/monit-agent/audit" \
+  --install
+
+sudo ./monitagent --start
+sudo ./monitagent --status
+```
+
+查看日志：
+
+```bash
+sudo journalctl -u monitagent -f
+```
+
+如果修改了 Edge 地址、Basic Auth、TLS 参数或 `hostLocator`，需要重启 Agent。修改 `agent.yaml` 后，可以发送 SIGHUP 让 Agent 重新加载配置：
+
+```bash
+sudo systemctl kill -s HUP monitagent
+```
+
+## 下一步
+
+Agent 启动成功后，通常几秒内可以在监控对象页面看到一个主机对象。接下来可以继续阅读[配置监控对象](/zh/monitors/targets/configure-targets)，在 `agent.yaml` 中添加数据库和中间件对象。

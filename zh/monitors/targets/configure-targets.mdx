@@ -1,0 +1,513 @@
+---
+title: "配置监控对象"
+description: "配置 agent.yaml，接入主机、MySQL、Redis、PostgreSQL、MongoDB、Kafka 和 Elasticsearch 等监控对象"
+keywords: ["agent.yaml", "MySQL", "Redis", "PostgreSQL", "MongoDB", "Kafka", "Elasticsearch", "监控对象"]
+---
+
+安装包内会包含一个默认 `agent.yaml`。如果只需要接入主机对象，可以先保持默认配置，确认页面出现主机后再继续增加 MySQL、Redis、PostgreSQL 等对象。
+
+## 基础配置示例
+
+下面是一个适合首次接入的基础配置：
+
+```yaml
+locator_mappings: {}
+
+host:
+  sample_interval: 2s
+
+  disk:
+    extra_exclude_mount_points: []
+    extra_exclude_fs_types: []
+    statfs_timeout: 1s
+    top_n: 20
+
+  disk_io:
+    top_n: 5
+    skip_loop: true
+    skip_partitions: true
+    dm_exclude_patterns:
+      - "docker-*"
+      - "*-pool"
+
+  network_io:
+    top_n: 5
+    exclude_patterns:
+      - "lo"
+      - "veth*"
+      - "docker*"
+      - "br-*"
+      - "virbr*"
+      - "flannel*"
+      - "cali*"
+      - "cni*"
+      - "tun*"
+      - "tap*"
+
+  top_processes:
+    default_top_n: 10
+    max_top_n: 50
+    include_cmdline: false
+
+  shell_exec:
+    enabled: true
+    pipeline_max_segments: 3
+    default_max_lines: 200
+    cat_max_file_size: 20971520
+    user_allow_list: []
+
+tool_policy:
+  disabled_tools: []
+
+mysql: []
+redis: []
+redis_sentinel: []
+postgres: []
+mongodb: []
+mongodb_mongos: []
+kafka: []
+elasticsearch: []
+
+script_tool:
+  enabled: false
+  dir: /opt/monit-agent/tools.d
+```
+
+## locator_mappings
+
+`locator_mappings` 用于设置页面上展示的对象地址，通常用于 MySQL 等非主机对象。
+
+例如 Agent 连接 MySQL 时使用的是本机地址：
+
+```yaml
+mysql:
+  - targets:
+      - "localhost:3306"
+```
+
+但你希望页面上显示为更容易识别的数据库地址，可以这样配置：
+
+```yaml
+locator_mappings:
+  "localhost:3306": "db-prod-01.example.com:3306"
+```
+
+建议：
+
+- MySQL、Redis、PostgreSQL、MongoDB 等服务如果配置了 `localhost` 或 `127.0.0.1`，建议同时配置 `locator_mappings`。
+- 映射后的地址应使用稳定 IP、DNS 或 `host:port`。
+- 不建议把映射后的地址写成 `localhost`、`127.0.0.1`。
+- Kafka 和 Elasticsearch 是集群级对象，不使用 `locator_mappings`。Kafka 使用 `cluster_name` 作为标识；Elasticsearch 自动从集群获取 `cluster_name`。
+
+## host
+
+`host` 用于调整主机诊断时的采集行为。首次接入一般不需要修改。
+
+| 配置 | 建议值 | 说明 |
+|---|---|---|
+| `sample_interval` | `2s` 或 `3s` | CPU、磁盘 I/O、网络 I/O 等指标的采样时间。 |
+| `disk.statfs_timeout` | `1s` | 避免异常挂载点拖慢诊断。 |
+| `disk.top_n` | `20` | 控制返回的文件系统数量。 |
+| `disk_io.top_n` | `5` | 控制返回的磁盘 I/O 设备数量。 |
+| `network_io.top_n` | `5` | 控制返回的网卡数量。 |
+| `top_processes.default_top_n` | `10` | 默认返回的进程数量。 |
+| `top_processes.include_cmdline` | `false` | 默认不返回完整命令行，避免泄露密码、token 或连接串。 |
+
+## shell_exec
+
+`shell_exec` 控制 Agent 是否允许执行受控的主机诊断命令。
+
+```yaml
+host:
+  shell_exec:
+    enabled: true
+    pipeline_max_segments: 3
+    default_max_lines: 200
+    cat_max_file_size: 20971520
+    user_allow_list: []
+```
+
+建议：
+
+- 需要 AI-SRE 做主机现场诊断时，保持 `enabled: true`。只有受控的 shell 才能执行，放心开启。
+- 如果发现有些 shell 被内置护栏阻断，可以手工添加到 `user_allow_list`。只有确认命令安全、只读、不会输出敏感信息时才添加。
+
+如需紧急禁用某个工具，可以使用 `tool_policy.disabled_tools`：
+
+```yaml
+tool_policy:
+  disabled_tools:
+    - shell.exec
+```
+
+## MySQL
+
+如果需要诊断 MySQL，在 `mysql:` 中添加实例配置。推荐使用只读 MySQL 账号，并优先把密码放到独立凭据文件中：
+
+```yaml
+locator_mappings:
+  "localhost:3306": "db-prod-01.example.com:3306"
+
+mysql:
+  - targets:
+      - "localhost:3306"
+    connection:
+      charset: utf8mb4
+      timeout: 3s
+      max_open_conns: 8
+      max_idle_conns: 2
+    overview:
+      sample_interval: 2s
+    query:
+      enabled: false
+      default_max_rows: 200
+      statement_timeout: 6s
+    credential:
+      source: env_file
+      path: /etc/monit-agent/mysql.env
+      username_key: MYSQL_USER
+      password_key: MYSQL_PASSWORD
+```
+
+凭据文件示例：
+
+```text
+MYSQL_USER=monit_ro
+MYSQL_PASSWORD=<MYSQL_PASSWORD>
+```
+
+| 配置 | 建议 |
+|---|---|
+| `targets` | 显式写 `host:port`。如果使用 `localhost:3306`，建议配置 `locator_mappings`。 |
+| `connection.timeout` | 建议 `3s`。 |
+| `overview.sample_interval` | 建议 `2s` 或 `3s`。 |
+| `query.enabled` | 默认 `false`。只有确认账号是只读账号时再开启。 |
+| `query.default_max_rows` | 建议 `200`。 |
+| `query.statement_timeout` | 建议 `6s`。 |
+| `credential.source` | 建议使用 `env_file`。 |
+
+如果启用 `mysql.query`，请务必使用只读账号。这个工具用于执行受控只读 SQL，不适合使用高权限账号。
+
+## Redis
+
+如果需要诊断 Redis，在 `redis:` 中添加实例配置。
+
+| 工具 | 功能 | 默认状态 |
+|---|---|---|
+| `redis.overview` | 采集两次 INFO ALL 并计算 diff，返回内存、命中率、连接数、QPS 等关键指标。 | 启用 |
+| `redis.slowlog` | 读取 SLOWLOG GET 返回近期慢查询记录。 | 启用 |
+| `redis.command` | 执行受控只读 Redis 命令（白名单策略）。 | 默认禁用 |
+
+```yaml
+locator_mappings:
+  "localhost:6379": "redis-prod-01.example.com:6379"
+
+redis:
+  - targets:
+      - "localhost:6379"
+    connection:
+      database: 0
+      timeout: 3s
+    overview:
+      sample_interval: 2s
+    command:
+      enabled: false
+    credential:
+      source: env_file
+      path: /etc/monit-agent/redis.env
+      password_key: REDIS_PASSWORD
+```
+
+```text
+REDIS_PASSWORD=<REDIS_PASSWORD>
+```
+
+| 配置 | 建议 |
+|---|---|
+| `targets` | 显式写 `host:port`。如果使用 `localhost:6379`，建议配置 `locator_mappings`。 |
+| `connection.database` | 默认 `0`。 |
+| `connection.timeout` | 建议 `3s`。 |
+| `overview.sample_interval` | 建议 `2s` 或 `3s`，范围 `[1s, 5s]`。 |
+| `command.enabled` | 默认 `false`。只有确认需要执行受控只读命令时再开启。 |
+| `credential` | Redis < 6 只有密码认证，`username` 可不配置。Redis 6+ ACL 模式下可同时配置 `username_key` 和 `password_key`。 |
+
+`redis.command` 启用后，只允许执行白名单内的只读命令，如 `CONFIG GET`、`CLIENT LIST`、`MEMORY USAGE`、`LATENCY HISTORY` 等。写命令会被拒绝。
+
+## Redis Sentinel
+
+如果需要诊断 Redis Sentinel 高可用集群，在 `redis_sentinel:` 中添加 Sentinel 进程配置。注意 `redis_sentinel` 与 `redis` 是两种不同的对象类型，分别指向 Sentinel 进程和 Redis 数据节点。
+
+| 工具 | 功能 | 默认状态 |
+|---|---|---|
+| `redis_sentinel.overview` | 获取 Sentinel 的 INFO 信息，包含已监控的 master 列表和状态。 | 启用 |
+| `redis_sentinel.topology` | 获取所有被监控 master 的拓扑信息，包括 master、replica、sentinel 节点列表。 | 启用 |
+
+```yaml
+redis_sentinel:
+  - targets:
+      - "10.1.2.10:26379"
+      - "10.1.2.11:26379"
+      - "10.1.2.12:26379"
+    connection:
+      timeout: 3s
+    credential:
+      source: env
+      password_key: REDIS_SENTINEL_PASSWORD
+```
+
+| 配置 | 建议 |
+|---|---|
+| `targets` | Sentinel 默认端口 `26379`，显式写 `host:port`。 |
+| `connection.timeout` | 建议 `3s`。 |
+| `credential` | Sentinel 通常只有密码认证（无 username）。如果 Sentinel 未启用 `requirepass`，可以不配置 credential。 |
+
+## PostgreSQL
+
+如果需要诊断 PostgreSQL，在 `postgres:` 中添加实例配置。
+
+| 工具 | 功能 | 默认状态 |
+|---|---|---|
+| `postgres.overview` | 采集两次关键统计视图并计算 diff，返回连接数、事务吞吐、缓存命中率、复制延迟等关键指标。 | 启用 |
+| `postgres.activity` | 查询 `pg_stat_activity` 返回当前活跃和长时间运行的查询。 | 启用 |
+| `postgres.query` | 执行受控只读 SQL 查询（SELECT/WITH/EXPLAIN 等）。 | 默认禁用 |
+
+```yaml
+locator_mappings:
+  "localhost:5432": "pg-prod-01.example.com:5432"
+
+postgres:
+  - targets:
+      - "localhost:5432"
+    connection:
+      database: postgres
+      sslmode: prefer
+      timeout: 3s
+      max_open_conns: 8
+      max_idle_conns: 2
+    overview:
+      sample_interval: 2s
+    activity:
+      min_query_age: 1s
+      top_n: 10
+    query:
+      enabled: false
+      default_max_rows: 200
+      statement_timeout: 6s
+    credential:
+      source: env_file
+      path: /etc/monit-agent/postgres.env
+      username_key: POSTGRES_USER
+      password_key: POSTGRES_PASSWORD
+```
+
+```text
+POSTGRES_USER=monit_ro
+POSTGRES_PASSWORD=<POSTGRES_PASSWORD>
+```
+
+| 配置 | 建议 |
+|---|---|
+| `targets` | 显式写 `host:port`。默认端口 `5432`，如果使用 `localhost:5432`，建议配置 `locator_mappings`。 |
+| `connection.database` | 必填。PostgreSQL 没有隐式默认数据库，常见值为 `postgres`。 |
+| `connection.sslmode` | 默认 `prefer`。可选值：`disable`、`allow`、`prefer`、`require`、`verify-ca`、`verify-full`。 |
+| `connection.timeout` | 建议 `3s`。 |
+| `overview.sample_interval` | 建议 `2s` 或 `3s`，范围 `[1s, 5s]`。 |
+| `activity.min_query_age` | 只返回运行时间超过此阈值的查询，默认 `1s`。 |
+| `activity.top_n` | 默认 `5`，上限 `20`。 |
+| `query.enabled` | 默认 `false`。只有确认账号是只读账号时再开启。 |
+| `query.default_max_rows` | 建议 `200`，上限 `10000`。 |
+| `query.statement_timeout` | 建议 `6s`，范围 `[1s, 7s]`。 |
+| `credential` | 必填。PostgreSQL 线协议不支持匿名连接。建议授予 `pg_monitor` 角色以获得完整的 `pg_stat_activity` 可见性。 |
+
+如果启用 `postgres.query`，请务必使用只读账号。
+
+## MongoDB
+
+如果需要诊断 MongoDB（mongod / 副本集成员），在 `mongodb:` 中添加实例配置。仅接受 `host:port` 格式，不支持 `mongodb+srv://` URI。
+
+| 工具 | 功能 | 默认状态 |
+|---|---|---|
+| `mongodb.overview` | 采集两次 serverStatus 并计算 diff，返回连接数、操作吞吐、内存、复制延迟等关键指标。 | 启用 |
+| `mongodb.current_ops` | 查询 currentOp 返回当前运行中的操作。 | 启用 |
+| `mongodb.command` | 执行受控只读管理命令（白名单策略）。 | 默认禁用 |
+
+```yaml
+mongodb:
+  - targets:
+      - "10.1.3.10:27017"
+      - "10.1.3.11:27017"
+    connection:
+      database: admin
+      timeout: 3s
+      # tls:
+      #   enabled: true
+      #   ca_file: /etc/ssl/mongo-ca.pem
+      #   allow_invalid_hostnames: false
+    overview:
+      sample_interval: 3s
+    command:
+      enabled: false
+    credential:
+      source: env_file
+      path: /etc/monit-agent/mongodb.env
+      username_key: MONGODB_USER
+      password_key: MONGODB_PASSWORD
+```
+
+```text
+MONGODB_USER=monit_ro
+MONGODB_PASSWORD=<MONGODB_PASSWORD>
+```
+
+| 配置 | 建议 |
+|---|---|
+| `targets` | 显式写 `host:port`。每条 target 对应一个独立的 mongod 实例。 |
+| `connection.database` | SCRAM 认证的 authSource 库，默认 `admin`。 |
+| `connection.timeout` | 建议 `3s`。 |
+| `connection.tls` | 可选。开启 TLS 时设置 `enabled: true`，如使用自签 CA 指定 `ca_file`。 |
+| `overview.sample_interval` | 建议 `3s`，范围 `[1s, 5s]`。 |
+| `command.enabled` | 默认 `false`。只有确认需要执行受控只读管理命令时再开启。 |
+| `credential` | 如果 MongoDB 未启用认证（开发/测试环境），可以不配置 credential。生产环境建议配置只读账号。 |
+
+`mongodb.command` 启用后，只允许执行白名单内的只读管理命令，如 `dbStats`、`collStats`、`serverStatus`、`replSetGetStatus` 等。写命令和危险命令会被拒绝。
+
+## MongoDB Mongos
+
+如果需要诊断 MongoDB 分片集群的路由进程（mongos），在 `mongodb_mongos:` 中添加配置。`mongodb_mongos` 与 `mongodb` 是两种不同的对象类型，分别指向 mongos 路由进程和 mongod 数据节点。
+
+| 工具 | 功能 | 默认状态 |
+|---|---|---|
+| `mongodb_mongos.overview` | 采集 mongos 的 serverStatus，返回连接数、操作吞吐等关键指标。 | 启用 |
+| `mongodb_mongos.shard_distribution` | 获取分片集群的拓扑和数据分布信息。 | 启用 |
+
+```yaml
+mongodb_mongos:
+  - targets:
+      - "10.1.3.20:27017"
+      - "10.1.3.21:27017"
+    connection:
+      database: admin
+      timeout: 3s
+    overview:
+      sample_interval: 3s
+    credential:
+      source: env_file
+      path: /etc/monit-agent/mongodb.env
+      username_key: MONGODB_USER
+      password_key: MONGODB_PASSWORD
+```
+
+| 配置 | 建议 |
+|---|---|
+| `targets` | mongos 路由进程地址，显式写 `host:port`。 |
+| `connection.database` | SCRAM 认证的 authSource 库，默认 `admin`。 |
+| `connection.timeout` | 建议 `3s`。 |
+| `overview.sample_interval` | 建议 `3s`，范围 `[1s, 5s]`。 |
+| `credential` | 通常与 `mongodb` 共用凭据文件。 |
+
+## Kafka
+
+如果需要诊断 Kafka 集群，在 `kafka:` 中添加配置。Kafka 是集群级对象，一个 `kafka` 配置块代表一个逻辑集群，`bootstrap_brokers` 是连接入口点而非独立的 target。
+
+| 工具 | 功能 | 默认状态 |
+|---|---|---|
+| `kafka.overview` | 获取集群 Broker 列表、Controller 信息和 Topic 概览。 | 启用 |
+| `kafka.consumer_lag` | 获取消费者组的消费延迟情况。 | 启用 |
+| `kafka.topic_detail` | 获取指定 Topic 的分区详情（副本分布、ISR、Leader 等）。 | 启用 |
+| `kafka.group_detail` | 获取指定消费者组的详情（成员分配、偏移量等）。 | 启用 |
+
+```yaml
+kafka:
+  - cluster_name: "prod-order-kafka"
+    bootstrap_brokers:
+      - "10.1.4.10:9092"
+      - "10.1.4.11:9092"
+      - "10.1.4.12:9092"
+    connection:
+      timeout: 5s
+      sasl_mechanism: none
+      # tls:
+      #   enabled: true
+      #   ca_file: /etc/ssl/kafka-ca.pem
+      #   cert_file: /etc/ssl/kafka-client.pem
+      #   key_file: /etc/ssl/kafka-client-key.pem
+    consumer_lag:
+      default_top_n: 10
+    # credential:
+    #   source: env_file
+    #   path: /etc/monit-agent/kafka.env
+    #   username_key: KAFKA_USER
+    #   password_key: KAFKA_PASSWORD
+```
+
+| 配置 | 建议 |
+|---|---|
+| `cluster_name` | 必填。作为页面上的对象标识，只允许小写字母、数字、`.`、`-`、`_`，长度 2-128。 |
+| `bootstrap_brokers` | 至少一个 Broker 地址，格式 `host:port`。建议填写多个以提高可用性。 |
+| `connection.timeout` | 建议 `5s`。 |
+| `connection.sasl_mechanism` | 默认 `none`。支持 `none`、`plain`、`scram-sha-256`、`scram-sha-512`。 |
+| `connection.tls` | 可选。启用 TLS 时设置 `enabled: true`，mTLS 需同时配置 `cert_file` 和 `key_file`。 |
+| `consumer_lag.default_top_n` | 默认 `10`，范围 `[1, 50]`。 |
+| `credential` | 仅当 `sasl_mechanism` 不为 `none` 时需要配置。 |
+
+Kafka 不使用 `locator_mappings`，`cluster_name` 直接作为页面上的对象地址。
+
+## Elasticsearch
+
+如果需要诊断 Elasticsearch 集群，在 `elasticsearch:` 中添加配置。Elasticsearch 是集群级对象，`cluster_name` 不需要在配置中声明，Agent 会在启动或 reload 时自动通过 `GET _cluster/health` 获取。如果集群不可达，该 target 会被跳过，直到下次 reload。
+
+| 工具 | 功能 | 默认状态 |
+|---|---|---|
+| `elasticsearch.overview` | 获取集群健康状态、节点数量、索引数量、分片分配等集群全局信息。 | 启用 |
+| `elasticsearch.node_stats` | 获取各节点的 JVM、OS、线程池、transport 等详细指标。 | 启用 |
+| `elasticsearch.index_stats` | 获取索引级别的文档数、存储大小、读写吞吐等统计信息。 | 启用 |
+| `elasticsearch.shard_allocation` | 获取集群分片分配详情，诊断分片不均衡或未分配分片。 | 启用 |
+| `elasticsearch.cat` | 执行受控的 `_cat` API 查询（白名单策略）。 | 默认禁用 |
+
+```yaml
+elasticsearch:
+  - targets:
+      - "https://es-node1.example.com:9200"
+      - "https://es-node2.example.com:9200"
+      - "https://es-node3.example.com:9200"
+    connection:
+      timeout: 5s
+      tls:
+        ca_cert: /etc/ssl/es-ca.pem
+        skip_verify: false
+    cat:
+      enabled: false
+    credential:
+      source: env_file
+      path: /etc/monit-agent/elasticsearch.env
+      username_key: ES_USER
+      password_key: ES_PASSWORD
+```
+
+```text
+ES_USER=monit_ro
+ES_PASSWORD=<ES_PASSWORD>
+```
+
+| 配置 | 建议 |
+|---|---|
+| `targets` | 完整 URL 格式，必须包含协议和端口，如 `https://es-node:9200`。支持 `http://` 和 `https://`。建议填写多个节点以提高可用性。 |
+| `connection.timeout` | 建议 `5s`。 |
+| `connection.tls.ca_cert` | 使用自签 CA 时指定 CA 证书路径，必须是绝对路径。 |
+| `connection.tls.skip_verify` | 默认 `false`。不建议在生产环境开启。 |
+| `cat.enabled` | 默认 `false`。开启后允许执行白名单内的 `_cat` API 查询。 |
+| `credential` | 如果 Elasticsearch 未启用安全认证，可以不配置。生产环境建议配置只读账号。 |
+
+Elasticsearch 不使用 `locator_mappings`，`cluster_name` 自动从集群获取作为页面上的对象地址。
+
+## script_tool
+
+`script_tool` 用于接入自定义脚本工具。普通用户可以保持关闭：
+
+```yaml
+script_tool:
+  enabled: false
+  dir: /opt/monit-agent/tools.d
+```
+
+只有在需要扩展自定义诊断能力，并且确认脚本来源和目录权限可控时，才建议开启。
