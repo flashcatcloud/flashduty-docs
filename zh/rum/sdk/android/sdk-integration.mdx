@@ -110,13 +110,52 @@ SDK 将自动开始收集以下数据：
 <Step title="配置网络追踪（可选）">
   配置网络拦截器以追踪 HTTP 请求和响应：
 
+### 开启分布式 Trace 追踪
+
+<Info>
+  如果只需要在 RUM 中查看请求 URL、方法、状态码和错误，配置 OkHttp
+  拦截器即可。若需要把移动端请求与后端 Trace 链路关联，还需要额外引入
+  Trace 模块并启用 `Trace.enable(...)`。
+</Info>
+
 **添加 OkHttp 依赖：**
 
 ```groovy build.gradle
 dependencies {
     implementation "cloud.flashcat:dd-sdk-android-okhttp:<latest-version>"
+    implementation "cloud.flashcat:dd-sdk-android-trace:<latest-version>"
 }
 ```
+
+`dd-sdk-android-okhttp` 负责把 OkHttp 请求记录为 RUM Resource；`dd-sdk-android-trace` 负责开启 Trace 功能、创建 span 并向一方域名请求注入 trace header。依赖使用 `cloud.flashcat`，代码 import 仍使用 `com.datadog.android.*` 包名。
+
+**启用 Trace 功能：**
+
+在 `Datadog.initialize(...)` 之后、发起网络请求之前启用 Trace：
+
+```kotlin Application.kt
+import com.datadog.android.trace.DatadogTracing
+import com.datadog.android.trace.GlobalDatadogTracer
+import com.datadog.android.trace.Trace
+import com.datadog.android.trace.TraceConfiguration
+
+Trace.enable(
+    TraceConfiguration.Builder().build()
+)
+
+GlobalDatadogTracer.registerIfAbsent(
+    DatadogTracing.newTracerBuilder()
+        .withServiceName("<SERVICE_NAME>")
+        .build()
+)
+```
+
+<Note>
+  `Trace.enable(...)` 是开启 Trace feature 的必要步骤。`GlobalDatadogTracer`
+  用于注册全局 tracer，方便 OkHttp、协程和手动 span 复用同一套 trace
+  配置；如果只使用 OkHttp 自动追踪，SDK 会在未注册全局 tracer
+  时创建本地 tracer，但建议显式注册以便指定 `service` 名称并降低排查成本。
+</Note>
 
 **配置拦截器：**
 
@@ -142,13 +181,14 @@ val okHttpClient = OkHttpClient.Builder()
 
 <Check>
   使用 `DatadogInterceptor` 后，OkHttpClient
-  处理的每个请求都会被自动记录为资源，相关信息（URL、方法、状态码、错误）会自动填充。
+  处理的一方域名请求会被自动记录为 RUM Resource，并在命中采样时注入
+  `x-datadog-*` 和 `traceparent` / `tracestate` 等 trace header，用于关联后端 Trace。
 </Check>
 
 <Note>
-  - 只有在视图处于活动状态时发起的网络请求才会被追踪 -
-  要追踪应用在后台时的请求，请参阅 [追踪后台事件](#追踪后台事件) -
-  如果使用多个拦截器，请将 `DatadogInterceptor` 添加为第一个拦截器
+  - host 只填写域名，不要包含 `http://`、`https://` 或路径；配置 `example.com` 会匹配 `api.example.com` 等子域名
+  - 只有在视图处于活动状态时发起的网络请求才会被追踪；要追踪应用在后台时的请求，请参阅 [追踪后台事件](#追踪后台事件)
+  - 如果使用多个拦截器，请将 `DatadogInterceptor` 添加为第一个拦截器；后续拦截器重新构造 `Request` 时需保留已有 headers
 </Note>
 
 **追踪网络重定向或重试：**
