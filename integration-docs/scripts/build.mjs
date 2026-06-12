@@ -24,6 +24,13 @@ function stripFrontmatter(content) {
   return content.replace(/^---\n[\s\S]*?\n---\n?/, '');
 }
 
+function getFrontmatterAttr(content, name) {
+  const frontmatter = content.match(/^---\n([\s\S]*?)\n---/);
+  if (!frontmatter) return '';
+  const match = frontmatter[1].match(new RegExp(`^${name}:\\s*(?:"([^"]*)"|'([^']*)'|(.+?))\\s*$`, 'm'));
+  return (match?.[1] || match?.[2] || match?.[3] || '').trim();
+}
+
 function removeHiddenBlocks(content) {
   return content.replace(/<div\b(?=[^>]*\bclass(?:Name)?=["'][^"']*\bhide\b[^"']*["'])[^>]*>[\s\S]*?<\/div>/g, '\n');
 }
@@ -161,7 +168,29 @@ function normalizeMarkdownIndentation(content) {
   return result.join('\n');
 }
 
+function normalizeMarkdownTables(content) {
+  const lines = content.split('\n');
+  return lines.map((line, index) => {
+    const trimmed = line.trim();
+    const prev = lines[index - 1]?.trim() || '';
+    const next = lines[index + 1]?.trim() || '';
+    if (!trimmed.includes('|') || !prev.includes('|') || !next.includes('|')) return line;
+
+    const cells = trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|');
+    if (cells.length < 2 || !cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell))) return line;
+    return `| ${cells.map(() => '---').join(' | ')} |`;
+  }).join('\n');
+}
+
+function shouldPrefixDescription(output, description) {
+  if (!description) return false;
+  if (output.includes(description)) return false;
+  const first = output.split('\n').find((line) => line.trim()) || '';
+  return /^(#{1,6}\s|>|<details\b)/.test(first.trim());
+}
+
 function mdxToMarkdown(content) {
+  const description = getFrontmatterAttr(content, 'description');
   let output = removeHiddenBlocks(stripFrontmatter(content));
 
   output = convertDirectiveContainers(convertCallouts(convertCards(convertAccordions(output))))
@@ -191,7 +220,7 @@ function mdxToMarkdown(content) {
     .replace(/<\/(Note|Tip|Warning|Info|Check|Warning)>/g, '\n')
     .replace(/<\/?(Steps|Tabs|AccordionGroup|CardGroup|CodeGroup|Frame)\b[^>]*>/g, '\n');
 
-  output = normalizeMarkdownIndentation(output)
+  output = normalizeMarkdownTables(normalizeMarkdownIndentation(output))
     .replace(/<img\b([^>]*)>/g, (_tag, attrs) => {
       const alt = getAttr(attrs, 'alt') || 'image';
       const src = getAttr(attrs, 'src');
@@ -207,6 +236,10 @@ function mdxToMarkdown(content) {
     .replace(/^\s*---\s*$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+
+  if (shouldPrefixDescription(output, description)) {
+    output = `${description}\n\n${output}`;
+  }
 
   return `${output}\n`;
 }
