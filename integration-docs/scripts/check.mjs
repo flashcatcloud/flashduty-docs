@@ -64,8 +64,29 @@ function findIndentedMarkdown(value) {
       inFence = !inFence;
       return;
     }
-    if (!inFence && /^ {4,}\S/.test(line)) {
+    if (!inFence && /^ {4,}\S/.test(line) && !/^ {2,}([-*+] |\d+\. )/.test(line)) {
       offenders.push(index + 1);
+    }
+  });
+
+  return offenders;
+}
+
+function findFlattenedNestedLists(value) {
+  const lines = value.split('\n');
+  const offenders = [];
+  let inFence = false;
+
+  lines.forEach((line, index) => {
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence;
+      return;
+    }
+
+    const current = line.trim();
+    const next = lines[index + 1] || '';
+    if (!inFence && /^\d+\.\s+.*[：:]$/.test(current) && /^[-*+]\s+/.test(next)) {
+      offenders.push(index + 2);
     }
   });
 
@@ -139,6 +160,11 @@ function checkLocale(locale, docs) {
     const indentedLines = findIndentedMarkdown(value);
     if (indentedLines.length > 0) {
       errors.push(`${locale}: ${key} has indented Markdown outside code fences at lines ${indentedLines.slice(0, 5).join(', ')}`);
+    }
+
+    const flattenedListLines = findFlattenedNestedLists(value);
+    if (flattenedListLines.length > 0) {
+      errors.push(`${locale}: ${key} may have flattened nested lists at lines ${flattenedListLines.slice(0, 5).join(', ')}`);
     }
 
     const tableLines = findMarkdownTables(value);
