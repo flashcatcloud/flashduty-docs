@@ -53,10 +53,50 @@ function absoluteDocsUrl(url) {
   return url;
 }
 
+function stripComponentIndent(content) {
+  const lines = content.trim().split('\n');
+  const nonEmpty = lines.filter((line) => line.trim());
+  const minIndent = nonEmpty.reduce((min, line) => {
+    const indent = line.match(/^\s*/)[0].length;
+    return Math.min(min, indent);
+  }, Infinity);
+  const trimBy = Number.isFinite(minIndent) ? minIndent : 0;
+  return lines.map((line) => line.slice(Math.min(trimBy, line.match(/^\s*/)[0].length))).join('\n').trim();
+}
+
+function blockquoteContent(content) {
+  const body = stripComponentIndent(content);
+  if (!body) return '';
+  return body
+    .split('\n')
+    .map((line) => (line.trim() ? `> ${line}` : '>'))
+    .join('\n');
+}
+
 function convertAccordions(content) {
   return content.replace(/<Accordion\b([^>]*)>([\s\S]*?)<\/Accordion>/g, (_tag, attrs, body) => {
     const title = getAttr(attrs, 'title') || 'Details';
-    return `\n\n<details>\n<summary>${title}</summary>\n\n${body.trim()}\n\n</details>\n\n`;
+    return `\n\n<details>\n<summary>${title}</summary>\n\n${stripComponentIndent(body)}\n\n</details>\n\n`;
+  });
+}
+
+function convertCards(content) {
+  return content.replace(/<Card\b([^>]*)>([\s\S]*?)<\/Card>/g, (_tag, attrs, body) => {
+    const title = getAttr(attrs, 'title');
+    const href = absoluteDocsUrl(getAttr(attrs, 'href'));
+    const cardBody = stripComponentIndent(body);
+    const label = href && title ? `[${title}](${href})` : title;
+    if (!label && !cardBody) return '\n';
+    if (!label) return `\n${cardBody}\n`;
+    if (!cardBody) return `\n- ${label}\n`;
+    return `\n- ${label}\n${cardBody}\n`;
+  });
+}
+
+function convertCallouts(content) {
+  return content.replace(/<(Note|Tip|Warning|Info|Check)\b[^>]*>([\s\S]*?)<\/\1>/g, (_tag, _kind, body) => {
+    const quote = blockquoteContent(body);
+    return quote ? `\n\n${quote}\n\n` : '\n';
   });
 }
 
@@ -90,10 +130,41 @@ function convertDirectiveContainers(content) {
   return result.join('\n');
 }
 
+function normalizeMarkdownIndentation(content) {
+  const lines = content.split('\n');
+  const result = [];
+  let inFence = false;
+  let fenceIndent = '';
+
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    if (trimmed.startsWith('```')) {
+      if (!inFence) {
+        fenceIndent = line.match(/^\s*/)[0];
+        inFence = true;
+      } else {
+        inFence = false;
+        fenceIndent = '';
+      }
+      result.push(trimmed);
+      continue;
+    }
+
+    if (inFence) {
+      result.push(fenceIndent && line.startsWith(fenceIndent) ? line.slice(fenceIndent.length) : line);
+      continue;
+    }
+
+    result.push(line.match(/^ {2,}\S/) ? trimmed : line);
+  }
+
+  return result.join('\n');
+}
+
 function mdxToMarkdown(content) {
   let output = removeHiddenBlocks(stripFrontmatter(content));
 
-  output = convertDirectiveContainers(convertAccordions(output))
+  output = convertDirectiveContainers(convertCallouts(convertCards(convertAccordions(output))))
     .replace(/{\s*\/\*[\s\S]*?\*\/\s*}/g, '')
     .replace(/^\s*import\s+.*$/gm, '')
     .replace(/^\s*export\s+.*$/gm, '')
@@ -120,7 +191,7 @@ function mdxToMarkdown(content) {
     .replace(/<\/(Note|Tip|Warning|Info|Check|Warning)>/g, '\n')
     .replace(/<\/?(Steps|Tabs|AccordionGroup|CardGroup|CodeGroup|Frame)\b[^>]*>/g, '\n');
 
-  output = output
+  output = normalizeMarkdownIndentation(output)
     .replace(/<img\b([^>]*)>/g, (_tag, attrs) => {
       const alt = getAttr(attrs, 'alt') || 'image';
       const src = getAttr(attrs, 'src');
@@ -132,6 +203,7 @@ function mdxToMarkdown(content) {
     .replace(/<br\s*\/?>/g, '\n')
     .replace(/<\/?span\b[^>]*>/g, '')
     .replace(/<\/?div\b[^>]*>/g, '\n')
+    .replace(/^[ \t]+$/gm, '')
     .replace(/^\s*---\s*$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();

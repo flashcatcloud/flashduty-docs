@@ -38,6 +38,24 @@ async function loadDocs(locale) {
   return mod.default;
 }
 
+function findIndentedMarkdown(value) {
+  const lines = value.split('\n');
+  const offenders = [];
+  let inFence = false;
+
+  lines.forEach((line, index) => {
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence;
+      return;
+    }
+    if (!inFence && /^ {4,}\S/.test(line)) {
+      offenders.push(index + 1);
+    }
+  });
+
+  return offenders;
+}
+
 function checkLocale(locale, docs) {
   const errors = [];
   const keys = Object.keys(docs);
@@ -54,6 +72,10 @@ function checkLocale(locale, docs) {
       if (pattern.test(value)) {
         errors.push(`${locale}: ${key} still contains ${pattern}`);
       }
+    }
+    const indentedLines = findIndentedMarkdown(value);
+    if (indentedLines.length > 0) {
+      errors.push(`${locale}: ${key} has indented Markdown outside code fences at lines ${indentedLines.slice(0, 5).join(', ')}`);
     }
   }
   return errors;
