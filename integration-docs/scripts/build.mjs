@@ -7,6 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(packageRoot, '..');
 const distRoot = path.join(packageRoot, 'dist');
+const docsBaseUrl = 'https://docs.flashcat.cloud';
 
 function readSource(locale, entry) {
   const source = typeof entry === 'string' ? entry : entry[locale];
@@ -21,6 +22,10 @@ function readSource(locale, entry) {
 
 function stripFrontmatter(content) {
   return content.replace(/^---\n[\s\S]*?\n---\n?/, '');
+}
+
+function removeHiddenBlocks(content) {
+  return content.replace(/<div\b(?=[^>]*\bclass(?:Name)?=["'][^"']*\bhide\b[^"']*["'])[^>]*>[\s\S]*?<\/div>/g, '\n');
 }
 
 function getAttr(attrs, name) {
@@ -40,6 +45,19 @@ function directiveLabel(kind) {
     warning: 'Warning'
   };
   return labels[kind?.toLowerCase()] || kind || 'Note';
+}
+
+function absoluteDocsUrl(url) {
+  if (!url) return url;
+  if (/^\/(?:zh|en)\//.test(url)) return `${docsBaseUrl}${url}`;
+  return url;
+}
+
+function convertAccordions(content) {
+  return content.replace(/<Accordion\b([^>]*)>([\s\S]*?)<\/Accordion>/g, (_tag, attrs, body) => {
+    const title = getAttr(attrs, 'title') || 'Details';
+    return `\n\n<details>\n<summary>${title}</summary>\n\n${body.trim()}\n\n</details>\n\n`;
+  });
 }
 
 function convertDirectiveContainers(content) {
@@ -73,9 +91,9 @@ function convertDirectiveContainers(content) {
 }
 
 function mdxToMarkdown(content) {
-  let output = stripFrontmatter(content);
+  let output = removeHiddenBlocks(stripFrontmatter(content));
 
-  output = convertDirectiveContainers(output)
+  output = convertDirectiveContainers(convertAccordions(output))
     .replace(/{\s*\/\*[\s\S]*?\*\/\s*}/g, '')
     .replace(/^\s*import\s+.*$/gm, '')
     .replace(/^\s*export\s+.*$/gm, '')
@@ -83,18 +101,16 @@ function mdxToMarkdown(content) {
     .replace(/<\/Step>/g, '\n')
     .replace(/<Tab\b([^>]*)>/g, (_tag, attrs) => `\n\n### ${getAttr(attrs, 'title') || 'Tab'}\n\n`)
     .replace(/<\/Tab>/g, '\n')
-    .replace(/<Accordion\b([^>]*)>/g, (_tag, attrs) => `\n\n### ${getAttr(attrs, 'title') || 'Details'}\n\n`)
-    .replace(/<\/Accordion>/g, '\n')
     .replace(/<Card\b([^>]*)\/>/g, (_tag, attrs) => {
       const title = getAttr(attrs, 'title');
-      const href = getAttr(attrs, 'href');
+      const href = absoluteDocsUrl(getAttr(attrs, 'href'));
       if (title && href) return `\n- [${title}](${href})\n`;
       if (title) return `\n- ${title}\n`;
       return '\n';
     })
     .replace(/<Card\b([^>]*)>/g, (_tag, attrs) => {
       const title = getAttr(attrs, 'title');
-      const href = getAttr(attrs, 'href');
+      const href = absoluteDocsUrl(getAttr(attrs, 'href'));
       if (title && href) return `\n\n### [${title}](${href})\n\n`;
       if (title) return `\n\n### ${title}\n\n`;
       return '\n';
@@ -110,9 +126,13 @@ function mdxToMarkdown(content) {
       const src = getAttr(attrs, 'src');
       return src ? `![${alt}](${src})` : '';
     })
+    .replace(/]\(\/(zh|en)\//g, `](${docsBaseUrl}/$1/`)
+    .replace(/href=(["'])\/(zh|en)\//g, `href=$1${docsBaseUrl}/$2/`)
+    .replace(/api\.flascat\.cloud/g, 'api.flashcat.cloud')
     .replace(/<br\s*\/?>/g, '\n')
     .replace(/<\/?span\b[^>]*>/g, '')
     .replace(/<\/?div\b[^>]*>/g, '\n')
+    .replace(/^\s*---\s*$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
