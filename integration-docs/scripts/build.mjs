@@ -168,18 +168,74 @@ function normalizeMarkdownIndentation(content) {
   return result.join('\n');
 }
 
-function normalizeMarkdownTables(content) {
-  const lines = content.split('\n');
-  return lines.map((line, index) => {
-    const trimmed = line.trim();
-    const prev = lines[index - 1]?.trim() || '';
-    const next = lines[index + 1]?.trim() || '';
-    if (!trimmed.includes('|') || !prev.includes('|') || !next.includes('|')) return line;
+function splitTableRow(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+}
 
-    const cells = trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|');
-    if (cells.length < 2 || !cells.every((cell) => /^\s*:?-{3,}:?\s*$/.test(cell))) return line;
-    return `| ${cells.map(() => '---').join(' | ')} |`;
-  }).join('\n');
+function isTableSeparator(line) {
+  const cells = splitTableRow(line);
+  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function isTableRow(line) {
+  const trimmed = line.trim();
+  return trimmed.includes('|') && !trimmed.startsWith('```');
+}
+
+function escapeHtml(value) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderTableCell(value) {
+  return escapeHtml(value)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+}
+
+function markdownTableToHtml(rows) {
+  const header = splitTableRow(rows[0]);
+  const body = rows.slice(2).map(splitTableRow);
+  const headHtml = header.map((cell) => `<th>${renderTableCell(cell)}</th>`).join('');
+  const bodyHtml = body
+    .map((row) => `<tr>${row.map((cell) => `<td>${renderTableCell(cell)}</td>`).join('')}</tr>`)
+    .join('\n');
+  return `<table>\n<thead>\n<tr>${headHtml}</tr>\n</thead>\n<tbody>\n${bodyHtml}\n</tbody>\n</table>`;
+}
+
+function convertMarkdownTables(content) {
+  const lines = content.split('\n');
+  const result = [];
+  let inFence = false;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trimStart().startsWith('```')) {
+      inFence = !inFence;
+      result.push(line);
+      continue;
+    }
+
+    if (!inFence && isTableRow(line) && isTableSeparator(lines[index + 1] || '')) {
+      const tableRows = [line, lines[index + 1]];
+      index += 2;
+      while (index < lines.length && isTableRow(lines[index]) && lines[index].trim()) {
+        tableRows.push(lines[index]);
+        index += 1;
+      }
+      index -= 1;
+      result.push(markdownTableToHtml(tableRows));
+      continue;
+    }
+
+    result.push(line);
+  }
+
+  return result.join('\n');
 }
 
 function shouldPrefixDescription(output, description) {
@@ -220,7 +276,7 @@ function mdxToMarkdown(content) {
     .replace(/<\/(Note|Tip|Warning|Info|Check|Warning)>/g, '\n')
     .replace(/<\/?(Steps|Tabs|AccordionGroup|CardGroup|CodeGroup|Frame)\b[^>]*>/g, '\n');
 
-  output = normalizeMarkdownTables(normalizeMarkdownIndentation(output))
+  output = convertMarkdownTables(normalizeMarkdownIndentation(output))
     .replace(/<img\b([^>]*)>/g, (_tag, attrs) => {
       const alt = getAttr(attrs, 'alt') || 'image';
       const src = getAttr(attrs, 'src');
