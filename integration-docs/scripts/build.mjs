@@ -162,6 +162,11 @@ function normalizeMarkdownIndentation(content) {
       continue;
     }
 
+    if (/^ {2,}([-*+] |\d+\. )/.test(line)) {
+      result.push(line);
+      continue;
+    }
+
     result.push(line.match(/^ {2,}\S/) ? trimmed : line);
   }
 
