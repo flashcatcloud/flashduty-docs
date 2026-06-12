@@ -83,12 +83,35 @@ function findMarkdownTables(value) {
       return;
     }
     const next = lines[index + 1]?.trim() || '';
-    if (!inFence && line.trim().includes('|') && /^(\|?\s*:?-{3,}:?\s*){2,}\|?$/.test(next)) {
+    if (!inFence && line.trim().includes('|') && /^(\|?\s*:?-+:?\s*){2,}\|?$/.test(next)) {
       offenders.push(index + 1);
     }
   });
 
   return offenders;
+}
+
+function findMalformedHtmlTables(value) {
+  const errors = [];
+  const tables = value.match(/<table>[\s\S]*?<\/table>/g) || [];
+  tables.forEach((table, tableIndex) => {
+    const headerColumns = (table.match(/<th>/g) || []).length;
+    const rows = [...table.matchAll(/<tr>([\s\S]*?)<\/tr>/g)].slice(1);
+    rows.forEach((row, rowIndex) => {
+      const columns = (row[1].match(/<td>/g) || []).length;
+      if (columns !== headerColumns) {
+        errors.push(`table ${tableIndex + 1} row ${rowIndex + 1} has ${columns}/${headerColumns} columns`);
+      }
+    });
+  });
+
+  const openTables = (value.match(/<table>/g) || []).length;
+  const closeTables = (value.match(/<\/table>/g) || []).length;
+  if (openTables !== closeTables) {
+    errors.push(`table open/close mismatch ${openTables}/${closeTables}`);
+  }
+
+  return errors;
 }
 
 function checkLocale(locale, docs) {
@@ -121,6 +144,11 @@ function checkLocale(locale, docs) {
     const tableLines = findMarkdownTables(value);
     if (tableLines.length > 0) {
       errors.push(`${locale}: ${key} still has Markdown tables at lines ${tableLines.slice(0, 5).join(', ')}`);
+    }
+
+    const malformedTables = findMalformedHtmlTables(value);
+    if (malformedTables.length > 0) {
+      errors.push(`${locale}: ${key} has malformed HTML tables: ${malformedTables.slice(0, 5).join('; ')}`);
     }
   }
   return errors;

@@ -169,16 +169,16 @@ function normalizeMarkdownIndentation(content) {
 }
 
 function splitTableRow(line) {
-  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
+  return line.trim().replace(/^>\s*/, '').replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cell.trim());
 }
 
 function isTableSeparator(line) {
   const cells = splitTableRow(line);
-  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+  return cells.length >= 2 && cells.every((cell) => /^:?-+:?$/.test(cell));
 }
 
 function isTableRow(line) {
-  const trimmed = line.trim();
+  const trimmed = line.trim().replace(/^>\s*/, '');
   return trimmed.includes('|') && !trimmed.startsWith('```');
 }
 
