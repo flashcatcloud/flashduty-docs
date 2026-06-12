@@ -21,7 +21,12 @@ const forbiddenPatterns = [
   /<Warning\b/,
   /<Video\b/,
   /{\s*\/\*/,
-  /^:{3,}/m
+  /^:{3,}/m,
+  /^---$/m,
+  /class(?:Name)?=["'][^"']*\bhide\b[^"']*["']/,
+  /]\(\/(?:zh|en)\//,
+  /href=["']\/(?:zh|en)\//,
+  /api\.flascat\.cloud/
 ];
 
 async function loadDocs(locale) {
