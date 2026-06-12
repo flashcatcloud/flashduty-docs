@@ -5,6 +5,7 @@ import { docMap, optionalMissingKeys } from '../src/doc-map.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
+const repoRoot = path.resolve(packageRoot, '..');
 const distRoot = path.join(packageRoot, 'dist');
 
 const expectedKeys = Object.keys(docMap);
@@ -38,6 +39,21 @@ async function loadDocs(locale) {
   return mod.default;
 }
 
+function getSourceDescription(locale, entry) {
+  const source = typeof entry === 'string' ? entry : entry[locale];
+  const absolute = entry?.legacy
+    ? path.resolve(packageRoot, source)
+    : path.resolve(repoRoot, locale, source);
+  if (!fs.existsSync(absolute)) return '';
+
+  const raw = fs.readFileSync(absolute, 'utf8');
+  const frontmatter = raw.match(/^---\n([\s\S]*?)\n---/);
+  if (!frontmatter) return '';
+
+  const match = frontmatter[1].match(/^description:\s*(?:"([^"]*)"|'([^']*)'|(.+?))\s*$/m);
+  return (match?.[1] || match?.[2] || match?.[3] || '').trim();
+}
+
 function findIndentedMarkdown(value) {
   const lines = value.split('\n');
   const offenders = [];
@@ -68,6 +84,11 @@ function checkLocale(locale, docs) {
     }
   }
   for (const [key, value] of Object.entries(docs)) {
+    const firstLine = value.split('\n').find((line) => line.trim()) || '';
+    if (getSourceDescription(locale, docMap[key]) && /^#{1,6}\s/.test(firstLine.trim())) {
+      errors.push(`${locale}: ${key} starts with a heading before its description`);
+    }
+
     for (const pattern of forbiddenPatterns) {
       if (pattern.test(value)) {
         errors.push(`${locale}: ${key} still contains ${pattern}`);
