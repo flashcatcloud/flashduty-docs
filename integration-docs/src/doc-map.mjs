@@ -1,0 +1,98 @@
+const alertBase = 'on-call/integration/alert-integration/alert-sources';
+const integrationBase = 'on-call/integration';
+
+export const docMap = {
+  CustomAlert: `${alertBase}/standard alert.mdx`,
+  Email: `${alertBase}/email.mdx`,
+  N9e: `${alertBase}/flashcat.mdx`,
+  Prometheus: `${alertBase}/prometheus.mdx`,
+  Grafana: `${alertBase}/grafana.mdx`,
+  Zabbix: `${alertBase}/zabbix.mdx`,
+  UptimeKuma: `${alertBase}/uptime-kuma.mdx`,
+  AliyunARMS: `${alertBase}/aliyun-arms.mdx`,
+  AliyunCmEvent: `${alertBase}/aliyun-cm-event.mdx`,
+  AliyunCm: `${alertBase}/aliyun-cm-metrics.mdx`,
+  AliyunSLS: `${alertBase}/aliyun-sls.mdx`,
+  AWSCW: `${alertBase}/aws-cloudwatch.mdx`,
+  AzureMonitor: `${alertBase}/azure-monitor.mdx`,
+  BaiDuBCM: `${alertBase}/baidu-bcm.mdx`,
+  HuaWeiCES: `${alertBase}/huawei-ces.mdx`,
+  InfluxDB: `${alertBase}/influxdata.mdx`,
+  OpenFalcon: `${alertBase}/open-falcon.mdx`,
+  PagerDuty: `${alertBase}/pagerduty.mdx`,
+  TencentBK: `${alertBase}/blueking.mdx`,
+  TencentCLS: `${alertBase}/tencent-cls.mdx`,
+  TencentCm: `${alertBase}/tencent-cm.mdx`,
+  TencentEb: `${alertBase}/tencent-eventbridge.mdx`,
+  OceanBase: `${alertBase}/oceanbase.mdx`,
+  Graylog: `${alertBase}/graylog.mdx`,
+  Skywalking: `${alertBase}/skywalking.mdx`,
+  Sentry: `${alertBase}/sentry.mdx`,
+  Jiankongbao: `${alertBase}/jiankongbao.mdx`,
+  AWSEventBridge: `${alertBase}/aws-eventbridge.mdx`,
+  Dynatrace: `${alertBase}/dynatrace.mdx`,
+  HuaweiyunLTS: `${alertBase}/huawei-lts.mdx`,
+  GoogleCM: `${alertBase}/google-cloud-monitoring.mdx`,
+  Splunk: `${alertBase}/splunk.mdx`,
+  AppDynamics: `${alertBase}/appdynamics.mdx`,
+  SolarWinds: `${alertBase}/solarwinds.mdx`,
+  VolcEngineMetric: `${alertBase}/volcengine-cm-metrics.mdx`,
+  VolcEngineEvent: `${alertBase}/volcengine-cm-event.mdx`,
+  VolcEngineTLS: `${alertBase}/volcengine-tls.mdx`,
+  OpManager: `${alertBase}/opmanager.mdx`,
+  Meraki: `${alertBase}/meraki.mdx`,
+  StateCloud: `${alertBase}/ctyun.mdx`,
+  Guance: `${alertBase}/guance.mdx`,
+  Zilliz: `${alertBase}/zilliz.mdx`,
+  HuaweiyunAPM: `${alertBase}/huawei-apm.mdx`,
+  ZStack: `${alertBase}/zstack.mdx`,
+  Keep: `${alertBase}/keep.mdx`,
+  ElastAlert2: `${alertBase}/elastalert2.mdx`,
+  DingtalkAlert: `${alertBase}/dingtalk-alert.mdx`,
+  FeishuAlert: `${alertBase}/lark-alert.mdx`,
+  VolcEngineDetect: `${alertBase}/volcengine-dial.mdx`,
+  Monit: `${alertBase}/monit.mdx`,
+  Rum: `${alertBase}/rum-alert.mdx`,
+  Cloudflare: `${alertBase}/cloudflare.mdx`,
+  WecomAlert: `${alertBase}/wecom-alert.mdx`,
+  Harbor: `${alertBase}/harbor.mdx`,
+  LabelMappingAPI: `${alertBase}/label-mapping-api.mdx`,
+  VolcEngineRTC: `${alertBase}/volcengine-rtc.mdx`,
+  UcloudCloudWatch: `${alertBase}/ucloud-cloudwatch.mdx`,
+  Nagios: `${alertBase}/nagios.mdx`,
+  JDCloudMonitor: `${alertBase}/jdcloud.mdx`,
+  AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
+  HttpPull: `${alertBase}/http-pull.mdx`,
+  DbPull: `${alertBase}/db-pull.mdx`,
+
+  CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  Jira: {
+    zh: 'legacy/zh/jira-change.md',
+    en: 'legacy/en/jira-change.md',
+    legacy: true
+  },
+
+  Lark: `${integrationBase}/instant-messaging/lark.mdx`,
+  Dingtalk: `${integrationBase}/instant-messaging/dingtalk.mdx`,
+  Wecom: `${integrationBase}/instant-messaging/wecom.mdx`,
+  Slack: `${integrationBase}/instant-messaging/slack.mdx`,
+  MicrosoftTeams: `${integrationBase}/instant-messaging/microsoft-teams.mdx`,
+
+  AlertWebhook: `${integrationBase}/webhooks/alert-webhook.mdx`,
+  IncidentWebhook: `${integrationBase}/webhooks/incident-webhook.mdx`,
+  CustomAction: `${integrationBase}/webhooks/custom-actions.mdx`,
+  JiraSync: `${integrationBase}/webhooks/jira-sync.mdx`,
+  ServiceNowSync: `${integrationBase}/webhooks/servicenow-sync.mdx`,
+  ServiceDeskPlusSync: `${integrationBase}/webhooks/servicedesk-plus-sync.mdx`,
+
+  Templates: 'on-call/configuration/templates.mdx',
+  Link: `${integrationBase}/other-integration/link.mdx`
+};
+
+export const optionalMissingKeys = [
+  // These keys are referenced defensively by fc-saas-web but were not present
+  // in the old published knowledge-base package either.
+  'Emqx',
+  'Rizhiyi',
+  'Datadog'
+];
