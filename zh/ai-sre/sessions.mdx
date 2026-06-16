@@ -1,7 +1,7 @@
 ---
 title: 控制台
-description: AI SRE 会话承载您与 Agent 的一次完整对话，包含消息、流式响应、工具调用与产物；本文介绍会话的新建与管理、消息发送、产物预览、上下文压缩与团队绑定。
-keywords: ["AI SRE", "会话", "对话", "流式响应", "工具调用", "Artifacts", "上下文压缩", "绑定团队"]
+description: AI SRE 会话承载您与 Agent 的一次完整对话，包含消息、流式响应、工具调用与产物；本文介绍会话的新建与管理、消息发送、产物预览、上下文压缩、团队绑定与会话数据导出。
+keywords: ["AI SRE", "会话", "对话", "流式响应", "工具调用", "Artifacts", "上下文压缩", "绑定团队", "导出", "NDJSON"]
 sidebarTitle: 控制台
 ---
 
@@ -192,6 +192,56 @@ Agent 产出的文件会以产物形式提供预览。点击产物即在右侧�
 </Warning>
 
 资源的团队作用域（账户范围与团队范围、可见性与编辑权限）规则，详见各资源页面的「作用域」一节。
+
+## 会话入口类型（entry_kind）
+
+---
+
+每个会话在创建时都带有一个 **入口类型（entry_kind）**，用于标识本次会话由哪个接入面产生。该字段持久化到数据库，并在创建响应中返回。
+
+| 值 | 来源 | 说明 |
+|---|---|---|
+| `web` | 控制台 | 默认值；未传入或传入未知值时自动归一为 `web` |
+| `im` | IM 平台（飞书 / 钉钉 / 企业微信 / Slack） | 由 IM 渠道自动设置；启用会话的**就地切换**能力（见下方） |
+| `api` | 外部 API 调用 | 用于程序化集成场景 |
+| `automation` | 自动化流程 | 由自动化任务触发的会话 |
+
+通过 `POST /safari/session/create` 创建会话时，可在请求体中传入 `entry_kind`（可选，省略即为 `web`）。`entry_kind` 一经创建不可修改。
+
+<Note>
+`entry_kind=im` 的会话支持**就地切换运行环境与团队范围**——即通过 IM 中的 `/env` 与 `/scope` 命令，在不中断对话的情况下重新绑定 BYOC Runner 或团队。控制台会话（`web`）的环境与团队在创建时固定，不支持就地切换。
+</Note>
+
+## 会话数据导出
+
+---
+
+通过 `POST /safari/session/export` 可以将一个会话的全部事件以 **NDJSON**（`application/x-ndjson`）格式流式导出，每行一个 JSON 对象。这一能力适用于审计、归档、离线分析或将会话数据接入外部系统等场景。
+
+### 请求参数
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `session_id` | string | 是 | 要导出的会话 ID |
+| `include_subagents` | bool | 否 | 为 `true` 时递归包含所有子 Agent 会话的事件流；默认 `false` |
+
+### 响应格式
+
+响应的 `Content-Type` 为 `application/x-ndjson`，**第一行始终**是 `session_meta` 类型的会话元数据信封，后续各行为会话事件。启用 `include_subagents=true` 时，每遇到一条 `subagent_dispatch` 类型的行，其后紧跟该子会话的完整事件流，子会话同样以自己的 `session_meta` 行作为起始。
+
+```
+{"type":"session_meta","session_id":"...","app_name":"..."}   // 第一行：会话元数据
+{"type":"message","..."}                                       // 后续：事件行（类型依内容而异）
+{"type":"subagent_dispatch","child_session_id":"..."}          // 子 Agent 派发标记
+{"type":"session_meta","session_id":"<child>","..."}           // 子会话元数据
+{"type":"message","..."}                                       // 子会话事件
+```
+
+<Warning>
+若流式传输已开始后发生错误，服务器**无法**切换回标准 JSON 错误包。此时会在流末尾追加一行 JSON 编码的错误对象，消费方需检测该行以判断流是否完整。
+</Warning>
+
+**权限**：导出端点使用与发送消息相同的权限门控（`CanChatSession`），即要求调用方具备该会话的消息收发权限，单纯的只读访问权限不够。
 
 ## 相关页面
 

@@ -1,7 +1,7 @@
 ---
 title: Console
-description: An AI SRE session holds one complete conversation between you and the agent, including messages, streaming responses, tool calls, and artifacts. This page covers creating and managing sessions, sending messages, previewing artifacts, context compaction, and team binding.
-keywords: ["AI SRE", "session", "chat", "streaming response", "tool call", "Artifacts", "context compaction", "team binding"]
+description: An AI SRE session holds one complete conversation between you and the agent, including messages, streaming responses, tool calls, and artifacts. This page covers creating and managing sessions, sending messages, previewing artifacts, context compaction, team binding, and session data export.
+keywords: ["AI SRE", "session", "chat", "streaming response", "tool call", "Artifacts", "context compaction", "team binding", "export", "NDJSON"]
 sidebarTitle: Console
 ---
 
@@ -192,6 +192,56 @@ Automatic linking between incidents / war rooms and teams is still evolving. You
 </Warning>
 
 For the rules governing team scope for resources (account scope vs. team scope, visibility, and edit permissions), see the "Scope" section on each resource page.
+
+## Session entry kind
+
+---
+
+Every session is created with an **entry kind** (`entry_kind`) that identifies which surface produced it. The value is persisted to the database and returned in the create response.
+
+| Value | Source | Notes |
+|---|---|---|
+| `web` | Console | Default; unknown or missing values are automatically normalized to `web` |
+| `im` | IM platform (Feishu / DingTalk / WeCom / Slack) | Set automatically by the IM path; enables **in-place switching** for the session (see below) |
+| `api` | External API call | For programmatic integration scenarios |
+| `automation` | Automated workflow | Sessions triggered by automation tasks |
+
+When calling `POST /safari/session/create`, you may include `entry_kind` in the request body (optional; defaults to `web`). The `entry_kind` cannot be changed after the session is created.
+
+<Note>
+Sessions with `entry_kind=im` support **in-place environment and team switching** — the IM `/env` and `/scope` commands can rebind the session to a different BYOC runner or team scope without discarding the conversation. Console sessions (`web`) have their environment and team fixed at creation time and do not support in-place switching.
+</Note>
+
+## Session data export
+
+---
+
+`POST /safari/session/export` streams all events from a session as **NDJSON** (`application/x-ndjson`), one JSON object per line. This is intended for auditing, archiving, offline analysis, or feeding session data into external systems.
+
+### Request fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `session_id` | string | Yes | ID of the session to export |
+| `include_subagents` | bool | No | When `true`, recursively includes the event streams of all subagent child sessions; defaults to `false` |
+
+### Response format
+
+The response `Content-Type` is `application/x-ndjson`. The **first line is always** a `session_meta` envelope containing the session's metadata; subsequent lines are session events. When `include_subagents=true`, each `subagent_dispatch` line is immediately followed by the complete event stream of the child session, which also begins with its own `session_meta` line.
+
+```
+{"type":"session_meta","session_id":"...","app_name":"..."}   // first line: session metadata
+{"type":"message","..."}                                       // subsequent: event lines (type varies)
+{"type":"subagent_dispatch","child_session_id":"..."}          // subagent dispatch marker
+{"type":"session_meta","session_id":"<child>","..."}           // child session metadata
+{"type":"message","..."}                                       // child session events
+```
+
+<Warning>
+If an error occurs after streaming has already begun, the server cannot switch to a standard JSON error envelope. Instead, a JSON-encoded error object is appended as the final line of the stream. Consumers must inspect this last line to determine whether the stream completed successfully.
+</Warning>
+
+**Permissions**: the export endpoint uses the same access gate as sending messages (`CanChatSession`), meaning the caller must have message-send permission on the session — read-only access is not sufficient.
 
 ## Related Pages
 
