@@ -268,6 +268,34 @@ Android 应用使用 ProGuard/R8 进行代码混淆后，错误堆栈中的类�
     <Note>
     插件会为启用混淆的 variant 创建 `uploadMapping<Variant>` 任务。NDK 符号上传任务会在项目存在 native build，或配置了 `additionalSymbolFilesLocations` 时创建。若项目使用多个 flavor，请为每个发布 variant 分别执行对应任务。
     </Note>
+
+    <Warning>
+    **NDK 符号文件必须是未剥离（unstripped）的 ELF 文件，且包含 GNU build-id 节。**
+
+    上传服务器会读取每个 `.so` 文件的 `.note.gnu.build-id` ELF 节以提取 build-id，并以此作为符号化寻址的唯一键。若文件缺少该节，上传立即返回 HTTP 400，错误信息为：
+
+    ```
+    libfoo.so: .note.gnu.build-id section not found. Build the .so with -Wl,--build-id and upload the unstripped file
+    ```
+
+    **常见原因及修复：**
+
+    - **CMake Release 构建默认剥离符号**：CMake 在 `CMAKE_BUILD_TYPE=Release` 时会在链接后执行 `strip`，移除 `.note.gnu.build-id` 节。需在 `CMakeLists.txt` 中显式添加链接标志：
+
+      ```cmake
+      target_link_options(mylib PRIVATE -Wl,--build-id)
+      ```
+
+      或对整个项目生效：
+
+      ```cmake
+      add_link_options(-Wl,--build-id)
+      ```
+
+    - **手动 strip 脚本**：如果 CI 流水线在上传前对 `.so` 运行了 `strip` 命令，需确保上传的是 `obj/` 目录下的原始未剥离文件，而不是 `libs/` 目录下已剥离的发布产物。`additionalSymbolFilesLocations` 参数用于指定此路径。
+
+    NDK 原生符号文件在 API 中以 `event.type=ndk_symbol_file` 标识，区别于 ProGuard mapping 文件的 `event.type=jvm_mapping_file`。自定义上传集成（不使用 Gradle 插件）时需传入正确的类型字段。
+    </Warning>
   </Step>
 </Steps>
 
@@ -309,7 +337,7 @@ iOS 应用在编译时会生成 dSYM（Debug Symbol）文件，其中包含将�
 
 | 功能 | 说明 |
 |------|------|
-| 查看已上传的符号文件 | 列出所有已上传的文件（SourceMap、小程序 SourceMap、mapping 文件、dSYM），包括路径、服务名、版本号、大小和上传时间 |
+| 查看已上传的符号文件 | 列出所有已上传的文件（SourceMap、小程序 SourceMap、ProGuard mapping 文件、dSYM、NDK 原生符号文件），包括路径、服务名、版本号、大小和上传时间。Android 标签页同时展示 ProGuard mapping 文件和 NDK 原生符号文件，NDK 行会显示 build_id、arch 和 lib_name 列 |
 | 按平台筛选 | 在 Web、微信小程序、iOS 和 Android 标签页之间切换，查看不同平台的符号文件 |
 | 版本管理 | 通过 `service` 和 `release-version` 参数为不同版本的应用分别管理 |
 | 小程序维度 | 微信小程序列表会展示符号文件元数据中的 AppID（取自 `metadata.appid`）和分包（取自 `metadata.subpackage`）两列；主包没有分包标识时显示「主包」，AppID 未上传时显示 `-` |
@@ -328,7 +356,7 @@ RUM 异常追踪支持结合 Web `sourcemap`、微信小程序 SourceMap、Andro
     ```
   </Step>
   <Step title="关联符号文件">
-    当错误堆栈中的文件路径、行号或地址信息与已上传的 Web `sourcemap`、微信小程序 SourceMap、Android mapping 文件或 iOS dSYM 文件匹配时，Flashduty 会自动将压缩、混淆或编译后的错误位置映射到原始源代码。
+    当错误堆栈中的文件路径、行号或地址信息与已上传的 Web `sourcemap`、微信小程序 SourceMap、Android ProGuard mapping 文件、Android NDK 原生符号文件或 iOS dSYM 文件匹配时，Flashduty 会自动将压缩、混淆或编译后的错误位置映射到原始源代码。
 
     **压缩文件堆栈：**
     ```
