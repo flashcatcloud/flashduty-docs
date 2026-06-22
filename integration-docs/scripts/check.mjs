@@ -54,6 +54,17 @@ function getSourceDescription(locale, entry) {
   return (match?.[1] || match?.[2] || match?.[3] || '').trim();
 }
 
+function getSourceAnchorIds(locale, entry) {
+  const source = typeof entry === 'string' ? entry : entry[locale];
+  const absolute = entry?.legacy
+    ? path.resolve(packageRoot, source)
+    : path.resolve(repoRoot, locale, source);
+  if (!fs.existsSync(absolute)) return [];
+
+  const raw = fs.readFileSync(absolute, 'utf8');
+  return [...raw.matchAll(/<span\b[^>]*\bid=["']([^"']+)["'][^>]*>/g)].map((match) => match[1]);
+}
+
 function findIndentedMarkdown(value) {
   const lines = value.split('\n');
   const offenders = [];
@@ -175,6 +186,11 @@ function checkLocale(locale, docs) {
     const malformedTables = findMalformedHtmlTables(value);
     if (malformedTables.length > 0) {
       errors.push(`${locale}: ${key} has malformed HTML tables: ${malformedTables.slice(0, 5).join('; ')}`);
+    }
+
+    const missingAnchors = getSourceAnchorIds(locale, docMap[key]).filter((id) => !value.includes(`<a id="${id}"></a>`));
+    if (missingAnchors.length > 0) {
+      errors.push(`${locale}: ${key} is missing explicit anchors: ${missingAnchors.slice(0, 5).join(', ')}`);
     }
   }
   return errors;
