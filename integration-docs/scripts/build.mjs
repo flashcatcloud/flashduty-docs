@@ -35,6 +35,19 @@ function removeHiddenBlocks(content) {
   return content.replace(/<div\b(?=[^>]*\bclass(?:Name)?=["'][^"']*\bhide\b[^"']*["'])[^>]*>[\s\S]*?<\/div>/g, '\n');
 }
 
+function convertAnchorSpans(content) {
+  return content
+    .replace(/<span\b([^>]*)>\s*<\/span>/g, (_tag, attrs) => {
+      const id = getAttr(attrs, 'id');
+      return id ? `<a id="${id}"></a>` : '';
+    })
+    .replace(/<span\b([^>]*)>/g, (_tag, attrs) => {
+      const id = getAttr(attrs, 'id');
+      return id ? `<a id="${id}"></a>` : '';
+    })
+    .replace(/<\/span>/g, '');
+}
+
 function getAttr(attrs, name) {
   const match = attrs.match(new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|{\\s*["']([^"']*)["']\\s*})`));
   return match?.[1] || match?.[2] || match?.[3] || '';
@@ -252,7 +265,7 @@ function shouldPrefixDescription(output, description) {
 
 function mdxToMarkdown(content) {
   const description = getFrontmatterAttr(content, 'description');
-  let output = removeHiddenBlocks(stripFrontmatter(content));
+  let output = convertAnchorSpans(removeHiddenBlocks(stripFrontmatter(content)));
 
   output = convertDirectiveContainers(convertCallouts(convertCards(convertAccordions(output))))
     .replace(/{\s*\/\*[\s\S]*?\*\/\s*}/g, '')
