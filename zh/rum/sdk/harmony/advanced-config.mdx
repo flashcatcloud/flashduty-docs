@@ -1,0 +1,291 @@
+---
+title: "HarmonyOS SDK 高级配置"
+description: "配置 HarmonyOS RUM SDK 的采样、隐私同意、事件过滤、Trace、崩溃采集和符号上传"
+keywords: ["RUM", "HarmonyOS SDK", "高级配置", "Trace", "Crash", "Sourcemap"]
+---
+
+本文介绍 HarmonyOS SDK 的核心配置、RUM 配置、隐私控制、Trace 关联、崩溃采集和符号上传。所有配置均来自当前 ArkTS SDK 公开 API。
+
+## 核心配置
+
+核心配置通过 `ConfigurationBuilder` 创建，并传给 `Flashcat.initialize()`。
+
+```ts
+import {
+  ConfigurationBuilder,
+  FlashcatSite
+} from '@flashcatcloud/core';
+
+const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+  .setService('shopping-app')
+  .setVariant('default')
+  .useSite(FlashcatSite.CN)
+  .setBatchUploadFrequencyMs(5000)
+  .build();
+```
+
+| 方法 / 参数 | 类型 | 默认值 | 说明 |
+|-------------|------|--------|------|
+| `new ConfigurationBuilder(clientToken, env)` | string, string | 必填 | `clientToken` 用于客户端上报鉴权；`env` 表示环境名称 |
+| `setService(service)` | string | 应用 bundle id | 服务名称，写入 RUM 事件的 `service` 字段 |
+| `setVariant(variant)` | string | `""` | 构建变体名称，用于区分不同产物 |
+| `useSite(site)` | `FlashcatSite` | `FlashcatSite.CN` | 数据接收站点；生产环境使用 `https://browser.flashcat.cloud` |
+| `setCustomEndpoint(endpoint)` | string | `""` | 覆盖上报 host，常用于本地代理或私有化转发；SDK 仍会追加 `/api/v2/rum` |
+| `setBatchUploadFrequencyMs(frequencyMs)` | number | `5000` | 前台批量上报调度间隔，单位为毫秒 |
+| `setVerbose(enabled)` | boolean | `false` | 输出 SDK 内部 HiLog，日志标签为 `Flashcat` |
+
+<Note>
+`Flashcat.initialize()` 同一个实例名只会初始化一次。重复初始化会返回已存在实例，不会重新注册功能模块。
+</Note>
+
+## 隐私同意状态
+
+初始化时需要传入 `TrackingConsent`。你也可以在运行时通过 `Flashcat.setTrackingConsent()` 修改。
+
+```ts
+import { Flashcat, TrackingConsent } from '@flashcatcloud/core';
+
+Flashcat.setTrackingConsent(TrackingConsent.PENDING);
+Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
+```
+
+| 状态 | 行为 |
+|------|------|
+| `GRANTED` | 写入主上传目录并启动批量上传 |
+| `PENDING` | 事件写入单独的 pending 缓冲区，不上传；变更为 `GRANTED` 后迁移并上传 |
+| `NOT_GRANTED` | 丢弃新事件，清空 pending 缓冲区并停止上传 |
+
+<Warning>
+Trace header 也受同意状态控制。只有状态为 `GRANTED` 时，SDK 才会向请求注入可关联的 `traceparent`。
+</Warning>
+
+## RUM 配置
+
+RUM 配置通过 `RumConfigurationBuilder` 创建，并传给 `FlashcatRum.enable()`。
+
+```ts
+import {
+  FlashcatRum,
+  RumConfigurationBuilder
+} from '@flashcatcloud/rum';
+
+FlashcatRum.enable(
+  new RumConfigurationBuilder('<APPLICATION_ID>')
+    .setSessionSampleRate(50)
+    .setTrackUserInteractions(true)
+    .setTrackNavigation(true)
+    .setTrackNetworkRequests(true)
+    .build()
+);
+```
+
+| 方法 / 参数 | 类型 | 默认值 | 说明 |
+|-------------|------|--------|------|
+| `new RumConfigurationBuilder(applicationId)` | string | 必填 | RUM 应用 ID，写入 `application.id` |
+| `setSessionSampleRate(rate)` | number | `100` | 会话采样率，取值范围按百分比理解；`100` 表示全部采集，`0` 表示不采集事件 |
+| `setTrackUserInteractions(enabled)` | boolean | `false` | 控制 `FlashcatRum.trackTap()` 是否记录 tap action |
+| `setTrackNavigation(enabled)` | boolean | `false` | 控制 `FlashcatRum.startViewTracking()` 是否注册 ArkUI `routerPageUpdate` 监听 |
+| `setTrackNetworkRequests(enabled)` | boolean | `false` | 控制 Trace 发布的网络生命周期是否转换为 RUM resource |
+| `setTrackFrustrations(enabled)` | boolean | `false` | 保留开关；当前版本尚未生成 frustration 事件 |
+| `setEventMapper(mapper)` | function | `null` | 在事件写入磁盘前修改或丢弃 view、action、error、resource 事件 |
+
+### 事件过滤和脱敏
+
+`setEventMapper()` 可以在事件上报前做轻量处理。返回修改后的事件表示继续上报，返回 `null` 表示丢弃事件。
+
+```ts
+import { RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
+  .setEventMapper((event) => {
+    if (event.type === 'resource') {
+      const resource = event.resource as Record<string, Object>;
+      const url = resource.url;
+      if (typeof url === 'string') {
+        resource.url = url.split('?')[0];
+      }
+    }
+
+    if (event.type === 'action') {
+      const action = event.action as Record<string, Object>;
+      const target = action.target as Record<string, Object>;
+      if (String(target.name).includes('secret')) {
+        return null;
+      }
+    }
+
+    return event;
+  })
+  .build();
+```
+
+<Warning>
+事件过滤函数运行在 SDK 写入路径上，应保持快速、同步且不抛异常。SDK 会兜底处理异常并保留原始事件，但复杂逻辑会增加端侧开销。
+</Warning>
+
+## 全局属性和用户信息
+
+全局属性会合并到后续事件的 `context` 对象中。
+
+```ts
+import {
+  GlobalRumMonitor,
+  RumErrorSource
+} from '@flashcatcloud/rum';
+
+const monitor = GlobalRumMonitor.get();
+
+monitor.addAttribute('tenant', 'acme');
+monitor.addError('checkout failed', RumErrorSource.CUSTOM);
+monitor.removeAttribute('tenant');
+```
+
+用户信息通过核心实例设置。`id`、`name`、`email` 和 `extraInfo` 会写入后续事件的 `usr` 对象。
+
+```ts
+import { Flashcat } from '@flashcatcloud/core';
+
+Flashcat.getInstance().setUserInfo({
+  id: 'user-1001',
+  name: 'Alice',
+  email: 'alice@example.com',
+  extraInfo: {
+    role: 'admin'
+  }
+});
+```
+
+## Trace 配置
+
+Trace 模块负责生成 W3C `traceparent`，并把生成的 trace id 和 span id 关联到 RUM resource 的 `_dd.trace_id` 和 `_dd.span_id` 字段。
+
+```ts
+import {
+  FlashcatTrace,
+  TraceConfigurationBuilder
+} from '@flashcatcloud/trace';
+
+FlashcatTrace.enable(
+  new TraceConfigurationBuilder()
+    .setSampleRate(100)
+    .setFirstPartyHosts(['api.example.com'])
+    .build()
+);
+```
+
+| 方法 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `setSampleRate(rate)` | number | `100` | 控制 `traceparent` flags 中 sampled 标记的比例 |
+| `setFirstPartyHosts(hosts)` | string[] | `[]` | 限制 `FlashcatHttp` 只向指定一方域名及其子域名注入 `traceparent`；空数组表示所有 host |
+
+<Note>
+当前 `setFirstPartyHosts()` 只由 `FlashcatHttp` 包装器使用。`rcp` 拦截器本身就是每个 session 的显式接入点，因此添加拦截器的 session 会对其请求注入 `traceparent`。
+</Note>
+
+## 崩溃采集配置
+
+Crash 模块通过 HarmonyOS `hiAppEvent` 监听 `APP_CRASH` 和 `APP_FREEZE`。系统会在下一次启动时回放故障事件，SDK 再通过 RUM error 管道上报。
+
+```ts
+import {
+  FlashcatCrash,
+  CrashConfigurationBuilder
+} from '@flashcatcloud/crash';
+
+FlashcatCrash.enable(
+  new CrashConfigurationBuilder()
+    .setTrackCrashes(true)
+    .setTrackAppHangs(true)
+    .setSampleRate(100)
+    .build()
+);
+```
+
+| 方法 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `setTrackCrashes(enabled)` | boolean | `true` | 采集 ArkTS / JS 和 Native C/C++ 崩溃 |
+| `setTrackAppHangs(enabled)` | boolean | `true` | 采集 `APP_FREEZE`，即主线程卡死或 watchdog 超时 |
+| `setSampleRate(rate)` | number | `100` | 崩溃和卡死事件采样率，SDK 会将输入值限制在 `0` 到 `100` |
+
+<Warning>
+请在 `Flashcat.initialize()` 和 `FlashcatRum.enable()` 之后尽早启用 Crash。Crash 事件通过 RUM feature 写入，如果未启用 RUM，Crash 模块会丢弃收到的崩溃回放。
+</Warning>
+
+## 后台和延迟上传
+
+SDK 默认在前台按 `setBatchUploadFrequencyMs()` 的间隔上传，并在应用进入后台时触发 `flush()`。如果需要由 HarmonyOS WorkScheduler 唤醒上传，可以注册延迟上传任务。
+
+```ts
+const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+  .setDeferredUploadWork('FlashcatUploadAbility', 71001)
+  .setUploadOnWifiOnly(true)
+  .setDeferredUploadRequiresCharging(false)
+  .build();
+```
+
+| 方法 | 默认值 | 说明 |
+|------|--------|------|
+| `setDeferredUploadWork(abilityName, workId?)` | 未启用，`workId` 默认为 `71001` | 注册系统 WorkScheduler 任务；宿主应用需要声明对应的 `WorkSchedulerExtensionAbility` |
+| `setUploadOnWifiOnly(enabled)` | `false` | 为延迟上传任务设置 Wi-Fi 网络限制 |
+| `setDeferredUploadRequiresCharging(enabled)` | `true` | 为延迟上传任务设置充电状态限制 |
+
+<Note>
+SDK 负责注册 WorkScheduler 任务；你的 `WorkSchedulerExtensionAbility` 被唤醒后，应调用 `Flashcat.flushAndWait()` 执行有界批量上传。
+</Note>
+
+## 上传 HarmonyOS 崩溃符号
+
+如需在控制台还原混淆后的 ArkTS 栈和 Native `.so` 栈，请使用 `@flashcatcloud/hvigor-plugin` 上传构建产物。
+
+该插件会上传两类文件：
+
+| 类型 | 文件 | 用途 |
+|------|------|------|
+| ArkTS Sourcemap | `sourceMaps.map`，可选 `nameCache.json` | 还原 ArkTS / TS 文件、函数、行列号 |
+| Native 符号 | 未 strip 的 `.so` 文件 | 根据 GNU build-id 解析 C/C++ 栈帧 |
+
+在模块的 `hvigorfile.ts` 中注册插件：
+
+```ts hvigorfile.ts
+import { hapTasks } from '@ohos/hvigor-ohos-plugin';
+import { flashcatSymbolUploadPlugin } from '@flashcatcloud/hvigor-plugin';
+
+export default {
+  system: hapTasks,
+  plugins: [
+    flashcatSymbolUploadPlugin({
+      endpoint: 'https://browser.flashcat.cloud',
+      apiKey: process.env.FLASHCAT_API_KEY ?? '',
+      service: 'shopping-app',
+      version: '1.0.0',
+      enabled: process.env.FLASHCAT_UPLOAD === '1'
+    })
+  ]
+};
+```
+
+发布构建后执行上传任务：
+
+```bash
+FLASHCAT_UPLOAD=1 FLASHCAT_API_KEY=*** \
+  hvigorw uploadFlashcatSymbols --mode module -p module=entry@default -p product=default
+```
+
+插件会向 `{endpoint}/sourcemap/upload` 发送 `multipart/form-data`：
+
+| Header | 值 |
+|--------|----|
+| `DD-API-KEY` | Flashduty API Key，用于解析账号 |
+| `DD-EVP-ORIGIN` | `flashcat-hvigor-plugin` |
+| `DD-EVP-ORIGIN-VERSION` | 插件版本 |
+
+上传事件类型：
+
+| 事件类型 | 表单字段 |
+|----------|----------|
+| `harmony_sourcemap` | `event`、`source_map`、可选 `name_cache` |
+| `harmony_symbol_file` | `event`、`symbol_file` |
+
+<Tip>
+Native 符号依赖 `.so` 的 GNU build-id。HarmonyOS NDK 默认会生成 build-id；如果你的构建链路关闭了该能力，请为 `.so` 增加 `-Wl,--build-id`。
+</Tip>
