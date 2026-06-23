@@ -1,0 +1,113 @@
+---
+title: "HarmonyOS SDK 兼容性"
+description: "了解 HarmonyOS RUM SDK 支持的工程类型、设备类型、权限、Kit 依赖和当前限制"
+keywords: ["RUM", "HarmonyOS SDK", "兼容性", "ArkTS", "Stage 模型"]
+---
+
+本文说明 HarmonyOS SDK 的支持范围和当前限制，帮助你在接入前判断工程是否满足要求。
+
+## 支持范围
+
+| 项目 | 支持情况 |
+|------|----------|
+| 工程模型 | HarmonyOS NEXT / Stage 模型 ArkTS 工程 |
+| SDK 形态 | HAR 模块，通过 `@flashcatcloud/*` 包导入 |
+| RUM 数据源 | 事件固定写入 `source: "harmony"` |
+| 设备类型 | SDK HAR 模块声明支持 `default`、`phone`、`tablet`、`2in1`、`tv`、`wearable`、`car` |
+| 运行时初始化 | 推荐在 `AbilityStage.onCreate` 中初始化一次 |
+| 数据上报 | `@kit.NetworkKit`，`POST /api/v2/rum` |
+
+## 模块和能力
+
+| 模块 | 包名 | 说明 |
+|------|------|------|
+| Core | `@flashcatcloud/core` | 初始化、配置、上下文、用户信息、隐私同意、持久化和上传 |
+| RUM | `@flashcatcloud/rum` | view、action、resource、error 和 session |
+| Trace | `@flashcatcloud/trace` | W3C `traceparent` 注入、RUM resource 关联、`FlashcatHttp` 包装器 |
+| Crash | `@flashcatcloud/crash` | `APP_CRASH`、`APP_FREEZE` 采集，并作为 RUM crash error 上报 |
+| Hvigor plugin | `@flashcatcloud/hvigor-plugin` | 上传 ArkTS sourcemap、`nameCache.json` 和 Native `.so` 符号 |
+
+## 权限要求
+
+宿主应用需要允许 SDK 访问网络上报地址。
+
+```json5 module.json5
+{
+  module: {
+    requestPermissions: [
+      {
+        name: "ohos.permission.INTERNET"
+      }
+    ]
+  }
+}
+```
+
+如果你的应用自身需要读取网络状态，也可以声明 `ohos.permission.GET_NETWORK_INFO`。当前 SDK 的事件上下文尚未自动订阅网络状态变化，因此该权限不是 RUM 上报的必需条件。
+
+## Kit 依赖
+
+SDK 源码使用以下 HarmonyOS Kit：
+
+| Kit | 使用场景 |
+|-----|----------|
+| `@kit.AbilityKit` | 获取应用上下文、bundle 信息、异常监听、应用前后台状态 |
+| `@kit.BasicServicesKit` | 读取设备品牌、型号、系统版本、API level 和设备类型 |
+| `@kit.NetworkKit` | 批量上报 RUM 数据，`FlashcatHttp` 包装网络请求 |
+| `@kit.RemoteCommunicationKit` | `rcp` 拦截器注入 Trace header 并记录 resource |
+| `@kit.ArkUI` | 监听 `routerPageUpdate`，记录自动 view |
+| `@kit.PerformanceAnalysisKit` | 监听 `hiAppEvent` 崩溃和卡死事件，输出 HiLog |
+| `@kit.BackgroundTasksKit` | 注册 WorkScheduler 延迟上传任务 |
+
+## 初始化顺序
+
+请按以下顺序启用 SDK：
+
+1. 调用 `Flashcat.initialize(...)` 创建核心实例
+2. 调用 `FlashcatRum.enable(...)` 启用 RUM
+3. 调用 `FlashcatTrace.enable(...)` 启用 Trace
+4. 调用 `FlashcatCrash.enable(...)` 启用 Crash
+
+<Warning>
+Crash 事件通过 RUM feature 写入。请不要在未启用 RUM 的情况下只启用 `@flashcatcloud/crash`，否则收到的崩溃回放不会产生 RUM error。
+</Warning>
+
+## 支持的自动采集
+
+| 能力 | 支持情况 | 说明 |
+|------|----------|------|
+| 自动 view | 支持 | 需要启用 `setTrackNavigation(true)` 并调用 `FlashcatRum.startViewTracking(context)` |
+| 自动 tap | 支持显式包装 | 需要启用 `setTrackUserInteractions(true)` 并在点击处理器中调用 `FlashcatRum.trackTap(target)` |
+| 自动 resource | 支持 | 通过 `rcp` 拦截器或 `FlashcatHttp` 包装器采集 |
+| 未捕获异常 | 支持 | 通过 `errorManager.on('error')` 采集 |
+| 崩溃和卡死 | 支持 | 通过 `hiAppEvent` 下一次启动回放 |
+| Trace 关联 | 支持 | 注入 W3C `traceparent`，并在 RUM resource 中写入 `_dd.trace_id` / `_dd.span_id` |
+
+## 当前限制
+
+| 限制 | 说明 |
+|------|------|
+| 导航范围 | 自动 view 当前监听 ArkUI `routerPageUpdate`；`Navigation` / `NavDestination` 需要手动 view 或额外封装 |
+| 点击范围 | SDK 不会自动遍历所有组件；你需要在按钮或公共点击处理器中调用 `FlashcatRum.trackTap()` |
+| 网络范围 | 只有使用 `rcp` 拦截器、`FlashcatHttp` 或手动 resource API 的请求会被采集 |
+| Resource 生命周期 | resource 需要在活跃 view 内结束；view 关闭时仍未结束的 resource 会被丢弃 |
+| 并发 resource | 单个 view 最多保留 100 个进行中的 resource |
+| rcp host 限制 | `setFirstPartyHosts()` 当前只作用于 `FlashcatHttp`；`rcp` session 添加拦截器后会对该 session 的请求注入 `traceparent` |
+| 崩溃时机 | HarmonyOS 系统在下一次启动回放崩溃和卡死事件，不会在崩溃进程中同步上报 |
+| 网络状态 | `connectivity.status` 当前为 `unknown` |
+| Session Replay | 当前不支持 |
+| 页面性能指标 | 当前不自动采集 HarmonyOS 页面渲染性能指标 |
+| Frustration | `setTrackFrustrations()` 是保留开关，当前不生成 frustration 事件 |
+
+## 符号解析兼容性
+
+HarmonyOS 崩溃栈可能同时包含 ArkTS / JS 帧和 Native `.so` 帧。服务端会按以下方式解析：
+
+| 栈帧类型 | 解析方式 | 所需上传文件 |
+|----------|----------|--------------|
+| ArkTS / JS | 使用 HarmonyOS `sourceMaps.map` 还原源文件、函数名和行列号 | `sourceMaps.map`，混淆构建可附加 `nameCache.json` |
+| Native C/C++ | 复用 Native 符号解析管道，通过 `build_id`、架构和 `.so` 名称匹配 | 未 strip 的 `.so` 文件，需包含 GNU build-id |
+
+<Tip>
+请在发布构建流程中上传符号文件，并确保 `service` 和 `version` 与 SDK 初始化和 RUM 事件中的值一致。否则控制台可以收到崩溃事件，但无法把栈帧还原到源码位置。
+</Tip>
