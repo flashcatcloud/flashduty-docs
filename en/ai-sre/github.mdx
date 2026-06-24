@@ -1,0 +1,148 @@
+---
+title: GitHub App
+description: Authorize a GitHub App in AI SRE so the agent can work directly inside your GitHub repositories during a session — read code, investigate recent changes / commits / PRs, trace a PR from a change ticket, and (when you ask) fix a bug, open a PR, or file an issue. It all runs through plain gh / git, using a short-lived, repo-scoped GitHub App token issued per turn.
+keywords: ["AI SRE", "GitHub App", "App", "gh", "git", "repository", "pull request", "issue", "installation token", "Customize"]
+sidebarTitle: GitHub App
+---
+
+<Info>
+  **Private beta**: AI SRE is currently in private beta and available to invited accounts only. To join the whitelist test, contact the Flashduty sales team to request access; features and the UI may change during the beta.
+</Info>
+
+## Overview
+
+---
+
+An **App** is an authorized external application — today there is exactly one, **GitHub**. Once you authorize a GitHub App, AI SRE can **work directly inside your GitHub repositories** during a session: understand and explore code, investigate recent changes / commits / PRs, trace a PR from a change ticket, answer questions about a codebase, and — when you ask — fix a bug, open a PR, or file an issue.
+
+The mechanism is plain: the agent operates on your repository with native `gh` and `git` commands inside its own sandbox, using a GitHub App installation token that Safari issues **per turn** and scopes to **only the repositories you granted**. The agent never sees or types that token.
+
+<Warning>
+The **GitHub App** on this page and the **MCP connector** that uses GitHub as an example in [MCP](/en/ai-sre/mcp) are **two different mechanisms** — don't confuse them:
+
+- **GitHub App (this page)**: the agent runs `gh` / `git` **directly** in its sandbox against your repository — clone, `git log`, `gh pr diff`, open a PR — like an engineer working in a terminal.
+- **MCP connector**: the agent makes **tool calls** to a hosted MCP server, and that server performs the operation and returns the result.
+
+One is "the agent runs git/gh in a shell"; the other is "the agent calls tools on a remote MCP server." This page covers only the former.
+</Warning>
+
+## Where to Find It
+
+---
+
+Go to **Plugins → Apps**. Apps is the **first and default** tab in the Plugins area — opening Plugins lands you here.
+
+<Note>
+Viewing the Apps tab requires the appropriate permission; without it, the tab is hidden. Authorizing, revoking, and enabling / disabling each require their own action permission — when you lack one, the corresponding button is shown disabled.
+</Note>
+
+## Connecting a GitHub Organization
+
+---
+
+Start the authorization from the GitHub card on the Apps page. The whole install completes in a popup through GitHub's official install page, and the list refreshes automatically after the callback.
+
+<Steps>
+  <Step title="Start the authorization">
+    Click **Authorize** on the GitHub card (if the card already has an installation, the button reads **Connect another organization**). The backend returns the GitHub App's install URL, and the frontend opens a popup of roughly **1024 × 760**.
+  </Step>
+  <Step title="Pick the organization and repositories on GitHub">
+    The popup loads the GitHub App install page. Choose the **organization** (or personal account) to install into, and grant a repository scope — **All repositories** or **Only select repositories**. The set of granted repositories determines which repositories AI SRE can access afterward.
+  </Step>
+  <Step title="GitHub calls back, the frontend refreshes">
+    After you confirm on GitHub, GitHub calls back to the backend; the backend 302-redirects to the frontend callback page `/ai-sre/app-callback`, which then forwards the result to the Apps tab via `postMessage` and closes the popup. On success, the Apps page shows **Authorized** and refreshes the installation list, and the new organization appears.
+  </Step>
+</Steps>
+
+<Note>
+If you are not the owner of the organization, GitHub routes the request to the organization owner through its request-to-install approval flow; the installation activates only after approval. Which organization to install into and which repositories to grant are decided entirely on GitHub's install page — Flashduty does not select on your behalf.
+</Note>
+
+## Managing Installations
+
+---
+
+Each authorized organization adds one installation row under the GitHub card. Each row shows:
+
+| Element | Description |
+|---|---|
+| Organization name | The GitHub organization / account login the installation lives on (`github_target`) |
+| Status dot | A colored dot plus a label: **Connected** (`active`), **Suspended** (`suspended`), **Revoked** (`revoked`) |
+| Repository count | The number of repositories currently granted to this installation |
+
+<AccordionGroup>
+  <Accordion title="Enable / Disable (suspend / resume)" icon="toggle-on">
+    The toggle in the top-right of the card switches between Enabled and Disabled, which moves the App's installations as a whole between **active ↔ suspended**. **Disable = suspend**: while suspended, no installation token is issued and the agent can no longer reach those repositories — but the **GitHub installation itself is kept**, so you can re-enable instantly with one click, without going through the GitHub authorization again. An App counts as "enabled" as long as it has at least one **Connected** installation.
+  </Accordion>
+  <Accordion title="Revoke" icon="trash">
+    Click **Revoke** on a row to open a confirmation dialog — "Revoke authorization for organization '…'? After revoking, AI SRE will no longer be able to access this organization's repositories. You can re-authorize at any time." On confirm, the installation is set to **Revoked** and no token is issued from then on; any cached token also expires naturally within its TTL of at most 1 hour. A revoked installation is hidden from the card; re-authorizing the same organization restores it.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+**Suspend** vs. **Revoke**: suspend turns it off temporarily, keeps the GitHub installation, and resumes with one click; revoke disconnects this authorization and requires going through the GitHub authorization again to use it.
+</Note>
+
+## How AI SRE Uses It
+
+---
+
+After authorization, you need no extra configuration. When you ask AI SRE to work on a task in a repository during a session, it does the work itself inside the sandbox — behavior governed by the built-in `github` Skill.
+
+### The token: short-lived, repo-scoped, least-privilege
+
+- **Issued per turn**: Safari injects a GitHub App installation token into the bash environment for each turn and wires `git` to use `gh`'s credential helper — `gh` reads the token automatically, and `git` HTTPS clone / push just work, with **nothing written** to `.git/config` or any URL. The token expires automatically at the end of the turn (cache TTL ≤ 1 hour); nothing to revoke.
+- **Least privilege**: the token carries only the permissions it needs — `contents` / `pull_requests` / `issues` are **write**, `metadata` is **read**.
+- **The agent never touches the token**: the agent never sees, types, pastes, or echoes it. Operations like `echo $GH_TOKEN`, `env`, `printenv`, or embedding the token in a URL (`https://x:TOKEN@github.com/...`) are blocked by the **bash guard**, so the token cannot leak into the transcript.
+- **Scope limited to granted repositories**: the token is scoped to the repositories granted at install. A `404` / `403` on an ungranted repository means "add that repository to the installation" — at which point the agent asks you to do so rather than trying to work around scope.
+
+<Note>
+**Cloud sessions** use the account's GitHub App installation. If `gh auth status` reports not logged in, the account has no GitHub App installed — or it is not installed on the target repository — and the agent tells you to install the GitHub App from **Plugins → Apps** and grant the repository. It does **not** ask you for a token.
+
+**BYOC sessions** are different: they use the runner host's **own `gh`** (you run `gh auth login` on the host, or set `GH_TOKEN` in the runner environment), **not** this App token. For differences between environments, see [Environments (BYOC)](/en/ai-sre/environments).
+</Note>
+
+### Typical actions
+
+The agent works like an engineer joining the project — understand first, then change, then verify:
+
+- **Enter the repository**: clone it into its own workspace (`gh repo clone OWNER/REPO`) and read the repo's own conventions first (`CLAUDE.md`, `AGENTS.md`, `README`, `CONTRIBUTING`).
+- **Investigate changes / PRs**: `git log`, `gh pr list`, `gh pr view <number>`, `gh pr diff <number>`, `gh search prs` — to trace a PR named in an incident or change ticket, see what a release shipped, or read a diff before deciding anything.
+- **Change and propose**: create a branch, make a minimal diff, open a reviewable PR with `gh pr create`, or file an issue with `gh issue create`, and report the PR / issue URL back to you.
+
+### Hard guardrails
+
+The agent never crosses these:
+
+- **Never force-push** (`git push --force` / `-f`).
+- **Never push the default branch directly** — always a branch + PR.
+- **One logical change per PR**, kept reviewable; if a change balloons beyond a focused diff, it stops and hands the analysis back to you.
+- Never delete branches, close others' issues / PRs, or change repository settings; never commit secrets, credentials, or build artifacts.
+
+## Permissions & Scope
+
+---
+
+GitHub App **authorize** and **revoke** are **account-level** operations (`team_id = 0`). **The account is the only security boundary**; the team here is just an ownership / audit tag:
+
+- **Who can authorize / revoke / enable / disable**: **any** account member with the corresponding action permission can authorize a new organization, revoke any installation, or enable / disable the whole App — these operations act on all installations in the account, not narrowed by team.
+- **Runtime token resolution is account-level too**: when a session needs a repository, the token is resolved and minted from **any connected installation in the account** (`ResolveSessionToken` does not filter by team). Members of an account share one authorization — consistent with AI SRE's "usage = account-level, ownership = team tag" model for other resources.
+
+## Related Pages
+
+---
+
+<CardGroup cols={2}>
+  <Card title="MCP (External Tools)" icon="plug" href="/en/ai-sre/mcp">
+    The other way to connect external capabilities: tool calls to a hosted MCP server.
+  </Card>
+  <Card title="Console" icon="comments" href="/en/ai-sre/sessions">
+    Watch the agent clone a repo, read a diff, and open a PR during a session.
+  </Card>
+  <Card title="BYOC" icon="server" href="/en/ai-sre/environments">
+    BYOC sessions use the runner host's own gh, not the account's GitHub App token.
+  </Card>
+  <Card title="Skills" icon="wrench" href="/en/ai-sre/skills">
+    The built-in github Skill governs how the agent works inside a repository.
+  </Card>
+</CardGroup>
