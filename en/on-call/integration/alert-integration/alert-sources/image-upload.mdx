@@ -1,0 +1,173 @@
+---
+title: "Image Upload API"
+description: "Upload an image via the image upload API to obtain an image_key, then reference it through the images field when reporting a standard alert to display alert-related screenshots in the frontend and Feishu/DingTalk app notifications."
+keywords: ["image upload", "image_key", "standard alert", "alert image", "integration_key", "Flashduty"]
+---
+
+## 1. Overview
+
+When reporting an alert, you can attach images via the `images` field of a [Standard Alert](/en/on-call/integration/alert-integration/alert-sources/standard-alert) to display alert-related screenshots in the frontend and in Feishu/DingTalk app notifications. The `src` of each image in `images` accepts two kinds of values:
+
+- A publicly accessible image URL starting with `http`/`https`;
+- An `image_key` returned by this API after uploading an image.
+
+When an image has no public URL, call the image upload API first to upload it and get an `image_key`, then reference that key when reporting the alert. The workflow is:
+
+1. Call the image upload API to upload the image file and obtain an `image_key`;
+2. When reporting a standard alert, put the `image_key` into `images[].src`;
+3. While processing the alert, Flashduty resolves the `image_key`, associates the image with the alert, and persists it for display.
+
+<Note>
+Image upload and standard alert reporting share the same integration key (`integration_key`). Use the push key you obtained from a [Standard Alert](/en/on-call/integration/alert-integration/alert-sources/standard-alert) (or any other) integration — no separate provisioning is required.
+</Note>
+
+## 2. API Specification
+
+### Request Method
+
+<div class="md-block">
+
+POST, Content-Type: `multipart/form-data`
+
+</div>
+
+### Request URL
+
+<div class="md-block">
+
+```
+{api_host}/push/image/upload?integration_key={integration_key}
+```
+
+`{api_host}` is the Flashduty endpoint domain, which defaults to `https://api.flashcat.cloud` on the public cloud and matches your alert push URL.
+
+</div>
+
+### Request Parameters
+
+**Query parameters:**
+
+| Parameter | Required | Type | Description |
+| :-: | :-: | :-: | :--- |
+| integration_key | Yes | string | Integration key used to identify the account. Obtained after adding an integration; shared with alert push. |
+
+**Form-data parameters:**
+
+| Parameter | Required | Type | Description |
+| :-: | :-: | :-: | :--- |
+| image | Yes | file | The image file to upload, up to `5MB` per file. The format is detected from the file content (not the extension); supported formats are listed below. |
+
+**Supported image formats:**
+
+| Format | Content-Type |
+| :-: | :--- |
+| JPEG | image/jpeg, image/jpg |
+| PNG | image/png |
+| WebP | image/webp |
+| GIF | image/gif |
+| TIFF | image/tiff, image/tif |
+| BMP | image/bmp |
+| ICO | image/x-icon, image/vnd.microsoft.icon |
+
+### Response
+
+| Field | Required | Type | Description |
+| :-: | :-: | :-: | :--- |
+| request_id | Yes | string | Request ID, used for tracing |
+| error | No | [Error](#Error) | Error description, returned only when an error occurs |
+| data | No | [Data](#Data) | Upload result |
+
+<span id="Data"></span>
+Data:
+
+| Field | Required | Type | Description |
+| :-: | :-: | :-: | :--- |
+| image_key | Yes | string | Image identifier in the form `img_<hash>`. Put it into `images[].src` when reporting a standard alert to reference the image. |
+
+<span id="Error"></span>
+Error:
+
+| Field | Required | Type | Description |
+| :-: | :-: | :-: | :--- |
+| code | Yes | string | Error code; see [Code](#Code) for enum values |
+| message | No | string | Error description |
+
+<span id="Code"></span>
+Code:
+
+| Error Code | HTTP Status | Description |
+| :-: | :-: | :--- |
+| InvalidParameter | 400 | Invalid parameter, e.g. missing image file, unsupported format, or file larger than 5MB |
+| Unauthorized | 401 | integration_key is missing or invalid, or the integration/account is disabled |
+| RequestTooFrequently | 429 | Too many requests; rate limit exceeded |
+| InternalError | 500 | Internal or unknown error |
+
+### Rate Limits
+
+To keep the service stable, image upload is rate-limited per account:
+
+- Up to `5` requests per second per account;
+- Up to `50` requests per minute per account.
+
+Exceeding the limit returns `RequestTooFrequently` (HTTP 429).
+
+## 3. Example
+
+Request:
+
+```bash
+curl -X POST '{api_host}/push/image/upload?integration_key={integration_key}' \
+  -F 'image=@/path/to/screenshot.png'
+```
+
+Success response:
+
+```json
+{
+    "request_id": "0ace00116215ab4ca0ec5244b8fc54b0",
+    "data": {
+        "image_key": "img_8f3a9c2b1e4d5f6a7b8c9d0e1f2a3b4c"
+    }
+}
+```
+
+## 4. Referencing the Image in an Alert
+
+Once you have the `image_key`, put it into the `src` field of an image in the `images` array when reporting a [Standard Alert](/en/on-call/integration/alert-integration/alert-sources/standard-alert):
+
+```json
+{
+    "event_status": "Warning",
+    "title_rule": "cpu idle low than 20%",
+    "labels": {
+        "service": "engine"
+    },
+    "images": [
+        {
+            "alt": "CPU usage screenshot",
+            "src": "img_8f3a9c2b1e4d5f6a7b8c9d0e1f2a3b4c"
+        }
+    ]
+}
+```
+
+For the full field definitions of the `images` array and the `image` struct, see [Standard Alert - image struct](/en/on-call/integration/alert-integration/alert-sources/standard-alert#image).
+
+<Note>
+- In `images[].src`, `image_key` is limited to `256` characters; anything longer is discarded.
+- An uploaded image is stored temporarily at first and is promoted to long-term storage only after it is referenced by an alert. Use the `image_key` in an alert report promptly after uploading.
+</Note>
+
+## 5. FAQ
+
+1. **What happens if I upload the same image twice?**
+
+   - Images are deduplicated by content. Uploading byte-identical images returns the same `image_key` and does not consume extra storage.
+
+2. **Can I use a public image URL directly?**
+
+   - Yes. If the image already has a public `http`/`https` URL, there is no need to upload it — just put the URL into `images[].src`. The image upload API is only for images without a public URL.
+
+3. **Can an image_key be used across accounts?**
+
+   - No. An `image_key` is bound to the account of the `integration_key` used at upload time and is valid only within that same account.
