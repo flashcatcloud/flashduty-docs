@@ -1,0 +1,113 @@
+---
+title: "HarmonyOS SDK compatibility"
+description: "Review supported project types, device types, permissions, Kit dependencies, and current limits for the HarmonyOS RUM SDK"
+keywords: ["RUM", "HarmonyOS SDK", "compatibility", "ArkTS", "Stage model"]
+---
+
+This page describes the HarmonyOS SDK support scope and current limits so you can confirm whether your project meets the requirements before integration.
+
+## Support scope
+
+| Item | Support |
+|------|---------|
+| Project model | HarmonyOS NEXT / Stage model ArkTS projects |
+| SDK form | HAR modules imported through `@flashcatcloud/*` packages |
+| RUM data source | Events always write `source: "harmony"` |
+| Device types | SDK HAR modules declare support for `default`, `phone`, `tablet`, `2in1`, `tv`, `wearable`, and `car` |
+| Runtime initialization | Initialize once in `AbilityStage.onCreate` when possible |
+| Data upload | `@kit.NetworkKit`, `POST /api/v2/rum` |
+
+## Modules and capabilities
+
+| Module | Package | Description |
+|--------|---------|-------------|
+| Core | `@flashcatcloud/core` | Initialization, configuration, context, user information, tracking consent, persistence, and upload |
+| RUM | `@flashcatcloud/rum` | View, action, resource, error, and session handling |
+| Trace | `@flashcatcloud/trace` | W3C `traceparent` / `tracestate` injection, RUM resource correlation, and the `FlashcatHttp` wrapper |
+| Crash | `@flashcatcloud/crash` | `APP_CRASH` and `APP_FREEZE` collection, reported as RUM crash errors |
+| Hvigor plugin | `@flashcatcloud/hvigor-plugin` | Uploads ArkTS sourcemap, `nameCache.json`, and native `.so` symbols |
+
+## Permission requirements
+
+The host application must allow the SDK to access the network upload endpoint.
+
+```json5 module.json5
+{
+  module: {
+    requestPermissions: [
+      {
+        name: "ohos.permission.INTERNET"
+      }
+    ]
+  }
+}
+```
+
+If your application itself reads network state, you can also declare `ohos.permission.GET_NETWORK_INFO`. The current SDK event context does not automatically subscribe to network state changes, so this permission is not required for RUM upload.
+
+## Kit dependencies
+
+The SDK source uses these HarmonyOS Kits:
+
+| Kit | Usage |
+|-----|-------|
+| `@kit.AbilityKit` | Application context, bundle information, exception observer, and foreground/background state |
+| `@kit.BasicServicesKit` | Device brand, model, OS version, API level, and device type |
+| `@kit.NetworkKit` | RUM batch upload and the `FlashcatHttp` request wrapper |
+| `@kit.RemoteCommunicationKit` | `rcp` interceptor for Trace header injection and resource recording |
+| `@kit.ArkUI` | `routerPageUpdate` observer for automatic views |
+| `@kit.PerformanceAnalysisKit` | `hiAppEvent` crash and hang observer, plus HiLog output |
+| `@kit.BackgroundTasksKit` | WorkScheduler deferred upload registration |
+
+## Initialization order
+
+Enable the SDK in this order:
+
+1. Call `Flashcat.initialize(...)` to create the core instance
+2. Call `FlashcatRum.enable(...)` to enable RUM
+3. Call `FlashcatTrace.enable(...)` to enable Trace
+4. Call `FlashcatCrash.enable(...)` to enable Crash
+
+<Warning>
+Crash events are written through the RUM feature. Do not enable only `@flashcatcloud/crash` without RUM, because received crash replays will not produce RUM errors.
+</Warning>
+
+## Supported automatic collection
+
+| Capability | Support | Description |
+|------------|---------|-------------|
+| Automatic views | Supported | Requires `setTrackNavigation(true)` and `FlashcatRum.startViewTracking(context)` |
+| Automatic taps | Supported through explicit wrapping | Requires `setTrackUserInteractions(true)` and `FlashcatRum.trackTap(target)` in click handlers |
+| Automatic resources | Supported | Collected through the `rcp` interceptor or `FlashcatHttp` wrapper |
+| Unhandled exceptions | Supported | Collected through `errorManager.on('error')` |
+| Crashes and hangs | Supported | Replayed by `hiAppEvent` on the next launch |
+| Trace correlation | Supported | Injects W3C `traceparent` and `tracestate`, and writes `_dd.trace_id` / `_dd.span_id` to RUM resources |
+
+## Current limits
+
+| Limit | Description |
+|-------|-------------|
+| Navigation scope | Automatic views currently listen to ArkUI `routerPageUpdate`; use manual views or additional wrapping for `Navigation` / `NavDestination` |
+| Tap scope | The SDK does not automatically traverse every component; call `FlashcatRum.trackTap()` in button handlers or shared click wrappers |
+| Network scope | Only requests using the `rcp` interceptor, `FlashcatHttp`, or manual resource APIs are collected |
+| Resource lifecycle | A resource must finish while a view is active; in-flight resources are dropped when the view closes |
+| Concurrent resources | A single view keeps at most 100 pending resources |
+| rcp host restriction | `setFirstPartyHosts()` currently applies only to `FlashcatHttp`; an `rcp` session with the interceptor injects Trace headers into that session's requests; requests that already have `traceparent` are not overwritten |
+| Crash timing | HarmonyOS replays crashes and hangs on the next launch; the SDK does not synchronously report from the crashing process |
+| Network status | `connectivity.status` is currently `unknown` |
+| Session Replay | Not currently supported |
+| Page performance metrics | HarmonyOS page rendering performance is not automatically collected |
+| Frustration | `setTrackFrustrations()` is reserved and currently does not generate frustration events |
+
+## Symbolication compatibility
+
+HarmonyOS crash stacks can contain both ArkTS / JS frames and native `.so` frames. The server resolves them as follows:
+
+| Frame type | Resolution method | Required uploaded files |
+|------------|-------------------|-------------------------|
+| ArkTS / JS | Uses HarmonyOS `sourceMaps.map` to restore source files, function names, lines, and columns | `sourceMaps.map`; obfuscated builds can also include `nameCache.json` |
+| Native C/C++ | Reuses the native symbolication pipeline and matches by `build_id`, architecture, and `.so` name | Unstripped `.so` files with GNU build-id |
+
+<Tip>
+Upload symbol files as part of your release build, and keep `service` and `version` aligned with SDK initialization and RUM events. Otherwise the console can receive crash events but cannot resolve frames back to source locations.
+</Tip>
