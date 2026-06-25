@@ -1,0 +1,230 @@
+---
+title: "HarmonyOS SDK 数据收集"
+description: "了解 HarmonyOS RUM SDK 自动和手动采集的事件类型、字段、会话规则与上报行为"
+keywords: ["RUM", "HarmonyOS SDK", "数据收集", "事件字段", "Crash"]
+---
+
+HarmonyOS SDK 将 RUM 数据组装为 NDJSON 批次并上报到 Flashduty。当前版本采集 view、action、resource 和 error 四类 RUM 事件；崩溃和卡死会作为带 `is_crash` 标记的 error 事件进入同一条管道。
+
+## 默认上下文
+
+SDK 初始化后，会为每条事件附加通用上下文。
+
+| 字段 | 来源 | 说明 |
+|------|------|------|
+| `source` | 固定值 | 固定为 `harmony` |
+| `service` | `ConfigurationBuilder.setService()` 或应用 bundle id | 服务名称，用于按服务筛选 |
+| `version` | HarmonyOS bundle 信息 | 应用版本号 |
+| `application.id` | `RumConfigurationBuilder(applicationId)` | RUM 应用 ID |
+| `session.id` | SDK 生成 | 用户会话 ID |
+| `os.name` / `os.version` | `@kit.BasicServicesKit.deviceInfo` | 操作系统名称和版本 |
+| `device.brand` / `device.model` / `device.type` | `deviceInfo` | 设备品牌、型号和类型 |
+| `connectivity.status` | SDK 网络上下文 | 当前版本默认为 `unknown` |
+| `usr.id` / `usr.name` / `usr.email` | `setUserInfo()` | 已识别用户信息；服务端不接收其他用户字段 |
+| `context.*` | 全局属性或单事件属性 | 自定义业务上下文 |
+
+<Note>
+`clientToken` 只用于上报鉴权，不会写入 RUM 事件。
+</Note>
+
+## 会话规则
+
+SDK 按会话进行采样和生命周期管理。
+
+| 规则 | 当前行为 |
+|------|----------|
+| 会话采样 | 创建会话时按 `sessionSampleRate` 做一次随机采样；未命中的会话不会写出事件 |
+| 空闲超时 | 15 分钟无真实事件后过期；keep-alive 不会刷新空闲时间 |
+| 最大时长 | 单个会话最长 4 小时 |
+| 视图保活 | 活跃 view 每 30 秒刷新一次 `time_spent` |
+| 启动条件 | `keepAlive` 不会创建新会话，只有真实 view、action、error 或 resource 事件会创建会话 |
+
+## View 事件
+
+View 表示用户正在查看的页面或业务视图。你可以通过自动路由追踪或手动 API 生成 view。
+
+```ts
+import { GlobalRumMonitor } from '@flashcatcloud/rum';
+
+const monitor = GlobalRumMonitor.get();
+
+monitor.startView('product-detail', 'ProductDetail', {
+  'view.url': 'pages/ProductDetail'
+});
+
+monitor.stopView('product-detail');
+```
+
+View 事件包含：
+
+| 字段 | 说明 |
+|------|------|
+| `view.id` | SDK 生成的唯一视图 ID |
+| `view.name` | 视图名称 |
+| `view.url` | 优先使用属性中的 `view.url`，否则使用 view key |
+| `view.time_spent` | 从 view 开始到当前更新的耗时，单位为纳秒 |
+| `view.is_active` | 当前视图是否仍处于活动状态 |
+| `view.action.count` | 当前 view 下 action 数量 |
+| `view.error.count` | 当前 view 下 error 数量 |
+| `view.resource.count` | 当前 view 下 resource 数量 |
+| `view.crash.count` | 当前 view 下 `is_crash` error 数量，用于计算 crash-free rate |
+| `_dd.document_version` | 同一 view 的更新版本号 |
+
+## Action 事件
+
+Action 表示用户操作。即时操作通过 `addAction()` 记录，带耗时的操作通过 `startAction()` 和 `stopAction()` 记录。
+
+```ts
+import {
+  GlobalRumMonitor,
+  RumActionType
+} from '@flashcatcloud/rum';
+
+const monitor = GlobalRumMonitor.get();
+
+monitor.addAction(RumActionType.TAP, 'pay_button');
+
+monitor.startAction(RumActionType.SCROLL, 'feed_scroll');
+monitor.stopAction(RumActionType.SCROLL, 'feed_scroll');
+```
+
+支持的 action 类型：
+
+| 枚举 | 值 |
+|------|----|
+| `RumActionType.TAP` | `tap` |
+| `RumActionType.SCROLL` | `scroll` |
+| `RumActionType.SWIPE` | `swipe` |
+| `RumActionType.CLICK` | `click` |
+| `RumActionType.BACK` | `back` |
+| `RumActionType.CUSTOM` | `custom` |
+
+Action 事件包含 `action.id`、`action.type`、`action.target.name` 和 `action.loading_time`。通过 `FlashcatRum.trackTap()` 自动记录的操作类型为 `tap`。
+
+## Resource 事件
+
+Resource 表示网络请求。SDK 会在以下场景生成 resource：
+
+- 使用 `rcp` session 并添加 `FlashcatTrace.interceptor()`
+- 使用 `FlashcatHttp.request()` 包装 `@kit.NetworkKit` 请求
+- 通过 `GlobalRumMonitor.get().startResource()` 和 `stopResource()` 手动记录
+
+```ts
+import {
+  GlobalRumMonitor,
+  RumResourceKind,
+  RumResourceMethod
+} from '@flashcatcloud/rum';
+
+const monitor = GlobalRumMonitor.get();
+
+monitor.startResource('order-request', RumResourceMethod.GET, 'https://api.example.com/orders');
+monitor.stopResource('order-request', 200, 2048, RumResourceKind.NATIVE);
+```
+
+Resource 事件包含：
+
+| 字段 | 说明 |
+|------|------|
+| `resource.id` | SDK 生成的资源 ID |
+| `resource.type` | 资源类型；自动网络采集会按响应 `Content-Type` 归类，无法识别时使用 `native` |
+| `resource.url` | 请求 URL |
+| `resource.method` | 请求方法 |
+| `resource.status_code` | HTTP 状态码 |
+| `resource.size` | 响应体大小，单位为字节 |
+| `resource.duration` | 请求耗时，单位为纳秒 |
+| `_dd.trace_id` / `_dd.span_id` | 当请求注入了 `traceparent` 时写入，用于关联后端 Trace |
+
+自动网络采集的资源类型映射：
+
+| 响应 `Content-Type` | `resource.type` |
+|---------------------|-----------------|
+| `image/*` | `image` |
+| `video/*` / `audio/*` | `media` |
+| `font/*` | `font` |
+| `text/css` | `css` |
+| `text/javascript` | `js` |
+| 其他或缺失 | `native` |
+
+如果请求失败，SDK 会生成 `source: "network"` 的 error 事件，并在 `error.resource` 中附带请求方法、状态码和 URL。
+
+## Error 事件
+
+Error 表示手动上报错误、未捕获 ArkTS 异常、网络错误、崩溃或卡死。
+
+```ts
+import {
+  GlobalRumMonitor,
+  RumErrorSource
+} from '@flashcatcloud/rum';
+
+GlobalRumMonitor.get().addError(
+  'checkout failed',
+  RumErrorSource.CUSTOM,
+  'at checkout'
+);
+```
+
+支持的 error source：
+
+| 枚举 | 值 | 说明 |
+|------|----|------|
+| `NETWORK` | `network` | 网络请求失败 |
+| `SOURCE` | `source` | ArkTS / JS 运行时错误或崩溃 |
+| `CONSOLE` | `console` | 控制台来源错误 |
+| `WEBVIEW` | `webview` | WebView 来源错误 |
+| `AGENT` | `agent` | Agent 来源错误 |
+| `CUSTOM` | `custom` | 业务手动上报 |
+
+Error 事件包含：
+
+| 字段 | 说明 |
+|------|------|
+| `error.message` | 错误消息 |
+| `error.source` | 错误来源 |
+| `error.stack` | 错误栈，存在时上报 |
+| `error.handling` | `handled` 或 `unhandled` |
+| `error.is_crash` | 崩溃和卡死事件为 `true` |
+| `error.category` | Crash 模块写入 `Exception` 或 `App Hang` |
+| `error.source_type` | Crash 模块写入 `harmony` |
+| `error.binary_images` | Native 崩溃关联的动态库符号信息 |
+| `build_id` | 用于匹配 Native 符号的 build-id |
+
+## 崩溃和卡死
+
+Crash 模块监听 HarmonyOS `hiAppEvent` 的 `APP_CRASH` 和 `APP_FREEZE`。系统会持久化崩溃并在下一次启动时回放，因此你需要在启动早期启用 Crash 模块。
+
+崩溃事件会通过 RUM error 管道上报：
+
+- ArkTS / JS 错误栈会按 V8 风格帧解析
+- Native C/C++ 栈会按 `#NN pc <address> <lib.so>` 形式解析
+- 如果上传了 `sourceMaps.map`、`nameCache.json` 和未 strip 的 `.so`，服务端会还原源文件、函数名、行列号和 Native 符号
+
+## 上报行为
+
+SDK 以 NDJSON 形式批量上报事件。
+
+| 行为 | 当前实现 |
+|------|----------|
+| 上报地址 | `{site}/api/v2/rum`，默认 site 为 `https://browser.flashcat.cloud` |
+| 请求方法 | `POST` |
+| Content-Type | `text/plain;charset=UTF-8` |
+| 鉴权 | 请求头 `DD-API-KEY: <clientToken>` |
+| User-Agent | `flashcat-sdk-harmony/0.1.3` |
+| 查询参数 | `ddsource=harmony`，`ddtags` 包含 `sdk_version:0.1.3`，并在存在时追加 `env`、`service`、`version` |
+| 默认上传间隔 | 5 秒 |
+| 网络超时 | 连接超时和读取超时均为 30 秒 |
+| 重试 | 网络错误、`401`、`403`、`408`、`429` 和 `5xx` 会保留批次并指数退避重试 |
+| 丢弃 | 其他 `4xx` 视为永久错误并丢弃当前批次 |
+| 强制刷新 | error 和 crash 事件会触发更快刷新 |
+| 后台刷新 | 应用进入后台时会刷新当前 view 并触发上传 |
+
+## 当前不采集的内容
+
+当前 HarmonyOS SDK 不自动采集以下数据：
+
+- Session Replay
+- Web Vitals 或浏览器页面性能指标
+- HarmonyOS 页面渲染性能指标
+- 自动 frustration 事件
+- 网络连接类型变化；`connectivity.status` 目前保持为 `unknown`

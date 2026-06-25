@@ -1,0 +1,253 @@
+---
+title: "HarmonyOS SDK 接入"
+description: "在 HarmonyOS NEXT 应用中接入 Flashduty RUM SDK，采集视图、操作、网络、错误和崩溃数据"
+keywords: ["RUM", "HarmonyOS SDK", "鸿蒙 SDK", "ArkTS", "用户监控"]
+---
+
+HarmonyOS SDK 通过 ArkTS HAR 模块提供 RUM、Trace 和 Crash 能力。初始化后，SDK 会把应用中的视图、用户操作、网络请求、错误和崩溃事件上报到 Flashduty RUM，并使用 `source: "harmony"` 标识数据来源。
+
+<Info>
+当前 SDK 模块版本为 `0.1.3`。示例使用 `@flashcatcloud/core`、`@flashcatcloud/rum`、`@flashcatcloud/trace` 和 `@flashcatcloud/crash` 四个模块。
+</Info>
+
+## 前提条件
+
+接入前，请先完成以下准备：
+
+- 在 Flashduty 控制台创建或选择一个 RUM 应用，并获取 **Application ID** 和 **Client Token**
+- 确认应用可以访问 `https://browser.flashcat.cloud/api/v2/rum`
+- 在宿主应用中声明 `ohos.permission.INTERNET` 权限，用于 SDK 批量上报数据
+- 使用 HarmonyOS NEXT / Stage 模型工程，并在应用启动早期完成 SDK 初始化
+
+## 安装 SDK
+
+在应用模块的 `oh-package.json5` 中添加需要的 Flashduty 模块。只接入 RUM 时至少需要 `core` 和 `rum`；需要网络 Trace 或崩溃采集时再添加对应模块。
+
+```json5 oh-package.json5
+{
+  dependencies: {
+    "@flashcatcloud/core": "0.1.3",
+    "@flashcatcloud/rum": "0.1.3",
+    "@flashcatcloud/trace": "0.1.3",
+    "@flashcatcloud/crash": "0.1.3"
+  }
+}
+```
+
+## 初始化 SDK
+
+建议在 `AbilityStage.onCreate` 中初始化 SDK。这样可以在页面、网络请求和异常发生前完成核心实例、RUM、Trace 和 Crash 功能注册。
+
+```ts MyAbilityStage.ets
+import { AbilityStage } from '@kit.AbilityKit';
+import {
+  Flashcat,
+  ConfigurationBuilder,
+  FlashcatSite,
+  TrackingConsent
+} from '@flashcatcloud/core';
+import {
+  FlashcatRum,
+  RumConfigurationBuilder
+} from '@flashcatcloud/rum';
+import {
+  FlashcatTrace,
+  TraceConfigurationBuilder
+} from '@flashcatcloud/trace';
+import {
+  FlashcatCrash,
+  CrashConfigurationBuilder
+} from '@flashcatcloud/crash';
+
+export default class MyAbilityStage extends AbilityStage {
+  onCreate(): void {
+    const coreConfig = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+      .setService('shopping-app')
+      .setVariant('default')
+      .useSite(FlashcatSite.CN)
+      .build();
+
+    Flashcat.initialize(this.context, coreConfig, TrackingConsent.GRANTED);
+
+    FlashcatRum.enable(
+      new RumConfigurationBuilder('<APPLICATION_ID>')
+        .setSessionSampleRate(100)
+        .setTrackUserInteractions(true)
+        .setTrackNavigation(true)
+        .setTrackNetworkRequests(true)
+        .build()
+    );
+
+    FlashcatTrace.enable(
+      new TraceConfigurationBuilder()
+        .setSampleRate(100)
+        .setFirstPartyHosts(['api.example.com'])
+        .build()
+    );
+
+    FlashcatCrash.enable(new CrashConfigurationBuilder().build());
+  }
+}
+```
+
+<Warning>
+请不要在客户端代码中使用服务端密钥。`clientToken` 只用于客户端 RUM 数据上报，`applicationId` 用于归属 RUM 应用数据。
+</Warning>
+
+## 采集页面视图
+
+如果应用使用 ArkUI `router`，请在 UI 页面拿到 `UIContext` 后启动自动视图追踪。该能力只有在 RUM 配置中启用 `setTrackNavigation(true)` 后才会生效。
+
+```ts pages/Index.ets
+import { FlashcatRum } from '@flashcatcloud/rum';
+
+@Entry
+@Component
+struct Index {
+  aboutToAppear(): void {
+    FlashcatRum.startViewTracking(this.getUIContext());
+  }
+}
+```
+
+自动视图追踪会监听 `routerPageUpdate`：
+
+| 页面状态 | SDK 行为 |
+|----------|----------|
+| `ON_PAGE_SHOW` | 生成 `startView`，视图名称优先使用路由名称，缺省时使用路径最后一段 |
+| `ON_PAGE_HIDE` | 生成 `stopView`，关闭当前视图并刷新停留时长 |
+
+如果你的页面没有使用 `router`，可以使用手动 API 管理视图。
+
+```ts
+import { GlobalRumMonitor } from '@flashcatcloud/rum';
+
+const monitor = GlobalRumMonitor.get();
+
+monitor.startView('checkout', 'Checkout');
+monitor.stopView('checkout');
+```
+
+## 采集用户操作
+
+启用 `setTrackUserInteractions(true)` 后，可以通过 `FlashcatRum.trackTap()` 在统一点击处理器中记录点击事件。该方法不会自动遍历所有组件，你需要在按钮或公共事件封装处显式调用。
+
+```ts
+import { FlashcatRum } from '@flashcatcloud/rum';
+
+Button('Pay')
+  .onClick(() => {
+    FlashcatRum.trackTap('pay_button');
+    // 执行业务逻辑
+  });
+```
+
+你也可以通过 `GlobalRumMonitor` 手动记录即时操作或带耗时的操作。
+
+```ts
+import {
+  GlobalRumMonitor,
+  RumActionType
+} from '@flashcatcloud/rum';
+
+const monitor = GlobalRumMonitor.get();
+
+monitor.addAction(RumActionType.TAP, 'checkout_button');
+
+monitor.startAction(RumActionType.SCROLL, 'product_feed');
+monitor.stopAction(RumActionType.SCROLL, 'product_feed');
+```
+
+## 采集网络请求和 Trace
+
+HarmonyOS SDK 提供两种网络接入方式。
+
+### rcp 拦截器
+
+如果应用使用 `@kit.RemoteCommunicationKit` 的 `rcp`，在 session 中添加 `FlashcatTrace.interceptor()`。拦截器会注入 W3C `traceparent` 和 `tracestate`，并把请求生命周期发送给 RUM 生成 resource 事件。
+
+```ts
+import { rcp } from '@kit.RemoteCommunicationKit';
+import { FlashcatTrace } from '@flashcatcloud/trace';
+
+const session = rcp.createSession({
+  interceptors: [FlashcatTrace.interceptor()]
+});
+
+const response = await session.get('https://api.example.com/orders');
+session.close();
+```
+
+### FlashcatHttp 包装器
+
+如果应用使用 `@kit.NetworkKit`，可以用 `FlashcatHttp.request()` 替代 `http.createHttp().request(...)`。该包装器会在请求完成或失败时生成 RUM resource 或 network error。
+
+```ts
+import { http } from '@kit.NetworkKit';
+import { FlashcatHttp } from '@flashcatcloud/trace';
+
+const response = await FlashcatHttp.request('https://api.example.com/orders', {
+  method: http.RequestMethod.GET
+});
+```
+
+<Note>
+`traceparent` 和 `tracestate` 只有在追踪同意状态为 `TrackingConsent.GRANTED` 时才会注入。`FlashcatHttp` 还会按 `setFirstPartyHosts()` 限制注入域名；未配置一方域名时会对所有 host 注入。请求已带有 `traceparent` 时，SDK 不会覆盖已有 Trace 上下文。
+</Note>
+
+对于其他网络栈，可以通过 `FlashcatTrace.getHeaders()` 获取包含 `traceparent` 和 `tracestate` 的手动注入请求头。
+
+```ts
+const headers = FlashcatTrace.getHeaders();
+// 将 headers 合并到你的自定义网络请求中
+```
+
+## 关联用户信息
+
+登录后，你可以设置当前用户。SDK 会把用户字段写入后续 RUM 事件的 `usr` 对象。
+
+```ts
+import { Flashcat } from '@flashcatcloud/core';
+
+Flashcat.getInstance().setUserInfo({
+  id: 'user-1001',
+  name: 'Alice',
+  email: 'alice@example.com'
+});
+```
+
+<Warning>
+当前 `setUserInfo()` 仅用于设置 `id`、`name` 和 `email`。服务端不接收其他用户字段；如需上报业务维度，请使用 RUM 全局属性或单事件属性写入 `context`。
+</Warning>
+
+用户退出登录时清除用户信息。
+
+```ts
+Flashcat.getInstance().clearUserInfo();
+```
+
+## 验证接入
+
+完成接入后，可以按以下方式验证：
+
+1. 在初始化配置中临时启用 `setVerbose(true)`，通过 HiLog 查看 `Flashcat` 标签日志
+2. 打开应用并触发页面切换、按钮点击、网络请求或手动错误
+3. 在 Flashduty RUM 应用中筛选 `source:harmony`，确认出现 view、action、resource 或 error 事件
+4. 对网络请求检查后端 Trace 是否收到 `traceparent`
+5. 触发 Crash 功能后重新启动应用；HarmonyOS 系统会在下一次启动时回放崩溃事件
+
+## 下一步
+
+<CardGroup cols={3}>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/harmony/advanced-config">
+配置采样率、隐私同意、事件过滤、Trace 和崩溃符号上传。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/harmony/compatible">
+了解支持的 HarmonyOS 工程、Kit、权限和当前限制。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/harmony/data-collection">
+查看 SDK 自动和手动采集的事件类型、字段与上报行为。
+</Card>
+</CardGroup>

@@ -1,0 +1,302 @@
+---
+title: "HarmonyOS SDK advanced configuration"
+description: "Configure HarmonyOS RUM SDK sampling, tracking consent, event mapping, Trace, crash reporting, and symbol upload"
+keywords: ["RUM", "HarmonyOS SDK", "advanced configuration", "Trace", "Crash", "Sourcemap"]
+---
+
+This page describes core configuration, RUM configuration, privacy controls, Trace correlation, crash reporting, and symbol upload for the HarmonyOS SDK. All options come from the current ArkTS SDK public API.
+
+## Core configuration
+
+Create core configuration with `ConfigurationBuilder` and pass it to `Flashcat.initialize()`.
+
+```ts
+import {
+  ConfigurationBuilder,
+  FlashcatSite
+} from '@flashcatcloud/core';
+
+const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+  .setService('shopping-app')
+  .setVariant('default')
+  .useSite(FlashcatSite.CN)
+  .setBatchUploadFrequencyMs(5000)
+  .build();
+```
+
+| Method / parameter | Type | Default | Description |
+|--------------------|------|---------|-------------|
+| `new ConfigurationBuilder(clientToken, env)` | string, string | Required | `clientToken` authenticates client-side reporting; `env` is the environment name |
+| `setService(service)` | string | Application bundle id | Service name written to the RUM event `service` field |
+| `setVariant(variant)` | string | `""` | Build variant name |
+| `useSite(site)` | `FlashcatSite` | `FlashcatSite.CN` | Intake site; production uses `https://browser.flashcat.cloud` |
+| `setCustomEndpoint(endpoint)` | string | `""` | Overrides the intake host, usually for local proxying or private forwarding; the SDK still appends `/api/v2/rum` |
+| `setBatchUploadFrequencyMs(frequencyMs)` | number | `5000` | Foreground batch upload cadence in milliseconds |
+| `setVerbose(enabled)` | boolean | `false` | Emits SDK internal HiLog entries with the `Flashcat` tag |
+
+<Note>
+`Flashcat.initialize()` initializes a given instance name only once. A duplicate call returns the existing instance and does not re-register feature modules.
+</Note>
+
+## Tracking consent
+
+Pass `TrackingConsent` during initialization. You can also update it at runtime with `Flashcat.setTrackingConsent()`.
+
+```ts
+import { Flashcat, TrackingConsent } from '@flashcatcloud/core';
+
+Flashcat.setTrackingConsent(TrackingConsent.PENDING);
+Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
+```
+
+| State | Behavior |
+|-------|----------|
+| `GRANTED` | Writes to the main upload directory and starts batch uploads |
+| `PENDING` | Writes events to a separate pending buffer; when consent changes to `GRANTED`, the SDK migrates and uploads them |
+| `NOT_GRANTED` | Drops new events, clears the pending buffer, and stops uploads |
+
+<Warning>
+Trace headers also honor tracking consent. The SDK injects correlatable `traceparent` and `tracestate` headers only when consent is `GRANTED`.
+</Warning>
+
+## RUM configuration
+
+Create RUM configuration with `RumConfigurationBuilder` and pass it to `FlashcatRum.enable()`.
+
+```ts
+import {
+  FlashcatRum,
+  RumConfigurationBuilder
+} from '@flashcatcloud/rum';
+
+FlashcatRum.enable(
+  new RumConfigurationBuilder('<APPLICATION_ID>')
+    .setSessionSampleRate(50)
+    .setTrackUserInteractions(true)
+    .setTrackNavigation(true)
+    .setTrackNetworkRequests(true)
+    .build()
+);
+```
+
+| Method / parameter | Type | Default | Description |
+|--------------------|------|---------|-------------|
+| `new RumConfigurationBuilder(applicationId)` | string | Required | RUM application ID written to `application.id` |
+| `setSessionSampleRate(rate)` | number | `100` | Session sample rate as a percentage; `100` collects all sessions, `0` collects no events |
+| `setTrackUserInteractions(enabled)` | boolean | `false` | Controls whether `FlashcatRum.trackTap()` records tap actions |
+| `setTrackNavigation(enabled)` | boolean | `false` | Controls whether `FlashcatRum.startViewTracking()` registers the ArkUI `routerPageUpdate` observer |
+| `setTrackNetworkRequests(enabled)` | boolean | `false` | Controls whether network lifecycle events published by Trace become RUM resources |
+| `setTrackFrustrations(enabled)` | boolean | `false` | Reserved toggle; the current version does not generate frustration events |
+| `setEventMapper(mapper)` | function | `null` | Modifies or drops view, action, error, and resource events before disk write |
+
+### Event mapping and redaction
+
+Use `setEventMapper()` to perform lightweight processing before events are reported. Return the modified event to keep it, or `null` to drop it.
+
+```ts
+import { RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
+  .setEventMapper((event) => {
+    if (event.type === 'resource') {
+      const resource = event.resource as Record<string, Object>;
+      const url = resource.url;
+      if (typeof url === 'string') {
+        resource.url = url.split('?')[0];
+      }
+    }
+
+    if (event.type === 'action') {
+      const action = event.action as Record<string, Object>;
+      const target = action.target as Record<string, Object>;
+      if (String(target.name).includes('secret')) {
+        return null;
+      }
+    }
+
+    return event;
+  })
+  .build();
+```
+
+<Warning>
+The event mapper runs on the SDK write path. Keep it fast, synchronous, and non-throwing. The SDK catches mapper errors and preserves the original event, but expensive logic increases client overhead.
+</Warning>
+
+## Global attributes and user information
+
+Global attributes are merged into the `context` object on subsequent events.
+
+```ts
+import {
+  GlobalRumMonitor,
+  RumErrorSource
+} from '@flashcatcloud/rum';
+
+const monitor = GlobalRumMonitor.get();
+
+monitor.addAttribute('tenant', 'acme');
+monitor.addError('checkout failed', RumErrorSource.CUSTOM);
+monitor.removeAttribute('tenant');
+```
+
+Set user information through the core instance. `id`, `name`, and `email` are written to the `usr` object on subsequent events.
+
+```ts
+import { Flashcat } from '@flashcatcloud/core';
+
+Flashcat.getInstance().setUserInfo({
+  id: 'user-1001',
+  name: 'Alice',
+  email: 'alice@example.com'
+});
+```
+
+<Warning>
+`setUserInfo()` currently sets only `id`, `name`, and `email`. The server does not accept other user fields; use RUM global attributes or per-event attributes to write business dimensions to `context`.
+</Warning>
+
+## Trace configuration
+
+The Trace module generates W3C `traceparent` and `tracestate`, then correlates the generated trace id and span id to RUM resources through `_dd.trace_id` and `_dd.span_id`. `tracestate` carries the Datadog vendor entry `dd=s:{0|1};o:rum`.
+
+```ts
+import {
+  FlashcatTrace,
+  TraceConfigurationBuilder
+} from '@flashcatcloud/trace';
+
+FlashcatTrace.enable(
+  new TraceConfigurationBuilder()
+    .setSampleRate(100)
+    .setFirstPartyHosts(['api.example.com'])
+    .build()
+);
+```
+
+| Method | Type | Default | Description |
+|--------|------|---------|-------------|
+| `setSampleRate(rate)` | number | `100` | Controls the sampled flag in `traceparent` and `tracestate` |
+| `setFirstPartyHosts(hosts)` | string[] | `[]` | Restricts `FlashcatHttp` Trace header injection to these first-party hosts and subdomains; an empty array means all hosts |
+
+<Note>
+`setFirstPartyHosts()` is currently used only by the `FlashcatHttp` wrapper. The `rcp` interceptor itself is an explicit per-session opt-in, so requests made through a session with the interceptor receive Trace headers. If a request already has `traceparent`, the SDK does not overwrite the existing Trace context. Existing `tracestate` keeps other vendors and moves the updated `dd=` member to the front.
+</Note>
+
+## Crash reporting configuration
+
+The Crash module listens to HarmonyOS `hiAppEvent` for `APP_CRASH` and `APP_FREEZE`. The system replays fault events on the next launch, and the SDK reports them through the RUM error pipeline.
+
+```ts
+import {
+  FlashcatCrash,
+  CrashConfigurationBuilder
+} from '@flashcatcloud/crash';
+
+FlashcatCrash.enable(
+  new CrashConfigurationBuilder()
+    .setTrackCrashes(true)
+    .setTrackAppHangs(true)
+    .setSampleRate(100)
+    .build()
+);
+```
+
+| Method | Type | Default | Description |
+|--------|------|---------|-------------|
+| `setTrackCrashes(enabled)` | boolean | `true` | Captures ArkTS / JS and native C/C++ crashes |
+| `setTrackAppHangs(enabled)` | boolean | `true` | Captures `APP_FREEZE`, such as main-thread hangs or watchdog timeouts |
+| `setSampleRate(rate)` | number | `100` | Crash and hang sample rate; the SDK clamps the value to `0` through `100` |
+
+<Warning>
+Enable Crash after `Flashcat.initialize()` and `FlashcatRum.enable()`, and do it early. Crash events are written through the RUM feature. If RUM is not enabled, the Crash module drops received crash replays.
+</Warning>
+
+## Background and deferred upload
+
+By default, the SDK uploads on the foreground cadence configured by `setBatchUploadFrequencyMs()` and triggers `flush()` when the application backgrounds. If you want HarmonyOS WorkScheduler to wake the app for uploads, register deferred upload work.
+
+```ts
+const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+  .setDeferredUploadWork('FlashcatUploadAbility', 71001)
+  .setUploadOnWifiOnly(true)
+  .setDeferredUploadRequiresCharging(false)
+  .build();
+```
+
+| Method | Default | Description |
+|--------|---------|-------------|
+| `setDeferredUploadWork(abilityName, workId?)` | Disabled, `workId` defaults to `71001` | Registers a system WorkScheduler task; the host application must declare the matching `WorkSchedulerExtensionAbility` |
+| `setUploadOnWifiOnly(enabled)` | `false` | Restricts deferred upload work to Wi-Fi |
+| `setDeferredUploadRequiresCharging(enabled)` | `true` | Restricts deferred upload work to charging state |
+
+<Note>
+The SDK registers the WorkScheduler task. When your `WorkSchedulerExtensionAbility` wakes, call `Flashcat.flushAndWait()` to perform a bounded batch drain.
+</Note>
+
+## Upload HarmonyOS crash symbols
+
+To de-obfuscate ArkTS stacks and symbolicate native `.so` stacks in the console, upload build artifacts with `@flashcatcloud/hvigor-plugin`.
+
+The plugin uploads two artifact types:
+
+| Type | Files | Purpose |
+|------|-------|---------|
+| ArkTS Sourcemap | `sourceMaps.map`, optional `nameCache.json` | Restores ArkTS / TS files, functions, lines, and columns |
+| Native symbols | Unstripped `.so` files | Resolves C/C++ frames by GNU build-id |
+
+The plugin ships as an npm package (on **npm**, not ohpm); install it as a build-time dev dependency in your project's root `package.json`, not in `oh-package.json5`:
+
+```bash
+npm install -D @flashcatcloud/hvigor-plugin
+```
+
+Then register the plugin in the module's `hvigorfile.ts`:
+
+```ts hvigorfile.ts
+import { hapTasks } from '@ohos/hvigor-ohos-plugin';
+import { flashcatSymbolUploadPlugin } from '@flashcatcloud/hvigor-plugin';
+
+export default {
+  system: hapTasks,
+  plugins: [
+    flashcatSymbolUploadPlugin({
+      endpoint: 'https://browser.flashcat.cloud',
+      apiKey: process.env.FLASHCAT_API_KEY ?? '',
+      service: 'shopping-app',
+      version: '1.0.0',
+      enabled: process.env.FLASHCAT_UPLOAD === '1'
+    })
+  ]
+};
+```
+
+<Note>
+`flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, default `0.1.0`). Neither is normally required.
+</Note>
+
+Run the upload task after a release build:
+
+```bash
+FLASHCAT_UPLOAD=1 FLASHCAT_API_KEY=*** \
+  hvigorw uploadFlashcatSymbols --mode module -p module=entry@default -p product=default
+```
+
+The plugin sends `multipart/form-data` to `{endpoint}/sourcemap/upload`:
+
+| Header | Value |
+|--------|-------|
+| `DD-API-KEY` | Flashduty API Key used to resolve the account |
+| `DD-EVP-ORIGIN` | `flashcat-hvigor-plugin` |
+| `DD-EVP-ORIGIN-VERSION` | Plugin version |
+
+Upload event types:
+
+| Event type | Form fields |
+|------------|-------------|
+| `harmony_sourcemap` | `event`, `source_map`, optional `name_cache` |
+| `harmony_symbol_file` | `event`, `symbol_file` |
+
+<Tip>
+Native symbolication depends on the GNU build-id in each `.so`. The HarmonyOS NDK generates build-id by default. If your build pipeline disables it, add `-Wl,--build-id` for the `.so`.
+</Tip>
