@@ -597,7 +597,7 @@
           "On-call/故障管理"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **故障查看**（`on-call`） |",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **故障查看**（`on-call`） |\n\n## 使用说明\n\n- 仅在需要预览每条告警的原始事件时设置 `include_events=true`。\n- 事件预览最多返回每条告警最新的 20 条事件；完整事件历史请使用 `POST /alert/event/list` 分页查询。\n- `event_cnt` 仍表示合并到每条告警的原始事件总数。",
           "href": "/zh/api-reference/on-call/incidents/incident-alert-list",
           "metadata": {
             "sidebarTitle": "查询故障关联告警"
@@ -666,7 +666,20 @@
                         "images": null,
                         "data_source_name": "FlashMonit",
                         "data_source_type": "monit.alert",
-                        "data_source_ref_id": "a_2451002751131"
+                        "data_source_ref_id": "a_2451002751131",
+                        "events": [
+                          {
+                            "event_id": "69da451df77b1b51f40e83df",
+                            "alert_id": "69da451df77b1b51f40e83de",
+                            "title": "CPU 使用率 > 90%",
+                            "event_severity": "Critical",
+                            "event_status": "Critical",
+                            "event_time": 1712650000,
+                            "labels": {
+                              "host": "web-01"
+                            }
+                          }
+                        ]
                       }
                     ]
                   }
@@ -698,7 +711,8 @@
                 "incident_id": "69da451ef77b1b51f40e83ee",
                 "is_active": true,
                 "limit": 100,
-                "p": 1
+                "p": 1,
+                "include_events": true
               }
             }
           }
@@ -6060,12 +6074,12 @@
       "post": {
         "operationId": "alert-read-event-list",
         "summary": "查询告警事件列表",
-        "description": "返回特定告警收到的所有原始事件，按时间顺序排列。",
+        "description": "通过游标或页码分页返回指定告警的原始事件。",
         "tags": [
           "On-call/告警管理"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **协作空间查看**（`on-call`） |\n\n## 使用说明\n\n- 每条告警会从集成持续接收原始事件，此接口展示指定告警的原始事件历史。",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **协作空间查看**（`on-call`） |\n\n## 使用说明\n\n- 默认按最新事件优先返回；设置 `asc=true` 可按最早事件优先读取。\n- 使用上次响应中的 `search_after_ctx` 搭配 `limit` 获取下一页。\n- 也支持通过 `p` 使用页码分页，但 `p * limit` 必须在 10,000 条以内。\n- 单条告警可能累积大量原始事件，热点告警建议优先使用游标分页。",
           "href": "/zh/api-reference/on-call/alerts/alert-read-event-list",
           "metadata": {
             "sidebarTitle": "查询告警事件列表"
@@ -6094,6 +6108,9 @@
                 "example": {
                   "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
                   "data": {
+                    "total": 57,
+                    "has_next_page": true,
+                    "search_after_ctx": "663a1b2c3d4e5f6789abc001",
                     "items": [
                       {
                         "event_id": "663a1b2c3d4e5f6789abc001",
@@ -6133,7 +6150,8 @@
                 "$ref": "#/components/schemas/AlertEventListRequest"
               },
               "example": {
-                "alert_id": "663a1b2c3d4e5f6789abcdef"
+                "alert_id": "663a1b2c3d4e5f6789abcdef",
+                "limit": 20
               }
             }
           }
@@ -26106,7 +26124,7 @@
             "items": {
               "$ref": "#/components/schemas/AlertEventItem"
             },
-            "description": "原始告警事件，调用方显式请求时返回。"
+            "description": "原始告警事件预览，仅在调用方请求时返回；每条告警最多返回最新 20 条。"
           },
           "event_cnt": {
             "type": "integer",
@@ -26730,7 +26748,7 @@
           },
           "include_events": {
             "type": "boolean",
-            "description": "true 时返回每条告警下的原始事件。"
+            "description": "为 true 时，在每条告警中最多返回最新 20 条原始事件作为预览。"
           },
           "is_active": {
             "type": [
@@ -31412,18 +31430,63 @@
         "properties": {
           "alert_id": {
             "type": "string",
-            "description": "告警 ID（ObjectID 十六进制字符串）。"
+            "pattern": "^[0-9a-fA-F]{24}$",
+            "description": "告警 ID（MongoDB ObjectID）。"
+          },
+          "asc": {
+            "type": "boolean",
+            "default": false,
+            "description": "为 true 时按最早事件优先返回；默认按最新事件优先返回。"
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 100,
+            "default": 20,
+            "description": "分页大小，默认 20，最大 100。"
+          },
+          "p": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "default": 1,
+            "description": "页码，从 1 开始；未传 `search_after_ctx` 时生效。"
+          },
+          "search_after_ctx": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{24}$",
+            "description": "上一页响应返回的游标；传入后使用游标分页而非页码分页。"
           }
         }
       },
       "AlertEventListResponse": {
         "type": "object",
+        "required": [
+          "items",
+          "total",
+          "has_next_page"
+        ],
         "properties": {
           "items": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/AlertEventItem"
-            }
+            },
+            "description": "按请求顺序返回的原始告警事件。"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "命中的事件总数。"
+          },
+          "has_next_page": {
+            "type": "boolean",
+            "description": "是否还有下一页。"
+          },
+          "search_after_ctx": {
+            "type": "string",
+            "description": "下一页请求可作为 `search_after_ctx` 传入的游标。"
           }
         }
       },
