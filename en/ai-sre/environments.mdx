@@ -237,6 +237,82 @@ Rule semantics:
 Permission configuration loads at Runner startup. Restart the Runner after editing the YAML file.
 </Tip>
 
+## Permission Configuration
+
+---
+
+By default, the Runner allows any command — the same trust model as running the AI model directly in your own shell. If you need to restrict which commands the Runner may execute, point it at a YAML rules file with the `--permission-config` flag or the `FLASHDUTY_RUNNER_PERMISSION_CONFIG` environment variable:
+
+```bash
+flashduty-runner run --token <your-token> --permission-config /etc/flashduty-runner/permission.yaml
+
+# Or via environment variable
+export FLASHDUTY_RUNNER_PERMISSION_CONFIG=/etc/flashduty-runner/permission.yaml
+```
+
+The rules file's top-level key is `permission`, mapping **glob patterns to `allow`/`deny`**:
+
+```yaml
+permission:
+  "*": "deny"
+  "kubectl get *": "allow"
+  "kubectl describe *": "allow"
+  "cat *": "allow"
+```
+
+- Rules apply everywhere a command can appear — inside pipelines (`cmd1 | cmd2`), `$(...)`/backtick command substitution, process substitution, and write-redirect targets (so `echo x > /etc/passwd` is gated the same way as running a command).
+- **The most specific rule wins**: the pattern with the longest literal prefix before its first `*` is tried first; the catch-all `"*"` is always tried last, and the first matching rule applies.
+- The file is loaded **once, at Runner startup** — edit the rules and restart the Runner for changes to take effect; there is no hot reload.
+- If the flag/env var is set but the file is missing, malformed, or defines no rules under the `permission` key, the Runner **refuses to start** (fails closed) rather than silently allowing every command: pointing the Runner at a permission config is a deliberate request to restrict it, so a broken config should surface as an error, not a silent security gap.
+- Leaving the flag/env var unset is the default and is equivalent to allowing all commands.
+
+<AccordionGroup>
+<Accordion title="Strict mode (recommended for shared environments)" icon="lock">
+Deny everything by default, then explicitly allow only what you need:
+
+```yaml
+permission:
+  "*": "deny"
+  "kubectl get *": "allow"
+  "kubectl describe *": "allow"
+  "kubectl logs *": "allow"
+  "cat *": "allow"
+  "ls *": "allow"
+```
+</Accordion>
+<Accordion title="Trust mode (for dedicated/isolated environments)" icon="unlock">
+Equivalent to not setting `--permission-config` at all, but lets you carve out explicit exceptions:
+
+```yaml
+permission:
+  "*": "allow"                 # Trust the AI model
+  "rm -rf /": "deny"           # Block catastrophic commands if desired
+```
+
+Suitable when the Runner runs in an isolated VM/container with limited blast radius, or when fast incident response matters more than restricting permissions.
+</Accordion>
+<Accordion title="Read-only mode (for monitoring only)" icon="eye">
+Allow only read-only commands — suitable when the Runner should observe but never modify state:
+
+```yaml
+permission:
+  "*": "deny"
+  "cat *": "allow"
+  "head *": "allow"
+  "tail *": "allow"
+  "ls *": "allow"
+  "grep *": "allow"
+  "ps *": "allow"
+  "df *": "allow"
+  "free *": "allow"
+```
+</Accordion>
+</AccordionGroup>
+
+<Note>
+Command permission is currently configured only through this file — there is no console UI for it yet.
+</Note>
+
 ## Selecting an environment in a session
 
 ---

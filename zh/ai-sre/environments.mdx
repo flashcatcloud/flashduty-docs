@@ -237,6 +237,82 @@ permission:
 权限配置会在 Runner 启动时加载。修改 YAML 后需要重启 Runner，新的规则才会生效。
 </Tip>
 
+## 权限配置
+
+---
+
+Runner 默认允许执行任意命令——与直接在自己的 shell 里运行 AI 模型一样，信任模型的判断。如果需要限制 Runner 可执行的命令范围，可以通过 `--permission-config` 参数或 `FLASHDUTY_RUNNER_PERMISSION_CONFIG` 环境变量为 Runner 指定一个 YAML 规则文件：
+
+```bash
+flashduty-runner run --token <your-token> --permission-config /etc/flashduty-runner/permission.yaml
+
+# 或通过环境变量
+export FLASHDUTY_RUNNER_PERMISSION_CONFIG=/etc/flashduty-runner/permission.yaml
+```
+
+规则文件顶层键是 `permission`，值是 **glob 模式 → `allow`/`deny`** 的映射：
+
+```yaml
+permission:
+  "*": "deny"
+  "kubectl get *": "allow"
+  "kubectl describe *": "allow"
+  "cat *": "allow"
+```
+
+- 规则会应用到命令的每一处出现——包括管道（`cmd1 | cmd2`）、`$(...)`/反引号命令替换、进程替换，以及写入重定向目标（因此 `echo x > /etc/passwd` 会像执行命令一样被拦截）。
+- **最具体的规则优先**：第一个 `*` 之前字面前缀最长的模式最先被尝试匹配，兜底规则 `"*"` 始终最后尝试，第一个匹配的规则生效。
+- 该文件仅在 Runner **启动时加载一次**——修改规则后需要重启 Runner 才能生效，不支持热重载。
+- 若指定了该 flag/环境变量，但文件缺失、格式错误，或未在 `permission` 键下定义任何规则，Runner 会**拒绝启动**（fail closed），而不是静默放行所有命令：显式配置权限即代表明确希望限制执行范围，配置写错时应当报错而非留下安全隐患。
+- 不设置该 flag/环境变量是默认行为，等价于允许所有命令。
+
+<AccordionGroup>
+<Accordion title="严格模式（推荐用于共享环境）" icon="lock">
+默认拒绝所有命令，仅显式放行需要的命令：
+
+```yaml
+permission:
+  "*": "deny"
+  "kubectl get *": "allow"
+  "kubectl describe *": "allow"
+  "kubectl logs *": "allow"
+  "cat *": "allow"
+  "ls *": "allow"
+```
+</Accordion>
+<Accordion title="信任模式（用于专属/隔离环境）" icon="unlock">
+等价于完全不设置 `--permission-config`，但允许显式声明例外：
+
+```yaml
+permission:
+  "*": "allow"                 # 信任 AI 模型
+  "rm -rf /": "deny"           # 如需要可阻止灾难性命令
+```
+
+适用于 Runner 运行在隔离 VM/容器、影响范围有限，或更看重响应速度而非限制权限的场景。
+</Accordion>
+<Accordion title="只读模式（仅用于监控）" icon="eye">
+只放行只读命令，适合仅用于观测、不希望 Runner 修改任何状态的场景：
+
+```yaml
+permission:
+  "*": "deny"
+  "cat *": "allow"
+  "head *": "allow"
+  "tail *": "allow"
+  "ls *": "allow"
+  "grep *": "allow"
+  "ps *": "allow"
+  "df *": "allow"
+  "free *": "allow"
+```
+</Accordion>
+</AccordionGroup>
+
+<Note>
+命令权限当前仅支持通过配置文件设置，控制台暂无对应的可视化配置界面。
+</Note>
+
 ## 在会话中选择环境
 
 ---
