@@ -1,7 +1,7 @@
 ---
 title: Automations
-description: Have AI SRE run a hidden session automatically on a cron schedule or via an HTTP API, driven by a task prompt, to produce inspection, insight, or post-mortem results. This page covers creating automation rules, configuration fields, triggers, run history, and permissions.
-keywords: ["AI SRE", "Automation", "inspection", "scheduled task", "cron", "HTTP trigger", "run history", "hidden session"]
+description: Have AI SRE run a hidden session automatically on a cron schedule, through an HTTP API, or from an On-call incident event, driven by a task prompt, to produce inspection, insight, or post-mortem results. This page covers creating automation rules, configuration fields, triggers, run history, and permissions.
+keywords: ["AI SRE", "Automation", "inspection", "scheduled task", "cron", "HTTP trigger", "On-call incident trigger", "manual run", "run history", "hidden session"]
 sidebarTitle: Automations
 ---
 
@@ -19,8 +19,9 @@ Each automation is a **rule**. A rule carries at least one trigger:
 
 - **Schedule (cron)**: set the cadence with a 4-field or 5-field cron expression (for example, every Monday morning or every day at 09:15); it runs automatically when the time comes.
 - **Call via API**: generate a trigger URL with a Bearer token, and trigger it on demand from an external system with a `POST`, passing the context for this run in the request body.
+- **On-call incident trigger (API)**: subscribe to selected On-call integrations and severities through the Automation API, then start a diagnostic run when a matching incident appears.
 
-When to use it: hand recurring routine inspections (such as a daily health check) and periodic insight / post-mortem reports to AI SRE to run automatically; or wire AI SRE into your existing pipeline / change system so an external call kicks off a diagnosis when an event occurs.
+When to use it: hand recurring routine inspections (such as a daily health check) and periodic insight / post-mortem reports to AI SRE to run automatically; or wire AI SRE into your existing pipeline, change system, or On-call incident flow so an event kicks off a diagnosis.
 
 Entry point: **AI SRE → Automations** in the left navigation, route `/ai-sre/automations`.
 
@@ -66,7 +67,7 @@ For **Environment**, "Auto" has the backend pick the best available environment 
 
 ---
 
-A rule must have **at least one trigger** configured. In the "Triggers" section of the form, click **Add trigger** to choose between two kinds; both can be enabled at the same time.
+A rule must have **at least one trigger** configured. The current console form exposes **Schedule** and **Call via API** in the "Triggers" section, and both can be enabled at the same time; the public API also supports an On-call incident trigger for wiring incident events directly into Automation runs.
 
 ### Schedule (cron)
 
@@ -131,6 +132,22 @@ The `text` in the request body is passed to the agent as context for this run, o
 A rule can enable **both** "Schedule" and "Call via API" at the same time: it runs automatically on the cadence and can also be kicked off on demand from outside. Each trigger occupies its own row and can be **removed** independently.
 </Tip>
 
+### On-call Incident Trigger (API)
+
+Use the Automation API to configure an `oncall_incident` trigger when you want AI SRE to start automatically from On-call incidents. The trigger registers a subscription with the On-call side, and only incidents matching the selected integrations and severities start a run.
+
+| Field | Type | Notes |
+|---|---|---|
+| `oncall_incident_trigger_enabled` | boolean | Whether the On-call incident trigger is enabled. |
+| `oncall_incident_channel_ids` | int64[] | On-call integration IDs to watch. Creating or enabling this trigger requires at least one valid ID. |
+| `oncall_incident_severities` | string[] | Incident severities to watch. Supported values are `Critical`, `Warning`, and `Info`; creating or enabling this trigger requires at least one value. |
+
+When a matching event arrives, the system creates a run with `trigger_kind: "oncall_incident"` and passes event context such as `incident_id`, `channel_id`, and `severity` into the session. The same trigger and the same `incident_id` reuse the same run, avoiding duplicate hidden sessions for one incident.
+
+<Note>
+The current console form does not expose a separate On-call incident trigger card. Configure it with the Automation create / update APIs in the API reference.
+</Note>
+
 ## Run History
 
 ---
@@ -162,6 +179,8 @@ Two filters are available above the table:
 - **Time range**: defaults to the **last 30 days**, adjustable, with a maximum span of **180 days**.
 - **Status**: filter by the run statuses above, or choose **All statuses**.
 
+Run records returned by the API also include `trigger_kind`, which can be `schedule`, `manual`, `http_post`, `oncall_incident`, or `debug`. `manual` means the run was started through the run-now API, and `oncall_incident` means it was started by a matching On-call incident event.
+
 Click any row to jump to the chat page of the hidden session for that run (`chat?session_id=<sessionID>`), where you can view the full messages, tool calls, and artifacts of that run. The run-history inspector's title reads "Execution history for {name} over the last 180 days."
 
 <Note>
@@ -182,6 +201,7 @@ Each rule offers a set of actions in the **Actions** column:
 | History | Opens the rule's run history. |
 | Edit | Opens the configuration form to modify the rule. |
 | Delete | Deletes the rule, with a confirmation that reads "The rule will no longer be triggered after deletion. Existing run history is cleaned up automatically after the retention period." |
+| Run now (API) | Call `POST /safari/automation/rule/run` to start one real run manually. The endpoint performs preflight checks first, returns a `run_id` after accepting the run, and returns `session_id` after the session is created. Manual runs are limited to one per rule per minute. |
 
 For read-only rules you **cannot edit** (`can_edit=false`), the switch and all action buttons are disabled; opening its form shows "Read-only — you can view this automation but cannot edit it." at the top.
 
@@ -197,6 +217,7 @@ Automation rules share the same two-level scope model as the other resources und
 | Visibility / list | The account Owner and admins see all rules; ordinary members see rules they created and rules of teams they belong to. |
 | Edit / manage | The account Owner and admins can manage any rule; ordinary members can manage rules they created and rules of teams they belong to (enable / disable, edit, delete). |
 | HTTP POST trigger | When initiating a real run through the trigger URL, authorization is only the trigger's Bearer Token. Any external system holding that Token can trigger the rule, and the run creates a hidden session under the rule's personal or team scope. |
+| On-call incident trigger | Started by a registered incident subscription, not by an HTTP POST Bearer token. The run still creates a hidden session under the rule's personal or team scope. |
 
 <Warning>
 The account is the only security perimeter at runtime; the team is an ownership / editing tag. Automation rule visibility and management follow this model. For the full rules shared with the other Customize resources, see the "Scope" section on each resource page.
