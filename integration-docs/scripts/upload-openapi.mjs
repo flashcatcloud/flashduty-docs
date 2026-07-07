@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { buildCdnUrl } from './cdn-url.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
@@ -39,20 +40,6 @@ function normalizeCdnDir(cdnDir) {
 
 export function buildOssFilePath(cdnDir, file) {
   return path.posix.join(normalizeCdnDir(cdnDir), 'api-reference', file);
-}
-
-export function buildCdnUrl(ossUrl, cdnEndpoint, cdnUrl) {
-  const endpointHost = cdnEndpoint
-    .replace(/^https?:\/\//, '')
-    .replace(/\/+$/g, '');
-  const normalizedCdnUrl = cdnUrl.replace(/\/+$/g, '');
-  const parsedUrl = new URL(ossUrl);
-
-  if (parsedUrl.host === endpointHost) {
-    return `${normalizedCdnUrl}${parsedUrl.pathname}`;
-  }
-
-  return ossUrl.replace(cdnEndpoint, normalizedCdnUrl);
 }
 
 export function validateJsonFile(filePath) {
