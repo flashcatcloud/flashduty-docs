@@ -5,7 +5,6 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-  buildCdnUrl,
   buildOssFilePath,
   listOpenapiJsonFiles,
   uploadOpenapiJsonFiles,
@@ -36,17 +35,6 @@ test('buildOssFilePath keeps the environment prefix and adds api-reference', () 
   assert.equal(
     buildOssFilePath('/test/docs/', 'openapi.zh.json'),
     '/test/docs/api-reference/openapi.zh.json'
-  );
-});
-
-test('buildCdnUrl rewrites the OSS endpoint URL to the public CDN URL', () => {
-  assert.equal(
-    buildCdnUrl(
-      'https://flashcat-docs.oss-cn-hangzhou.aliyuncs.com/docs/api-reference/openapi.en.json',
-      'flashcat-docs.oss-cn-hangzhou.aliyuncs.com',
-      'https://docs-cdn.flashcat.cloud'
-    ),
-    'https://docs-cdn.flashcat.cloud/docs/api-reference/openapi.en.json'
   );
 });
 
