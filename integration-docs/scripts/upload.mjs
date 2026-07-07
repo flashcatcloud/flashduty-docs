@@ -5,6 +5,7 @@ import OSS from 'ali-oss';
 import CDN from '@alicloud/cdn20180510';
 import OpenApi from '@alicloud/openapi-client';
 import dotenv from 'dotenv';
+import { buildCdnUrl } from './cdn-url.mjs';
 
 dotenv.config();
 
@@ -44,7 +45,7 @@ async function uploadFile(file) {
   const localFilePath = path.join(localDir, file);
   const ossFilePath = path.join(process.env.CDN_DIR, file).replace(/\\/g, '/');
   const result = await ossClient.put(ossFilePath, localFilePath);
-  const cdnUrl = result.url.replace(process.env.CDN_ENDPOINT, process.env.CDN_URL);
+  const cdnUrl = buildCdnUrl(result.url, process.env.CDN_ENDPOINT, process.env.CDN_URL);
   console.log(`Uploaded ${file} -> ${cdnUrl}`);
   await refreshCdnCache(cdnUrl);
 }
