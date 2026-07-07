@@ -44,9 +44,9 @@ test('buildCdnUrl rewrites the OSS endpoint URL to the public CDN URL', () => {
     buildCdnUrl(
       'https://flashcat-docs.oss-cn-hangzhou.aliyuncs.com/docs/api-reference/openapi.en.json',
       'flashcat-docs.oss-cn-hangzhou.aliyuncs.com',
-      'https://download.flashcat.cloud'
+      'https://docs-cdn.flashcat.cloud'
     ),
-    'https://download.flashcat.cloud/docs/api-reference/openapi.en.json'
+    'https://docs-cdn.flashcat.cloud/docs/api-reference/openapi.en.json'
   );
 });
 
@@ -78,7 +78,7 @@ test('uploadOpenapiJsonFiles uploads every JSON file and refreshes each CDN URL'
     CDN_BUCKET: 'bucket',
     CDN_REGION: 'oss-cn-hangzhou',
     CDN_ENDPOINT: 'bucket.oss-cn-hangzhou.aliyuncs.com',
-    CDN_URL: 'https://download.flashcat.cloud',
+    CDN_URL: 'https://docs-cdn.flashcat.cloud',
     CDN_DIR: '/docs'
   };
   const ossClient = {
@@ -110,8 +110,8 @@ test('uploadOpenapiJsonFiles uploads every JSON file and refreshes each CDN URL'
   assert.deepEqual(
     refreshed,
     [
-      'https://download.flashcat.cloud/docs/api-reference/openapi.en.json',
-      'https://download.flashcat.cloud/docs/api-reference/openapi.zh.json'
+      'https://docs-cdn.flashcat.cloud/docs/api-reference/openapi.en.json',
+      'https://docs-cdn.flashcat.cloud/docs/api-reference/openapi.zh.json'
     ]
   );
   assert.equal(uploaded[0].options.headers['Content-Type'], 'application/json; charset=utf-8');
