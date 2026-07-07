@@ -40,6 +40,8 @@ Read the latest version from the [CDN latest version pointer](https://static.fla
 |----------|-------------|---------|
 | `FLASHDUTY_VERSION` | Install a specific version, e.g. `v0.6.0` | latest |
 | `FLASHDUTY_INSTALL_DIR` | Custom install directory | `/usr/local/bin` (shell), `~\.flashduty\bin` (PowerShell) |
+| `MIRROR_URL` | Override the release asset download mirror prefix used by the installer script; must use `https://` | `https://static.flashcat.cloud/flashduty-cli` |
+| `FLASHDUTY_UPDATE_BASE_URL` | Override the base URL used by `flashduty update` and the automatic update check | `https://static.flashcat.cloud/flashduty-cli` |
 
 ## Authentication
 
@@ -110,7 +112,7 @@ Common filter flags for `incident list`:
 | `--progress` | Progress filter: `Triggered`, `Processing`, `Closed` | all |
 | `--severity` | Severity filter: `Critical`, `Warning`, `Info` | all |
 | `--channel` | Filter by channel ID | - |
-| `--title` | Search by title keyword | - |
+| `--query` | Free-text search across title, labels, and content (also resolves a 24-char incident ID or 6-char incident num to a direct lookup) | - |
 | `--since` | Start time (duration, date, datetime, or unix timestamp) | `24h` |
 | `--until` | End time | `now` |
 | `--limit` | Max results | `20` |
@@ -132,15 +134,30 @@ Supports `--channel`, `--since`, `--until`, `--type`, `--limit`, `--page`.
 flashduty member list [flags]    # List members
 ```
 
-Supports `--name`, `--email`, `--page`.
+Supports `--query` (free-text search by name or email), `--role-id`, `--page`, `--limit`, `--orderby`, `--asc`.
 
-### team — Team queries
+### team — Team management
 
 ```bash
-flashduty team list [flags]      # List teams with members
+flashduty team list [flags]                          # List teams with members
+flashduty team info --team-id <id>                   # Get a single team's details
+flashduty team upsert --team-name <name> [flags]     # Create or update a team (update when --team-id is set)
+flashduty team delete --team-id <id>                 # Delete a team (irreversible)
 ```
 
-Supports `--name`, `--page`.
+`team list` supports `--query` (team name substring match), `--page`, `--limit`, `--orderby` (`created_at`/`updated_at`/`team_name`), `--asc`, `--person-id` (filter to teams the given member belongs to).
+
+`team info` accepts `--team-id`, `--team-name`, or `--ref-id` to identify the team (exactly one required).
+
+`team upsert` creates or updates a team:
+- `--team-name` (required, 1–39 characters)
+- `--team-id` (set to update an existing team; omit to create)
+- `--description` (up to 500 characters)
+- `--person-ids` (member ID list; **replaces the entire member list — run `team info` first to see current members before updating**)
+- `--emails` (email addresses to invite as members)
+- `--ref-id` (external reference ID for HR system integration)
+
+`team delete` accepts `--team-id`, `--team-name`, or `--ref-id` to identify the team. **This action is permanent and cannot be undone.**
 
 ### channel — Channel queries
 
@@ -150,12 +167,15 @@ flashduty channel list [flags]   # List channels
 
 Supports `--name`.
 
-### escalation-rule — Escalation rule queries
+### channel escalate-rule-list — Escalation rule queries
+
+Escalation rule management has moved into the `channel` command group. Pass the channel ID as a positional argument:
 
 ```bash
-flashduty escalation-rule list --channel <id>          # By channel ID
-flashduty escalation-rule list --channel-name <name>   # By channel name (auto-resolved)
+flashduty channel escalate-rule-list <channel-id>   # List all escalation rules for a channel
 ```
+
+Other escalation rule management commands under the `channel` group: `escalate-rule-create`, `escalate-rule-update`, `escalate-rule-delete` (all require `--channel-id`).
 
 ### field — Custom field queries
 
@@ -165,39 +185,80 @@ flashduty field list [flags]     # List custom field definitions
 
 Supports `--name`.
 
-### statuspage — Status page management
+### status-page — Status page management
 
 ```bash
-flashduty statuspage list [--id <ids>]                                   # List status pages
-flashduty statuspage changes --page-id <id> --type <incident|maintenance> # List active changes
-flashduty statuspage create-incident --page-id <id> --title <title>      # Create a status page incident
-flashduty statuspage create-timeline --page-id <id> --change <id> --message <msg>  # Append a timeline update
+flashduty status-page list                                             # List status pages
+flashduty status-page change-active-list <page-id>                    # List active status page events
+flashduty status-page change-create <page-id> [flags]                 # Create a status page event
+flashduty status-page change-timeline-create [flags]                  # Append a timeline update
 ```
 
 #### Migrate from Atlassian Statuspage
 
-Migration jobs run asynchronously. After kicking off a job, poll progress with `migrate status`:
+Migration jobs run asynchronously. Poll progress with `migration-status` after kicking off a job:
 
 ```bash
 # 1. Migrate structure and history
-flashduty statuspage migrate structure \
+flashduty status-page migrate-structure <source-page-id> \
   --from atlassian \
-  --source-page-id page_123 \
   --api-key $ATLASSIAN_STATUSPAGE_API_KEY
 
 # 2. Check job status
-flashduty statuspage migrate status --job-id <job_id>
+flashduty status-page migration-status <job-id>
 
 # 3. Migrate email subscribers
-flashduty statuspage migrate email-subscribers \
+flashduty status-page migrate-email-subscribers \
   --from atlassian \
   --source-page-id page_123 \
   --target-page-id <target_page_id> \
   --api-key $ATLASSIAN_STATUSPAGE_API_KEY
 
 # 4. Cancel a running job
-flashduty statuspage migrate cancel --job-id <job_id>
+flashduty status-page migration-cancel <job-id>
 ```
+
+Other available subcommands: `change-delete`, `change-info`, `change-list`, `change-timeline-delete`, `change-timeline-update`, `change-update`, `component-upsert`, `component-delete`, `section-upsert`, `section-delete`, `info`, `subscriber-list`, `subscriber-import`, `subscriber-export`, `template-list`, `template-upsert`, `template-delete`.
+
+### rum — RUM application management
+
+Use these commands to manage RUM applications themselves, rather than querying individual RUM events. The current surface covers application detail, batch reads, listing, webhook testing, and create/update/delete operations.
+
+```bash
+flashduty rum application-info <application-id>            # Get one application's detail
+flashduty rum application-infos <id1> [<id2>...]          # Batch get multiple applications
+flashduty rum application-list [flags]                    # List accessible applications
+flashduty rum application-webhook-test <application-id>   # Send a sample alert to a webhook URL
+flashduty rum application-create <team-id> [flags]        # Create an application
+flashduty rum application-update <application-id> [flags] # Update an application
+flashduty rum application-delete <application-id>         # Delete an application
+```
+
+Common flags for `application-list`:
+
+| Flag | Description |
+|------|-------------|
+| `--query` | Search by application name |
+| `--team-id` | Restrict results to one team |
+| `--is-my-team` | Return only applications owned by the caller's teams |
+| `--orderby` | Sort field: `created_at` or `updated_at` |
+| `--asc` | Sort ascending |
+
+Core fields for `application-create` / `application-update`:
+
+| Flag | Description |
+|------|-------------|
+| `--application-name` | Application name; required on create, 1-40 characters |
+| `--type` | Application type: `browser`, `ios`, `android`, `react-native`, `flutter`, `kotlin-multiplatform`, `roku`, `unity` |
+| `--team-id` | Owning team ID (required on create) |
+| `--is-private` | Restrict access to team members only |
+| `--no-geo` | Disable geographic inference |
+| `--no-ip` | Disable IP collection |
+| `--data` | Add `alerting` and `tracing` objects when you need notification or trace-link configuration |
+
+<Note>
+`application-webhook-test` returns `ok`, `status_code`, and `message`, which makes it suitable for verifying that a RUM alert webhook really accepts a sample delivery from Flashduty.
+</Note>
 
 ### template — Notification templates
 
@@ -230,7 +291,7 @@ Common flags for `session list`:
 | `--since` | Keep only sessions updated within the window (client-side filter), e.g. `30d`, `24h`, `2026-05-01` | - |
 | `--limit` | Max sessions to fetch | `200` |
 | `--page` | Start page (1-based) | `1` |
-| `--format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope), `toon` (compact) | `jsonl` |
+| `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope), `toon` (compact) | `jsonl` |
 
 <Note>
 The server endpoint `/safari/session/list` caps each page at 100 rows; when `--limit` exceeds that, the CLI paginates automatically — no manual paging required. The API has no time-window filter, so `--since` is applied client-side against each session's `updated_at` after fetching.
@@ -247,11 +308,77 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 |------|-------------|
 | `--include-subagents` | After each `subagent_dispatch`, recursively inline that subagent's own full event stream |
 
+### monit-agent — On-box host/database diagnostics
+
+Run live diagnostics on a target host or data source through flashmonit agents, without needing a shell login on the target machine.
+
+```bash
+flashduty monit-agent catalog --target-locator <host>    # List available diagnostic tools for a target
+flashduty monit-agent invoke  --target-locator <host> --data '<json>'  # Run up to 8 tools concurrently
+```
+
+Both subcommands require `--target-locator` (internal IP, hostname, or data-source name). `--target-kind` is optional (`host`, `mysql`, `redis`, etc.) and is inferred automatically when omitted.
+
+`invoke` accepts a `--data` JSON payload listing the tools to run, up to 8 concurrently:
+
+```bash
+flashduty monit-agent invoke --target-locator '10.0.0.1' \
+  --data '{"tools":[{"tool":"os.overview"},{"tool":"disk.usage"}]}'
+```
+
+For SQL parameters containing quotes or commas, pass `--data -` and supply the body via a stdin heredoc to avoid shell-quoting issues:
+
+```bash
+flashduty monit-agent invoke --target-locator 'db-host' --data - <<'FDUTY'
+{"tools":[{"tool":"mysql.query","params":{"sql":"SELECT a, b FROM t WHERE s='RUNNING'","max_rows":50}}]}
+FDUTY
+```
+
+### monit-query — Monitoring datasource queries
+
+Probe monitoring back-end datasources (Prometheus, VictoriaLogs, Loki, MySQL) directly, bypassing the alert-rule layer.
+
+```bash
+flashduty monit-query diagnose [flags]   # Pre-clustered RCA findings (log patterns or metric trends)
+flashduty monit-query rows [flags]       # Raw datasource passthrough query
+```
+
+Common flags for `diagnose`:
+
+| Flag | Description |
+|------|-------------|
+| `--ds-type` | Datasource type (required): `prometheus`, `victorialogs`, `loki`, `mysql` |
+| `--ds-name` | Datasource name as configured in the console (required) |
+| `--input-query` | Filter-only log query or matrix PromQL (required) |
+| `--time-start` | Window start — relative (`15m`, `1h`), unix seconds, or `now` (default `15m`) |
+| `--time-end` | Window end — relative, unix seconds, or `now` (default `now`; window capped at 6h) |
+| `--operation` | `log_patterns` or `metric_trends` (inferred from `--ds-type` when omitted) |
+
+`rows` requires `--ds-type`, `--ds-name`, and `--expr` (query expression). Use `--args KEY=VALUE` (repeatable) for parameterized queries.
+
+### monit — Alert-expression preview
+
+If you want to validate a datasource expression before saving a rule, use `preview-sync` to execute a synchronous preview request and inspect the raw result.
+
+```bash
+flashduty monit preview-sync [flags]
+```
+
+Common flags:
+
+| Flag | Description |
+|------|-------------|
+| `--ds-name` | Datasource display name (required, must match the console configuration) |
+| `--ds-type` | Datasource type (required), such as `prometheus`, `loki`, or `elasticsearch` |
+| `--expr` | Query expression to preview (required) |
+| `--delay-seconds` | Shift the query window backward by a few seconds to compensate for ingestion latency |
+| `--data` | Add datasource-specific parameters such as `args` |
+
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI (~248 commands) via a spec-driven code generator, organized into top-level command groups by resource. In addition to the On-call domain (incident, change, channel, escalation-rule, field, statuspage, template, and more), it also covers:
+Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **291 API operations**, and the CLI generates corresponding resource-organized commands for them. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
-- **AI SRE (`safari`)**: a2a-agents, mcp-servers, sessions, skills, and more
+- **AI SRE (`safari`)**: a2a-agents, automations, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
 - **On-call & scheduling**: calendar, schedule
 - **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
@@ -273,8 +400,15 @@ flashduty login          # Interactive login
 flashduty config show    # Show current configuration
 flashduty config set     # Set a configuration value
 flashduty version        # Print version information
+flashduty whoami         # Show the current authenticated identity (account ID, email, role)
+flashduty update         # Update to the latest version
+flashduty update --check # Check for updates without installing
 flashduty completion     # Generate shell completions (bash/zsh/fish/powershell)
 ```
+
+<Note>
+`flashduty update` downloads and runs the platform installer, replacing the current binary with the latest release. `--check` only prints the available version without modifying any local files. After any non-update command runs in a terminal, if a newer version is available the CLI automatically emits an update notice banner to stderr.
+</Note>
 
 Enable shell completion (zsh example):
 

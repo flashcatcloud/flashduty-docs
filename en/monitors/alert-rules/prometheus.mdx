@@ -40,6 +40,10 @@ This mode is suitable for scenarios requiring multi-level alerts on the same met
 
 Monitors supports configuring multiple query statements in one alert rule (named A, B, C...) and referencing these query results simultaneously in threshold expressions (e.g., `$A > 90 and $B < 50`).
 
+<Warning>
+The query names `R` and `__all__` are reserved by the engine and cannot be used as query names. Submitting a rule with either name returns the validation error `query name is reserved`. `R` is an internal engine calculation variable; `__all__` is used by the No Data mode's "Alert on Empty Result" state-tracking sentinel.
+</Warning>
+
 - **Auto Correlation**: The alert engine automatically correlates results from different query statements based on **labels**.
 - **Alignment Requirements**: Only when two query statements return data with **exactly the same** label sets can they be correlated to the same context for calculation.
   - Example: Query A returns `cpu_usage_percent{instance="host-1", job="node"}`, Query B returns `mem_usage_percent{instance="host-1", job="node"}`, then `$A` and `$B` can be successfully correlated.
@@ -111,12 +115,33 @@ This mode is specifically for monitoring whether monitored objects are alive or 
 - Monitor instrumentation reporting service interruption.
 - Monitor batch jobs not executing on time.
 
+### Sub-mode 1: Per-Series Monitoring
+
+Triggers an alert when a Series that **was previously queryable becomes absent for N consecutive cycles**. This is the default no-data detection mode.
+
+- Requirement: The target Series must have been observed by the engine at least once to establish a baseline.
+- Limitation: If a monitored target has never reported data at all (e.g., an Exporter installed but never successfully scraped), this mode cannot fire.
+- Fields: `enabled: true`, `severity` (`Critical | Warning | Info`).
+
+### Sub-mode 2: Alert on Empty Result
+
+Triggers an alert when **all queries return empty results for N consecutive checks**. This mode specifically covers the "data was never reported" scenario, filling the blind spot of per-series mode.
+
+- Use cases: A newly deployed Exporter has never successfully collected any metrics; a batch job has never produced any output; you want an immediate alert when a target is completely absent.
+- Fields: `alert_on_empty_result: true`, `alert_on_empty_result_severity` (`Critical | Warning | Info`).
+- Recovery: Once any query returns a non-empty result, the alert auto-recovers after `recovery_check_times` consecutive confirmations.
+
+<Note>
+Both sub-modes can be enabled simultaneously and run independently. `alert_on_empty_result` uses the internal sentinel key `__all__` to track state, which is why `__all__` is a reserved query name and cannot be used in rules (see "Query Naming Constraints" above).
+</Note>
+
 ### Comparison with Prometheus Native `absent()` Function
 
 | Method | Description |
 |------|------|
 | Prometheus `absent()` | Requires listing all identifying label combinations; multiple instances need multiple statements |
-| Monitors No Data Mode | Only needs one query statement, automatically monitors all Series |
+| Monitors Per-Series Mode | Only needs one query statement, automatically monitors all previously-seen Series |
+| Monitors Alert on Empty Result (new) | Fires even when data was never reported — no prior Series presence required |
 
 ## Advanced Configuration
 

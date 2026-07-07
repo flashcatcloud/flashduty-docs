@@ -41,6 +41,10 @@ Monitors 兼容 Prometheus 的 PromQL 查询语法，并提供了灵活的告警
 
 Monitors 支持在一个告警规则中配置多条查询语句（分别命名为 A、B、C...），并支持在阈值表达式中同时引用这些查询结果（如 `$A > 90 and $B < 50`）。
 
+<Warning>
+查询名称 `R` 和 `__all__` 是引擎内部保留名称，不可用作查询名称。使用这两个名称提交规则时，后端会返回校验错误 `query name is reserved`。`R` 是引擎内部计算变量，`__all__` 用于数据缺失"全空结果告警"模式的状态追踪。
+</Warning>
+
 - **自动关联**：告警引擎会自动根据 **标签** 对不同查询语句返回的结果进行关联。
 - **对齐要求**：只有当两条查询语句返回的数据包含 **完全相同** 的标签集时，它们才能被关联到同一组上下文中进行计算。
   - 示例：查询 A 返回 `cpu_usage_percent{instance="host-1", job="node"}`，查询 B 返回 `mem_usage_percent{instance="host-1", job="node"}`，则 `$A` 和 `$B` 可以成功关联。
@@ -112,12 +116,33 @@ Monitors 支持在一个告警规则中配置多条查询语句（分别命名�
 - 监控埋点上报服务中断。
 - 监控批处理任务未按时执行。
 
+### 子模式一：按 Series 监控（Per-Series）
+
+当某个 Series **曾经可以查到数据，后来连续 N 次查不到**时触发告警。这是默认的数据缺失检测模式。
+
+- 要求：目标 Series 必须至少被引擎观测到一次，才能建立基线。
+- 局限：如果某个监控对象从来没有上报过数据（例如：Exporter 安装后从未成功采集到一条指标），此模式无法触发告警。
+- 字段：`enabled: true`，`severity`（`Critical | Warning | Info`）。
+
+### 子模式二：全空结果告警（Alert on Empty Result）
+
+当**所有查询在连续 N 次检查中均返回空结果**时触发告警。此模式专门覆盖"数据从未上报过"的场景，弥补按 Series 模式的盲区。
+
+- 适用场景：新部署的 Exporter 从未成功采集到指标；批处理任务从未产生过输出；希望在目标完全不存在时立即告警。
+- 字段：`alert_on_empty_result: true`，`alert_on_empty_result_severity`（`Critical | Warning | Info`）。
+- 恢复逻辑：一旦任意查询返回非空结果，经过连续 `recovery_check_times` 次确认后自动恢复。
+
+<Note>
+两个子模式可以同时开启，相互独立运行。`alert_on_empty_result` 使用内置哨兵 key `__all__` 跟踪状态，因此 `__all__` 是引擎保留的查询名称，不可在规则中使用（详见下文"查询命名约束"）。
+</Note>
+
 ### 对比 Prometheus 原生的 `absent()` 函数
 
 | 方式 | 说明 |
 |------|------|
 | Prometheus `absent()` | 需要把每个标识类的标签组合都列举出来，多个实例需多条语句 |
-| Monitors 数据缺失模式 | 只需一条查询语句，自动对所有 Series 进行监控 |
+| Monitors 按 Series 模式 | 只需一条查询语句，自动对所有已观测 Series 进行监控 |
+| Monitors 全空结果模式（新） | 无需 Series 曾存在，数据从未上报也能触发告警 |
 
 ## 高级配置
 

@@ -1,295 +1,164 @@
 ---
-title: "DB Pull Alert Integration"
-description: "Flashduty periodically connects to an external database, executes SQL queries, and converts the results into standard alert events. Use this when alert data is stored in a database and cannot be pushed actively."
-keywords: ["Alert Integration", "DB Pull", "Database Pull", "MySQL", "PostgreSQL", "ClickHouse", "Polling"]
+title: "Database Pull Alert Integration (DB Pull)"
+description: "Flashduty periodically queries a MySQL, PostgreSQL, or ClickHouse database and converts matching rows into standard alert events. Use this when alert data is already written to a relational database and the system cannot push alerts outward."
+keywords: ["Alert Integration", "DB Pull", "Database", "MySQL", "PostgreSQL", "ClickHouse", "Polling", "Data Ingestion"]
 ---
 
-By configuring a database connection and SQL query, Flashduty periodically connects to the database on the schedule you define, executes the query, converts each result row into an event that conforms to the [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard%20alert) protocol through field mapping, and writes the event into the alert channel. Your system does not need to support push delivery, as long as the alert data is stored in a database that Flashduty can access.
+By configuring a database connection and a SELECT query, Flashduty connects to your database on the schedule you define, incrementally fetches new rows via cursor-based pagination, and converts each row into a [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard%20alert) using field mapping rules. Your system does not need to support push delivery.
 
-<Tip>
-DB Pull is the right choice when **alert data is stored in a relational database**, **the monitoring system cannot send webhooks**, or when you **need to extract abnormal records directly from business tables as alerts**. If your system already supports webhook delivery, prefer the corresponding push-based integration. It has lower latency and a smaller resource footprint.
-</Tip>
+:::tips
+DB Pull is the right choice when **alert data is already stored in a relational database** and you **cannot or do not want to modify the existing system to support webhook push**. If the database is on a network that Flashduty cannot reach, consider exporting alerts to a publicly accessible HTTP endpoint and using the HTTP Pull integration instead.
+:::
 
 <div className="hide">
 
-## Setup steps
+## Setup Steps
 ---
 
 ### In Flashduty
 
-<AccordionGroup>
-<Accordion title="Using dedicated integration">
-When you don't need to route alerts to different channels based on alert content, this method is preferred because it is simpler.
+<details>
+<summary>Using Dedicated Integration</summary>
 
-1. Enter the Flashduty console, select **Channel**, and open the details page of a channel.
-2. Select the **Integrations** tab, click **Add Integration**, and enter the add integration page.
+When you don't need to route alert events to different channels, this method is preferred — it's simpler.
+
+1. Enter the Flashduty console, select **Channel**, and enter the details page of a channel.
+2. Select the **Integrations** tab, click **Add Integration** to enter the add integration page.
 3. Select the **DB Pull** integration.
-4. Fill in the form as described in "Configuration" below, then click **Save**.
-</Accordion>
+4. Fill in the form as described in the "Configuration" section below and click **Save**.
+</details>
 
-<Accordion title="Using shared integration">
-When you need to route alerts to different channels based on the alert event payload, choose this method.
+<details>
+<summary>Using Shared Integration</summary>
 
-1. Enter the Flashduty console, select **Integration Center => Alert Events**, and enter the integration selection page.
-2. Select the **DB Pull** integration and fill in **Integration Name**.
-3. Configure **Default Route** and select the corresponding channel. After the integration is created, you can go to **Route** to configure more routing rules.
-4. Fill in the form as described in "Configuration" below, then click **Save**.
-</Accordion>
-</AccordionGroup>
+When you need to route alert events to different channels based on the alert payload, choose this method.
+
+1. Enter the Flashduty console, select **Integration Center => Alert Events** to enter the integration selection page.
+2. Select the **DB Pull** integration and fill in the **Integration Name**.
+3. Configure the **Default Route** and select the corresponding channel (after the integration is created, go to **Route** to add finer-grained routing rules).
+4. Fill in the form as described in the "Configuration" section below and click **Save**.
+</details>
 
 </div>
 
 ## Configuration
 ---
 
-### Database connection
+### Database Driver
+
+| Field | Required | Description |
+| :-: | :-: | :--- |
+| Driver | Yes | The database type. Supported values: `mysql`, `postgres` (or `postgresql`), `clickhouse`. Case-insensitive — the system normalizes to lowercase. |
+
+### Connection
+
+| Field | Required | Description |
+| :-: | :-: | :--- |
+| Host | Yes | Hostname or IP address of the database server. **Loopback addresses (127.x.x.x / ::1), private subnets, and link-local addresses are rejected** to prevent SSRF attacks. |
+| Port | Yes | Database listener port. Common defaults: MySQL `3306`, PostgreSQL `5432`, ClickHouse `9000`. |
+| Username | Yes | The account used to connect. A read-only account is strongly recommended. |
+| Password | Yes | Connection password, stored encrypted and never shown in plaintext after saving. |
+| Database | Yes | Name of the database to connect to. |
+| Extra Params | No | Additional connection parameters as key-value pairs, mapped to driver-specific DSN options (e.g., MySQL `timeout`, PostgreSQL `sslmode`). |
+
+### Query Configuration
 
 | Field | Required | Default | Description |
 | :-: | :-: | :-: | :--- |
-| Database type | Yes | - | Supports `MySQL`, `PostgreSQL`, and `ClickHouse`. |
-| Host | Yes | - | Database server address, either an IP address or domain name. |
-| Port | Yes | - | Database port, range `1 ~ 65535`. |
-| Username | Yes | - | Database login username. |
-| Password | No | - | Database login password. The system stores it encrypted. |
-| Database name | Yes | - | Name of the database to connect to. |
-| Connection parameters | No | - | Additional connection parameters in key-value format. For example, MySQL can use `charset=utf8mb4`, and PostgreSQL can use `sslmode=require`. |
-
-<Warning>
-For security reasons, Flashduty non-private deployments cannot connect to private network addresses such as `127.0.0.1`, `10.x.x.x`, or `192.168.x.x`. Make sure your database is accessible from the public internet, or use a private deployment. We recommend creating a **read-only account** for Flashduty and granting only the SELECT permissions required for the target tables.
-</Warning>
-
-### SQL query
-
-| Field | Required | Default | Description |
-| :-: | :-: | :-: | :--- |
-| Query | Yes | - | SQL `SELECT` statement used to pull alert data. It must start with `SELECT` or `WITH`. |
-| Timeout (seconds) | No | `5` | Timeout for a single query, range `1 ~ 10`. |
-| Polling cycle (seconds) | Yes | `300` | Interval between successive polls. **Minimum 30 seconds.** |
-| Rows per page | No | `500` | Maximum number of rows returned by each paginated query, range `1 ~ 1000`. |
-| Max pages | No | `5` | Maximum number of paginated queries to run in a single polling cycle, range `1 ~ 10`. A single polling cycle can process up to 2,000 events across all pages. |
-
-**SQL safety restrictions:**
-
-The system strictly validates query statements. The following content is **not allowed**:
-
-- Multi-statement queries containing `;`
-- DML or DDL operations such as `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, and `CREATE`
-- Lock operations such as `FOR UPDATE` and `LOCK IN SHARE MODE`
-- Row limit keywords such as `LIMIT`, `OFFSET`, `FETCH`, and `TOP`; pagination is controlled automatically by the system
-- Parameter placeholders such as `?`
+| Query | Yes | - | A read-only SELECT statement (or a CTE starting with `WITH`). **DML/DDL keywords** (`INSERT`, `UPDATE`, `DELETE`, `DROP`, etc.) are **forbidden**. **Parameter placeholders** (`?`) are **forbidden**. **Row-limiting keywords** (`LIMIT`, `OFFSET`, `FETCH NEXT`, `SELECT TOP`) are **forbidden** — the system controls pagination automatically. The query output **must include** both cursor columns (`time_column` and `id_column`); validation fails at save time if they are missing. |
+| Timeout (seconds) | Yes | `5` | Maximum execution time for a single page query, range `1 ~ 10` seconds. Values above `10` are clamped to `10`. |
+| Polling Cycle (seconds) | Yes | - | Interval between successive polling cycles (seconds). |
+| Max Pages | Yes | `5` | Maximum pages fetched per polling cycle, range `1 ~ 10`. Values above `10` are clamped to `10`. Pagination stops when the cap is reached or a page returns fewer rows than `page_size`. |
+| Page Size | Yes | `500` | Maximum rows returned per page, range `1 ~ 1000`. Values above `1000` are clamped to `1000`. |
 
 <Note>
-You only need to write the core query logic. **Do not** add `LIMIT` or `ORDER BY` to the SQL. The system automatically wraps your query as a subquery and adds pagination conditions and sorting based on the cursor columns.
+The total rows ingested per cycle is bounded by `max_pages × page_size` and is also subject to a system-wide event count ceiling. Set `page_size` to a batch size your database can handle efficiently (typically 200–500 rows) and tune `max_pages` based on your alert throughput.
 </Note>
 
-### Cursor configuration
+### Cursor Configuration
 
-DB Pull uses **keyset pagination** to make sure each poll retrieves only incremental data. The system uses a combination of the time column and ID column to locate the last read position, then continues from that position on the next poll.
+Flashduty uses **keyset pagination** to fetch new rows incrementally and avoid full-table scans. After each polling cycle, the system persists the cursor position of the last processed row and resumes from there on the next cycle.
 
-| Field | Required | Default | Description |
-| :-: | :-: | :-: | :--- |
-| Time column | Yes | - | Name of the time column used for sorting and pagination. It must appear in the SQL SELECT list. For example, `created_at` or `trigger_time`. |
-| ID column | Yes | - | Name of the unique ID column used for deduplication and sorting within the same timestamp. It must appear in the SQL SELECT list. For example, `id` or `alert_id`. |
-| Initial time | No | - | Starting time for the first poll. If left empty, polling starts from the earliest data. Supported formats include `2006-01-02 15:04:05` and `2006-01-02T15:04:05`. |
+| Field | Required | Description |
+| :-: | :-: | :--- |
+| Time Column (`time_column`) | Yes | The timestamp column used for ordering and pagination. The name must match `[a-zA-Z_][a-zA-Z0-9_]*` and must appear in the SELECT output. |
+| ID Column (`id_column`) | Yes | A unique-identifier column used together with the time column to break ties when multiple rows share the same timestamp (typically an auto-increment primary key or UUID). Same naming rules as `time_column`. |
+| Initial Time (`initial_time`) | No | The starting point for the very first fetch (or after a checkpoint reset), in `YYYY-MM-DD HH:MM:SS` format. If omitted, the system uses the time the integration was saved as the starting point — **rows that already exist before that moment will not be fetched**. |
 
-The automatically generated pagination query logic is as follows:
+**How pagination works**
 
-```sql
-SELECT * FROM (your query) AS _src
-WHERE (_src.time_column > ? OR (_src.time_column = ? AND _src.ID_column > ?))
-ORDER BY _src.time_column ASC, _src.ID_column ASC
-LIMIT ?
-```
-
-<Tip>
-Cursor positions are automatically persisted with a TTL of 30 days. If you change key configuration such as the database connection, SQL query, or cursor columns, the system detects the change and resets the cursor position automatically.
-</Tip>
-
-### Field mapping
-
-Column names returned by database queries usually differ from the field names in standard alert events, so they need to be converted through field mapping.
-
-**Standard field mapping**
-
-Map columns from query results to standard alert event fields:
-
-| Target field | Description |
-| :--- | :--- |
-| `event_status` | Alert status: Critical / Warning / Info / Ok |
-| `title_rule` | Alert title |
-| `alert_key` | Alert identifier |
-| `description` | Alert description |
-| `event_time` | Event time. Supports Unix timestamps, ISO 8601, and common datetime formats. |
-
-Each field supports three mapping methods:
-
-| Mapping method | Description | Example |
-| :--- | :--- | :--- |
-| `column` | Directly reference a column from the query result | `severity` |
-| `template` | Use Go template syntax to concatenate multiple columns | `{{.host}} - {{.check_name}}` |
-| `const` | Use a fixed value | `Critical` |
-
-**Label mapping**
-
-Labels support four modes:
-
-| Mode | Description |
-| :--- | :--- |
-| `include_columns` | Select specified columns from the query result as labels. Only explicitly listed columns are extracted. |
-| `all_columns` | Automatically use all columns that are not occupied by field mapping and are not cursor columns as labels. |
-| `json_column` | Specify a column whose value is a JSON string. The system automatically parses it into label key-value pairs. |
-| `manual` | Manually define the mapping between label names and source columns. Label names can differ from column names. |
-
-The following examples are based on the same query:
+The system wraps your SELECT statement in a subquery and appends keyset conditions, ordering, and a LIMIT on the outer query:
 
 ```sql
-SELECT id, created_at, severity, host, check_name, message, env, service, tags_json
-FROM alert_records
-WHERE status = 'open'
+SELECT * FROM (<your query>) AS _src
+WHERE (_src.<time_column> > ? OR (_src.<time_column> = ? AND _src.<id_column> > ?))
+ORDER BY _src.<time_column> ASC, _src.<id_column> ASC
+LIMIT <page_size>
 ```
 
-In this example, field mapping maps `severity` to `event_status`, `check_name` to `title_rule`, `id` to `alert_key`, `message` to `description`, and `created_at` to `event_time`. The cursor columns are `created_at` and `id`.
+Do not include `ORDER BY`, `LIMIT`, or `OFFSET` in your own query — the system controls these.
 
-**Mode 1: specified columns, `include_columns`**
+**Automatic checkpoint reset**
 
-Select specified columns from the query result as labels. Only explicitly listed columns are extracted; other columns are ignored.
+The system computes a fingerprint over the fields that define the ordered row stream: `driver`, `host`, `port`, `database`, `query`, `time_column`, `id_column`, and `initial_time`. When any of these fields change, the checkpoint is automatically invalidated and the next fetch restarts from `initial_time`. Editing field mappings or severity mappings **does not** trigger a checkpoint reset and will not replay historical rows.
+
+### Field Mapping
+
+Field mapping controls which database columns (or constant values) are mapped to which fields of the Standard Alert Event.
+
+#### Standard Field Mapping (fields)
+
+Each mapping rule specifies a **target field** (a Standard Event field name) and a **rule**. Three rule types are supported:
+
+| Rule Type | `type` Value | `value` Description |
+| :-: | :-: | :--- |
+| Column | `column` | Reads the value of the named column from the database row directly. Example: `"type": "column", "value": "alert_title"` reads the `alert_title` column. |
+| Constant | `const` | A fixed string applied to every row. Example: `"type": "const", "value": "Critical"` always sets the field to `Critical`. |
+| Template | `template` | A Go template string that can reference any column in the row. Example: `"type": "template", "value": "{{.host}}: {{.message}}"` concatenates the `host` and `message` columns. |
+
+When the target field is `event_time`, the system automatically converts the column value to a Unix timestamp in seconds. Supported input formats include `time.Time`, Unix milliseconds (integer), `"2006-01-02T15:04:05"`, `"2006-01-02 15:04:05"`, and other common datetime representations.
+
+#### Label Mapping (labels)
+
+Label mapping controls how database columns are converted into the `labels` dictionary of the alert event. Four modes are supported:
+
+| Mode | `mode` Value | Description |
+| :-: | :-: | :--- |
+| Specific Columns | `include_columns` | Only the columns listed in `columns` are included as labels. The label key is the column name; the label value is the column's string representation. |
+| All Columns | `all_columns` | Every column in the query result is automatically added as a label, excluding cursor columns and columns already referenced by `fields` rules. Useful when the column set is small or variable. |
+| JSON Column | `json_column` | Parses the specified column's value as a JSON object (`{"key": "value", ...}`) and maps it directly to labels. The column value must be valid JSON. |
+| Manual | `manual` | Explicitly maps label keys to source column names, e.g. `{"region": "dc_region", "env": "deploy_env"}`. The map key is the label name; the map value is the source column name. |
+
+### Severity Mapping
+
+External systems use inconsistent field names and values for alert severity. **Severity Mapping** translates the external value into Flashduty's standard `Critical / Warning / Info`.
+
+- Flashduty reads the `event_status` field produced by field mapping and looks it up in the severity mapping table.
+- **Fallback when no match**: if `event_status` does not match any key in the table, the severity defaults to `Warning`.
+
+Example configuration:
 
 ```json
 {
-  "mode": "include_columns",
-  "columns": ["env", "service", "host"]
+  "P0": "Critical",
+  "P1": "Critical",
+  "P2": "Warning",
+  "P3": "Info"
 }
 ```
 
-Generated labels: `env=production`, `service=api`, and `host=web-01`.
-
-**Mode 2: all columns, `all_columns`**
-
-Automatically use all columns that are **not occupied by field mapping** and are **not cursor columns** as labels. This is suitable when there are many columns and you want to preserve all of them as labels.
-
-```json
-{
-  "mode": "all_columns"
-}
-```
-
-Using the query above as an example, `severity`, `check_name`, `message`, `created_at`, and `id` are already occupied by field mapping or cursors. The remaining columns, `host`, `env`, `service`, and `tags_json`, automatically become labels.
-
-**Mode 3: JSON column, `json_column`**
-
-Specify a column from the query result whose value is a JSON string. The system automatically parses it into label key-value pairs. This is suitable when the alert table already has a JSON-formatted label field.
-
-```json
-{
-  "mode": "json_column",
-  "json_column": "tags_json"
-}
-```
-
-If the value of the `tags_json` column is `{"region":"cn-north","cluster":"k8s-prod"}`, the generated labels are `region=cn-north` and `cluster=k8s-prod`.
-
-**Mode 4: manual mapping, `manual`**
-
-Manually define the mapping between label names and source columns. Label names can differ from column names. This is suitable when you need to rename labels or select only some columns.
-
-```json
-{
-  "mode": "manual",
-  "mapping": {
-    "environment": "env",
-    "service": "service",
-    "host": "host"
-  }
-}
-```
-
-Generated labels: `environment=production`, `service=api`, and `host=web-01`. The left side is the label name, and the right side is the column name from the query result.
-
-**Complete field mapping configuration example:**
-
-```json
-{
-  "fields": {
-    "event_status": { "type": "column", "value": "severity" },
-    "title_rule": { "type": "template", "value": "{{.host}} - {{.check_name}}" },
-    "alert_key": { "type": "column", "value": "id" },
-    "description": { "type": "column", "value": "message" },
-    "event_time": { "type": "column", "value": "created_at" }
-  },
-  "labels": {
-    "mode": "include_columns",
-    "columns": ["env", "service", "host"]
-  }
-}
-```
-
-### Severity mapping
-
-External systems often use different field names and values for alert severity. Flashduty uses **Severity Mapping** to translate external values into the standard `Critical / Warning / Info` levels.
-
-- The system reads the mapped `event_status` field value and looks up the corresponding Flashduty severity in the mapping table.
-- **Default mapping**: `P1 → Critical`, `P2 → Warning`, `P3 → Info`. You can remove the default entries or add any number of custom entries.
-- **Fallback when no match**: if the value does not match any key in the mapping table, it falls back to `Warning`.
-
-**Complete configuration example:**
-
-Assume the `severity` column in your database stores values such as `critical`, `warning`, and `info`, which differ in capitalization from Flashduty standard values. You need to map the `severity` column to `event_status` in `field_mapping`, then convert the values through `severity_mapping`:
-
-```json
-{
-  "field_mapping": {
-    "fields": {
-      "title_rule": { "type": "column", "value": "title" },
-      "description": { "type": "column", "value": "description" },
-      "event_status": { "type": "column", "value": "severity" }
-    },
-    "labels": {
-      "mode": "include_columns",
-      "columns": ["source", "status"]
-    }
-  },
-  "severity_mapping": {
-    "critical": "Critical",
-    "warning": "Warning",
-    "info": "Info"
-  }
-}
-```
-
-In this configuration, `field_mapping` extracts the database `severity` column as the `event_status` field, and `severity_mapping` converts the original column value, such as `critical`, into the Flashduty standard value `Critical`.
-
-## Default route
+## Default Route
 ---
 
-When creating a "Shared Integration" under **Integration Center => Alert Events**, you must configure a default route. Otherwise, newly pulled events are dropped. After creation, you can add finer-grained rules under **Route**.
+When creating a "Shared Integration" (under **Integration Center => Alert Events**), you must configure a default route — otherwise newly pulled events will be dropped. After creation, you can add finer-grained rules under **Route**.
 
-A "Dedicated Integration" created under **Integrations** in a specific channel is automatically bound to that channel and does not need a separate default route.
+A "Dedicated Integration" (created under the **Integrations** tab of a specific channel) is automatically bound to that channel and does not require a separate default route.
 
-## FAQ
+## Notes
+---
 
-<AccordionGroup>
-<Accordion title="Which databases are supported?">
-Currently, **MySQL**, **PostgreSQL**, and **ClickHouse** are supported. If you use a database compatible with the MySQL or PostgreSQL protocol, such as TiDB, CockroachDB, or Aurora, it usually works as well.
-</Accordion>
-
-<Accordion title="Why can't I write LIMIT in the SQL?">
-The system uses keyset pagination to automatically control page size and page traversal logic. Your query is wrapped as a subquery, and the system adds `WHERE`, `ORDER BY`, and `LIMIT` conditions in the outer query. If you manually add row limits in the inner SQL, the pagination logic conflicts.
-</Accordion>
-
-<Accordion title="Polling works, but no new alerts are created. Why?">
-Check the following:
-
-1. Make sure `event_status` and `title_rule`, the two required fields, are correctly configured in field mapping.
-2. Check whether severity mapping is correct and whether the original value matches the mapping table.
-3. If `alert_key` is used, check whether it duplicates a previous alert. Events with the exact same status and content are deduplicated and dropped.
-4. Check whether the event matches any drop, inhibit, or silence rule.
-</Accordion>
-
-<Accordion title="After I change the SQL or connection information, does polling start from the beginning?">
-Yes. The system detects changes to key configuration such as the database connection, SQL query, and cursor columns. When a change is detected, the cursor is reset automatically, and the next poll starts again from the initial time or the beginning of the data.
-</Accordion>
-
-<Accordion title="How is the database connection password stored?">
-The password is encrypted with RSA when saved and decrypted only when polling runs. The system never stores or transmits the password in plaintext.
-</Accordion>
-</AccordionGroup>
+- **Database account permissions**: Create a dedicated read-only account for DB Pull with only `SELECT` privilege on the target table. Do not grant write access.
+- **Network reachability**: The Flashduty service must be able to reach `host:port` over the public internet or a dedicated line. Private subnets (`10.x.x.x`, `192.168.x.x`, `172.16–31.x.x`) and loopback addresses are rejected by the system.
+- **Index on cursor columns**: For performance, create a composite index on `(time_column, id_column)` to support efficient keyset pagination queries.
+- **Time column precision**: The system records cursor timestamps with microsecond precision (`2006-01-02 15:04:05.999999`). Use at least millisecond precision for your time column (`DATETIME(3)` or `TIMESTAMP(6)`) to avoid missing rows when many rows arrive within the same second.
+- **Query idempotency**: After a checkpoint reset, the same rows may be fetched again. Ensure your field mapping includes a column that uniquely identifies each alert (mapped to `alert_key`) so that Flashduty can correctly deduplicate events.

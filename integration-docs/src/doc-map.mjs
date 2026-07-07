@@ -2,7 +2,7 @@ const alertBase = 'on-call/integration/alert-integration/alert-sources';
 const integrationBase = 'on-call/integration';
 
 export const docMap = {
-  CustomAlert: `${alertBase}/standard alert.mdx`,
+  CustomAlert: `${alertBase}/standard-alert.mdx`,
   Email: `${alertBase}/email.mdx`,
   N9e: `${alertBase}/flashcat.mdx`,
   Prometheus: `${alertBase}/prometheus.mdx`,

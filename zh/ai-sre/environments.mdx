@@ -1,215 +1,377 @@
 ---
-title: BYOC
-description: 运行环境是您自托管的常驻 Runner 进程，负责执行工具、运行 Skill、连接 MCP；当没有在线的自托管 Runner 时，AI SRE 会话自动回退到云端沙箱。本文介绍如何连接 Runner、在会话中选择环境、配置作用域与排查常见问题。
-keywords: ["AI SRE", "运行环境", "Environment", "BYOC", "Runner", "自托管", "云端沙箱", "心跳", "作用域"]
-sidebarTitle: BYOC
+title: 运行环境
+description: 运行环境决定 AI SRE Agent 在哪里执行命令、读写文件、运行 Skill 与连接 MCP。本文先说明 Sandbox 与 BYOC Runner 的关系，再分别介绍云端 Sandbox、自托管 Runner、权限配置、会话选择与常见排查。
+keywords: ["AI SRE", "运行环境", "Environment", "Sandbox", "BYOC", "Runner", "权限配置", "自托管", "云端沙箱", "心跳", "作用域"]
+sidebarTitle: 运行环境
 ---
 
 <Info>
-  **内测功能**：AI SRE 目前处于内测阶段，仅对受邀账户开放。如需参与白名单测试，请联系 Flashduty 商务团队申请开通；内测期间功能与界面可能调整。
+  **内测功能**：AI SRE 目前处于内测阶段，专业版及以上用户可申请免费试用。请通过 [AI SRE 内测申请表](https://c9xudyniiq.feishu.cn/share/base/form/shrcn0ngCfdoygiaHnAT80BfZiH) 提交申请，审核通过后将开通白名单；内测期间功能与界面可能调整。
 </Info>
 
 ## 概述
 
 ---
 
-**运行环境**（Environment）是 AI SRE Agent 实际执行动作的地方。Agent 的每一次工具调用——执行命令、读写文件、运行 Skill、连接 MCP 服务——都发生在某个运行环境内。
+**运行环境**（Environment）是 AI SRE Agent 实际执行动作的地方。Agent 的每一次工具调用，包括执行命令、读写文件、运行 Skill、连接 MCP 服务，都会落在一个运行环境里。
 
 AI SRE 提供两类运行环境：
 
 <CardGroup cols={2}>
-  <Card title="自托管 Environment（BYOC）" icon="server">
-    部署在**您自己机器上**的常驻 Runner 进程。它与 AI SRE 保持常驻连接，随时待命接收任务。您完全掌控它运行在哪台机器、能访问哪些内网资源。
+  <Card title="云端 Sandbox" icon="cloud" href="/zh/ai-sre/sandbox">
+    Flashduty 托管的临时容器，零安装、开箱即用。没有当前成员可用的在线 BYOC Runner 时，会话会自动回退到云端 Sandbox。
   </Card>
-  <Card title="云端沙箱" icon="cloud" href="/zh/ai-sre/sandbox">
-    由系统托管的临时容器。无需任何安装，开箱即用。会话空闲时自动暂停，下次发送消息时自动唤醒。是没有在线 Runner 时的**默认回退**。
+  <Card title="BYOC Runner" icon="server" href="#byoc-runner">
+    部署在您自己机器上的常驻进程。它通过 WebSocket 连接 AI SRE，让 Agent 在您的网络边界内执行任务。
   </Card>
 </CardGroup>
 
-二者的选择逻辑很简单：**当您的账户下有在线的自托管 Runner 时，AI SRE 优先使用它；否则回退到云端沙箱。** 您也可以在聊天输入框里固定指定使用某个 Runner 或强制使用云端沙箱。
+默认选择逻辑是：**优先使用当前成员可用的在线 BYOC Runner；否则使用云端 Sandbox。** 可用 Runner 包括账户级 Runner，以及当前成员所属团队下的团队级 Runner。您也可以在会话输入框的环境选择器中固定使用云端 Sandbox，或固定使用某个具体 Runner。
 
 <Note>
-本页中的「Environment」「Runner」指的是同一个东西：在控制台里管理的那条记录称为 **Environment**，而真正跑在您机器上的那个进程称为 **Runner**。一个 Environment 记录对应一个 Runner 进程。
+控制台里的记录称为 **Environment**，跑在机器上的进程称为 **Runner**。一个 BYOC Environment 对应一个 Runner 进程；云端 Sandbox 则由系统按会话管理。
 </Note>
 
-## 为什么自托管（BYOC）
+## 云端 Sandbox
 
 ---
 
-云端沙箱适合快速上手与无网络要求的排查；当排查需要触达您的真实环境时，自托管 Runner 才能真正发挥作用。BYOC（Bring Your Own Compute，自带算力）把执行位置交还给您：
+云端 Sandbox 是 Flashduty 托管的临时执行容器。它适合快速上手、演示，以及不需要访问您内网的排查。您不需要安装任何进程，也不需要维护机器。
+
+适合使用云端 Sandbox 的场景：
+
+- 还没有部署 Runner，想先体验 AI SRE；
+- 排查只需要访问 Flashduty 数据、可信公网服务或公开文档；
+- 一次性、轻量任务，不值得准备常驻机器；
+- 希望强制隔离在托管环境中执行，而不是使用账户下已有 Runner。
+
+<Warning>
+云端 Sandbox 不能访问您的 VPC、专线、内网数据库、内网 API 或跳板机。需要直连这些资源时，请使用 [BYOC Runner](#byoc-runner)，把执行位置放到能访问目标资源的机器上。
+</Warning>
+
+更多生命周期、出网边界与会话选择细节，见 [Sandbox](/zh/ai-sre/sandbox)。
+
+## BYOC Runner
+
+---
+
+BYOC（Bring Your Own Compute）Runner 是您部署在自己机器上的 `flashduty-runner` 进程。它与 AI SRE 保持常驻 WebSocket 连接，收到任务后在本机执行命令、读写文件、运行 Skill，并按需连接本机可达的 MCP 服务。
+
+BYOC Runner 的价值来自执行位置：
 
 <AccordionGroup>
+<Accordion title="触达真实环境" icon="server">
+  Runner 跑在您的机器上，因此能访问这台机器本身可达的 VPC、内网、专线、Kubernetes 集群、云厂商 CLI、数据库或跳板机。
+</Accordion>
 <Accordion title="数据驻留" icon="key">
-  Runner 跑在您自己的机器上，工具执行产生的命令输出、日志、文件都留在您的环境内。敏感数据不必离开您的网络边界即可被 Agent 读取与分析。
+  命令输出、日志、临时文件和工具执行结果优先留在您的网络边界内。Agent 能读取和分析这些信息，但执行面仍由您机器的系统账号、文件权限和网络策略约束。
 </Accordion>
-<Accordion title="网络可达性 / 低延迟" icon="server">
-  云端沙箱默认只能访问受控的公网域名，触达不到您 VPC、内网或专线后的服务。把 Runner 部署在能直连这些目标的机器上，Agent 就能直接查询内网数据库、调用内网 API、登录跳板机——并且少了一跳公网往返，延迟更低。
-</Accordion>
-<Accordion title="安全合规" icon="users">
-  您掌控 Runner 运行所在机器的操作系统账号、文件系统权限与出网策略。配合作用域与编辑权限，可以把某个 Runner 限定为只对特定团队可见，满足最小权限与审计要求。
+<Accordion title="本地权限可控" icon="shield-check">
+  您可以决定 Runner 运行在哪个 OS 用户下、能访问哪些目录、拥有哪些 CLI 凭据，以及是否加载本页的[权限配置](#权限配置)收敛命令范围。
 </Accordion>
 </AccordionGroup>
 
 <Tip>
-自托管 Environment 是您自己的机器，AI SRE 不接管它的出网控制——云端沙箱上那套「按环境配置允许访问域名」的代理策略不适用于 BYOC，因此自托管 Environment 的表单里**不提供网络访问配置**。出网完全由您机器自身的网络与防火墙策略决定。
+BYOC Runner 的出网策略由您的机器和防火墙决定。云端 Sandbox 的“按域名配置出网允许列表”不适用于 BYOC，因此自托管 Environment 表单里不提供网络访问配置。
 </Tip>
 
-## 连接一个 Runner
+### 创建并连接
+
+在 AI SRE 左侧菜单进入 **Environments**，创建一个自托管 Environment。创建时需要填写：
+
+| 字段 | 是否必填 | 说明 |
+|---|---|---|
+| 名称 | 否 | 在账户范围内唯一，最长 128 字符。留空时，Runner 首次连接并发送心跳后，会自动用机器主机名命名；若主机名重复，会追加 Environment ID 后缀。 |
+| 范围 | 是 | 账户范围对整个账户可见；团队范围仅对该团队成员可见和可编辑。见[作用域](#作用域)。 |
+| 标签 | 否 | 用于任务路由的标签，逗号分隔，例如 `linux, docker, gpu`。 |
+
+创建成功后会弹出**接入指引**，包含这条 Environment 的 Token、安装命令、升级命令和卸载命令。列表行里的钥匙按钮或 pending 状态的“查看接入指引”也会打开同一个弹窗。
+
+### 安装方式
+
+接入指引里的命令会自动填入真实 `TOKEN` 与 `URL`。以下示例只展示占位符，请以控制台生成的命令为准。
+
+<Tabs>
+  <Tab title="Linux (systemd)">
+    在目标机器上以 root / sudo 执行：
+
+    ```bash
+    curl -fsSL https://static.flashcat.cloud/flashduty-runner/install.sh | \
+      sudo TOKEN=<your-token> \
+      URL=<connect-url> \
+      bash
+    ```
+
+    脚本会安装二进制、创建 systemd 服务，并写入 `/etc/flashduty-runner/env`。同一条命令可用于首次安装和升级；如果已是最新版本，会自动跳过。
+  </Tab>
+  <Tab title="Docker">
+    在已安装 Docker 的机器上启动容器：
+
+    ```bash
+    docker run -d \
+      --name flashduty-runner \
+      -e FLASHDUTY_RUNNER_TOKEN=<your-token> \
+      -e FLASHDUTY_RUNNER_URL=<connect-url> \
+      -v /var/flashduty/workspace:/workspace \
+      registry.flashcat.cloud/public/flashduty-runner:latest
+    ```
+
+    Docker 权限取决于容器挂载。需要 kubeconfig、云厂商 CLI 凭据或 Docker socket 时，在镜像名前追加对应的 `-v` / `-e` 参数。
+  </Tab>
+  <Tab title="手动 / macOS">
+    先安装二进制，再手动启动进程：
+
+    ```bash
+    curl -fsSL https://static.flashcat.cloud/flashduty-runner/install.sh | sudo bash -s -- --no-service
+
+    FLASHDUTY_RUNNER_TOKEN=<your-token> \
+    FLASHDUTY_RUNNER_URL=<connect-url> \
+    flashduty-runner run
+    ```
+
+    手动模式不会注册 systemd 服务，适合 macOS、临时排查或您已有自己的进程管理方式。
+  </Tab>
+</Tabs>
+
+<Note>
+`connect-url` 与 `install_script_url` 都由后端下发，前端不会硬编码。私有化或离线部署可以把安装脚本分发源替换为内部镜像，但镜像需要同时提供 `install.sh`、`releases/latest` 与 `releases/download/<version>/...` release assets。
+</Note>
+
+### Linux 服务用户
+
+Linux (systemd) 安装默认使用安装脚本自动创建的 `flashduty` 用户。该用户没有 sudo 权限，systemd unit 会启用 `NoNewPrivileges=true`、`ProtectSystem=strict`、`PrivateTmp=true` 等限制，并只把 Runner 的状态目录设为可写。
+
+如果 Runner 需要读取某个已有用户的 kubeconfig、云厂商 CLI 凭据或 Docker 权限组，可以在接入指引里填写“Linux 服务用户”，或手动在命令中增加 `RUN_AS`：
+
+```bash
+curl -fsSL https://static.flashcat.cloud/flashduty-runner/install.sh | \
+  sudo TOKEN=<your-token> \
+  URL=<connect-url> \
+  RUN_AS=<existing-user> \
+  bash
+```
+
+`RUN_AS` 等价于安装脚本的 `--run-as <user>` 参数，要求该系统用户已经存在。这样做会让 systemd 服务以该用户运行，也会相应放宽该用户主目录的保护策略。
+
+<Warning>
+只有在 Runner 确实需要读取该用户的本地凭据或加入该用户所在权限组时，才指定 `RUN_AS`。否则优先使用默认 `flashduty` 用户。
+</Warning>
+
+### Token、升级和卸载
+
+Token 是 Runner 连接 AI SRE 的唯一凭据。它会写入安装命令或环境变量中，请只在安装、升级或排查连接时查看，不要发给无关人员。若怀疑泄露，请删除对应 Environment 后重新创建。
+
+Runner 启动后会持续发送心跳。列表状态含义如下：
+
+| 状态 | 含义 |
+|---|---|
+| 等待中（pending） | Environment 已创建，但 Runner 从未连接过。 |
+| 在线（online） | Runner 当前已连接，心跳正常，可承接任务。 |
+| 离线（offline） | Runner 曾连接过，但当前心跳已断。 |
+
+Runner 版本由服务端在心跳中比对。发现新版本时，Runner 会收到升级通知并自行下载、校验、替换。手动重跑安装命令也可升级。卸载命令也在接入指引里：`--uninstall` 保留配置卸载，`--purge` 清除配置与数据。
+
+## 权限配置
 
 ---
 
-在 AI SRE 左侧菜单进入 **`Environments`**（运行环境），即可创建并连接一个自托管 Runner。整个流程分为「在控制台创建记录、拿到 Token」与「在目标机器上安装并启动」两步。
+Runner 默认使用允许全部命令的规则：
 
-<Steps>
-<Step title="创建 Environment 记录">
-  点击右上角 **创建 Environment**，在表单中填写：
+```yaml
+permission:
+  "*": "allow"
+```
 
-  | 字段 | 类型 | 是否必填 | 说明 |
-  |---|---|---|---|
-  | 名称 | 字符串 | 是 | 用于标识此 Environment 的唯一名称，在账户范围内必须唯一，最长 128 字符 |
-  | 范围 | 账户 / 团队 | 是 | 账户范围在整个账户内可见；团队范围仅对该团队成员可见和可编辑（见下文[作用域](#作用域)） |
-  | 标签 | 字符串列表 | 否 | 用于任务路由的标签，逗号分隔，例如 `linux, docker, gpu` |
+当您希望把 Runner 的命令执行范围收敛到允许列表或拒绝列表时，可以在 Runner 所在机器上创建一个 YAML 文件，并通过 `--permission-config` 或 `FLASHDUTY_RUNNER_PERMISSION_CONFIG` 指定它。权限配置是 Runner 本机文件，不在控制台表单里编辑。
 
-  创建成功后会弹出**接入指引**，其中包含本 Environment 的连接凭据 **Token** 与一键安装命令。
-</Step>
+Linux (systemd) 安装后，推荐在 `/etc/flashduty-runner/env` 中加入：
 
-<Step title="拿到 Token（连接凭据）">
-  Token 是 Runner 连接 AI SRE 的**唯一凭据**，请妥善保管、勿对外分享。它会随安装命令一起注入到 Runner 进程。
+```bash
+FLASHDUTY_RUNNER_PERMISSION_CONFIG=/etc/flashduty-runner/permission.yaml
+```
 
-  <Warning>
-  Token 等同于把执行能力授予一个 Runner，泄露后他人可冒充该 Environment 接入。若怀疑泄露，可在列表中删除该 Environment 后重建。Token 可随时在列表行的 **Token 按钮**（钥匙图标）里重新查看。
-  </Warning>
-</Step>
+然后重启服务：
 
-<Step title="在目标机器上安装并启动">
-  接入指引提供两种安装方式，命令中的 `TOKEN`、`URL` 已自动填入您这条 Environment 的真实值：
+```bash
+sudo systemctl restart flashduty-runner
+```
 
-  <Tabs>
-  <Tab title="Linux (systemd)">
-    在目标机器上以 root / sudo 执行一行命令，脚本会安装二进制并注册为 systemd 常驻服务：
+手动启动时也可以直接传参数：
 
-    ```bash
-    curl -fsSL https://static.flashcat.cloud/flashduty-runner/install.sh | sudo TOKEN=<your-token> URL=<connect-url> bash
-    ```
+```bash
+flashduty-runner run \
+  --token <your-token> \
+  --permission-config /etc/flashduty-runner/permission.yaml
+```
 
-    同一条安装命令既可用于首次安装，也可用于升级——已是最新版本会自动跳过。
-  </Tab>
-  <Tab title="手动 / macOS">
-    分两步：先只安装二进制（不注册 systemd 服务），再手动启动进程：
+一个常见的只读排查配置如下：
 
-    ```bash
-    # ① 仅安装二进制
-    curl -fsSL https://static.flashcat.cloud/flashduty-runner/install.sh | sudo bash -s -- --no-service
+```yaml
+permission:
+  "*": "deny"
+  "kubectl get *": "allow"
+  "kubectl describe *": "allow"
+  "kubectl logs *": "allow"
+  "ls": "allow"
+  "ls *": "allow"
+  "cat *": "allow"
+  "head *": "allow"
+  "tail *": "allow"
+  "grep *": "allow"
+  "pwd": "allow"
+  "whoami": "allow"
+  "date": "allow"
+```
 
-    # ② 手动启动
-    FLASHDUTY_RUNNER_TOKEN=<your-token> FLASHDUTY_RUNNER_URL=<connect-url> flashduty-runner run
-    ```
-  </Tab>
-  </Tabs>
+规则语义：
 
-  <Note>
-  `connect-url` 是 Runner 拨入 AI SRE 的连接地址（默认形如 `wss://api.flashcat.cloud/safari/environment/ws`），由部署侧配置注入，您无需手填——接入指引里已是可直接复制的完整命令。
-  </Note>
-</Step>
-
-<Step title="校验在线状态">
-  Runner 启动并成功连接后，它会持续向 AI SRE 发送**心跳**。回到 Environments 列表，对应行的状态会从 **等待中**（从未连接）变为 **在线**：
-
-  | 状态 | 含义 |
-  |---|---|
-  | 等待中（pending） | 记录已创建，但 Runner 从未连接过。列表中显示「查看接入指引」入口 |
-  | 在线（online） | Runner 当前已连接，心跳正常，可承接任务 |
-  | 离线（offline） | Runner 曾经连接过，但当前心跳已断 |
-
-  在线后，列表还会回填该机器的**机器信息**（操作系统 / 架构 / 主机名）、Runner **版本**，以及**最后心跳**时间（「刚刚」「N 分钟前」「N 小时前」等）。当存在更新版本时，版本列会出现「可升级」提示，点击即可重新打开接入指引，按相同的命令升级。
-</Step>
-</Steps>
+- `permission` 是顶层 key，下面是 `glob pattern: allow|deny` 的扁平映射；
+- 未指定配置文件时，Runner 允许全部命令；
+- 一旦指定配置文件，文件缺失、YAML 格式错误或 `permission` 为空都会让 Runner 拒绝启动，避免因配置错误回退到允许全部；
+- 命令按规范化后的 shell 片段匹配，空格差异不会影响匹配；
+- 规则按“`*` 之前的字面前缀更长者更具体”排序，更具体的规则先匹配，`*` 总是最后兜底；
+- Runner 会检查管道、命令替换、进程替换、算术展开里的命令；
+- 写重定向会按形如 `> /path`、`>> /path`、`&> /path` 的合成命令检查；读重定向本身不会额外拦截。
 
 <Tip>
-升级与卸载也都在同一份接入指引里：已安装的 Runner 重跑安装命令即升级；卸载提供两种命令——`--uninstall` 保留配置卸载，`--purge` 清除配置与数据彻底卸载。
+权限配置会在 Runner 启动时加载。修改 YAML 后需要重启 Runner，新的规则才会生效。
 </Tip>
+
+## 权限配置
+
+---
+
+Runner 默认允许执行任意命令——与直接在自己的 shell 里运行 AI 模型一样，信任模型的判断。如果需要限制 Runner 可执行的命令范围，可以通过 `--permission-config` 参数或 `FLASHDUTY_RUNNER_PERMISSION_CONFIG` 环境变量为 Runner 指定一个 YAML 规则文件：
+
+```bash
+flashduty-runner run --token <your-token> --permission-config /etc/flashduty-runner/permission.yaml
+
+# 或通过环境变量
+export FLASHDUTY_RUNNER_PERMISSION_CONFIG=/etc/flashduty-runner/permission.yaml
+```
+
+规则文件顶层键是 `permission`，值是 **glob 模式 → `allow`/`deny`** 的映射：
+
+```yaml
+permission:
+  "*": "deny"
+  "kubectl get *": "allow"
+  "kubectl describe *": "allow"
+  "cat *": "allow"
+```
+
+- 规则会应用到命令的每一处出现——包括管道（`cmd1 | cmd2`）、`$(...)`/反引号命令替换、进程替换，以及写入重定向目标（因此 `echo x > /etc/passwd` 会像执行命令一样被拦截）。
+- **最具体的规则优先**：第一个 `*` 之前字面前缀最长的模式最先被尝试匹配，兜底规则 `"*"` 始终最后尝试，第一个匹配的规则生效。
+- 该文件仅在 Runner **启动时加载一次**——修改规则后需要重启 Runner 才能生效，不支持热重载。
+- 若指定了该 flag/环境变量，但文件缺失、格式错误，或未在 `permission` 键下定义任何规则，Runner 会**拒绝启动**（fail closed），而不是静默放行所有命令：显式配置权限即代表明确希望限制执行范围，配置写错时应当报错而非留下安全隐患。
+- 不设置该 flag/环境变量是默认行为，等价于允许所有命令。
+
+<AccordionGroup>
+<Accordion title="严格模式（推荐用于共享环境）" icon="lock">
+默认拒绝所有命令，仅显式放行需要的命令：
+
+```yaml
+permission:
+  "*": "deny"
+  "kubectl get *": "allow"
+  "kubectl describe *": "allow"
+  "kubectl logs *": "allow"
+  "cat *": "allow"
+  "ls *": "allow"
+```
+</Accordion>
+<Accordion title="信任模式（用于专属/隔离环境）" icon="unlock">
+等价于完全不设置 `--permission-config`，但允许显式声明例外：
+
+```yaml
+permission:
+  "*": "allow"                 # 信任 AI 模型
+  "rm -rf /": "deny"           # 如需要可阻止灾难性命令
+```
+
+适用于 Runner 运行在隔离 VM/容器、影响范围有限，或更看重响应速度而非限制权限的场景。
+</Accordion>
+<Accordion title="只读模式（仅用于监控）" icon="eye">
+只放行只读命令，适合仅用于观测、不希望 Runner 修改任何状态的场景：
+
+```yaml
+permission:
+  "*": "deny"
+  "cat *": "allow"
+  "head *": "allow"
+  "tail *": "allow"
+  "ls *": "allow"
+  "grep *": "allow"
+  "ps *": "allow"
+  "df *": "allow"
+  "free *": "allow"
+```
+</Accordion>
+</AccordionGroup>
+
+<Note>
+命令权限当前仅支持通过配置文件设置，控制台暂无对应的可视化配置界面。
+</Note>
 
 ## 在会话中选择环境
 
 ---
 
-在聊天**输入框底部**常驻一个**环境选择器**，用来指定本次会话在哪个运行环境里执行。点击它会展开三类选项：
+聊天输入框底部的环境选择器决定新会话在哪里执行：
 
 | 选项 | 含义 |
 |---|---|
-| **自动** | 由 AI SRE 自动选择最优可用环境：账户下有在线 Runner 时优先用 Runner，否则回退到云端沙箱。新会话的默认值 |
-| **云端沙箱 · 默认** | 强制使用系统托管的云端沙箱，忽略自托管 Runner |
-| **自托管 Environment** | 列出账户下可见的 Runner，选择某个具体 Runner。**离线 / 未连接的 Runner 会变灰且不可选**——您能看到它存在，但选不了一个已经掉线的 Runner |
-
-选择器底部还提供「**添加自托管 Environment**」入口，可直接跳转到 Environments 页面创建新的 Runner。
+| **自动** | 新会话默认值。优先使用当前成员可用的在线 Runner，否则回退到云端 Sandbox。 |
+| **云端 Sandbox · 默认** | 强制使用系统托管的云端 Sandbox，忽略自托管 Runner。 |
+| **自托管 Environment** | 列出当前成员可使用的 Runner。离线、从未连接或团队权限不匹配的 Runner 不可选。 |
 
 <Warning>
-环境选择**会被会话记住**，且对一条会话是**一次性锁定**的：会话首次发送消息时确定的运行环境会被记录下来，后续轮次始终沿用该环境，**不会**因为您事后切换选择器而改变。要换一个运行环境，请新建一条会话。
+环境选择对一条会话是一次性锁定的：会话首次发送消息时确定的运行环境会被记录，后续轮次始终沿用，不会因为您之后切换选择器而改变。要换环境，请新建会话。
 </Warning>
 
-历史会话打开时，选择器会以**只读**形式展示这条会话当初锁定的环境及其当前状态。如果当初绑定的是某个 Runner 而它现在已离线 / 被删除，该选择器会以红点标注「离线 / 已删除」，点击可展开原因并提供「去 Environments」的跳转链接——此时该会话无法继续发送消息，需要重新连接对应 Runner，或新建会话改用云端沙箱。
+历史会话打开时，选择器会以只读形式展示这条会话当初锁定的环境及其当前状态。如果绑定的 Runner 已离线或被删除，该会话不能继续发送消息；请先恢复 Runner，或新建会话改用云端 Sandbox。
 
 ## 作用域
 
 ---
 
-和其他资源（Skill、知识库、MCP、Agent）一样，每个运行环境都有账户级与团队级两档作用域：
+每个 BYOC Environment 都有账户级与团队级两档作用域：
 
 | 作用域 | 可见范围 |
 |---|---|
-| 账户级 | 整个账户内所有成员可见 |
-| 团队级 | 仅该团队的成员可见、可编辑 |
+| 账户级 | 整个账户内所有成员可见、可选择并可用于运行。 |
+| 团队级 | 仅该团队成员可见、可编辑、可选择并可用于运行。 |
 
-在 Environment 列表的「范围」列，账户级显示为「**账户**」标签，团队级显示对应**团队名**。列表上方的 ScopeBar 可按账户 / 团队过滤要查看的 Environment。
+编辑权限遵循统一规则：
 
-**编辑权限**遵循统一规则：
-
-1. 账户所有者或账户管理员 → 可编辑任意运行环境；
-2. 团队成员 → 可编辑本团队的团队级运行环境；
-3. 没有「创建者额外权限」一说——不是创建者也能按上述规则编辑。
-
-**会话如何挑选 Runner**（运行时可见性）：
+1. 账户所有者或账户管理员可编辑任意 Environment；
+2. 团队成员可编辑本团队的团队级 Environment；
+3. 不存在“创建者额外权限”，不是创建者也可以按上述规则编辑。
 
 <Note>
-作用域是**编辑与归属**的标签，而**账户是运行时唯一的安全边界**。当会话需要回退或自动选择 Runner 时，系统从该账户下**所有在线的 BYOC Runner**中按标签匹配挑选一个；自动选择不以团队作硬过滤。因此，给某个 Runner 打上团队级作用域，主要约束的是「谁能在控制台看到并编辑它」，而非「哪些会话能用到它的算力」。
+账户仍是运行时安全边界，但团队作用域也会参与 Runner 选择：系统自动选择 Runner 或按 ID 固定 Runner 时，只会使用账户级 Runner，或当前成员所属团队下的团队级 Runner。这样可以避免成员把会话落到自己无权使用的团队 Runner 上。
 </Note>
-
-如果会话**绑定了某个团队**（例如从作战室故障拉起、或在 UI 中显式指定团队），该团队的 Skill、MCP 与知识会在会话内被优先装配，运行环境的算力仍以账户为边界。
 
 ## 故障排查
 
 ---
 
-排查 Runner 问题时，先看 Environments 列表里那一行的 **状态** 与 **最后心跳**——这两个字段直接反映 AI SRE 此刻是否认得这个 Runner。
+排查 Runner 问题时，先看 Environments 列表的**状态**与**最后心跳**。
 
 <AccordionGroup>
-<Accordion title="Runner 显示「离线」" icon="bug">
-  状态为**离线**（offline）说明 Runner 曾经连接过，但 AI SRE 在约 **90 秒**内没有收到它的心跳，于是判定其掉线。常见原因与排查：
-
-  - **进程已退出**：登录目标机器检查 Runner 进程或 systemd 服务是否在运行（`systemctl status flashduty-runner`）。崩溃或被 OOM 杀掉都会导致心跳中断。
-  - **机器或网络中断**：机器关机、休眠、断网，或到 AI SRE 的出网被防火墙阻断，都会让心跳无法送达。
-  - **恢复方式**：让 Runner 重新启动并保持运行即可——它会自动重连并重新发送心跳，列表状态会在下一次心跳后回到「在线」。
+<Accordion title="Runner 显示离线" icon="bug">
+  离线说明 Runner 曾连接过，但 AI SRE 在约 90 秒内没有收到心跳。请检查 systemd 服务或进程是否在运行、机器是否休眠或断网、到 AI SRE 的出网是否被防火墙阻断。恢复进程和网络后，Runner 会自动重连。
 </Accordion>
-
-<Accordion title="Runner 始终停在「等待中 / 未连接」" icon="wrench">
-  状态为**等待中**（pending）表示这条 Environment 记录从创建至今**从未**成功连接过。逐项核对：
-
-  - **安装命令是否完整执行**：确认 `curl ... | sudo TOKEN=... URL=... bash` 跑通且无报错，二进制已落地。
-  - **Token 是否匹配**：Runner 用的 `TOKEN` 必须正是这条 Environment 的 Token。从别处复制了旧的或别的 Environment 的 Token 会导致鉴权失败、连接建立不起来。可在列表行的 Token 按钮重新获取并核对。
-  - **连接地址是否可达**：Runner 拨入的 `URL` 需要从目标机器**能出网到达**。先在该机器上验证到该地址的连通性，再排查上层。
+<Accordion title="Runner 一直等待首次连接" icon="wrench">
+  等待中说明这条 Environment 从未成功连接过。请确认安装命令完整执行、Token 属于这条 Environment、`URL` 从目标机器可达。如果使用了权限配置，也要确认配置文件存在且 YAML 可解析。
 </Accordion>
-
-<Accordion title="发送消息提示「连接超时」或一直无响应" icon="server">
-  会话执行依赖一个**在线**的运行环境。当选择器固定指向某个 Runner、而该 Runner 不在线时，AI SRE 不会偷偷把会话改派到别处（会话是一次性锁定的），而是直接拦下并提示该 Environment 不可用。处理方式：
-
-  - 确认所选 Runner 在 Environments 列表里确为**在线**；若为离线 / 未连接，先按上面两条恢复它。
-  - 临时绕过：在选择器里改选**自动**或**云端沙箱**，让会话走云端回退。注意环境绑定是一次性的，已锁定到离线 Runner 的**旧会话**无法改派——需要**新建一条会话**再切换。
-  - 若 Runner 显示在线但执行仍超时，多半是 Runner 所在机器到目标资源（数据库、内网 API 等）这一段不通，而非 Runner 与 AI SRE 之间的链路——按目标资源侧排查网络与权限。
+<Accordion title="会话提示连接超时或无响应" icon="server">
+  如果会话固定到了某个离线 Runner，AI SRE 不会偷偷改派到其他环境。请先恢复该 Runner，或新建会话并选择“自动”或“云端 Sandbox”。如果 Runner 在线但任务失败，多半是 Runner 到目标资源这一段的网络或权限问题。
 </Accordion>
 </AccordionGroup>
 
 <Tip>
-判断「问题出在哪一段」的最快办法：先看状态。**离线 / 等待中**说明 Runner 与 AI SRE 之间的链路有问题（看心跳、看进程、看出网）；**在线却执行失败**说明 Runner 与被排查目标之间有问题（看目标资源的网络与权限）。
+最快的定位方法：**离线 / 等待中**看 Runner 到 AI SRE 的连接；**在线但执行失败**看 Runner 到目标资源的网络、凭据和权限。
 </Tip>
 
 ## 相关页面
@@ -218,15 +380,15 @@ AI SRE 提供两类运行环境：
 
 <CardGroup cols={2}>
   <Card title="Sandbox" icon="cloud" href="/zh/ai-sre/sandbox">
-    无在线 Runner 时的默认回退执行环境——托管、临时、零安装。
+    了解云端 Sandbox 的生命周期、适用场景与出网边界。
   </Card>
   <Card title="控制台" icon="comments" href="/zh/ai-sre/sessions">
-    在会话中查看绑定的运行环境、团队与 Agent 调用了哪些资源。
+    在会话中查看绑定的运行环境、团队与 Agent 调用的资源。
   </Card>
   <Card title="MCP（外部工具）" icon="plug" href="/zh/ai-sre/mcp">
-    MCP 连接在 Agent 运行时按每个 Environment 建立。
+    MCP 连接在 Agent 运行时于所选环境内建立。
   </Card>
   <Card title="Skill" icon="bug" href="/zh/ai-sre/skills">
-    Skill 在所选运行环境中执行，了解如何上传与启用 Skill。
+    Skill 在所选运行环境中执行。
   </Card>
 </CardGroup>

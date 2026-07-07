@@ -1,0 +1,173 @@
+---
+title: "图片上传 API"
+description: "通过图片上传接口上传图片并获得 image_key，可在上报标准告警时通过 images 字段引用，用于在前端及飞书、钉钉应用通知中展示告警相关截图。"
+keywords: ["图片上传", "image_key", "标准告警", "告警图片", "integration_key", "Flashduty"]
+---
+
+## 一、功能概述
+
+上报告警时，您可以在 [标准告警](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 的 `images` 字段中携带图片，用于在前端及飞书、钉钉应用通知中展示告警相关截图。`images` 中每张图片的 `src` 支持两种取值：
+
+- `http`/`https` 开头的公网可访问图片链接；
+- 通过本接口上传图片后返回的 `image_key`。
+
+当图片没有公网链接时，可先调用图片上传接口上传图片，拿到 `image_key`，再在上报告警时引用。工作流程如下：
+
+1. 调用图片上传接口，上传图片文件，获得 `image_key`；
+2. 上报标准告警时，将 `image_key` 填入 `images[].src`；
+3. Flashduty 在处理告警时解析 `image_key`，将图片关联到告警并持久化展示。
+
+<Note>
+图片上传与标准告警上报共用同一个集成秘钥（`integration_key`）。请使用您在 [标准告警](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 等集成中获取的推送秘钥，无需单独申请。
+</Note>
+
+## 二、接口说明
+
+### 请求方式
+
+<div class="md-block">
+
+POST，Content-Type: `multipart/form-data`
+
+</div>
+
+### 请求地址
+
+<div class="md-block">
+
+```
+{api_host}/push/image/upload?integration_key={integration_key}
+```
+
+其中 `{api_host}` 为 Flashduty 的接入域名，公有云默认为 `https://api.flashcat.cloud`，与您的告警推送地址保持一致。
+
+</div>
+
+### 请求参数
+
+**Query 参数：**
+
+| 参数 | 必含 | 类型 | 释义 |
+| :-: | :-: | :-: | :--- |
+| integration_key | 是 | string | 集成秘钥，用于确定账户。添加集成后获得，与告警推送共用同一个秘钥。 |
+
+**Form-Data 参数：**
+
+| 参数 | 必含 | 类型 | 释义 |
+| :-: | :-: | :-: | :--- |
+| image | 是 | file | 待上传的图片文件，单文件最大 `5MB`。系统根据文件内容（而非扩展名）识别格式，支持的格式见下表。 |
+
+**支持的图片格式：**
+
+| 格式 | Content-Type |
+| :-: | :--- |
+| JPEG | image/jpeg、image/jpg |
+| PNG | image/png |
+| WebP | image/webp |
+| GIF | image/gif |
+| TIFF | image/tiff、image/tif |
+| BMP | image/bmp |
+| ICO | image/x-icon、image/vnd.microsoft.icon |
+
+### 请求响应
+
+| 字段名称 | 必选 | 类型 | 描述 |
+| :-: | :-: | :-: | :--- |
+| request_id | 是 | string | 请求 ID，用于链路追踪 |
+| error | 否 | [Error](#Error) | 错误描述，仅当出现错误时返回 |
+| data | 否 | [Data](#Data) | 上传结果 |
+
+<span id="Data"></span>
+Data：
+
+| 字段名称 | 必选 | 类型 | 描述 |
+| :-: | :-: | :-: | :--- |
+| image_key | 是 | string | 图片标识，形如 `img_<hash>`。在上报标准告警时填入 `images[].src` 即可引用该图片。 |
+
+<span id="Error"></span>
+Error：
+
+| 字段名称 | 必选 | 类型 | 描述 |
+| :-: | :-: | :-: | :--- |
+| code | 是 | string | 错误码，枚举值参考 [Code](#Code) |
+| message | 否 | string | 错误描述 |
+
+<span id="Code"></span>
+Code：
+
+| 错误码 | HTTP Status | 描述 |
+| :-: | :-: | :--- |
+| InvalidParameter | 400 | 参数错误，如缺少 image 文件、图片格式不支持或文件超过 5MB |
+| Unauthorized | 401 | integration_key 缺失或无效，或集成、账户已被禁用 |
+| RequestTooFrequently | 429 | 请求过于频繁，超过频率限制 |
+| InternalError | 500 | 内部或未知错误 |
+
+### 频率限制
+
+为保护服务稳定，图片上传按账户限流：
+
+- 每账户每秒最多 `5` 次；
+- 每账户每分钟最多 `50` 次。
+
+超过限制时返回 `RequestTooFrequently`（HTTP 429）。
+
+## 三、请求示例
+
+请求：
+
+```bash
+curl -X POST '{api_host}/push/image/upload?integration_key={integration_key}' \
+  -F 'image=@/path/to/screenshot.png'
+```
+
+成功响应：
+
+```json
+{
+    "request_id": "0ace00116215ab4ca0ec5244b8fc54b0",
+    "data": {
+        "image_key": "img_8f3a9c2b1e4d5f6a7b8c9d0e1f2a3b4c"
+    }
+}
+```
+
+## 四、在告警中引用图片
+
+拿到 `image_key` 后，在上报 [标准告警](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 时，将其填入 `images` 数组中某张图片的 `src` 字段即可：
+
+```json
+{
+    "event_status": "Warning",
+    "title_rule": "cpu idle low than 20%",
+    "labels": {
+        "service": "engine"
+    },
+    "images": [
+        {
+            "alt": "CPU 使用率截图",
+            "src": "img_8f3a9c2b1e4d5f6a7b8c9d0e1f2a3b4c"
+        }
+    ]
+}
+```
+
+`images` 与 `image` 结构体的完整字段说明，请参考 [标准告警 - image 结构体](/zh/on-call/integration/alert-integration/alert-sources/standard-alert#image)。
+
+<Note>
+- `image_key` 在 `images[].src` 中的长度限制为 `256` 字符，超长会被丢弃。
+- 上传后的图片先临时存储，被告警引用后才会转为长期存储。请在上传后及时将 `image_key` 用于告警上报。
+</Note>
+
+## 五、常见问题
+
+1. **重复上传同一张图片会怎样？**
+
+   - 系统按图片内容去重。上传内容完全相同的图片会返回相同的 `image_key`，不会重复占用存储。
+
+2. **可以直接使用图片的公网链接吗？**
+
+   - 可以。如果图片已有 `http`/`https` 公网可访问链接，无需上传，直接将链接填入 `images[].src` 即可。图片上传接口仅用于没有公网链接的场景。
+
+3. **image_key 可以跨账户使用吗？**
+
+   - 不可以。`image_key` 与上传时所用 `integration_key` 归属的账户绑定，仅在同一账户内有效。
