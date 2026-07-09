@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  buildOpenapiReferenceIndex,
   buildOssFilePath,
   listOpenapiJsonFiles,
   uploadOpenapiJsonFiles,
@@ -50,12 +51,71 @@ test('validateRequiredEnv reports every missing upload credential', () => {
   ]);
 });
 
-test('uploadOpenapiJsonFiles uploads every JSON file and refreshes each CDN URL', async () => {
+test('buildOpenapiReferenceIndex keeps only path label and docs URL', () => {
+  assert.deepEqual(buildOpenapiReferenceIndex({
+    paths: {
+      '/alert/list': {
+        post: {
+          summary: '查询告警列表',
+          'x-mint': {
+            href: '/zh/api-reference/on-call/alerts/alert-read-list'
+          }
+        }
+      },
+      '/alert/ignored': {
+        post: {
+          summary: '缺少文档链接'
+        }
+      }
+    }
+  }), {
+    '/alert/list': {
+      label: '查询告警列表',
+      url: 'https://docs.flashcat.cloud/zh/api-reference/on-call/alerts/alert-read-list'
+    }
+  });
+});
+
+test('uploadOpenapiJsonFiles uploads every JSON file, a manifest, and refreshes each CDN URL', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'openapi-upload-'));
   const apiReferenceDir = path.join(tempDir, 'api-reference');
   fs.mkdirSync(apiReferenceDir);
-  fs.writeFileSync(path.join(apiReferenceDir, 'openapi.en.json'), '{"openapi":"3.1.0"}\n');
-  fs.writeFileSync(path.join(apiReferenceDir, 'openapi.zh.json'), '{"openapi":"3.1.0"}\n');
+  fs.writeFileSync(path.join(apiReferenceDir, 'openapi.en.json'), JSON.stringify({
+    openapi: '3.1.0',
+    paths: {
+      '/alert/list': {
+        post: {
+          summary: 'List alerts',
+          'x-mint': {
+            href: '/en/api-reference/on-call/alerts/alert-read-list'
+          },
+          responses: {
+            200: {
+              description: 'Success'
+            }
+          }
+        }
+      }
+    }
+  }));
+  fs.writeFileSync(path.join(apiReferenceDir, 'openapi.zh.json'), JSON.stringify({
+    openapi: '3.1.0',
+    paths: {
+      '/alert/list': {
+        post: {
+          summary: '查询告警列表',
+          'x-mint': {
+            href: '/zh/api-reference/on-call/alerts/alert-read-list'
+          },
+          responses: {
+            200: {
+              description: '成功'
+            }
+          }
+        }
+      }
+    }
+  }));
   fs.writeFileSync(path.join(apiReferenceDir, 'ignored.txt'), 'not json\n');
 
   const uploaded = [];
@@ -92,15 +152,33 @@ test('uploadOpenapiJsonFiles uploads every JSON file and refreshes each CDN URL'
     uploaded.map((item) => item.ossFilePath),
     [
       '/docs/api-reference/openapi.en.json',
-      '/docs/api-reference/openapi.zh.json'
+      '/docs/api-reference/openapi.zh.json',
+      '/docs/api-reference/manifest.json'
     ]
   );
   assert.deepEqual(
     refreshed,
     [
       'https://docs-cdn.flashcat.cloud/docs/api-reference/openapi.en.json',
-      'https://docs-cdn.flashcat.cloud/docs/api-reference/openapi.zh.json'
+      'https://docs-cdn.flashcat.cloud/docs/api-reference/openapi.zh.json',
+      'https://docs-cdn.flashcat.cloud/docs/api-reference/manifest.json'
     ]
   );
   assert.equal(uploaded[0].options.headers['Content-Type'], 'application/json; charset=utf-8');
+  const zhUpload = uploaded.find((item) => item.ossFilePath.endsWith('/openapi.zh.json'));
+  assert.ok(zhUpload);
+  assert.deepEqual(JSON.parse(zhUpload.localFilePath.toString('utf8')), {
+    '/alert/list': {
+      label: '查询告警列表',
+      url: 'https://docs.flashcat.cloud/zh/api-reference/on-call/alerts/alert-read-list'
+    }
+  });
+  const manifestUpload = uploaded.find((item) => item.ossFilePath.endsWith('/manifest.json'));
+  assert.ok(manifestUpload);
+  assert.deepEqual(JSON.parse(manifestUpload.localFilePath.toString('utf8')), {
+    files: [
+      'openapi.en.json',
+      'openapi.zh.json'
+    ]
+  });
 });
