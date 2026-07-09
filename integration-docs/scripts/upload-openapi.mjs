@@ -7,6 +7,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(packageRoot, '..');
 const defaultApiReferenceDir = path.join(repoRoot, 'api-reference');
+const docsBaseUrl = 'https://docs.flashcat.cloud';
+const httpMethods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
 
 export const requiredEnv = [
   'CDN_ACCESS_KEY',
@@ -46,6 +48,36 @@ export function validateJsonFile(filePath) {
   JSON.parse(fs.readFileSync(filePath, 'utf8'));
 }
 
+export function buildOpenapiReferenceIndex(openapi) {
+  const result = {};
+
+  for (const [apiPath, pathItem] of Object.entries(openapi.paths ?? {})) {
+    const operation = httpMethods
+      .map((method) => pathItem?.[method])
+      .find(Boolean);
+    const href = operation?.['x-mint']?.href;
+    const label = operation?.summary || operation?.['x-mint']?.metadata?.sidebarTitle || operation?.operationId;
+
+    if (href && label) {
+      result[apiPath] = {
+        label,
+        url: new URL(href, docsBaseUrl).toString()
+      };
+    }
+  }
+
+  return result;
+}
+
+function buildJsonUploadOptions() {
+  return {
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'public, max-age=300'
+    }
+  };
+}
+
 async function createOssClient(env = process.env) {
   const { default: OSS } = await import('ali-oss');
   return new OSS({
@@ -77,6 +109,20 @@ async function refreshCdnCache(cdnRuntime, url) {
   console.log(`Refreshed CDN cache: ${url}`);
 }
 
+async function uploadJsonAsset({
+  env,
+  ossClient,
+  cdnRuntime,
+  ossFilePath,
+  payload,
+  label
+}) {
+  const result = await ossClient.put(ossFilePath, payload, buildJsonUploadOptions());
+  const cdnUrl = buildCdnUrl(result.url, env.CDN_ENDPOINT, env.CDN_URL);
+  console.log(`Uploaded ${label} -> ${cdnUrl}`);
+  await refreshCdnCache(cdnRuntime, cdnUrl);
+}
+
 export async function uploadOpenapiJsonFiles({
   apiReferenceDir = defaultApiReferenceDir,
   env = process.env,
@@ -103,18 +149,32 @@ export async function uploadOpenapiJsonFiles({
   for (const file of files) {
     const localFilePath = path.join(apiReferenceDir, file);
     const ossFilePath = buildOssFilePath(env.CDN_DIR, file);
-    const result = await resolvedOssClient.put(ossFilePath, localFilePath, {
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        'Cache-Control': 'public, max-age=300'
-      }
+    const uploadPayload = Buffer.from(`${JSON.stringify(
+      buildOpenapiReferenceIndex(JSON.parse(fs.readFileSync(localFilePath, 'utf8'))),
+      null,
+      2
+    )}\n`);
+    await uploadJsonAsset({
+      env,
+      ossClient: resolvedOssClient,
+      cdnRuntime: resolvedCdnRuntime,
+      ossFilePath,
+      payload: uploadPayload,
+      label: file
     });
-    const cdnUrl = buildCdnUrl(result.url, env.CDN_ENDPOINT, env.CDN_URL);
-    console.log(`Uploaded ${file} -> ${cdnUrl}`);
-    await refreshCdnCache(resolvedCdnRuntime, cdnUrl);
   }
 
-  console.log(`Uploaded ${files.length} OpenAPI JSON files from ${apiReferenceDir}`);
+  const manifestPayload = Buffer.from(`${JSON.stringify({ files }, null, 2)}\n`);
+  await uploadJsonAsset({
+    env,
+    ossClient: resolvedOssClient,
+    cdnRuntime: resolvedCdnRuntime,
+    ossFilePath: buildOssFilePath(env.CDN_DIR, 'manifest.json'),
+    payload: manifestPayload,
+    label: 'manifest.json'
+  });
+
+  console.log(`Uploaded ${files.length} OpenAPI JSON files and manifest from ${apiReferenceDir}`);
 }
 
 async function loadDotenvIfAvailable() {
