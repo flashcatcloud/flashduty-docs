@@ -121,6 +121,7 @@ Chinese-English terminology mapping. Maintain consistency during translation.
 | 解决办法 | resolution |
 | 推送地址 | push URL |
 | 跳转链接 | jump link |
+| 产物 | Artifact / Artifacts |
 
 ## Actions
 
@@ -188,7 +189,6 @@ a single half-width space on either side (e.g., `管理你的 Routines`, not
 | Knowledge Pack | A curated knowledge bundle attached to an Agent |
 | Tool call | A single tool invocation inside an Agent turn |
 | Slash command | UI slash-prefixed command (e.g., `/help`) |
-| Artifact | Output produced by an Agent (file, doc, image) |
 | Reasoning | The reasoning / chain-of-thought block of a model response |
 | Connector | Integration with an external system (Slack, GitHub, etc.) |
 | Environment | Execution environment for runners (env vars, credentials) |
@@ -201,3 +201,4 @@ Translatable companions (do NOT belong in DNT — translate to Chinese):
 | English | Chinese |
 |---------|---------|
 | Customize | 自定义 |
+| Artifact / Artifacts | 产物 |
