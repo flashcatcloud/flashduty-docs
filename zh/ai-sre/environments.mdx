@@ -51,6 +51,38 @@ AI SRE 提供两类运行环境：
 
 更多生命周期、出网边界与会话选择细节，见 [Sandbox](/zh/ai-sre/sandbox)。
 
+## 云端环境模板
+
+---
+
+云端环境模板是为 Flashduty 托管的云端 Sandbox 预定义的可复用配置：出口网络策略、环境变量与启动脚本。会话使用的云端 Sandbox 如果没有绑定模板，就用系统默认配置启动；绑定了模板后，新建的 Sandbox 会按模板配置启动。
+
+在 AI SRE 左侧菜单进入 **Environments**，切换到顶部的**云端**标签页，即可查看、创建、编辑或删除云端环境模板。
+
+### 创建云端环境模板
+
+| 字段 | 是否必填 | 说明 |
+|---|---|---|
+| 名称 | 是 | 在账户范围内必须唯一，最长 128 字符。 |
+| 范围 | 是 | 账户范围的模板在整个账户内可见；团队范围的模板仅对该团队成员可见和可编辑。 |
+| 网络访问 | 否，默认「全部允许」 | 下拉框展示「默认允许列表」「自定义（你的域名列表）」「全部允许」三个选项，但目前只有**「全部允许」**可以选择——「默认允许列表」与「自定义」选项已在界面上展示但处于禁用状态，属于已知限制，尚未开放。也就是说，当前创建或编辑云端环境模板，都会让绑定它的 Sandbox 处于完全放开出网的状态。 |
+| 环境变量 | 否 | `.env` 格式（`KEY=value`，每行一条，支持带引号的多行值），最大 32 KB，界面会实时显示已用字节数。 |
+| 启动脚本 | 否 | Bash 脚本，最大 64 KB，界面会实时显示已用字节数。 |
+
+<Warning>
+环境变量以明文形式对所有使用该云端环境模板的人可见——请勿在这里填写密钥或凭据。
+</Warning>
+
+启动脚本在**全新沙箱（Ubuntu 24.04，以 root 身份运行）**内、**Agent 启动前**执行，典型用途是用 `apt` 安装 Agent 需要的软件包。
+
+### 删除云端环境模板
+
+删除一个云端环境模板不影响正在使用它的会话——已绑定的会话会回退为系统默认配置继续可用；后续新建的 Sandbox 会改用系统默认配置。
+
+<Note>
+云端环境模板只配置**云端 Sandbox**的出网、环境变量与启动脚本。BYOC Runner 的出网策略由您自己的机器和防火墙决定，见下方 [BYOC Runner](#byoc-runner)；云端 Sandbox 本身的生命周期与出网边界详见 [Sandbox](/zh/ai-sre/sandbox)。
+</Note>
+
 ## BYOC Runner
 
 ---
@@ -169,20 +201,25 @@ Runner 启动后会持续发送心跳。列表状态含义如下：
 | 在线（online） | Runner 当前已连接，心跳正常，可承接任务。 |
 | 离线（offline） | Runner 曾连接过，但当前心跳已断。 |
 
-Runner 版本由服务端在心跳中比对。发现新版本时，Runner 会收到升级通知并自行下载、校验、替换。手动重跑安装命令也可升级。卸载命令也在接入指引里：`--uninstall` 保留配置卸载，`--purge` 清除配置与数据。
+Runner 版本由服务端在心跳中比对。发现新版本时，Runner 会收到升级通知并自行下载、校验、替换。手动重跑安装命令也可升级。
+
+卸载命令也在接入指引里，按安装方式不同：
+
+- **Linux (systemd) / 手动安装**：安装脚本的 `--uninstall`（保留配置卸载）与 `--purge`（清除配置与数据）。
+- **Docker 安装**：卸载是容器命令，与安装脚本的参数无关——`docker rm -f flashduty-runner`（卸载，保留 `/var/flashduty/workspace` 数据）与 `docker rm -f flashduty-runner && rm -rf /var/flashduty/workspace`（彻底卸载，同时清除 workspace 数据）。
 
 ## 权限配置
 
 ---
 
-Runner 默认使用允许全部命令的规则：
+Runner 默认使用允许全部命令的规则，这与直接在自己的 shell 里运行 AI 模型、信任模型的判断是同一套信任模型：
 
 ```yaml
 permission:
   "*": "allow"
 ```
 
-当您希望把 Runner 的命令执行范围收敛到允许列表或拒绝列表时，可以在 Runner 所在机器上创建一个 YAML 文件，并通过 `--permission-config` 或 `FLASHDUTY_RUNNER_PERMISSION_CONFIG` 指定它。权限配置是 Runner 本机文件，不在控制台表单里编辑。
+当您希望把 Runner 的命令执行范围收敛到允许列表或拒绝列表时，可以在 Runner 所在机器上创建一个 YAML 文件，并通过 `--permission-config` 参数或 `FLASHDUTY_RUNNER_PERMISSION_CONFIG` 环境变量指定它。权限配置是 Runner 本机文件，不在控制台表单里编辑。
 
 Linux (systemd) 安装后，推荐在 `/etc/flashduty-runner/env` 中加入：
 
@@ -204,51 +241,9 @@ flashduty-runner run \
   --permission-config /etc/flashduty-runner/permission.yaml
 ```
 
-一个常见的只读排查配置如下：
-
-```yaml
-permission:
-  "*": "deny"
-  "kubectl get *": "allow"
-  "kubectl describe *": "allow"
-  "kubectl logs *": "allow"
-  "ls": "allow"
-  "ls *": "allow"
-  "cat *": "allow"
-  "head *": "allow"
-  "tail *": "allow"
-  "grep *": "allow"
-  "pwd": "allow"
-  "whoami": "allow"
-  "date": "allow"
-```
-
-规则语义：
-
-- `permission` 是顶层 key，下面是 `glob pattern: allow|deny` 的扁平映射；
-- 未指定配置文件时，Runner 允许全部命令；
-- 一旦指定配置文件，文件缺失、YAML 格式错误或 `permission` 为空都会让 Runner 拒绝启动，避免因配置错误回退到允许全部；
-- 命令按规范化后的 shell 片段匹配，空格差异不会影响匹配；
-- 规则按“`*` 之前的字面前缀更长者更具体”排序，更具体的规则先匹配，`*` 总是最后兜底；
-- Runner 会检查管道、命令替换、进程替换、算术展开里的命令；
-- 写重定向会按形如 `> /path`、`>> /path`、`&> /path` 的合成命令检查；读重定向本身不会额外拦截。
-
 <Tip>
 权限配置会在 Runner 启动时加载。修改 YAML 后需要重启 Runner，新的规则才会生效。
 </Tip>
-
-## 权限配置
-
----
-
-Runner 默认允许执行任意命令——与直接在自己的 shell 里运行 AI 模型一样，信任模型的判断。如果需要限制 Runner 可执行的命令范围，可以通过 `--permission-config` 参数或 `FLASHDUTY_RUNNER_PERMISSION_CONFIG` 环境变量为 Runner 指定一个 YAML 规则文件：
-
-```bash
-flashduty-runner run --token <your-token> --permission-config /etc/flashduty-runner/permission.yaml
-
-# 或通过环境变量
-export FLASHDUTY_RUNNER_PERMISSION_CONFIG=/etc/flashduty-runner/permission.yaml
-```
 
 规则文件顶层键是 `permission`，值是 **glob 模式 → `allow`/`deny`** 的映射：
 
@@ -260,11 +255,14 @@ permission:
   "cat *": "allow"
 ```
 
-- 规则会应用到命令的每一处出现——包括管道（`cmd1 | cmd2`）、`$(...)`/反引号命令替换、进程替换，以及写入重定向目标（因此 `echo x > /etc/passwd` 会像执行命令一样被拦截）。
-- **最具体的规则优先**：第一个 `*` 之前字面前缀最长的模式最先被尝试匹配，兜底规则 `"*"` 始终最后尝试，第一个匹配的规则生效。
-- 该文件仅在 Runner **启动时加载一次**——修改规则后需要重启 Runner 才能生效，不支持热重载。
+规则语义：
+
+- 不设置 `--permission-config` / `FLASHDUTY_RUNNER_PERMISSION_CONFIG` 是默认行为，等价于允许所有命令；
+- 规则会应用到命令的每一处出现——管道（`cmd1 | cmd2`）、`$(...)`/反引号命令替换、进程替换、算术展开，以及写入重定向目标（例如 `echo x > /etc/passwd` 会像执行命令一样被拦截；读重定向本身不会额外拦截）；
+- 命令按规范化后的 shell 片段匹配，空格差异不会影响匹配；
+- **最具体的规则优先**：第一个 `*` 之前字面前缀最长的模式最先被尝试匹配，兜底规则 `"*"` 始终最后尝试，第一个匹配的规则生效；
+- 该文件仅在 Runner **启动时加载一次**——修改规则后需要重启 Runner，新规则才会生效，不支持热重载；
 - 若指定了该 flag/环境变量，但文件缺失、格式错误，或未在 `permission` 键下定义任何规则，Runner 会**拒绝启动**（fail closed），而不是静默放行所有命令：显式配置权限即代表明确希望限制执行范围，配置写错时应当报错而非留下安全隐患。
-- 不设置该 flag/环境变量是默认行为，等价于允许所有命令。
 
 <AccordionGroup>
 <Accordion title="严格模式（推荐用于共享环境）" icon="lock">
@@ -300,11 +298,15 @@ permission:
   "cat *": "allow"
   "head *": "allow"
   "tail *": "allow"
+  "ls": "allow"
   "ls *": "allow"
   "grep *": "allow"
   "ps *": "allow"
   "df *": "allow"
   "free *": "allow"
+  "pwd": "allow"
+  "whoami": "allow"
+  "date": "allow"
 ```
 </Accordion>
 </AccordionGroup>
