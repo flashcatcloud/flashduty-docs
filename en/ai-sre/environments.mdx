@@ -51,6 +51,38 @@ The cloud Sandbox cannot reach your VPC, dedicated line, private databases, priv
 
 For lifecycle, egress boundaries, and session-selection details, see [Sandbox](/en/ai-sre/sandbox).
 
+## Cloud environment templates
+
+---
+
+A cloud environment template is a reusable, predefined configuration for the Flashduty-managed cloud Sandbox: egress policy, environment variables, and a setup script. If a session's cloud Sandbox has no template bound, it starts with the system default configuration; once a template is bound, new Sandboxes start with that template's configuration.
+
+Go to **Environments** in the AI SRE sidebar and switch to the **Cloud** tab at the top to view, create, edit, or delete cloud environment templates.
+
+### Create a cloud environment template
+
+| Field | Required | Description |
+|---|---|---|
+| Name | Yes | Must be unique within the account, up to 128 characters. |
+| Scope | Yes | Account-scoped templates are visible to the whole account. Team-scoped templates are visible and editable only by that team. |
+| Network access | No, defaults to "Allow all" | The dropdown shows three options — "Default allowlist," "Custom (your domain list)," and "Allow all" — but currently only **"Allow all"** can be selected. "Default allowlist" and "Custom" are shown in the UI but disabled; this is a known limitation, not yet available. In other words, creating or editing a cloud environment template today always leaves the Sandbox it's bound to with fully open egress. |
+| Environment variables | No | `.env` format (`KEY=value`, one per line, multi-line quoted values supported), up to 32 KB, with a live byte counter in the UI. |
+| Setup script | No | A Bash script, up to 64 KB, with a live byte counter in the UI. |
+
+<Warning>
+Environment variables are visible in plaintext to everyone who uses this cloud environment template — do not put secrets or credentials here.
+</Warning>
+
+The setup script runs inside a **fresh sandbox (Ubuntu 24.04, running as root)**, **before the agent starts** — typically used to `apt install` packages the agent needs.
+
+### Delete a cloud environment template
+
+Deleting a cloud environment template does not affect sessions currently using it — bound sessions fall back to the system default configuration and keep working; new Sandboxes created afterward use the system default configuration.
+
+<Note>
+Cloud environment templates only configure egress, environment variables, and the setup script for the **cloud Sandbox**. BYOC Runner egress is governed by your own machine and firewall — see [BYOC Runner](#byoc-runner) below. For the cloud Sandbox's own lifecycle and egress boundary, see [Sandbox](/en/ai-sre/sandbox).
+</Note>
+
 ## BYOC Runner
 
 ---
@@ -169,20 +201,25 @@ After the Runner starts, it continuously sends heartbeats. List statuses mean:
 | Online | The Runner is currently connected, heartbeat is healthy, and it can accept work. |
 | Offline | The Runner connected before, but its heartbeat is currently lost. |
 
-The backend compares Runner versions during heartbeats. When a newer version is available, the Runner receives an upgrade notification and downloads, verifies, and replaces itself. Re-running the install command also upgrades manually. Uninstall commands are in the setup guide: `--uninstall` removes the service while preserving config, and `--purge` removes config and data.
+The backend compares Runner versions during heartbeats. When a newer version is available, the Runner receives an upgrade notification and downloads, verifies, and replaces itself. Re-running the install command also upgrades manually.
+
+Uninstall commands are also in the setup guide, and differ by installation method:
+
+- **Linux (systemd) / manual install**: the install script's `--uninstall` flag (removes the service while preserving config) and `--purge` flag (removes config and data).
+- **Docker install**: uninstalling is a container command, unrelated to the install script's flags — `docker rm -f flashduty-runner` (removes the container, keeps the `/var/flashduty/workspace` data) and `docker rm -f flashduty-runner && rm -rf /var/flashduty/workspace` (full removal, including the workspace data).
 
 ## Permission Configuration
 
 ---
 
-By default, Runner uses an allow-all rule:
+By default, Runner uses an allow-all rule — the same trust model as running the AI model directly in your own shell:
 
 ```yaml
 permission:
   "*": "allow"
 ```
 
-When you want to narrow which commands the Runner may execute, create a YAML file on the Runner machine and point the Runner to it with `--permission-config` or `FLASHDUTY_RUNNER_PERMISSION_CONFIG`. Permission configuration is a local Runner file; it is not edited in the console form.
+When you want to narrow which commands the Runner may execute, create a YAML file on the Runner machine and point the Runner to it with the `--permission-config` flag or the `FLASHDUTY_RUNNER_PERMISSION_CONFIG` environment variable. Permission configuration is a local Runner file; it is not edited in the console form.
 
 For a Linux (systemd) install, add this to `/etc/flashduty-runner/env`:
 
@@ -204,51 +241,9 @@ flashduty-runner run \
   --permission-config /etc/flashduty-runner/permission.yaml
 ```
 
-A common read-only troubleshooting config looks like this:
-
-```yaml
-permission:
-  "*": "deny"
-  "kubectl get *": "allow"
-  "kubectl describe *": "allow"
-  "kubectl logs *": "allow"
-  "ls": "allow"
-  "ls *": "allow"
-  "cat *": "allow"
-  "head *": "allow"
-  "tail *": "allow"
-  "grep *": "allow"
-  "pwd": "allow"
-  "whoami": "allow"
-  "date": "allow"
-```
-
-Rule semantics:
-
-- `permission` is the top-level key; beneath it is a flat `glob pattern: allow|deny` map;
-- when no config file is set, Runner allows all commands;
-- once a config file is set, a missing file, invalid YAML, or empty `permission` map makes Runner refuse to start, avoiding an accidental fallback to allow-all;
-- commands are matched after shell normalization, so spacing differences do not affect matching;
-- rules are ordered by specificity: the longer literal prefix before `*` wins, and `*` is always the fallback;
-- Runner checks commands inside pipelines, command substitution, process substitution, and arithmetic expansion;
-- write redirects are checked as synthetic commands such as `> /path`, `>> /path`, and `&> /path`; read redirects are not blocked by themselves.
-
 <Tip>
 Permission configuration loads at Runner startup. Restart the Runner after editing the YAML file.
 </Tip>
-
-## Permission Configuration
-
----
-
-By default, the Runner allows any command — the same trust model as running the AI model directly in your own shell. If you need to restrict which commands the Runner may execute, point it at a YAML rules file with the `--permission-config` flag or the `FLASHDUTY_RUNNER_PERMISSION_CONFIG` environment variable:
-
-```bash
-flashduty-runner run --token <your-token> --permission-config /etc/flashduty-runner/permission.yaml
-
-# Or via environment variable
-export FLASHDUTY_RUNNER_PERMISSION_CONFIG=/etc/flashduty-runner/permission.yaml
-```
 
 The rules file's top-level key is `permission`, mapping **glob patterns to `allow`/`deny`**:
 
@@ -260,11 +255,14 @@ permission:
   "cat *": "allow"
 ```
 
-- Rules apply everywhere a command can appear — inside pipelines (`cmd1 | cmd2`), `$(...)`/backtick command substitution, process substitution, and write-redirect targets (so `echo x > /etc/passwd` is gated the same way as running a command).
-- **The most specific rule wins**: the pattern with the longest literal prefix before its first `*` is tried first; the catch-all `"*"` is always tried last, and the first matching rule applies.
-- The file is loaded **once, at Runner startup** — edit the rules and restart the Runner for changes to take effect; there is no hot reload.
-- If the flag/env var is set but the file is missing, malformed, or defines no rules under the `permission` key, the Runner **refuses to start** (fails closed) rather than silently allowing every command: pointing the Runner at a permission config is a deliberate request to restrict it, so a broken config should surface as an error, not a silent security gap.
-- Leaving the flag/env var unset is the default and is equivalent to allowing all commands.
+Rule semantics:
+
+- Leaving `--permission-config` / `FLASHDUTY_RUNNER_PERMISSION_CONFIG` unset is the default and is equivalent to allowing all commands;
+- rules apply everywhere a command can appear — inside pipelines (`cmd1 | cmd2`), `$(...)`/backtick command substitution, process substitution, arithmetic expansion, and write-redirect targets (so `echo x > /etc/passwd` is gated the same way as running a command; read redirects are not blocked by themselves);
+- commands are matched after shell normalization, so spacing differences do not affect matching;
+- **the most specific rule wins**: the pattern with the longest literal prefix before its first `*` is tried first; the catch-all `"*"` is always tried last, and the first matching rule applies;
+- the file is loaded **once, at Runner startup** — edit the rules and restart the Runner for changes to take effect; there is no hot reload;
+- if the flag/env var is set but the file is missing, malformed, or defines no rules under the `permission` key, the Runner **refuses to start** (fails closed) rather than silently allowing every command: pointing the Runner at a permission config is a deliberate request to restrict it, so a broken config should surface as an error, not a silent security gap.
 
 <AccordionGroup>
 <Accordion title="Strict mode (recommended for shared environments)" icon="lock">
@@ -300,11 +298,15 @@ permission:
   "cat *": "allow"
   "head *": "allow"
   "tail *": "allow"
+  "ls": "allow"
   "ls *": "allow"
   "grep *": "allow"
   "ps *": "allow"
   "df *": "allow"
   "free *": "allow"
+  "pwd": "allow"
+  "whoami": "allow"
+  "date": "allow"
 ```
 </Accordion>
 </AccordionGroup>
