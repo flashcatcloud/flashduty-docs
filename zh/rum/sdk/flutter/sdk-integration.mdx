@@ -1,0 +1,195 @@
+---
+title: "Flutter SDK 接入"
+description: "在 Flutter 应用中接入 Flashduty RUM SDK，采集视图、操作、网络、错误和崩溃数据"
+keywords: ["RUM", "Flutter SDK", "Dart", "用户监控", "移动端监控"]
+---
+
+Flutter SDK 基于原生 iOS / Android SDK 封装，通过 `flashcat_flutter_plugin` 提供 RUM 能力。初始化后，SDK 会把应用中的视图、用户操作、网络请求、错误和崩溃事件上报到 Flashduty RUM，并使用 `source: "flutter"` 标识数据来源。
+
+<Info>
+当前 SDK 版本为 `0.1.0`，仅支持 **iOS 和 Android** 平台（不支持 Flutter Web）。Dart 类名仍沿用上游 `Datadog*` 命名（如 `DatadogSdk`、`DatadogConfiguration`），仅包名 `flashcat_flutter_plugin` 与站点枚举 `FlashcatSite` 做了品牌化。v1 暂不包含 Logs、Session Replay、dio / gql / grpc 伴生包。
+</Info>
+
+## 前提条件
+
+接入前，请先完成以下准备：
+
+- 在 Flashduty 控制台创建或选择一个 RUM 应用，并获取 **Application ID** 和 **Client Token**
+- 确认应用可以访问 `https://browser.flashcat.cloud/api/v2/rum`
+- Flutter SDK ≥ 3.0，Dart ≥ 3.0；iOS 部署目标 ≥ 12.0，Android `minSdkVersion` ≥ 21
+- 在应用启动早期（`main()` 中）完成 SDK 初始化
+
+## 安装 SDK
+
+在 `pubspec.yaml` 中添加 `flashcat_flutter_plugin`，然后执行 `flutter pub get`。
+
+<Note>
+`flashcat_flutter_plugin` 的 pub.dev 发布仍在确认中。为保证依赖可解析，下方示例使用 git 源。待正式发布到 pub.dev 后，可切换为 `flashcat_flutter_plugin: ^0.1.0` 的托管形式。
+</Note>
+
+```yaml pubspec.yaml
+dependencies:
+  flashcat_flutter_plugin:
+    git:
+      url: https://github.com/flashcatcloud/fc-sdk-flutter
+      path: packages/datadog_flutter_plugin
+```
+
+## 初始化 SDK
+
+建议在 `main()` 中、`runApp` 之前完成初始化。使用 `DatadogSdk.runApp` 启动应用时，SDK 会自动接管 `FlutterError.onError` 与 `PlatformDispatcher.instance.onError`，无需手动接线即可采集未处理异常。
+
+```dart main.dart
+import 'package:flutter/widgets.dart';
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+
+Future<void> main() async {
+  final configuration = DatadogConfiguration(
+    clientToken: '<CLIENT_TOKEN>',
+    env: 'production',
+    service: 'com.example.shopping',
+    site: FlashcatSite.cn,
+    nativeCrashReportEnabled: true, // 采集原生 iOS / Android 崩溃
+    firstPartyHosts: ['api.example.com'], // 对这些域名注入分布式追踪头
+    rumConfiguration: DatadogRumConfiguration(
+      applicationId: '<APPLICATION_ID>',
+      sessionSamplingRate: 100.0,
+      // customEndpoint: 'https://your-ingest.example.com', // 私有化自定义上报地址
+    ),
+  );
+
+  await DatadogSdk.runApp(configuration, TrackingConsent.granted, () async {
+    runApp(const MyApp());
+  });
+}
+```
+
+<Warning>
+请不要在客户端代码中使用服务端密钥。`clientToken` 只用于客户端 RUM 数据上报，`applicationId` 用于归属 RUM 应用数据。
+</Warning>
+
+如果你需要在 `runApp` 之外自行控制启动流程，也可以手动初始化，但需要自己接线错误采集：
+
+```dart
+WidgetsFlutterBinding.ensureInitialized();
+await DatadogSdk.instance.initialize(configuration, TrackingConsent.granted);
+
+final originalOnError = FlutterError.onError;
+FlutterError.onError = (details) {
+  DatadogSdk.instance.rum?.handleFlutterError(details);
+  originalOnError?.call(details);
+};
+```
+
+## 采集页面视图
+
+为 `MaterialApp`（或 `CupertinoApp`）添加 `DatadogNavigationObserver`，SDK 会把 Navigator 的路由切换自动记录为 RUM 视图。
+
+```dart
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+
+MaterialApp(
+  navigatorObservers: [
+    DatadogNavigationObserver(datadogSdk: DatadogSdk.instance),
+  ],
+  home: const HomeScreen(),
+);
+```
+
+<Note>
+`DatadogNavigationObserver` 的构造函数使用命名参数 `datadogSdk:`。默认使用路由的 `settings.name` 作为视图名称，可以通过 `viewInfoExtractor` 回调自定义视图名或过滤路由。
+</Note>
+
+对于没有使用命名路由的场景，可以用 `DatadogNavigationObserverProvider` 配合 `DatadogRouteAwareMixin` 手动管理视图。
+
+## 采集用户操作
+
+在 RUM 配置中 `trackFrustrations` 默认开启。用 `RumUserActionDetector` 包裹应用子树后，SDK 会自动识别点击等交互并生成 action 事件；你也可以手动记录操作。
+
+```dart
+// 自动识别子树内的用户交互
+RumUserActionDetector(
+  rum: DatadogSdk.instance.rum,
+  child: const MyApp(),
+);
+
+// 手动记录一次操作
+DatadogSdk.instance.rum?.addAction(RumActionType.tap, 'Checkout');
+```
+
+## 采集网络请求
+
+自动网络采集由独立的 `datadog_tracking_http_client` 包提供，通过配置对象上的扩展方法 `enableHttpTracking()` 开启。它会全局替换 `HttpClient`，把 `dart:io` / `http` 请求记录为 RUM resource，并对 `firstPartyHosts` 命中的域名注入 W3C 追踪头。
+
+```dart
+final configuration = DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  firstPartyHosts: ['api.example.com'],
+  rumConfiguration: DatadogRumConfiguration(applicationId: '<APPLICATION_ID>'),
+)..enableHttpTracking();
+```
+
+<Warning>
+`datadog_tracking_http_client` 当前仍以 `datadog_flutter_plugin` 命名声明依赖（`^3.0.0`），与本 fork 的 `flashcat_flutter_plugin` 0.1.0 不能直接解析。启用网络采集时需要在 `pubspec.yaml` 中加 `dependency_overrides` 指向本 fork。该能力不属于 v1 核心范围，可按需接入。
+</Warning>
+
+## 关联用户信息
+
+登录后，你可以设置当前用户。SDK 会把用户字段写入后续 RUM 事件的 `usr` 对象。
+
+```dart
+DatadogSdk.instance.setUserInfo(
+  id: 'user-1001',
+  name: 'Alice',
+  email: 'alice@example.com',
+);
+```
+
+用户退出登录时清除用户信息：
+
+```dart
+DatadogSdk.instance.setUserInfo();
+```
+
+## 上报错误
+
+使用 `DatadogSdk.runApp` 时未处理异常会被自动采集。你也可以手动上报捕获到的异常：
+
+```dart
+try {
+  // ... 业务逻辑 ...
+} catch (e, st) {
+  DatadogSdk.instance.rum?.addError(e, RumErrorSource.source, stackTrace: st);
+}
+```
+
+<Note>
+崩溃与错误堆栈需要上传符号文件才能还原到源码位置。Flutter symbols、iOS dSYM、Android mapping 文件通过 FlashCat CLI 上传，且上传时的 `version` 必须与 SDK 初始化中的 `version` 一致。详见 <a href="/zh/rum/sdk/flutter/advanced-config">高级配置</a>。
+</Note>
+
+## 验证接入
+
+完成接入后，可以按以下方式验证：
+
+1. 在初始化时临时设置 `DatadogSdk.instance.sdkVerbosity = CoreLoggerLevel.debug`，通过控制台日志查看 SDK 上报行为
+2. 运行应用并触发页面切换、点击、网络请求或手动错误
+3. 在 Flashduty RUM 应用中筛选 `source:flutter`，确认出现 view、action、resource 或 error 事件
+4. 对网络请求检查后端是否收到 W3C `traceparent`
+
+## 下一步
+
+<CardGroup cols={3}>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/flutter/advanced-config">
+配置采样率、隐私同意、事件过滤、追踪和符号文件上传。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/flutter/compatible">
+了解支持的平台、Flutter 版本、伴生包和当前限制。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/flutter/data-collection">
+查看 SDK 自动和手动采集的事件类型、字段与上报行为。
+</Card>
+</CardGroup>
