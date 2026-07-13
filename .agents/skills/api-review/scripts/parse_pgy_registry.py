@@ -25,10 +25,11 @@ from collections import Counter
 from pathlib import Path
 
 # A row looks like:
-#   {ID: 15, Method: "POST", Path: "/access/external-exchange",
+#   {Product: "Platform", Method: "POST", Path: "/access/external-exchange",
 #    Name: "access:read:externalExchange", NameCN: "外部认证交换",
 #    Description: "...", Auth: "none", IsDangerous: false, IsAudit: false,
 #    Qps: 100, Provider: "pgy", Domain: "http://127.0.0.1:11482"},
+# Older rows can start with `ID: <number>,`; current name-keyed rows do not.
 #
 # Rows can be prefixed with `//` (commented-out). The convention:
 # - Commented rows = existing production APIs already persisted in the DB.
@@ -38,7 +39,7 @@ from pathlib import Path
 # The file is a cumulative ledger; nothing deletes a row once registered.
 
 ROW_RE = re.compile(
-    r"""^\s*(?P<commented>//\s*)?\{ID:\s*(?P<id>\d+)\s*,\s*(?P<fields>.*)\},?\s*$""",
+    r"""^\s*(?P<commented>//\s*)?\{(?:ID:\s*(?P<id>\d+)\s*,\s*|(?=\s*Product:))(?P<fields>.*)\},?\s*$""",
     re.VERBOSE,
 )
 
@@ -76,10 +77,11 @@ def parse_file(path: Path) -> list[dict]:
                 continue
 
             row: dict = {
-                "id": int(m.group("id")),
                 "commented": m.group("commented") is not None,
                 "line": lineno,
             }
+            if m.group("id") is not None:
+                row["id"] = int(m.group("id"))
 
             for fm in FIELD_RE.finditer(m.group("fields")):
                 key = fm.group("key")
