@@ -39,7 +39,7 @@ from pathlib import Path
 # The file is a cumulative ledger; nothing deletes a row once registered.
 
 ROW_RE = re.compile(
-    r"""^\s*(?P<commented>//\s*)?\{(?:ID:\s*(?P<id>\d+)\s*,\s*)?(?P<fields>.*)\},?\s*$""",
+    r"""^\s*(?P<commented>//\s*)?\{(?:ID:\s*(?P<id>\d+)\s*,\s*|(?=\s*Product:))(?P<fields>.*)\},?\s*$""",
     re.VERBOSE,
 )
 

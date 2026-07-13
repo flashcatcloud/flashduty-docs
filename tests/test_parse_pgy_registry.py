@@ -31,6 +31,33 @@ class ParseRegistryTest(unittest.TestCase):
         self.assertEqual(rows[0]["auth"], "all")
         self.assertEqual(rows[0]["provider"], "safari")
 
+    def test_ignores_non_registry_struct_without_numeric_id(self):
+        row = '{Method: "POST", Path: "/test", Auth: "all", Provider: "pgy"},\n'
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fixture:
+            fixture.write(row)
+            fixture_path = Path(fixture.name)
+        try:
+            rows = PARSER.parse_file(fixture_path)
+        finally:
+            fixture_path.unlink()
+
+        self.assertEqual(rows, [])
+
+    def test_preserves_legacy_registry_row_with_numeric_id(self):
+        row = (
+            '{ID: 15, Method: "POST", Path: "/team/list", Name: "team:read:list", '
+            'Auth: "all", Provider: "pgy"},\n'
+        )
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fixture:
+            fixture.write(row)
+            fixture_path = Path(fixture.name)
+        try:
+            rows = PARSER.parse_file(fixture_path)
+        finally:
+            fixture_path.unlink()
+
+        self.assertEqual(rows[0]["id"], 15)
+
 
 if __name__ == "__main__":
     unittest.main()
