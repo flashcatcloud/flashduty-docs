@@ -27,7 +27,7 @@ sidebarTitle: Agent
 Delegation does not make you wait: after AI SRE hands a task to a remote agent, the conversation continues immediately, so you can keep working or delegate several tasks at once. When the remote agent finishes, its result appears in the conversation as a new message. Each A2A delegation appears in the conversation stream as a **task card** carrying an `A2A` badge, showing the remote agent name, task intent, run status (initializing / in progress / completed / failed / interrupted), and usage metrics such as tool call count, tokens, and elapsed time. Click the card to view the full delegation trace in the right-hand panel.
 
 <Tip>
-**The description is the core signal for agent selection.** Before delegating, AI SRE sees a list of available agents where each entry is `name: description`. Write descriptions as prescriptive imperatives (e.g., "USE THIS FIRST for …", "prefer-over-X when …") that clearly state **when to prefer this agent, what it excels at, and what it is not suited for** — the more precise the description, the better AI SRE can delegate the right task to the right agent.
+**Instructions are the agent-selection signal.** Before delegating, AI SRE sees a list of available agents where each entry is `name: instructions`. Do not treat this as one line of display copy; use the form's multi-line editor to write prescriptive guidance (for example, "USE THIS FIRST for …" or "prefer-over-X when …") that clearly states **when to prefer this agent, what it excels at, and what it is not suited for**. The more precise the instructions, the better AI SRE can delegate the right task to the right agent.
 </Tip>
 
 The A2A agent list and management entry point are on the **Plugins → Agents** page (menu tab labeled **Agents**).
@@ -70,11 +70,59 @@ On the A2A Agents list page, click **Add A2A Agent** and fill in the form:
 | --- | --- | --- | --- |
 | Name | string | — | A2A agent identifier (e.g., `metrics-analyzer`). Required |
 | Scope | Account / Team | — | Scope: **Account** (visible account-wide) or a specific **Team** (visible and editable only to members of that team). Required — see "Scope" below |
-| Description | string | — | A brief description of this A2A agent's capabilities. It appears in AI SRE's available-agent list as the selection signal — write it as a prescriptive imperative |
-| Card URL | string | — | The base URL of the remote A2A agent (e.g., `https://flashai.flashcat.cloud`). Required. The platform validates that it is a legitimate http/https address and rejects loopback, private, link-local, or cloud-metadata addresses |
+| Execution Environment | Auto / BYOC Runner | `Auto` | Pins this A2A agent's delegated requests to a specific online BYOC Runner; defaults to **Auto** (no environment pinned — the backend picks one automatically per call), and a Cloud Sandbox cannot be selected. This controls which Runner the agent's outbound calls run from, which is a different concept from the per-user-OAuth execution environment picker in "Auth Modes" below — that one only decides which environment a given OAuth network request is issued from |
+| Instructions | string | — | The agent-selection signal shown to AI SRE. It is inserted into AI SRE's system prompt and available-agent list to decide when to call this A2A agent. Required; write prescriptive guidance that explains when to use the agent, its capability boundaries, and when not to use it. Maximum 2,000 characters |
+| Card URL | string | — | The Agent Card URL of the remote A2A agent, or just the service origin for agents that follow the default well-known location (for example, `https://agents.example.com`). If the URL includes a path, the platform reads that exact URL; if only an origin is provided, it resolves `/.well-known/agent-card.json` by A2A convention. Required. The platform only validates that the URL is well-formed (scheme is http/https, host is non-empty) — it does not classify hosts or IPs; actual network reachability and egress restrictions depend on the network boundary of the selected **execution environment** (Cloud Sandbox / BYOC Runner) |
 | Auth Type | enum | `none` | Credential type attached to outbound requests: `none` / `bearer` (Bearer Token) / `api_key` (custom Header + Key) |
 | Streaming | bool | on | Whether to communicate with the remote agent in streaming mode |
 | User Auth Mode | enum | `shared` | See "Auth Modes" below |
+| Skip TLS certificate verification | bool | off | Shown only when the Card URL uses HTTPS. Enable only when the remote endpoint uses a self-signed certificate inside a controlled network; this skips certificate-chain and hostname verification |
+| Allow OAuth discovery over HTTP | bool | off | Required only when "Per-user OAuth" is selected and the Card URL is a non-local HTTP URL. Use only in controlled test environments; after you enable it, the Safari service can fetch OAuth metadata from that host |
+
+### Using the FlashAI Template
+
+**FlashAI** is the observability analysis product in the Flashcat / 快猫星云 family. It can also be connected as a remote A2A agent for AI SRE. On the A2A Agents page, expand the **Connect FlashAI observability analysis** panel to create an A2A agent from the FlashAI template.
+
+The FlashAI template is not a blanket rule that sends every observability question to FlashAI. It configures FlashAI as the delegation target for **Flashcat / 快猫星云-originated alert and incident investigation**. For alerts or incidents from Flashcat products such as Event Wall / 事件墙, Firemap / 灭火图, and Polaris / 北极星, AI SRE should prefer delegating analysis to FlashAI.
+
+The template prefills multi-line instructions. Its core routing rules are:
+
+- Prefer FlashAI when the user is investigating an alert, incident, fault, or alert group that clearly originates from Flashcat / 快猫星云.
+- Event Wall / 事件墙 alert events, incidents, and alert groups are positive routing signals.
+- Firemap / 灭火图 faults are positive routing signals, especially fields such as `fault_type=firemap` or `rule_prod=firemap`.
+- Polaris / 北极星 faults are positive routing signals, especially fields such as `fault_type=polaris`, `rule_prod=polaris`, or the internal marker `rule_prod=northstar`.
+- Flashcat alerts from `n9e.alert` should also be delegated to FlashAI when they carry fault metadata such as `rule_prod`, `rule_config.detail_url`, `workspace`, `fault_type`, `fault_workspace`, `fault_detail_url`, or `fault_condition`.
+- Do not use FlashAI by default for generic metrics, logs, traces, topology, or performance questions that do not include Flashcat / 快猫星云 alert context, a Flashcat URL, product markers, or the fault fields above. Use the available local tools or the customer's actual observability source instead.
+
+Prepare FlashAI first:
+
+<Steps>
+  <Step title="Confirm the version">
+    FlashAI must be `release-24` or later.
+  </Step>
+  <Step title="Configure FlashAI /config">
+    Open `/config` in the FlashAI / Flashcat console (for example, `https://demo.flashcat.cloud/config`), add `a2a_server_base_url`, and set it to the current FlashAI access domain, for example `https://demo.flashcat.cloud`.
+  </Step>
+  <Step title="Confirm network reachability">
+    If FlashAI uses a private-network address, only a BYOC Runner deployed in that network can reach it. If cloud Sandbox also needs to call FlashAI, use a publicly reachable domain and configure an allowlist as needed. This is the same network-reachability rule used for MCP SSE endpoints in Sandbox.
+  </Step>
+</Steps>
+
+After FlashAI is prepared, enter the **FlashAI domain** in the panel (for example, `demo.flashcat.cloud`) and click **Use this template**. The page opens the **Add A2A Agent** form and prefills:
+
+- Name: generated from the domain, for example `flashai-demo`
+- Instructions: multi-line delegation guidance for AI SRE, explaining which Flashcat alerts/incidents should prefer FlashAI and which generic observability questions should not.
+- Card URL: generated from the domain:
+
+```text
+https://demo.flashcat.cloud/api/fc-model/a2a/.well-known/agent-card.json
+```
+
+The template only prefills common values. You still choose the **Scope** (Account or Team) and configure authentication in the form. A2A agents can be installed multiple times for different scopes, so the FlashAI panel does not disappear just because one FlashAI agent already exists. Agent names must still be unique within the account; if the same FlashAI domain needs to be installed more than once, adjust the name in the form.
+
+<Tip>
+  Do not remove the instructions generated by the FlashAI template unless you have more precise ones. Whether AI SRE proactively calls a remote A2A agent depends mainly on the selection signal provided by the name and instructions; when the instructions are too short or too generic, AI SRE may keep reasoning locally or incorrectly delegate ordinary metrics / logs questions to FlashAI.
+</Tip>
 
 ### Auth Modes
 
@@ -88,13 +136,17 @@ A2A agents support three credential-supply modes that determine how credentials 
     Each user provides their own key on first use; the key is encrypted and stored at the account level. Configure the Header name (required), placeholder, and help link (optional) in the Key Schema to guide users on first call.
   </Accordion>
   <Accordion title="Per-user OAuth (per_user_oauth)" icon="shield-halved">
-    Each user authorizes via the OAuth 2.1 flow; an authorization window pops up automatically on the first call to this A2A agent, and credentials are stored per user after completion.
+    Each user authorizes via the OAuth 2.1 flow; an authorization window pops up automatically on the first call to this A2A agent, and credentials are stored per user after completion. Before authorizing, choose an **execution environment** in the Credential dialog: a Cloud Sandbox or an online BYOC Runner; **Auto** is unavailable. OAuth requests run from the selected environment, so choose a BYOC Runner that can reach the service when its OAuth endpoint is private.
   </Accordion>
 </AccordionGroup>
 
 <Note>
 For security reasons, saved sensitive fields (such as `token`, `api_key`, and `client_secret`) are returned **masked** when read. When editing, leaving a sensitive field blank means "keep the current value" — not "clear it." The stored credential is only overwritten when you explicitly change it.
 </Note>
+
+<Warning>
+Use HTTPS for per-user OAuth discovery whenever possible. Enable "Allow OAuth discovery over HTTP" for a non-local HTTP Card URL only in controlled test environments. If an HTTPS endpoint uses a self-signed certificate, enable "Skip TLS certificate verification" only temporarily and only inside a trusted network.
+</Warning>
 
 ## Inbound: Letting External Agents Call AI SRE
 
@@ -136,13 +188,13 @@ The full lifecycle of A2A agents is managed on the **Plugins → Agents** page.
 
 <AccordionGroup>
   <Accordion title="Create" icon="plus">
-    Click **Add A2A Agent**, fill in the name, scope, Card URL, auth settings, and save. You must select a definite scope (account or team) before submitting — the submit button remains disabled until a scope is chosen.
+    Click **Add A2A Agent**, fill in the name, scope, instructions, Card URL, auth settings, and save. You must select a definite scope (account or team) before submitting — the submit button remains disabled until a scope is chosen.
   </Accordion>
   <Accordion title="Enable / Disable" icon="toggle-on">
     Use the toggle in the list to switch an A2A agent's enabled state. Only **enabled** agents appear in AI SRE's available-agent list and can receive delegated tasks; disabling one makes it immediately invisible to delegation.
   </Accordion>
   <Accordion title="Inspect / Edit" icon="pen-to-square">
-    Click any row in the list to open the form, where you can view and edit the name, description, scope, Card URL, auth configuration, streaming, and auth mode. The form is **read-only** when you do not have edit permission.
+    Click any row in the list to open the form, where you can view and edit the name, instructions, scope, Card URL, auth configuration, streaming, and auth mode. The form is **read-only** when you do not have edit permission.
   </Accordion>
   <Accordion title="Delete" icon="trash">
     Remove an A2A agent from the current scope. **Active sessions that delegated to it will fail.** Deletion requires confirmation.
@@ -164,6 +216,8 @@ A2A agents share the same **two-level scope** model as other resources (skills, 
 | Team level | Visible only to members of that team |
 
 **Edit permissions**: the account owner or account admin can edit any agent; team members can edit team-level agents **in their own team**; there is no creator-retains-rights exception. When you do not have edit permission, the corresponding row in the list is **read-only**.
+
+**Create and reassign**: to create a new team-level agent, you must belong to the target team; account-level creation is limited to the account owner or admins. When editing an existing agent, the account owner or admins can move it to any team to recover resources left behind by empty teams or departed members; regular members can move it only to teams they belong to.
 
 **Runtime visibility**: at session start, AI SRE's available-agent list shows only **account-level** resources plus resources belonging to the **team bound to the current session** (e.g., the team carried in by an incident / war room, or explicitly selected in the UI). A team's skills, MCP servers, and A2A agents are only mounted into the current session on demand after the agent reads that team's knowledge during an investigation. **The account is the only security perimeter at runtime; team is simply an ownership and editing tag.**
 
