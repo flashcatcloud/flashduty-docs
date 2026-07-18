@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(packageRoot, '..');
 const distRoot = path.join(packageRoot, 'dist');
-const docsBaseUrl = 'https://docs.flashcat.cloud';
+const docsBaseUrl = 'https://docs.flashduty.com';
 
 function readSource(locale, entry) {
   const source = typeof entry === 'string' ? entry : entry[locale];
