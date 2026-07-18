@@ -10,7 +10,7 @@
 # Required env vars: MEILI_ENDPOINT, MEILI_API_KEY, MEILI_INDEX
 # Optional:
 #   FULL_UPLOAD  - set to "true" for full re-upload (default: false)
-#   BASE_URL     - docs base URL (default: https://docs.flashcat.cloud)
+#   BASE_URL     - docs base URL (default: https://docs.flashduty.com)
 #
 # Usage:
 #   sh scripts/upload.sh [--full] [--dry-run] [--help]
@@ -24,7 +24,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 cd "$REPO_ROOT"
 
 SCRIPT_NAME=$(basename "$0")
-BASE_URL="${BASE_URL:-https://docs.flashcat.cloud}"
+BASE_URL="${BASE_URL:-https://docs.flashduty.com}"
 FULL_UPLOAD="${FULL_UPLOAD:-false}"
 DRY_RUN=false
 BATCH_SIZE=5
