@@ -3,7 +3,7 @@
 English | [中文](https://github.com/flashcatcloud/flashduty-docs/blob/main/README_zh.md)
 
 [![Mintlify](https://img.shields.io/badge/Built_with-Mintlify-8B5CF6?style=flat-square)](https://mintlify.com/)
-[![Docs](https://img.shields.io/badge/Live-docs.flashcat.cloud-blue?style=flat-square)](https://docs.flashcat.cloud)
+[![Docs](https://img.shields.io/badge/Live-docs.flashduty.com-blue?style=flat-square)](https://docs.flashduty.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 Official documentation for [Flashduty](https://flashcat.cloud/), bilingual (Chinese & English), built with [Mintlify](https://mintlify.com/). Covers On-call incident management, RUM real user monitoring, and Monitors alert rules — **390+** pages in total.
@@ -131,7 +131,7 @@ Full glossary: [`glossary.md`](glossary.md)
 
 | Resource | Link |
 |----------|------|
-| Flashduty Docs | [docs.flashcat.cloud](https://docs.flashcat.cloud) |
+| Flashduty Docs | [docs.flashduty.com](https://docs.flashduty.com) |
 | Flashduty Console | [console.flashcat.cloud](https://console.flashcat.cloud/) |
 | Flashduty Website | [flashcat.cloud](https://flashcat.cloud/) |
 | MCP Server | [flashduty-mcp-server](https://github.com/flashcatcloud/flashduty-mcp-server) |
