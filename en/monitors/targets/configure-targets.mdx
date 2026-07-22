@@ -51,7 +51,6 @@ host:
 
   shell_exec:
     enabled: true
-    pipeline_max_segments: 3
     default_max_lines: 200
     cat_max_file_size: 20971520
     user_allow_list: []
@@ -67,10 +66,6 @@ mongodb: []
 mongodb_mongos: []
 kafka: []
 elasticsearch: []
-
-script_tool:
-  enabled: false
-  dir: /opt/monit-agent/tools.d
 ```
 
 ## locator_mappings
@@ -110,7 +105,7 @@ Recommendations:
 | `disk.top_n` | `20` | Controls the number of file systems returned. |
 | `disk_io.top_n` | `5` | Controls the number of disk I/O devices returned. |
 | `network_io.top_n` | `5` | Controls the number of network interfaces returned. |
-| `top_processes.default_top_n` | `10` | Default number of processes returned. |
+| `top_processes.default_top_n` | `10` | Default number of process rows and container rows returned separately. |
 | `top_processes.include_cmdline` | `false` | Does not return the full command line by default, reducing the risk of exposing passwords, tokens, or connection strings. |
 
 ## shell_exec
@@ -121,7 +116,6 @@ Recommendations:
 host:
   shell_exec:
     enabled: true
-    pipeline_max_segments: 3
     default_max_lines: 200
     cat_max_file_size: 20971520
     user_allow_list: []
@@ -130,7 +124,22 @@ host:
 Recommendations:
 
 - Keep `enabled: true` when AI-SRE needs live host diagnostics. Only controlled shell commands can be executed.
+- `pipeline_max_segments` is optional. Its default and maximum are both `10`; configure it only when you need a lower pipeline segment limit.
+- `process_environ` is optional and defaults to `redacted`. Reads of `/proc/<pid>/environ` are redacted. Set it to `denied` to disable them entirely. Raw process environments are never returned.
 - If some shell commands are blocked by built-in guardrails, add them manually to `user_allow_list` only after confirming that they are safe, read-only, and do not expose sensitive information.
+
+The built-in rules cover common host and container diagnostics:
+
+- `du` can scan only an absolute directory other than `/`. It must stay on one file system and use a summary or a maximum depth of two; actual execution is limited to eight seconds. Its output can feed `sort`, `head`, `tail`, `uniq`, or `wc -l`.
+- `ls` can inspect multiple targets and validates every path independently. `find -exec` is normally rejected; the only exception is a constrained, read-only nested `ls` command explicitly approved by local root.
+- `docker ps --format` accepts only safe templates for container IDs, names, images, and status.
+- `ss` accepts constrained read-only arguments and TCP state filters. State names are case-insensitive, such as `ss state CLOSE-WAIT -tn`.
+- `dmesg` can run by itself or feed an authorized filter such as `head`, `tail`, or `grep`. Options that clear the ring buffer, modify the console, follow continuously, or read an arbitrary file are rejected.
+- `nginx -T` must discard standard output or immediately feed the built-in `grep` filter.
+
+Execution time, returned lines, and returned bytes are always bounded for every command.
+
+If a command does not pass the automatic rules but is not a non-bypassable high-risk operation, local root can confirm it in a [shell approval session](/en/monitors/targets/install-agent#temporarily-approve-controlled-shell-commands). Shutdown, reboot, disk or file system destruction, interpreter execution, and reads of permanently sensitive credential paths are rejected even with human approval.
 
 To urgently disable a tool, use `tool_policy.disabled_tools`:
 
@@ -139,6 +148,8 @@ tool_policy:
   disabled_tools:
     - shell.exec
 ```
+
+After a successful reload of `shell_exec.enabled` or `tool_policy.disabled_tools`, the Agent refreshes its available tool catalog immediately; no restart is required. If a diagnostic request returns `catalog_changed` during the refresh, retry the request.
 
 ## MySQL
 
@@ -499,15 +510,3 @@ ES_PASSWORD=<ES_PASSWORD>
 | `credential` | If Elasticsearch security authentication is disabled, credential can be omitted. Configure a read-only account in production. |
 
 Elasticsearch does not use `locator_mappings`. The Agent automatically obtains `cluster_name` from the cluster and uses it as the object address in the console.
-
-## script_tool
-
-`script_tool` is used to add custom script tools. Most users can keep it disabled:
-
-```yaml
-script_tool:
-  enabled: false
-  dir: /opt/monit-agent/tools.d
-```
-
-Enable it only when you need custom diagnostic capabilities and can confirm that the script source and directory permissions are controlled.
