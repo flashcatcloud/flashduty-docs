@@ -28,7 +28,123 @@ Flashduty On-call 已适配部分常用工单、部署系统的 webhook 协议�
 
 ## 实现协议
 
-请参照 [开发文档](/zh/on-call/integration/change-integration/custom-event) 完成协议开发。
+### 请求描述
+
+请求方式：
+
+```http
+POST, Content-Type: application/json
+```
+
+请求地址为集成详情页展示的 **推送地址**，格式如下：
+
+```text
+{api_host}/event/push/change/standard?integration_key={integration_key}
+```
+
+### 请求参数
+
+#### Headers
+
+| 字段 | 必含 | 类型 | 说明 |
+| :--- | :---: | :--- | :--- |
+| Content-Type | 是 | string | 固定值：`application/json`。 |
+
+#### Query Strings
+
+| 字段 | 必含 | 类型 | 说明 |
+| :--- | :---: | :--- | :--- |
+| integration_key | 是 | string | 集成秘钥，用于访问控制。创建集成后可在推送地址中获取。 |
+
+#### Payload
+
+| 字段 | 必含 | 类型 | 说明 |
+| :--- | :---: | :--- | :--- |
+| title | 是 | string | 变更标题，例如发布单标题、工单标题或部署任务名称。 |
+| change_key | 是 | string | 变更标识。相同 `change_key` 会被识别为同一个变更，后续事件会更新该变更的状态、标签和链接。 |
+| change_status | 是 | string | 变更状态。枚举值（首字母大写）：`Planned` 计划中、`Ready` 待执行、`Processing` 执行中、`Canceled` 已取消、`Done` 已完成。 |
+| event_time | 否 | integer | 事件发生时间，Unix 时间戳。支持秒级或毫秒级时间戳；未传时使用 Flashduty 接收事件的时间。 |
+| description | 否 | string | 变更描述，例如变更内容、影响范围、执行步骤或回滚方案。 |
+| link | 否 | string | 变更详情链接，例如发布单、工单或 CI/CD 任务地址。 |
+| labels | 否 | map | 变更标签集合，key 和 value 均为 string 类型。建议 key 遵循 Prometheus 标签命名规范；系统会将 key 中的空格、点号、斜杠等特殊字符替换为下划线。 |
+
+<Note>
+当 `change_status` 为 `Done` 或 `Canceled` 时，Flashduty 会将该事件时间记录为变更结束时间；再次上报非结束状态时，结束时间会被清空。
+</Note>
+
+### 请求响应
+
+| 字段 | 必含 | 类型 | 说明 |
+| :--- | :---: | :--- | :--- |
+| request_id | 是 | string | 请求 ID，用于链路追踪。 |
+| error | 否 | [Error](#error) | 错误描述，仅当出现错误时返回。 |
+| data | 否 | object | 上报成功时返回空对象。 |
+
+#### Error <span id="error"></span>
+
+| 字段 | 必含 | 类型 | 说明 |
+| :--- | :---: | :--- | :--- |
+| code | 是 | string | 错误码，枚举值参考 [Code](#code)。 |
+| message | 否 | string | 错误描述。 |
+
+#### Code <span id="code"></span>
+
+| 错误码 | HTTP Status | 说明 |
+| :--- | :---: | :--- |
+| InvalidParameter | 400 | 参数错误，例如缺少必填字段、状态枚举值不合法或集成秘钥无效。 |
+| InvalidContentType | 400 | `Content-Type` 不支持。 |
+| MethodNotAllowed | 405 | HTTP Method 不支持。 |
+| Unauthorized | 401 | 登录认证未通过。 |
+| AccessDenied | 403 | 权限认证未通过。 |
+| RequestTooFrequently | 429 | 请求过于频繁。 |
+| RouteNotFound | 404 | 请求 Method 和 Path 未匹配。 |
+| ResourceNotFound | 400 | 账户未购买资源，请先前往费用中心下单。 |
+| NoLicense | 400 | 账户无充足订阅 License，请先升级或购买订阅。 |
+| InternalError | 500 | 内部或未知错误。 |
+
+### 请求示例
+
+请求：
+
+```bash
+curl -X POST '{api_host}/event/push/change/standard?integration_key={integration_key}' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "title": "order-service v1.12.0 production release",
+    "change_key": "deploy-order-service-202607231030",
+    "change_status": "Processing",
+    "event_time": 1784773800,
+    "description": "Deploy order-service v1.12.0 to production cluster cn-shanghai-prod.",
+    "link": "https://deploy.example.com/releases/deploy-order-service-202607231030",
+    "labels": {
+      "service": "order-service",
+      "env": "prod",
+      "cluster": "cn-shanghai-prod",
+      "owner": "sre"
+    }
+  }' -v
+```
+
+成功响应：
+
+```json
+{
+  "request_id": "0ace00116215ab4ca0ec5244b8fc54b0",
+  "data": {}
+}
+```
+
+失败响应：
+
+```json
+{
+  "request_id": "0ace00116215abc0ba4e52449bd305b0",
+  "error": {
+    "code": "InvalidParameter",
+    "message": "Key: 'ChangeEvent.ChangeStatus' Error:Field validation for 'ChangeStatus' failed on the 'oneof' tag"
+  }
+}
+```
 
 ## 最佳实践
 
@@ -36,6 +152,7 @@ Flashduty On-call 已适配部分常用工单、部署系统的 webhook 协议�
 
 - **变更的应用范围**：如 host、cluster 等
 - **变更的归属信息**：如 team、owner 等
+- **变更的生命周期**：同一个变更在计划、执行、完成或取消时，使用相同 `change_key` 持续上报不同 `change_status`，便于在故障时间线上还原变更过程
 
 ## 常见问题
 
@@ -55,4 +172,3 @@ Flashduty On-call 已适配部分常用工单、部署系统的 webhook 协议�
 如果以上步骤执行后仍未找到问题根因，请 **携带请求响应中的 request_id** 联系我们。
 </Accordion>
 </AccordionGroup>
-
