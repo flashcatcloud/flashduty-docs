@@ -150,7 +150,7 @@ Resource 事件包含：
 
 ## Error 事件
 
-Error 表示手动上报错误、未捕获 ArkTS 异常、网络错误、崩溃或卡死。
+Error 表示手动上报错误、未捕获 ArkTS 异常、未处理的 Promise rejection、网络错误、崩溃或卡死。
 
 ```ts
 import {
@@ -176,6 +176,8 @@ GlobalRumMonitor.get().addError(
 | `AGENT` | `agent` | Agent 来源错误 |
 | `CUSTOM` | `custom` | 业务手动上报 |
 
+RUM 会自动监听 `errorManager.on('error')` 和 `errorManager.on('unhandledRejection')`。未处理的 Promise rejection 会作为普通非崩溃 error 上报，不会触发退出或恢复策略。
+
 Error 事件包含：
 
 | 字段 | 说明 |
@@ -186,13 +188,22 @@ Error 事件包含：
 | `error.handling` | `handled` 或 `unhandled` |
 | `error.is_crash` | 崩溃和卡死事件为 `true` |
 | `error.category` | Crash 模块写入 `Exception` 或 `App Hang` |
-| `error.source_type` | Crash 模块写入 `harmony` |
+| `error.source_type` | Crash 模块写入 `harmony`；未处理的 Promise rejection 写入 `promise` |
+| `crash.recovered` | 通过 `REPORT_AND_RECOVER` 软着陆并在后续启动回放的崩溃中存在且为 `true` |
 | `error.binary_images` | Native 崩溃关联的动态库符号信息 |
 | `build_id` | 用于匹配 Native 符号的 build-id |
 
 ## 崩溃和卡死
 
-Crash 模块监听 HarmonyOS `hiAppEvent` 的 `APP_CRASH` 和 `APP_FREEZE`。系统会持久化崩溃并在下一次启动时回放，因此你需要在启动早期启用 Crash 模块。
+Crash 模块通过实时和事后两条路径采集故障：
+
+- 主线程上未捕获的 ArkTS 异常会进入实时 JS 崩溃策略路径。`REPORT_THEN_EXIT` 和 `REPORT_AND_RECOVER` 会在进程退出或重启前同步持久化 SDK 待处理崩溃记录
+- 下次启动时，Crash 模块会把 SDK 自身的待处理记录回放到 RUM，标记为已消费后删除持久化文件
+- HarmonyOS `hiAppEvent` 会在后续启动时回放 `APP_CRASH` 和 `APP_FREEZE`，用于采集 ArkTS、Native C/C++ 崩溃和卡死
+
+同一次 ArkTS 崩溃可能同时到达 `onUnhandledException`、`onException` 和后续的 `hiAppEvent.APP_CRASH`。SDK 会对两个实时回调进行指纹去重，并通过持久化的已消费记录去重系统回放，保证一次策略管理的崩溃在 RUM 管道中只生成一个 crash error 事件。
+
+未处理的 Promise rejection 会单独采集为 `error.source_type: promise` 的普通非崩溃 RUM error。它不会使进程退出，也不会进入崩溃策略路径。
 
 崩溃事件会通过 RUM error 管道上报：
 
@@ -210,8 +221,8 @@ SDK 以 NDJSON 形式批量上报事件。
 | 请求方法 | `POST` |
 | Content-Type | `text/plain;charset=UTF-8` |
 | 鉴权 | 请求头 `DD-API-KEY: <clientToken>` |
-| User-Agent | `flashcat-sdk-harmony/0.1.3` |
-| 查询参数 | `ddsource=harmony`，`ddtags` 包含 `sdk_version:0.1.3`，并在存在时追加 `env`、`service`、`version` |
+| User-Agent | `flashcat-sdk-harmony/0.2.0` |
+| 查询参数 | `ddsource=harmony`，`ddtags` 包含 `sdk_version:0.2.0`，并在存在时追加 `env`、`service`、`version` |
 | 默认上传间隔 | 5 秒 |
 | 网络超时 | 连接超时和读取超时均为 30 秒 |
 | 重试 | 网络错误、`401`、`403`、`408`、`429` 和 `5xx` 会保留批次并指数退避重试 |
