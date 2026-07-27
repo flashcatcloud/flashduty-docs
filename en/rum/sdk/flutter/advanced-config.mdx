@@ -4,41 +4,71 @@ description: "Configure sampling, tracking consent, event filtering, distributed
 keywords: ["RUM", "Flutter SDK", "advanced configuration", "sampling", "tracking consent", "symbol upload"]
 ---
 
-This page describes the advanced configuration options of the Flutter SDK. All configuration is passed through `DatadogConfiguration` and `DatadogRumConfiguration`.
+This page covers the Flutter SDK's advanced options. Configuration is split across two objects: `DatadogConfiguration` carries SDK-level settings (credentials, site, version, upload strategy), and `DatadogRumConfiguration` carries RUM feature settings (sampling, automatic collection toggles, event mappers).
 
-## Sampling rate
+## Sampling rates
 
 ```dart
 DatadogRumConfiguration(
   applicationId: '<APPLICATION_ID>',
-  sessionSamplingRate: 100.0, // Session sampling rate
-  traceSampleRate: 20.0,      // Trace sampling rate on resources
+  sessionSamplingRate: 100.0, // session sampling rate
+  traceSampleRate: 20.0,      // tracing sampling rate on resources
 );
 ```
 
+Both `sessionSamplingRate` and `traceSampleRate` are clamped to the `0`–`100` range. Passing a value outside that range does not raise an error — it is truncated.
+
+## Application version and service name
+
+`version`, `service`, and `flavor` determine how RUM events are attributed, and whether crash stack traces can be matched against your symbol files.
+
+```dart
+DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  service: 'com.example.shopping',
+  version: '1.4.2',
+  flavor: 'release',
+  rumConfiguration: DatadogRumConfiguration(applicationId: '<APPLICATION_ID>'),
+);
+```
+
+| Field | Type | Default | Description |
+|------|------|--------|------|
+| `service` | string | Falls back to the native SDK's default when unset | Service name, used to distinguish applications in the console. It must match the value used when uploading symbol files |
+| `version` | string | The version in `pubspec.yaml`, minus any build or pre-release suffix | Application version. Set it explicitly when you need the full version string, or when the pubspec version differs from your released version |
+| `flavor` | string | `null` | Application variant (for example, per-channel builds). When `null`, it is not written to RUM as a tag, but symbol upload tools treat it as `release` by default |
+
+<Warning>
+`version` is a Datadog-style tag and cannot contain `+`. The SDK replaces `+` with `-` before reporting — for example, `1.4.2+18` becomes `1.4.2-18`. Use the replaced value when uploading symbol files, otherwise stack traces cannot be resolved.
+</Warning>
+
 ## Tracking consent
 
-`TrackingConsent` controls whether data is collected and reported, to meet compliance requirements such as GDPR:
+`TrackingConsent` controls whether data is collected and reported, so you can meet requirements such as GDPR:
 
 | Value | Behavior |
 |------|------|
 | `TrackingConsent.granted` | Collect and report |
 | `TrackingConsent.notGranted` | Do not collect |
-| `TrackingConsent.pending` | Cache first, then decide whether to report or drop after the user grants consent |
+| `TrackingConsent.pending` | Cache first, then report or discard once the user decides |
 
 ```dart
-// Pass in during initialization
+// Pass it during initialization
 await DatadogSdk.runApp(configuration, TrackingConsent.pending, () async {
   runApp(const MyApp());
 });
 
-// Update after the user grants consent
+// Update it after the user grants consent
 DatadogSdk.instance.setTrackingConsent(TrackingConsent.granted);
 ```
 
+If a user withdraws consent, call `DatadogSdk.instance.clearAllData()` to discard the locally cached data that has not been reported yet.
+
 ## Event filtering and masking
 
-Event mappers run before events are reported; return `null` to drop the event, or return it after modification. You can use them to mask sensitive fields, remove noise, or rename views.
+Event mappers run before an event is reported. Return `null` to drop the event, or return it after modification. Use them to mask sensitive fields, remove noise, or rename views.
 
 ```dart
 DatadogRumConfiguration(
@@ -46,7 +76,7 @@ DatadogRumConfiguration(
   viewEventMapper: (event) => event,
   actionEventMapper: (event) => event,
   resourceEventMapper: (event) {
-    // For example, remove the query token from the URL
+    // For example, strip a query token from the URL
     return event;
   },
   errorEventMapper: (event) => event,
@@ -54,9 +84,13 @@ DatadogRumConfiguration(
 );
 ```
 
+<Note>
+`viewEventMapper` must return an event and cannot drop views; the other mappers can return `null` to drop their event. Mappers can only modify mutable (non-`final`) properties on an event.
+</Note>
+
 ## Distributed tracing
 
-For hosts that match `firstPartyHosts`, the SDK injects the W3C `traceparent` to correlate frontend RUM with backend APM. Tracing requires network collection (`enableHttpTracking()`).
+For hosts matched by `firstPartyHosts`, the SDK injects tracing headers so you can correlate frontend RUM with backend APM. Tracing requires network collection (`enableHttpTracking()` or `DatadogClient`).
 
 ```dart
 DatadogConfiguration(
@@ -71,9 +105,44 @@ DatadogConfiguration(
 )..enableHttpTracking();
 ```
 
-## Custom reporting endpoint
+### Choose tracing header types
 
-For on-premises deployments, override the default reporting endpoint through `customEndpoint`:
+`firstPartyHosts` is a shorthand: every host you list receives both the Datadog-style `x-datadog-*` headers and the W3C `traceparent` header. If your backend accepts only one of them, or different gateways use different protocols, use `firstPartyHostsWithTracingHeaders` to specify them per host:
+
+```dart
+DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  firstPartyHostsWithTracingHeaders: {
+    'api.example.com': {TracingHeaderType.tracecontext},
+    'legacy.example.com': {TracingHeaderType.b3multi},
+  },
+  rumConfiguration: DatadogRumConfiguration(applicationId: '<APPLICATION_ID>'),
+);
+```
+
+| `TracingHeaderType` | Injected headers |
+|------|------|
+| `datadog` | `x-datadog-trace-id`, `x-datadog-parent-id`, `x-datadog-sampling-priority`, and others |
+| `tracecontext` | W3C `traceparent` / `tracestate` |
+| `b3` | OpenTelemetry B3 single header (`b3`) |
+| `b3multi` | OpenTelemetry B3 multiple headers (`X-B3-TraceId` and others) |
+
+You can pass `firstPartyHosts` and `firstPartyHostsWithTracingHeaders` together; the SDK takes the union of the two.
+
+### Control when headers are injected
+
+`traceContextInjection` decides whether unsampled requests still carry tracing headers:
+
+| Value | Behavior |
+|------|------|
+| `TraceContextInjection.sampled` (default) | Inject tracing headers only into sampled requests |
+| `TraceContextInjection.all` | Inject tracing headers into every request and let the backend decide how to handle unsampled traces |
+
+## Custom intake endpoint
+
+For on-premises deployments, override the default intake endpoint through `customEndpoint`:
 
 ```dart
 DatadogRumConfiguration(
@@ -82,33 +151,64 @@ DatadogRumConfiguration(
 );
 ```
 
+## Collection in background isolates
+
+If you run network requests or business logic in a background isolate, attach to the already-initialized SDK inside that isolate so its events land in the same session:
+
+```dart
+await DatadogSdk.instance.attachToBackgroundIsolate();
+```
+
+<Note>
+The SDK must already be initialized on the main isolate for `attachToBackgroundIsolate()` to receive a configuration. Calling it before initialization completes, or on a platform without isolate support, logs a warning and is silently skipped.
+</Note>
+
 ## Symbol file upload
 
-To resolve crash and error stacks back to source locations, you need to upload symbol files. A Flutter application may contain both Dart and native frames:
+To resolve crash and error stack traces back to source locations, upload symbol files. A Flutter application can contain both Dart and native frames:
 
-| Frame type | Required files | How to generate |
+| Frame type | Required file | How it is produced |
 |----------|----------|----------|
 | Dart | Flutter symbols | `flutter build --split-debug-info=<dir> --obfuscate` |
-| iOS Native | dSYM | Xcode build output |
-| Android Native | mapping files | R8 / ProGuard output |
+| iOS native | dSYM | Xcode build output |
+| Android native | mapping file | R8 / ProGuard output |
 
-Use the FlashCat CLI to upload symbol files:
+Upload symbol files with the FlashCat CLI:
 
 ```bash
-# Example: upload the symbol files for the corresponding version
+# Example: upload the symbol files for a given version
 flashcat-cli flutter-symbols upload --service <SERVICE_NAME> --version <VERSION> <symbols-dir>
 ```
 
 <Warning>
-The `version` and `service` used at upload time must exactly match the values in the SDK initialization. Otherwise the console can receive crash events but cannot resolve stack frames back to source locations. Make symbol upload part of your release build process.
+The `version` and `service` used at upload must exactly match the values passed during SDK initialization. Otherwise the console receives crash events but cannot resolve frames back to source locations. Make symbol upload part of your release build pipeline.
 </Warning>
 
-## Other configuration
+## RUM collection options
 
-| Configuration | Default | Description |
-|------|--------|------|
-| `nativeCrashReportEnabled` | false | Whether to collect native crashes |
-| `detectLongTasks` | true | Whether to collect long tasks |
-| `longTaskThreshold` | 0.1s | Long task threshold |
-| `trackBackgroundEvents` | false | Whether to collect events while the application is in the background |
-| `batchSize` / `uploadFrequency` | — | Upload batch size and frequency, balancing real-time delivery against battery usage |
+Set all of the following on `DatadogRumConfiguration`.
+
+| Option | Type | Default | Description |
+|------|------|--------|------|
+| `detectLongTasks` | bool | `true` | Whether to collect long tasks |
+| `longTaskThreshold` | double | `0.1` (seconds) | Long task threshold, with a minimum of 0.02. Smaller values are raised to 0.02 |
+| `trackFrustrations` | bool | `true` | Whether to generate frustration signals from user actions |
+| `trackBackgroundEvents` | bool | `false` | Whether to collect events while no view is active, including while the application is in the background. When enabled, these events attach to an automatically created background view, which can create additional sessions and affect billing |
+| `trackAnonymousUser` | bool | `true` | Whether to generate an anonymous user ID that persists across launches, correlating sessions from the same device without collecting personal data |
+| `vitalUpdateFrequency` | `VitalsFrequency?` | `average` | Mobile vitals collection frequency: `frequent` (100ms), `average` (500ms), `rare` (1000ms). Set to `null` to disable vitals collection |
+| `reportFlutterPerformance` | bool | `false` | Whether to report Flutter-specific build and raster times, collected through `SchedulerBinding.addTimingsCallback` |
+| `initialResourceThreshold` | double | `0.1` (seconds) | How long after a view starts a resource can begin and still count toward Time to Network-Settled (TNS) |
+| `trackNonFatalAnrs` | `bool?` | Platform-dependent | Whether to report non-fatal Android ANRs. Disabled by default on Android 30+ (too noisy), enabled by default on Android 29 and below (where fatal ANRs cannot be reported) |
+| `appHangThreshold` | `double?` | `null` (disabled) | iOS app hang threshold, in seconds. For example, `0.25` reports hangs lasting at least 250ms |
+| `telemetrySampleRate` | double | `20.0` | Sampling rate for the SDK's own telemetry |
+
+## Upload strategy
+
+Set all of the following on `DatadogConfiguration` to trade off data freshness against device resource usage. All three default to `null`, which keeps the native SDK's default strategy.
+
+| Option | Type | Values | Description |
+|------|------|------|------|
+| `batchSize` | `BatchSize?` | `small` / `medium` / `large` | Preferred size of a single batch. Smaller batches upload more promptly but issue more requests |
+| `uploadFrequency` | `UploadFrequency?` | `frequent` / `average` / `rare` | How often the SDK attempts to upload |
+| `batchProcessingLevel` | `BatchProcessingLevel?` | `low` / `medium` / `high` | How many batches are processed sequentially in one read/upload cycle. `high` sends more data per cycle but uses more CPU and memory; `low` does the opposite. The native default is `medium` |
+| `nativeCrashReportEnabled` | bool | `false` | Whether to collect native iOS / Android crashes |

@@ -7,7 +7,7 @@ keywords: ["RUM", "Flutter SDK", "Dart", "用户监控", "移动端监控"]
 Flutter SDK 基于原生 iOS / Android SDK 封装，通过 `flashcat_flutter_plugin` 提供 RUM 能力。初始化后，SDK 会把应用中的视图、用户操作、网络请求、错误和崩溃事件上报到 Flashduty RUM，并使用 `source: "flutter"` 标识数据来源。
 
 <Info>
-当前 SDK 版本为 `0.1.0`，仅支持 **iOS 和 Android** 平台（不支持 Flutter Web）。Dart 类名仍沿用上游 `Datadog*` 命名（如 `DatadogSdk`、`DatadogConfiguration`），仅包名 `flashcat_flutter_plugin` 与站点枚举 `FlashcatSite` 做了品牌化。v1 暂不包含 Logs、Session Replay、dio / gql / grpc 伴生包。
+当前 SDK 版本为 `flashcat_flutter_plugin` 0.1.1，仅支持 **iOS 和 Android** 平台（不支持 Flutter Web / Desktop）。Dart 类名仍沿用上游 `Datadog*` 命名（如 `DatadogSdk`、`DatadogConfiguration`），仅包名与站点枚举 `FlashcatSite` 做了品牌化。v1 暂不包含 Logs 与 Session Replay。
 </Info>
 
 ## 前提条件
@@ -16,24 +16,28 @@ Flutter SDK 基于原生 iOS / Android SDK 封装，通过 `flashcat_flutter_plu
 
 - 在 Flashduty 控制台创建或选择一个 RUM 应用，并获取 **Application ID** 和 **Client Token**
 - 确认应用可以访问 `https://browser.flashcat.cloud/api/v2/rum`
-- Flutter SDK ≥ 3.0，Dart ≥ 3.0；iOS 部署目标 ≥ 12.0，Android `minSdkVersion` ≥ 21
+- Flutter ≥ 3.27.0，Dart SDK ≥ 3.6.0
+- iOS 部署目标 ≥ 13.0，且 Podfile 中启用 `use_frameworks!`（Flutter 默认已启用）
+- Android `minSdkVersion` ≥ 23；若使用 Kotlin，版本需 ≥ 2.1.0
 - 在应用启动早期（`main()` 中）完成 SDK 初始化
 
 ## 安装 SDK
 
-在 `pubspec.yaml` 中添加 `flashcat_flutter_plugin`，然后执行 `flutter pub get`。
-
-<Note>
-`flashcat_flutter_plugin` 的 pub.dev 发布仍在确认中。为保证依赖可解析，下方示例使用 git 源。待正式发布到 pub.dev 后，可切换为 `flashcat_flutter_plugin: ^0.1.0` 的托管形式。
-</Note>
+三个包都已发布到 pub.dev，由认证发布者 `flashcat.cloud` 维护。在 `pubspec.yaml` 中按需添加，然后执行 `flutter pub get`。
 
 ```yaml pubspec.yaml
 dependencies:
-  flashcat_flutter_plugin:
-    git:
-      url: https://github.com/flashcatcloud/fc-sdk-flutter
-      path: packages/datadog_flutter_plugin
+  # RUM / Core / 崩溃采集，必选
+  flashcat_flutter_plugin: ^0.1.1
+  # 自动网络采集与分布式追踪，可选
+  flashcat_tracking_http_client: ^0.1.0
+  # WebView 数据关联，可选
+  flashcat_webview_tracking: ^0.1.0
 ```
+
+<Note>
+`flashcat_tracking_http_client` 与 `flashcat_webview_tracking` 都依赖 `flashcat_flutter_plugin: ^0.1.0`，可以与主包一起正常解析，无需 `dependency_overrides`。
+</Note>
 
 ## 初始化 SDK
 
@@ -47,8 +51,9 @@ Future<void> main() async {
   final configuration = DatadogConfiguration(
     clientToken: '<CLIENT_TOKEN>',
     env: 'production',
-    service: 'com.example.shopping',
     site: FlashcatSite.cn,
+    service: 'com.example.shopping',
+    version: '1.4.2', // 需与符号文件上传时的 version 一致
     nativeCrashReportEnabled: true, // 采集原生 iOS / Android 崩溃
     firstPartyHosts: ['api.example.com'], // 对这些域名注入分布式追踪头
     rumConfiguration: DatadogRumConfiguration(
@@ -63,6 +68,8 @@ Future<void> main() async {
   });
 }
 ```
+
+`clientToken`、`env` 和 `site` 是必填参数。`site` 没有隐式默认值，生产环境请显式传入 `FlashcatSite.cn`。
 
 <Warning>
 请不要在客户端代码中使用服务端密钥。`clientToken` 只用于客户端 RUM 数据上报，`applicationId` 用于归属 RUM 应用数据。
@@ -119,9 +126,11 @@ DatadogSdk.instance.rum?.addAction(RumActionType.tap, 'Checkout');
 
 ## 采集网络请求
 
-自动网络采集由独立的 `datadog_tracking_http_client` 包提供，通过配置对象上的扩展方法 `enableHttpTracking()` 开启。它会全局替换 `HttpClient`，把 `dart:io` / `http` 请求记录为 RUM resource，并对 `firstPartyHosts` 命中的域名注入 W3C 追踪头。
+自动网络采集由 `flashcat_tracking_http_client` 提供，通过配置对象上的扩展方法 `enableHttpTracking()` 开启。它会全局替换 `HttpClient`，把 `dart:io` / `http` 请求记录为 RUM resource，并对 `firstPartyHosts` 命中的域名注入追踪头。
 
 ```dart
+import 'package:flashcat_tracking_http_client/flashcat_tracking_http_client.dart';
+
 final configuration = DatadogConfiguration(
   clientToken: '<CLIENT_TOKEN>',
   env: 'production',
@@ -132,12 +141,58 @@ final configuration = DatadogConfiguration(
 ```
 
 <Warning>
-`datadog_tracking_http_client` 当前仍以 `datadog_flutter_plugin` 命名声明依赖（`^3.0.0`），与本 fork 的 `flashcat_flutter_plugin` 0.1.0 不能直接解析。启用网络采集时需要在 `pubspec.yaml` 中加 `dependency_overrides` 指向本 fork。该能力不属于 v1 核心范围，可按需接入。
+`enableHttpTracking()` 会修改 `HttpOverrides.global`。如果你的应用也需要自定义 `HttpOverrides`，请在初始化 SDK **之前**完成设置——SDK 初始化时会读取 `HttpOverrides.current`，并在其基础上创建客户端。
+</Warning>
+
+### 使用 DatadogClient 精确控制
+
+如果你只想追踪部分请求，或使用了 `cronet_http`、`cupertino_http` 这类原生 HTTP 实现（全局替换对它们不生效），可以改用 `DatadogClient` 包装 `http` 包的 `Client`：
+
+```dart
+import 'package:flashcat_tracking_http_client/flashcat_tracking_http_client.dart';
+import 'package:http/http.dart' as http;
+
+final datadogClient = DatadogClient(
+  datadogSdk: DatadogSdk.instance,
+  innerClient: http.Client(), // 可选，不传则使用默认 Client
+);
+```
+
+即使使用 `DatadogClient`，仍需在配置中声明 `firstPartyHosts` 才能启用分布式追踪。除 `cronet_http` / `cupertino_http` 场景外，不建议同时启用 `enableHttpTracking()` 与 `DatadogClient`，两者会相互干扰。
+
+## 采集 WebView 数据
+
+混合应用中，`flashcat_webview_tracking` 可以把 WebView 内产生的 RUM 事件桥接到 Flutter 会话中，避免 WebView 成为监控盲区。该包配合 [`webview_flutter`](https://pub.dev/packages/webview_flutter) 使用。
+
+```yaml pubspec.yaml
+dependencies:
+  webview_flutter: ^4.0.4
+  flashcat_flutter_plugin: ^0.1.1
+  flashcat_webview_tracking: ^0.1.0
+```
+
+在 `WebViewController` 上调用 `trackDatadogEvents` 扩展方法，并传入允许桥接的 host 列表：
+
+```dart
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+import 'package:flashcat_webview_tracking/flashcat_webview_tracking.dart';
+
+final webViewController = WebViewController()
+  ..setJavaScriptMode(JavaScriptMode.unrestricted)
+  ..trackDatadogEvents(
+    DatadogSdk.instance,
+    ['myapp.example'], // 允许桥接的 host，其他来源的事件会被忽略
+  )
+  ..loadRequest(Uri.parse('https://myapp.example'));
+```
+
+<Warning>
+Android 上必须设置 `JavaScriptMode.unrestricted`，否则桥接脚本无法注入，WebView 内的事件不会上报。
 </Warning>
 
 ## 关联用户信息
 
-登录后，你可以设置当前用户。SDK 会把用户字段写入后续 RUM 事件的 `usr` 对象。
+登录后，你可以设置当前用户。SDK 会把用户字段写入后续 RUM 事件的 `usr` 对象。`id` 为必填参数。
 
 ```dart
 DatadogSdk.instance.setUserInfo(
@@ -145,13 +200,52 @@ DatadogSdk.instance.setUserInfo(
   name: 'Alice',
   email: 'alice@example.com',
 );
+
+// 追加自定义用户属性，与已有属性合并；把某个属性置为 null 表示删除它
+DatadogSdk.instance.addUserExtraInfo({'plan': 'pro', 'trial': null});
 ```
 
 用户退出登录时清除用户信息：
 
 ```dart
-DatadogSdk.instance.setUserInfo();
+DatadogSdk.instance.clearUserInfo();
 ```
+
+<Warning>
+清除用户信息请使用 `clearUserInfo()`。`setUserInfo` 的 `id` 是必填命名参数，`setUserInfo()` 空调用无法通过编译。
+</Warning>
+
+`clearUserInfo()` 会同时清空当前活跃会话与活跃视图上的 `usr` 属性。如果你希望保留它们上面已有的用户信息，请先用 `rum.stopSession()` 或 `rum.stopView()` 结束会话或视图，再执行清除。
+
+## 关联账户信息
+
+面向企业客户的应用可以按用户所属账户（租户、组织、团队）做归因。账户信息写入后续事件的 `account` 对象，与用户信息相互独立。
+
+```dart
+DatadogSdk.instance.setAccountInfo(
+  id: 'acct-2048',
+  name: 'ACME Inc.',
+  extraInfo: {'tier': 'enterprise'},
+);
+
+// 追加账户自定义属性
+DatadogSdk.instance.addAccountExtraInfo({'region': 'cn-north'});
+
+// 切换或退出账户时清除
+DatadogSdk.instance.clearAccountInfo();
+```
+
+与 `clearUserInfo()` 一样，`clearAccountInfo()` 会清空活跃会话与活跃视图上的 `account` 属性。
+
+## 清除本地缓存数据
+
+如果用户撤回授权，或你需要响应数据删除诉求，可以丢弃尚未上报的本地数据：
+
+```dart
+DatadogSdk.instance.clearAllData();
+```
+
+该方法只清除还没有发送到服务端的缓存数据，已上报的数据不受影响。
 
 ## 上报错误
 
