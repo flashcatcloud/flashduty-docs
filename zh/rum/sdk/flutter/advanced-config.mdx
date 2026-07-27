@@ -1,0 +1,114 @@
+---
+title: "Flutter SDK 高级配置"
+description: "配置 Flutter RUM SDK 的采样率、隐私同意、事件过滤、分布式追踪和符号文件上传"
+keywords: ["RUM", "Flutter SDK", "高级配置", "采样", "隐私同意", "符号上传"]
+---
+
+本文介绍 Flutter SDK 的进阶配置项。所有配置都通过 `DatadogConfiguration` 与 `DatadogRumConfiguration` 传入。
+
+## 采样率
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  sessionSamplingRate: 100.0, // 会话采样率
+  traceSampleRate: 20.0,      // resource 上的追踪采样率
+);
+```
+
+## 隐私同意
+
+`TrackingConsent` 控制是否采集与上报数据，适配 GDPR 等合规要求：
+
+| 取值 | 行为 |
+|------|------|
+| `TrackingConsent.granted` | 采集并上报 |
+| `TrackingConsent.notGranted` | 不采集 |
+| `TrackingConsent.pending` | 先缓存，待用户授权后决定上报或丢弃 |
+
+```dart
+// 初始化时传入
+await DatadogSdk.runApp(configuration, TrackingConsent.pending, () async {
+  runApp(const MyApp());
+});
+
+// 用户授权后更新
+DatadogSdk.instance.setTrackingConsent(TrackingConsent.granted);
+```
+
+## 事件过滤与脱敏
+
+事件映射器在事件上报前执行，返回 `null` 丢弃事件，或修改后返回。可用于脱敏敏感字段、去除噪声、重命名视图。
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  viewEventMapper: (event) => event,
+  actionEventMapper: (event) => event,
+  resourceEventMapper: (event) {
+    // 例如去除 URL 中的 query token
+    return event;
+  },
+  errorEventMapper: (event) => event,
+  longTaskEventMapper: (event) => event,
+);
+```
+
+## 分布式追踪
+
+对 `firstPartyHosts` 命中的域名，SDK 会注入 W3C `traceparent`，实现前端 RUM 与后端 APM 的链路关联。追踪需要配合网络采集（`enableHttpTracking()`）。
+
+```dart
+DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  firstPartyHosts: ['api.example.com', 'gateway.example.com'],
+  rumConfiguration: DatadogRumConfiguration(
+    applicationId: '<APPLICATION_ID>',
+    traceSampleRate: 100.0,
+  ),
+)..enableHttpTracking();
+```
+
+## 自定义上报地址
+
+私有化部署时，通过 `customEndpoint` 覆盖默认上报地址：
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  customEndpoint: 'https://your-ingest.example.com',
+);
+```
+
+## 符号文件上传
+
+要把崩溃与错误堆栈还原到源码位置，需要上传符号文件。Flutter 应用可能同时包含 Dart 与原生帧：
+
+| 栈帧类型 | 所需文件 | 生成方式 |
+|----------|----------|----------|
+| Dart | Flutter symbols | `flutter build --split-debug-info=<dir> --obfuscate` |
+| iOS Native | dSYM | Xcode 构建产物 |
+| Android Native | mapping 文件 | R8 / ProGuard 产物 |
+
+使用 FlashCat CLI 上传符号文件：
+
+```bash
+# 示例：上传对应 version 的符号文件
+flashcat-cli flutter-symbols upload --service <SERVICE_NAME> --version <VERSION> <symbols-dir>
+```
+
+<Warning>
+上传时的 `version` 与 `service` 必须与 SDK 初始化中的值完全一致，否则控制台可以收到崩溃事件，但无法把栈帧还原到源码位置。请把符号上传纳入发布构建流程。
+</Warning>
+
+## 其他配置
+
+| 配置 | 默认值 | 说明 |
+|------|--------|------|
+| `nativeCrashReportEnabled` | false | 是否采集原生崩溃 |
+| `detectLongTasks` | true | 是否采集 long task |
+| `longTaskThreshold` | 0.1s | long task 判定阈值 |
+| `trackBackgroundEvents` | false | 是否采集应用后台期间的事件 |
+| `batchSize` / `uploadFrequency` | — | 上报批量大小与频率，权衡实时性与耗电 |
