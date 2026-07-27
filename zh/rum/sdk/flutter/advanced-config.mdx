@@ -4,7 +4,7 @@ description: "配置 Flutter RUM SDK 的采样率、隐私同意、事件过滤�
 keywords: ["RUM", "Flutter SDK", "高级配置", "采样", "隐私同意", "符号上传"]
 ---
 
-本文介绍 Flutter SDK 的进阶配置项。所有配置都通过 `DatadogConfiguration` 与 `DatadogRumConfiguration` 传入。
+本文介绍 Flutter SDK 的进阶配置项。配置分布在两个对象上：`DatadogConfiguration` 承载 SDK 级别的设置（凭据、站点、版本、上报策略），`DatadogRumConfiguration` 承载 RUM 特性的设置（采样、自动采集开关、事件映射器）。
 
 ## 采样率
 
@@ -15,6 +15,34 @@ DatadogRumConfiguration(
   traceSampleRate: 20.0,      // resource 上的追踪采样率
 );
 ```
+
+`sessionSamplingRate` 与 `traceSampleRate` 的取值都会被强制收敛到 `0`–`100` 区间，传入超出范围的值不会报错，而是被截断。
+
+## 应用版本与服务名
+
+`version`、`service` 和 `flavor` 决定 RUM 事件的归属标签，也决定崩溃堆栈能否与符号文件匹配上。
+
+```dart
+DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  service: 'com.example.shopping',
+  version: '1.4.2',
+  flavor: 'release',
+  rumConfiguration: DatadogRumConfiguration(applicationId: '<APPLICATION_ID>'),
+);
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `service` | string | 未设置时沿用原生 SDK 的默认值 | 服务名，用于在控制台区分不同应用。上传符号文件时需与此处一致 |
+| `version` | string | 取自 `pubspec.yaml` 的版本号，去掉 build 与预发布后缀 | 应用版本。需要携带完整版本信息，或 pubspec 版本与实际发版版本不一致时，显式设置 |
+| `flavor` | string | `null` | 应用变体（如多渠道包）。为 `null` 时不会作为标签写入 RUM，但符号上传工具默认按 `release` 处理 |
+
+<Warning>
+`version` 是 Datadog 风格的标签，不允许出现 `+`。SDK 上报前会自动把 `+` 替换为 `-`，例如 `1.4.2+18` 会变成 `1.4.2-18`。上传符号文件时请使用替换后的值，否则堆栈无法还原。
+</Warning>
 
 ## 隐私同意
 
@@ -36,6 +64,8 @@ await DatadogSdk.runApp(configuration, TrackingConsent.pending, () async {
 DatadogSdk.instance.setTrackingConsent(TrackingConsent.granted);
 ```
 
+如果用户撤回授权，可以调用 `DatadogSdk.instance.clearAllData()` 丢弃尚未上报的本地缓存数据。
+
 ## 事件过滤与脱敏
 
 事件映射器在事件上报前执行，返回 `null` 丢弃事件，或修改后返回。可用于脱敏敏感字段、去除噪声、重命名视图。
@@ -54,9 +84,13 @@ DatadogRumConfiguration(
 );
 ```
 
+<Note>
+`viewEventMapper` 必须返回一个事件，不能丢弃视图；其余映射器可以返回 `null` 来丢弃对应事件。映射器只能修改事件中可变（非 `final`）的属性。
+</Note>
+
 ## 分布式追踪
 
-对 `firstPartyHosts` 命中的域名，SDK 会注入 W3C `traceparent`，实现前端 RUM 与后端 APM 的链路关联。追踪需要配合网络采集（`enableHttpTracking()`）。
+对 `firstPartyHosts` 命中的域名，SDK 会注入追踪头，实现前端 RUM 与后端 APM 的链路关联。追踪需要配合网络采集（`enableHttpTracking()` 或 `DatadogClient`）。
 
 ```dart
 DatadogConfiguration(
@@ -71,6 +105,41 @@ DatadogConfiguration(
 )..enableHttpTracking();
 ```
 
+### 选择追踪头类型
+
+`firstPartyHosts` 是一种简写：列出的每个域名都会同时注入 Datadog 风格的 `x-datadog-*` 头和 W3C `traceparent` 头。如果后端只接受其中一种，或不同网关使用不同协议，请改用 `firstPartyHostsWithTracingHeaders` 按域名指定：
+
+```dart
+DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  firstPartyHostsWithTracingHeaders: {
+    'api.example.com': {TracingHeaderType.tracecontext},
+    'legacy.example.com': {TracingHeaderType.b3multi},
+  },
+  rumConfiguration: DatadogRumConfiguration(applicationId: '<APPLICATION_ID>'),
+);
+```
+
+| `TracingHeaderType` | 注入的请求头 |
+|------|------|
+| `datadog` | `x-datadog-trace-id`、`x-datadog-parent-id`、`x-datadog-sampling-priority` 等 |
+| `tracecontext` | W3C `traceparent` / `tracestate` |
+| `b3` | OpenTelemetry B3 单头模式（`b3`） |
+| `b3multi` | OpenTelemetry B3 多头模式（`X-B3-TraceId` 等） |
+
+`firstPartyHosts` 与 `firstPartyHostsWithTracingHeaders` 可以同时传入，SDK 会取两者的并集。
+
+### 控制注入时机
+
+`traceContextInjection` 决定未被采样的请求是否仍然携带追踪头：
+
+| 取值 | 行为 |
+|------|------|
+| `TraceContextInjection.sampled`（默认） | 只对采样命中的请求注入追踪头 |
+| `TraceContextInjection.all` | 对所有请求注入追踪头，由后端决定如何处理未采样的链路 |
+
 ## 自定义上报地址
 
 私有化部署时，通过 `customEndpoint` 覆盖默认上报地址：
@@ -81,6 +150,18 @@ DatadogRumConfiguration(
   customEndpoint: 'https://your-ingest.example.com',
 );
 ```
+
+## 后台 isolate 采集
+
+如果你在后台 isolate 中执行网络请求或业务逻辑，需要在该 isolate 内附着到已初始化的 SDK，事件才会归入同一个会话：
+
+```dart
+await DatadogSdk.instance.attachToBackgroundIsolate();
+```
+
+<Note>
+必须先在主 isolate 完成初始化，`attachToBackgroundIsolate()` 才能拿到配置。在初始化完成前调用，或在不支持 isolate 的平台上调用，会打印告警并静默跳过。
+</Note>
 
 ## 符号文件上传
 
@@ -103,12 +184,31 @@ flashcat-cli flutter-symbols upload --service <SERVICE_NAME> --version <VERSION>
 上传时的 `version` 与 `service` 必须与 SDK 初始化中的值完全一致，否则控制台可以收到崩溃事件，但无法把栈帧还原到源码位置。请把符号上传纳入发布构建流程。
 </Warning>
 
-## 其他配置
+## RUM 采集配置
 
-| 配置 | 默认值 | 说明 |
-|------|--------|------|
-| `nativeCrashReportEnabled` | false | 是否采集原生崩溃 |
-| `detectLongTasks` | true | 是否采集 long task |
-| `longTaskThreshold` | 0.1s | long task 判定阈值 |
-| `trackBackgroundEvents` | false | 是否采集应用后台期间的事件 |
-| `batchSize` / `uploadFrequency` | — | 上报批量大小与频率，权衡实时性与耗电 |
+以下选项都在 `DatadogRumConfiguration` 上设置。
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `detectLongTasks` | bool | `true` | 是否采集 long task |
+| `longTaskThreshold` | double | `0.1`（秒） | long task 判定阈值，最小值 0.02。传入更小的值会被抬到 0.02 |
+| `trackFrustrations` | bool | `true` | 是否从用户操作生成 frustration 信号 |
+| `trackBackgroundEvents` | bool | `false` | 是否采集无活跃视图时（含应用在后台）的事件。开启后这些事件会挂到自动创建的 background 视图上，可能产生额外会话并影响计费 |
+| `trackAnonymousUser` | bool | `true` | 是否生成跨启动持久化的匿名用户 ID，用于在不采集个人信息的前提下关联同一设备的会话 |
+| `vitalUpdateFrequency` | `VitalsFrequency?` | `average` | 移动端 vitals 采集频率：`frequent`（100ms）、`average`（500ms）、`rare`（1000ms）。设为 `null` 关闭 vitals 采集 |
+| `reportFlutterPerformance` | bool | `false` | 是否上报 Flutter 特有的 build / raster 耗时，通过 `SchedulerBinding.addTimingsCallback` 采集 |
+| `initialResourceThreshold` | double | `0.1`（秒） | 视图开始后多长时间内启动的 resource 计入 Time to Network-Settled（TNS） |
+| `trackNonFatalAnrs` | `bool?` | 随平台版本 | 是否上报 Android 非致命 ANR。Android 30+ 默认关闭（噪声过大），Android 29 及以下默认开启（该版本无法上报致命 ANR） |
+| `appHangThreshold` | `double?` | `null`（关闭） | iOS 应用卡顿判定阈值，单位秒。例如设为 `0.25` 表示上报持续 250ms 以上的卡顿 |
+| `telemetrySampleRate` | double | `20.0` | SDK 自身遥测的采样率 |
+
+## 上报策略
+
+以下选项都在 `DatadogConfiguration` 上设置，用于权衡数据实时性与设备资源消耗。三者默认都为 `null`，即沿用原生 SDK 的默认策略。
+
+| 配置 | 类型 | 取值 | 说明 |
+|------|------|------|------|
+| `batchSize` | `BatchSize?` | `small` / `medium` / `large` | 单批数据的大小偏好。批次越小，单次上报越及时，但请求次数越多 |
+| `uploadFrequency` | `UploadFrequency?` | `frequent` / `average` / `rare` | 尝试上报的频率 |
+| `batchProcessingLevel` | `BatchProcessingLevel?` | `low` / `medium` / `high` | 单个读取/上报周期内连续处理的批次数量。`high` 单周期发送更多数据但占用更多 CPU 与内存，`low` 反之。原生默认为 `medium` |
+| `nativeCrashReportEnabled` | bool | `false` | 是否采集原生 iOS / Android 崩溃 |
