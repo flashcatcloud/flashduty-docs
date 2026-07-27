@@ -150,7 +150,7 @@ If the request fails, the SDK generates an error event with `source: "network"` 
 
 ## Error events
 
-Errors represent manually reported errors, unhandled ArkTS exceptions, network errors, crashes, or hangs.
+Errors represent manually reported errors, unhandled ArkTS exceptions, unhandled Promise rejections, network errors, crashes, or hangs.
 
 ```ts
 import {
@@ -176,6 +176,8 @@ Supported error sources:
 | `AGENT` | `agent` | Agent-originated error |
 | `CUSTOM` | `custom` | Business-defined manual error |
 
+RUM automatically listens to `errorManager.on('error')` and `errorManager.on('unhandledRejection')`. Unhandled Promise rejections are reported as ordinary, non-crashing errors and never trigger exit or recovery policies.
+
 Error events include:
 
 | Field | Description |
@@ -186,13 +188,22 @@ Error events include:
 | `error.handling` | `handled` or `unhandled` |
 | `error.is_crash` | `true` for crashes and hangs |
 | `error.category` | Crash module writes `Exception` or `App Hang` |
-| `error.source_type` | Crash module writes `harmony` |
+| `error.source_type` | Crash module writes `harmony`; unhandled Promise rejections write `promise` |
+| `crash.recovered` | Present and `true` on crashes soft-landed through `REPORT_AND_RECOVER` and replayed on a later launch |
 | `error.binary_images` | Dynamic library symbol information for native crashes |
 | `build_id` | Build-id used to match native symbols |
 
 ## Crashes and hangs
 
-The Crash module listens to HarmonyOS `hiAppEvent` for `APP_CRASH` and `APP_FREEZE`. The system persists faults and replays them on the next launch, so enable the Crash module early in startup.
+The Crash module collects faults through live and post-mortem paths:
+
+- Uncaught main-thread ArkTS exceptions enter the live JS crash-policy path. `REPORT_THEN_EXIT` and `REPORT_AND_RECOVER` synchronously persist an SDK pending crash incident before the process exits or restarts
+- On the next launch, the Crash module replays its own pending incident into RUM, marks it as consumed, and deletes the persisted file
+- HarmonyOS `hiAppEvent` replays `APP_CRASH` and `APP_FREEZE` on a later launch to capture ArkTS crashes, native C/C++ crashes, and hangs
+
+One ArkTS crash can reach `onUnhandledException`, `onException`, and the later `hiAppEvent.APP_CRASH`. The SDK deduplicates the two live callbacks by fingerprint and uses a persisted consumed record to deduplicate the system replay, ensuring that one policy-managed crash produces exactly one crash error event in the RUM pipeline.
+
+Unhandled Promise rejections are collected separately as ordinary, non-crashing RUM errors with `error.source_type: promise`. They do not terminate the process or enter the crash-policy path.
 
 Crash events are reported through the RUM error pipeline:
 
@@ -210,8 +221,8 @@ The SDK uploads events as NDJSON batches.
 | Request method | `POST` |
 | Content-Type | `text/plain;charset=UTF-8` |
 | Authentication | `DD-API-KEY: <clientToken>` request header |
-| User-Agent | `flashcat-sdk-harmony/0.1.3` |
-| Query parameters | `ddsource=harmony`; `ddtags` includes `sdk_version:0.1.3` and appends `env`, `service`, and `version` when present |
+| User-Agent | `flashcat-sdk-harmony/0.2.0` |
+| Query parameters | `ddsource=harmony`; `ddtags` includes `sdk_version:0.2.0` and appends `env`, `service`, and `version` when present |
 | Default upload interval | 5 seconds |
 | Network timeout | 30-second connect timeout and 30-second read timeout |
 | Retry | Network errors, `401`, `403`, `408`, `429`, and `5xx` keep the batch and retry with exponential backoff |

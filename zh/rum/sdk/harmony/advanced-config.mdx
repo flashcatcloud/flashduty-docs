@@ -185,12 +185,18 @@ FlashcatTrace.enable(
 
 ## 崩溃采集配置
 
-Crash 模块通过 HarmonyOS `hiAppEvent` 监听 `APP_CRASH` 和 `APP_FREEZE`。系统会在下一次启动时回放故障事件，SDK 再通过 RUM error 管道上报。
+Crash 模块提供两条采集路径：
+
+- 通过 HarmonyOS `hiAppEvent` 监听 `APP_CRASH` 和 `APP_FREEZE`，在后续启动时通过 RUM error 管道上报系统回放的故障事件
+- 实时处理主线程上未捕获的 ArkTS 异常，根据 `JsCrashPolicy` 在进程退出或重启前完成上报
+
+默认的 JS 崩溃策略是 `REPORT_THEN_EXIT`。
 
 ```ts
 import {
   FlashcatCrash,
-  CrashConfigurationBuilder
+  CrashConfigurationBuilder,
+  JsCrashPolicy
 } from '@flashcatcloud/crash';
 
 FlashcatCrash.enable(
@@ -198,18 +204,78 @@ FlashcatCrash.enable(
     .setTrackCrashes(true)
     .setTrackAppHangs(true)
     .setSampleRate(100)
+    .setJsCrashPolicy(JsCrashPolicy.REPORT_THEN_EXIT)
     .build()
 );
 ```
 
 | 方法 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `setTrackCrashes(enabled)` | boolean | `true` | 采集 ArkTS / JS 和 Native C/C++ 崩溃 |
-| `setTrackAppHangs(enabled)` | boolean | `true` | 采集 `APP_FREEZE`，即主线程卡死或 watchdog 超时 |
-| `setSampleRate(rate)` | number | `100` | 崩溃和卡死事件采样率，SDK 会将输入值限制在 `0` 到 `100` |
+| `setTrackCrashes(enabled)` | boolean | `true` | 监听 `hiAppEvent.APP_CRASH` 回放，包括 ArkTS 和 Native 崩溃；不控制 JS 策略的同步上报 |
+| `setTrackAppHangs(enabled)` | boolean | `true` | 监听 `hiAppEvent.APP_FREEZE` 回放 |
+| `setSampleRate(rate)` | number | `100` | `hiAppEvent` 崩溃和卡死事件的上报百分比；输入值限制在 `0` 到 `100`；不对 JS 策略的同步上报采样 |
+| `setJsCrashPolicy(policy)` | `JsCrashPolicy` | `REPORT_THEN_EXIT` | 设置主线程上未捕获 ArkTS 异常的处理策略 |
+| `setCrashLoopThreshold(threshold)` | number | `3` | 滚动窗口内第 N 次崩溃禁止再次重启，最多允许 N-1 次恢复重启；小于 `1` 的值按 `1` 处理 |
+| `setCrashLoopWindowMs(windowMs)` | number | `60000` | 统计可恢复崩溃的滚动窗口，单位为毫秒；小于 `1` 的值按 `1` 处理 |
+| `setCrashLoopCooldownMs(cooldownMs)` | number | `300000` | 已触发保护后，重置持久化记录所需的无崩溃时长，单位为毫秒；小于 `1` 的值按 `1` 处理 |
 
 <Warning>
-请在 `Flashcat.initialize()` 和 `FlashcatRum.enable()` 之后尽早启用 Crash。Crash 事件通过 RUM feature 写入，如果未启用 RUM，Crash 模块会丢弃收到的崩溃回放。
+从 `0.2.0` 开始，默认策略由旧版的进程存活行为改为 `REPORT_THEN_EXIT`。仅初始化旧版 SDK 会在未捕获 ArkTS 异常后抑制宿主应用退出，使应用在业务状态未定义的情况下继续运行。新默认行为会同步保存崩溃并恢复平台退出语义。如需恢复旧行为，请显式设置 `JsCrashPolicy.OBSERVE_ONLY`，并确认保留受损进程符合你的业务预期。
+</Warning>
+
+### `REPORT_THEN_EXIT`
+
+这是默认策略。发生主线程上未捕获的同步或异步 ArkTS 异常时，SDK 会同步持久化崩溃记录、刷新当前 RUM 写入器，然后退出进程。记录会在下一次启动时回放到 RUM。如果同步写入失败，SDK 会尝试异步上报并仍然退出。
+
+### `REPORT_AND_RECOVER`
+
+SDK 会同步持久化崩溃记录，检查持久化的崩溃循环保护，然后调用 `appRecovery.saveAppState()` 和 `restartApp()`。旧进程退出并启动新进程，下一次启动回放的记录会带有 `crash.recovered: true`。
+
+如果无法启用恢复、无法持久化循环记录、保护被触发、无法把记录标记为可恢复，或重启请求失败，SDK 会降级为退出。
+
+### `OBSERVE_ONLY`
+
+SDK 会异步上报异常并让当前进程继续运行。该策略恢复 `0.2.0` 之前的存活行为，不会退出或重启进程。事件循环可能仍能响应，但未捕获异常可能已经使应用处于损坏或不一致的业务状态。
+
+### 崩溃循环保护
+
+循环保护仅影响 `REPORT_AND_RECOVER`。默认配置下，60 秒滚动窗口内前两次崩溃可以重启，第三次崩溃会同步上报但降级为退出，即窗口内第 N 次崩溃禁止重启，最多允许 N-1 次恢复重启。
+
+崩溃时间戳会跨进程持久化，应用重启不会重置保护。保护触发后，每次被阻止的崩溃都会成为最新时间戳；应用需要保持完整的 5 分钟无崩溃冷却期，记录才会重置。将 `setCrashLoopThreshold(1)` 设为 `1` 会完全禁用恢复重启：每次崩溃仍同步上报，但都会退出，也不会标记 `crash.recovered`。
+
+### 恢复宿主应用状态
+
+自动重启不会自行定义需要恢复的页面状态。宿主 `UIAbility` 需要实现 `onSaveState`，把需要的状态写入 `wantParam`，并返回 `ALL_AGREE`：
+
+```ts
+import { AbilityConstant, UIAbility } from '@kit.AbilityKit';
+
+export default class EntryAbility extends UIAbility {
+  onSaveState(
+    _reason: AbilityConstant.StateType,
+    wantParam: Record<string, Object>
+  ): AbilityConstant.OnSaveResult {
+    wantParam['route'] = 'pages/Checkout';
+    wantParam['draftId'] = 'draft-123';
+    return AbilityConstant.OnSaveResult.ALL_AGREE;
+  }
+}
+```
+
+宿主应用需要在恢复启动的 `Want` 中读取这些参数，并且只恢复可以安全继续的状态。该能力是尽力而为的状态恢复，依赖宿主实现 `onSaveState`。SDK 编排下的状态保存和 `wantParam` 恢复仅在 API 24 模拟器上完成验证，尚未完成真机验证。
+
+### 能力边界
+
+| 故障类型 | 采集和策略行为 |
+|----------|----------------|
+| 主线程上未捕获的 ArkTS 同步或异步异常 | 实时采集；应用所选 `JsCrashPolicy`，包括同步持久化和可选重启 |
+| 未处理的 Promise rejection | 作为普通非崩溃 RUM error 上报，`error.source_type: promise`；进程不会退出，也不应用崩溃策略 |
+| TaskPool 或 Worker 抛出异常 | 在已验证场景中不会到达 error observer，不会导致宿主进程退出，不属于崩溃策略覆盖范围 |
+| Native C/C++ 信号崩溃 | JS 崩溃策略无法阻止或重启；仅在后续启动时通过 `hiAppEvent.APP_CRASH` 采集 |
+| `APP_FREEZE` | 仅通过 `hiAppEvent.APP_FREEZE` 在后续启动时采集 |
+
+<Warning>
+请在 `Flashcat.initialize()` 后尽早启用 RUM 和 Crash。JS 崩溃策略的传递不依赖启用顺序：Crash 会把策略推送给 RUM，RUM 启动时也会主动读取策略，因此先启用任一模块都能激活策略。仍建议先调用 `FlashcatRum.enable()`，再调用 `FlashcatCrash.enable()`，以便立即回放上一次启动留下的待处理崩溃记录。Crash 事件需要通过 RUM 管道发布。
 </Warning>
 
 ## 后台和延迟上传
