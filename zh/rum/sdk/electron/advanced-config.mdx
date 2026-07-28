@@ -1,0 +1,249 @@
+---
+title: "Electron SDK 高级配置"
+description: "配置 Electron RUM SDK 的完整初始化参数、上报批次、代理、手动上报 API 与 sourcemap 上传"
+keywords: ["RUM", "Electron SDK", "高级配置", "代理", "sourcemap", "手动上报"]
+---
+
+本文介绍 Electron 主进程 SDK 的进阶配置项与手动上报 API。渲染进程的进阶配置与 Web SDK 完全一致，见 [Web SDK 高级配置](/zh/rum/sdk/web/advanced-config)。
+
+## 完整初始化参数
+
+```ts
+import { init } from '@flashcatcloud/electron-sdk';
+
+await init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  site: 'browser.flashcat.cloud',
+  env: 'production',
+  version: app.getVersion(),
+  allowedWebViewHosts: ['localhost'],
+  telemetrySampleRate: 20,
+  batchSize: 'MEDIUM',
+  uploadFrequency: 'NORMAL',
+});
+```
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `applicationId` | `string` | 是 | — | RUM 应用 ID |
+| `clientToken` | `string` | 是 | — | 客户端 Token |
+| `service` | `string` | 是 | — | 服务名称，需与 sourcemap 上传时一致 |
+| `site` | `string` | 是 | — | 上报站点，只接受 `browser.flashcat.cloud` 或 `jira.flashcat.cloud` |
+| `env` | `string` | 否 | — | 环境标识，如 `production`、`staging` |
+| `version` | `string` | 否 | — | 应用版本号，需与 sourcemap 上传时一致 |
+| `proxy` | `string` | 否 | — | 自定义上报地址，见[使用代理上报](#使用代理上报) |
+| `allowedWebViewHosts` | `string[]` | 否 | `[]` | 允许通过桥接上报的渲染进程 host 白名单 |
+| `telemetrySampleRate` | `number` | 否 | `20` | SDK 自身遥测采样率（0–100），设为 `0` 关闭 |
+| `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | 否 | `MEDIUM` | 单批上报大小 |
+| `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | 否 | `NORMAL` | 上报间隔 |
+| `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | 否 | `mask` | 传递给渲染进程的隐私级别；当前版本不支持 Session Replay，该参数暂无实际效果 |
+
+<Note>
+`init()` 是异步的，返回 `false` 表示配置校验失败（例如缺少必填项或 `site` 不在白名单），此时 SDK 不会启动，并在控制台打印具体原因。
+</Note>
+
+## 上报批次与频率
+
+上报是磁盘缓冲的：事件先写入 `app.getPath('userData')` 下的批次文件，达到 `batchSize` 后轮转，再按 `uploadFrequency` 的间隔上传，上传成功才删除文件。
+
+| `batchSize` | 单批大小 | 适用场景 |
+|-------------|----------|----------|
+| `SMALL` | 16 KiB | 事件量小、希望尽快看到数据 |
+| `MEDIUM`（默认） | 512 KiB | 通用 |
+| `LARGE` | 4 MiB | 事件量大、希望减少请求次数 |
+
+| `uploadFrequency` | 间隔 | 适用场景 |
+|-------------------|------|----------|
+| `RARE` | 30 秒 | 弱网或对功耗敏感 |
+| `NORMAL`（默认） | 10 秒 | 通用 |
+| `FREQUENT` | 5 秒 | 调试接入、需要快速验证 |
+
+<Tip>
+接入调试阶段可临时使用 `batchSize: 'SMALL'` + `uploadFrequency: 'FREQUENT'`，让事件更快出现在控制台；上线前改回默认值。
+</Tip>
+
+## 使用代理上报
+
+如果客户端网络无法直连 Flashduty intake，或你需要统一出网口，可以配置 `proxy`。SDK 会把请求发到你的代理地址，并通过 `ddforward` 查询参数携带原始路径。
+
+```ts
+await init({
+  // ...
+  site: 'browser.flashcat.cloud',
+  proxy: 'https://rum-proxy.example.com/forward',
+});
+```
+
+代理服务需要把请求原样转发到 `https://<site><ddforward 解码后的路径>`，并保留 `DD-API-KEY` 请求头和请求体。请求体是换行分隔的 JSON，`Content-Type` 为 `text/plain;charset=UTF-8`，转发时不要改写。
+
+<Warning>
+配置 `proxy` 后，SDK 会用代理的 host 来识别并跳过自身上报请求，避免循环采集。请确保代理地址是完整的绝对 URL。
+</Warning>
+
+## 手动上报错误
+
+主进程中被你自己 `try/catch` 掉的异常不会被自动采集，需要显式上报：
+
+```ts
+import { addError } from '@flashcatcloud/electron-sdk';
+
+try {
+  await syncWorkspace();
+} catch (error) {
+  addError(error, {
+    context: { component: 'sync', workspaceId: 'ws-1001' },
+  });
+}
+```
+
+| 选项 | 类型 | 说明 |
+|------|------|------|
+| `context` | `Record<string, unknown>` | 写入事件 `context` 的自定义属性 |
+| `startTime` | `number` | 错误发生的时间戳，缺省为当前时间 |
+
+手动上报的错误 `error.source` 为 `custom`、`error.handling` 为 `handled`，可在查看器中与未捕获异常区分。
+
+## 结束当前会话
+
+需要在用户登出等场景下主动切断会话时，调用 `stopSession()`。当前会话立即过期，后续活跃信号会开启一个新会话。
+
+```ts
+import { stopSession } from '@flashcatcloud/electron-sdk';
+
+stopSession();
+```
+
+## Operation 监控（预览）
+
+用成对的起止调用跟踪关键业务流程，服务端按 `name`（及可选的 `operationKey`）关联，生成 `vital` 事件。
+
+```ts
+import { startOperation, succeedOperation, failOperation } from '@flashcatcloud/electron-sdk';
+
+startOperation('checkout');
+try {
+  await runCheckout();
+  succeedOperation('checkout');
+} catch (error) {
+  failOperation('checkout', 'error');
+}
+
+// 同名并行操作用 operationKey 区分
+startOperation('upload', { operationKey: 'profile_pic' });
+startOperation('upload', { operationKey: 'cover_photo' });
+succeedOperation('upload', { operationKey: 'profile_pic' });
+failOperation('upload', 'abandoned', { operationKey: 'cover_photo' });
+```
+
+| 参数 | 说明 |
+|------|------|
+| `name` | 必填，仅允许字母、数字和 `_` `.` `@` `$` `-` |
+| `failureReason` | `'error'`、`'abandoned'` 或 `'other'` |
+| `options.operationKey` | 区分同名的并行操作 |
+| `options.context` | 合并进事件 `context` 的自定义属性 |
+| `options.description` | 写入 `vital.description` 的描述 |
+
+由于关联发生在服务端，你可以**在一个进程开始、在另一个进程结束**——例如渲染进程点击「结算」时 `startOperation`，主进程完成落单后 `succeedOperation`。
+
+<Warning>
+该 API 处于预览阶段，签名可能在正式版前调整。
+</Warning>
+
+## 上传 sourcemap
+
+Electron 应用发布时通常会压缩 JavaScript 产物，错误堆栈因此只有压缩后的文件名和行列号。上传 sourcemap 后，Flashduty 会在异常详情中展示还原后的源码位置。
+
+<Warning>
+当前版本**只有渲染进程的 JavaScript 错误栈**支持反混淆。主进程错误栈是 Node.js 原生的 V8 格式，服务端的 JavaScript 栈解析器暂不识别，会按原始栈展示。上传 sourcemap 不会改变主进程错误的展示效果。
+</Warning>
+
+### 生成 sourcemap
+
+在渲染进程的打包配置中开启 sourcemap 输出：
+
+<CodeGroup>
+```ts vite.config.ts
+export default defineConfig({
+  build: { sourcemap: true },
+});
+```
+
+```js webpack.config.js
+module.exports = {
+  mode: 'production',
+  devtool: 'source-map',
+};
+```
+
+```ts build.ts
+await esbuild.build({
+  sourcemap: true,
+});
+```
+</CodeGroup>
+
+<Warning>
+不要把 `.map` 文件打进最终分发的应用包。请在上传后、打包 asar 之前把它们从产物目录中移除，避免泄露源码。
+</Warning>
+
+### 上传到 Flashduty
+
+使用 [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli) 上传：
+
+```bash
+flashcat-cli sourcemaps upload \
+  --service my-electron-app \
+  --release-version 1.0.0 \
+  --minified-path-prefix <压缩文件路径前缀> \
+  --api-key <YOUR_API_KEY> \
+  ./out/renderer
+```
+
+`--minified-path-prefix` 需要与错误堆栈中实际出现的 URL 前缀一致。**匹配只使用 URL 的 path 部分**，协议和 host 会被忽略——例如 `file:///opt/app/dist/renderer.js`、`app:///opt/app/dist/renderer.js` 与 `/opt/app/dist/renderer.js` 三者等价。
+
+Electron 下的前缀取决于渲染进程的页面加载方式：
+
+| 页面加载方式 | 堆栈中的 URL 形态 | `--minified-path-prefix` |
+|--------------|-------------------|--------------------------|
+| 开发态 dev server | `http://localhost:5173/assets/index.js` | `http://localhost:5173/assets` |
+| 自定义协议 | `app://assets/index.js` | `app://assets` |
+| 远程页面 | `https://app.example.com/assets/index.js` | `https://app.example.com/assets` |
+| `loadFile()`（`file://`） | `file:///opt/myapp/resources/app.asar/dist/renderer.js` | `file:///opt/myapp/resources/app.asar/dist`，或等价的 `/opt/myapp/resources/app.asar/dist` |
+
+<Warning>
+使用 `loadFile()` 时，堆栈里的路径是**应用运行时的安装路径**，它在构建期不可知，且逐台机器不同：
+
+- macOS：装在 `/Applications` 还是 `~/Applications` 由用户决定
+- Windows：路径通常形如 `C:/Users/<用户名>/AppData/Local/Programs/<app>/…`，包含用户名
+- Linux AppImage：每次启动都挂载到新的 `/tmp/.mount_XXXXXX/…`
+
+因此一次上传只能匹配一个固定的安装位置，无法覆盖真实分发场景。**建议在打包产物中改用自定义协议加载渲染进程页面**（通过 `protocol.handle()` 注册 `app://` 并 `loadURL('app://index.html')`），这样堆栈路径在所有机器上都稳定，同时也满足[启用桥接](/zh/rum/sdk/electron/sdk-integration#配置-allowedwebviewhosts-启用桥接)的要求。
+</Warning>
+
+<Tip>
+上传前先在控制台的异常详情里查看真实错误堆栈中的文件 URL，再据此确定前缀。前缀对不上时，sourcemap 能上传成功但堆栈不会被还原。
+</Tip>
+
+<Warning>
+`--service` 与 `--release-version` 必须与 SDK 初始化中的 `service` 和 `version` 完全一致。请把 sourcemap 上传纳入发布构建流程，并在每次版本发布时重新上传。
+</Warning>
+
+更多说明见[源码映射与异常追踪](/zh/rum/error-tracking/source-mapping)。
+
+## 相关页面
+
+<CardGroup cols={3}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/electron/sdk-integration">
+完成主进程与渲染进程的双进程接入。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/electron/compatible">
+了解支持范围与当前限制。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/electron/data-collection">
+查看两个进程分别采集的事件类型与字段。
+</Card>
+</CardGroup>

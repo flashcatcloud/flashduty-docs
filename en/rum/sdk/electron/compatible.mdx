@@ -1,0 +1,102 @@
+---
+title: "Electron SDK compatibility"
+description: "Review supported Electron versions, operating systems, bundlers, module formats, and current limits for the Electron RUM SDK"
+keywords: ["RUM", "Electron SDK", "compatibility", "bundlers", "known limits"]
+---
+
+This page describes the Electron SDK support scope and current limits so you can confirm whether your project meets the requirements before integration.
+
+## Support scope
+
+| Item | Support |
+|------|---------|
+| Electron version | 39 and later (`peerDependencies: electron >= 39`) |
+| Operating systems | macOS, Windows, Linux |
+| Main-process package | `@flashcatcloud/electron-sdk` |
+| Renderer package | `@flashcatcloud/browser-rum` (the same package as the Web SDK) |
+| Module formats | Both CommonJS and ESM builds are shipped |
+| RUM data source | Main-process events, and renderer events when the bridge is enabled, carry `source: "electron"` |
+| Reporting | `POST https://<site>/api/v2/rum` |
+
+## Bundlers
+
+| Tool | Support | Notes |
+|------|---------|-------|
+| Vite / electron-vite / Forge + Vite | Plugin provided | `@flashcatcloud/electron-sdk/vite-plugin` |
+| Webpack / Forge + Webpack | Plugin provided | `@flashcatcloud/electron-sdk/webpack-plugin` |
+| esbuild | Plugin provided | `@flashcatcloud/electron-sdk/esbuild-plugin` |
+| No main-process bundling (running `.js` directly) | Supported | Write `import '@flashcatcloud/electron-sdk/instrument'` as the first import |
+| Other bundlers | No plugin | You must guarantee the instrument entry point runs before `require('electron')` and keep `dd-trace` and the SDK external |
+
+<Warning>
+When the main process is bundled, the matching plugin is **required**. Otherwise the bundler's `require` hoisting breaks the `dd-trace` module hook order: the SDK still initializes and reports main-process data, but `BrowserWindow` preload injection fails and renderer processes never receive the bridge object.
+</Warning>
+
+## Renderer page loading
+
+Whether a renderer can hand events to the main process through the bridge depends on whether its page host matches `allowedWebViewHosts`.
+
+| Loading method | Bridge available | Notes |
+|----------------|------------------|-------|
+| `loadURL('http://localhost:<port>')` | Yes | Set `allowedWebViewHosts: ['localhost']` |
+| `loadURL('https://<host>')` | Yes | Set the matching domain; matching supports subdomain suffixes |
+| Custom protocol (`protocol.handle()` + `loadURL('app://…')`) | Yes | Add the custom protocol host to the allowlist |
+| `loadFile()` (`file://`) | No | `location.hostname` is an empty string and cannot match the allowlist; the renderer falls back to direct upload |
+
+## Automatic collection
+
+| Capability | Support | Notes |
+|------------|---------|-------|
+| Main-process session | Supported | Persisted at `userData/_dd_s`, reused after restart |
+| Main-process view | Supported | One view per main-process instance |
+| Node uncaught exceptions / promise rejections | Supported | `process.on('uncaughtException' \| 'unhandledRejection')` |
+| Main-process HTTP requests | Supported | Traced by `dd-trace` for `http`/`https`, `fetch`, and `net.fetch`, converted to `resource` |
+| Native crash capture | Supported | Electron `crashReporter` writes minidumps, parsed and uploaded on the next startup |
+| Native crash symbolication | Not supported | See "Current limits" |
+| Renderer view / action / resource / error / Web Vitals | Supported | Collected by `@flashcatcloud/browser-rum` |
+| Session Replay | Not supported | See "Current limits" |
+
+## Current limits
+
+| Limit | Description |
+|-------|-------------|
+| Native crash symbolication | There is no desktop (macOS / Windows / Linux) symbolication pipeline yet. Crash events are stored and displayed with thread stacks and module lists, but only as **raw addresses** — no function names or line numbers |
+| Main-process JS stack resolution | Main-process stacks use the native Node.js V8 format, which the backend JavaScript stack parser does not recognize yet, so they are displayed as-is. Source map upload only affects renderer errors |
+| Source map matching for `file://` pages | With `loadFile()`, stack paths are runtime installation paths that differ per machine, so a single upload matches only one fixed install location. Load pages over a custom protocol instead |
+| Session Replay | Not supported. The `defaultPrivacyLevel` parameter is forwarded to renderers but currently has no effect |
+| APM / distributed tracing | Flashduty has no span intake today. IPC and child-process command spans collected by `dd-trace` are dropped locally; only HTTP spans become RUM `resource` events |
+| Log reporting | Log-type events sent over the bridge from renderers are not forwarded to the backend in this version |
+| Main-process Web Vitals | The main process is a Node.js runtime with no DOM or rendering pipeline, so it produces no LCP / INP / CLS, long task, or user action data |
+| Session renewal signal | Only renderer `click` actions extend the session. A purely background main process enters a new session after 15 minutes without interaction |
+| `site` values | Only `browser.flashcat.cloud` (production) and `jira.flashcat.cloud` (internal staging) are accepted. For private deployments, forward through the `proxy` parameter — see [Advanced configuration](/en/rum/sdk/electron/advanced-config#report-through-a-proxy) |
+| Main-process view counters | `view.action.count` and its siblings count main-process events only, not events bridged from renderers |
+
+## Symbolication compatibility
+
+| Frame type | Resolution | Files to upload |
+|------------|------------|-----------------|
+| Renderer JavaScript | Source maps restore the original file, function name, and line/column | `.map` files produced by the build |
+| Main-process JavaScript | Not resolved in this version; displayed as the raw V8 stack | — |
+| Native crash frames (C/C++) | Not resolved in this version | — |
+
+See [Advanced configuration · Upload source maps](/en/rum/sdk/electron/advanced-config#upload-source-maps) for the upload procedure.
+
+<Tip>
+The `service` and `version` values used at upload time must exactly match the ones passed to the SDK. Otherwise the console receives error events but cannot map stack frames back to source. Make source map upload part of your release build.
+</Tip>
+
+## Related pages
+
+<CardGroup cols={3}>
+<Card title="SDK integration" icon="plug" href="/en/rum/sdk/electron/sdk-integration">
+Integrate both the main process and renderer processes.
+</Card>
+
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/electron/advanced-config">
+Configure batching, proxy, manual reporting, and source map upload.
+</Card>
+
+<Card title="Data collection" icon="database" href="/en/rum/sdk/electron/data-collection">
+See which event types and fields each process contributes.
+</Card>
+</CardGroup>
