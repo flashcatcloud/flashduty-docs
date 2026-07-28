@@ -169,6 +169,61 @@ BYOC Runner 的出网策略由您的机器和防火墙决定。云端 Sandbox �
 `connect-url` 与 `install_script_url` 都由后端下发，前端不会硬编码。私有化或离线部署可以把安装脚本分发源替换为内部镜像，但镜像需要同时提供 `install.sh`、`releases/latest` 与 `releases/download/<version>/...` release assets。
 </Note>
 
+### 连接使用自签证书的私有化端点
+
+Runner 默认会校验控制 WebSocket 的证书链和主机名。私有化端点使用自签证书时，优先把对应 CA 加入 Runner 所在系统或容器的信任库；只有无法安装 CA、且端点位于可信私有网络内时，才关闭校验。
+
+| 配置方式 | 值 | 默认值 | 说明 |
+|---|---|---|---|
+| 环境变量 | `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true` | `false` | 适用于 systemd、Docker 和其他进程管理器 |
+| 命令行参数 | `--insecure-skip-tls-verify` | 未启用 | 适用于手动运行；命令行参数优先于环境变量 |
+
+<Tabs>
+  <Tab title="Linux (systemd)">
+    编辑 `/etc/flashduty-runner/env`，写入私有化端点和 TLS 配置：
+
+    ```bash
+    FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws
+    FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true
+    ```
+
+    重启 Runner，让新的环境变量生效：
+
+    ```bash
+    sudo systemctl restart flashduty-runner
+    ```
+  </Tab>
+  <Tab title="Docker">
+    创建容器时传入环境变量：
+
+    ```bash
+    docker run -d \
+      --name flashduty-runner \
+      -e FLASHDUTY_RUNNER_TOKEN=<your-token> \
+      -e FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws \
+      -e FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true \
+      -v /var/flashduty/workspace:/workspace \
+      registry.flashcat.cloud/public/flashduty-runner:latest
+    ```
+  </Tab>
+  <Tab title="手动 / macOS">
+    启动时传入命令行参数：
+
+    ```bash
+    flashduty-runner run \
+      --token <your-token> \
+      --url wss://private.example.com/safari/environment/ws \
+      --insecure-skip-tls-verify
+    ```
+
+    如果环境变量已经设为 `true`，可以传入 `--insecure-skip-tls-verify=false`，显式恢复证书校验。
+  </Tab>
+</Tabs>
+
+<Warning>
+开启后，Runner 不再校验控制 WebSocket 的证书链和主机名，攻击者可能冒充控制端。该开关只影响 Runner 到 AI SRE 的控制 WebSocket，不会改变任务执行期间 MCP、A2A 或其他 HTTPS 请求的 TLS 配置。Runner 启动时会在日志中明确提示校验已关闭。
+</Warning>
+
 ### Linux 服务用户
 
 Linux (systemd) 安装默认使用安装脚本自动创建的 `flashduty` 用户。该用户没有 sudo 权限，systemd unit 会启用 `NoNewPrivileges=true`、`ProtectSystem=strict`、`PrivateTmp=true` 等限制，并只把 Runner 的状态目录设为可写。
@@ -366,6 +421,9 @@ permission:
 </Accordion>
 <Accordion title="Runner 一直等待首次连接" icon="wrench">
   等待中说明这条 Environment 从未成功连接过。请确认安装命令完整执行、Token 属于这条 Environment、`URL` 从目标机器可达。如果使用了权限配置，也要确认配置文件存在且 YAML 可解析。
+</Accordion>
+<Accordion title="日志提示 certificate signed by unknown authority" icon="shield-xmark">
+  私有化端点的证书未被 Runner 信任。优先把签发该证书的 CA 加入 Runner 所在系统或容器的信任库；如果端点使用自签证书且位于可信私有网络内，也可以按上文说明显式开启 `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY`。systemd 部署需要重启服务，Docker 部署需要用新的环境变量重新创建容器，手动运行的进程需要重新启动。
 </Accordion>
 <Accordion title="会话提示连接超时或无响应" icon="server">
   如果会话固定到了某个离线 Runner，AI SRE 不会偷偷改派到其他环境。请先恢复该 Runner，或新建会话并选择“自动”或“云端 Sandbox”。如果 Runner 在线但任务失败，多半是 Runner 到目标资源这一段的网络或权限问题。
