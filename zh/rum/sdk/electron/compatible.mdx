@@ -1,0 +1,102 @@
+---
+title: "Electron SDK 兼容性"
+description: "了解 Electron RUM SDK 支持的 Electron 版本、操作系统、打包工具、模块格式和当前限制"
+keywords: ["RUM", "Electron SDK", "兼容性", "打包工具", "已知限制"]
+---
+
+本文说明 Electron SDK 的支持范围和当前限制，帮助你在接入前判断工程是否满足要求。
+
+## 支持范围
+
+| 项目 | 支持情况 |
+|------|----------|
+| Electron 版本 | 39 及以上（`peerDependencies: electron >= 39`） |
+| 操作系统 | macOS、Windows、Linux |
+| 主进程包 | `@flashcatcloud/electron-sdk` |
+| 渲染进程包 | `@flashcatcloud/browser-rum`（与 Web SDK 同一个包） |
+| 模块格式 | 同时提供 CommonJS 与 ESM 产物 |
+| RUM 数据源 | 主进程与桥接生效的渲染进程事件写入 `source: "electron"` |
+| 数据上报 | `POST https://<site>/api/v2/rum` |
+
+## 打包工具
+
+| 工具 | 支持情况 | 说明 |
+|------|----------|------|
+| Vite / electron-vite / Forge + Vite | 提供插件 | `@flashcatcloud/electron-sdk/vite-plugin` |
+| Webpack / Forge + Webpack | 提供插件 | `@flashcatcloud/electron-sdk/webpack-plugin` |
+| esbuild | 提供插件 | `@flashcatcloud/electron-sdk/esbuild-plugin` |
+| 不打包主进程（直接运行 `.js`） | 支持 | 手写 `import '@flashcatcloud/electron-sdk/instrument'` 作为第一行导入即可 |
+| 其他打包工具 | 未提供插件 | 需要你自行保证 instrument 入口先于 `require('electron')` 执行，并把 `dd-trace` 与 SDK 保留为 external |
+
+<Warning>
+主进程被打包时**必须**使用对应插件，否则打包工具的 `require` 提升会破坏 `dd-trace` 的模块挂钩顺序：SDK 仍能初始化并上报主进程数据，但 `BrowserWindow` 的 preload 注入会失效，渲染进程拿不到桥接对象。
+</Warning>
+
+## 渲染进程页面加载方式
+
+渲染进程能否通过桥接把事件交给主进程，取决于页面 host 是否命中 `allowedWebViewHosts`。
+
+| 加载方式 | 桥接可用 | 说明 |
+|----------|----------|------|
+| `loadURL('http://localhost:<port>')` | 支持 | 配置 `allowedWebViewHosts: ['localhost']` |
+| `loadURL('https://<host>')` | 支持 | 配置对应域名，匹配规则支持子域名后缀 |
+| 自定义协议（`protocol.handle()` + `loadURL('app://…')`） | 支持 | 把自定义协议的 host 加入白名单 |
+| `loadFile()`（`file://`） | 不支持 | `location.hostname` 为空字符串，无法匹配白名单；渲染进程会退化为直连上报 |
+
+## 自动采集能力
+
+| 能力 | 支持情况 | 说明 |
+|------|----------|------|
+| 主进程会话 | 支持 | 持久化在 `userData/_dd_s`，重启可续用 |
+| 主进程 view | 支持 | 每个主进程实例一个 view |
+| Node 未捕获异常 / Promise 拒绝 | 支持 | `process.on('uncaughtException' \| 'unhandledRejection')` |
+| 主进程 HTTP 请求 | 支持 | 由 `dd-trace` 追踪 `http`/`https`、`fetch`、`net.fetch`，转成 `resource` |
+| 原生崩溃采集 | 支持 | Electron `crashReporter` 写 minidump，下次启动解析上报 |
+| 原生崩溃符号化 | 不支持 | 见「当前限制」 |
+| 渲染进程 view / action / resource / error / Web Vitals | 支持 | 由 `@flashcatcloud/browser-rum` 采集 |
+| Session Replay | 不支持 | 见「当前限制」 |
+
+## 当前限制
+
+| 限制 | 说明 |
+|------|------|
+| 原生崩溃符号化 | 桌面端（macOS / Windows / Linux）尚无符号解析链路。崩溃事件能正常落库并展示线程栈与模块列表，但只有**原始地址**，不会还原为函数名和行号 |
+| 主进程 JS 栈反混淆 | 主进程错误栈是 Node.js 原生的 V8 格式，服务端 JavaScript 栈解析器暂不识别，按原始栈展示。上传 sourcemap 只对渲染进程错误生效 |
+| `file://` 页面的 sourcemap 匹配 | 使用 `loadFile()` 时堆栈路径是运行时安装路径，逐台机器不同，一次上传只能匹配固定安装位置。建议改用自定义协议加载页面 |
+| Session Replay | 当前不支持。`defaultPrivacyLevel` 参数会传递给渲染进程，但暂不产生实际效果 |
+| APM / 分布式追踪 | Flashduty 当前没有 span 上报入口。`dd-trace` 采集的 IPC 调用与子进程命令 span 在本地丢弃，只有 HTTP span 会转成 RUM `resource` 事件 |
+| 日志上报 | 渲染进程通过桥接发来的 log 类型事件当前不会转发到服务端 |
+| 主进程 Web Vitals | 主进程是 Node.js 运行时，没有 DOM 和渲染管线，不会产生 LCP / INP / CLS、long task 和用户操作数据 |
+| 会话续期信号 | 目前只有渲染进程的 `click` action 会续期会话。纯后台运行的主进程会在 15 分钟无交互后进入新会话 |
+| `site` 取值 | 只接受 `browser.flashcat.cloud`（生产）与 `jira.flashcat.cloud`（内部预发）。私有化部署请使用 `proxy` 参数转发，见[高级配置](/zh/rum/sdk/electron/advanced-config#使用代理上报) |
+| 主进程 view 计数 | `view.action.count` 等计数只统计主进程事件，不包含桥接过来的渲染进程事件 |
+
+## 符号解析兼容性
+
+| 栈帧类型 | 解析方式 | 所需上传文件 |
+|----------|----------|--------------|
+| 渲染进程 JavaScript | 使用 sourcemap 还原源文件、函数名和行列号 | 构建产生的 `.map` 文件 |
+| 主进程 JavaScript | 当前不解析，按原始 V8 栈展示 | — |
+| 原生崩溃帧（C/C++） | 当前不解析 | — |
+
+上传方式见[高级配置 · 上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap)。
+
+<Tip>
+上传时的 `service` 与 `version` 必须与 SDK 初始化中的值完全一致，否则控制台可以收到错误事件，但无法把栈帧还原到源码位置。请把 sourcemap 上传纳入发布构建流程。
+</Tip>
+
+## 相关页面
+
+<CardGroup cols={3}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/electron/sdk-integration">
+完成主进程与渲染进程的双进程接入。
+</Card>
+
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/electron/advanced-config">
+配置上报批次、代理、手动上报与 sourcemap 上传。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/electron/data-collection">
+查看两个进程分别采集的事件类型与字段。
+</Card>
+</CardGroup>

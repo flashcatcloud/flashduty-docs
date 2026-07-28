@@ -1,0 +1,282 @@
+---
+title: "Electron SDK integration"
+description: "Integrate the Flashduty RUM SDK into Electron desktop applications, covering both the main process and renderer processes"
+keywords: ["RUM", "Electron SDK", "desktop monitoring", "main process", "renderer process"]
+---
+
+An Electron application runs a **main process** (Node.js) and one or more **renderer processes** (Chromium). Because the two runtimes are completely different, Electron RUM integration requires two packages:
+
+| Process | Package | What it collects |
+|---------|---------|------------------|
+| Main process | `@flashcatcloud/electron-sdk` | Session, view, Node errors, native crashes, main-process network requests |
+| Renderer process | `@flashcatcloud/browser-rum` | Page views, user actions, front-end resources, JS errors, Web Vitals |
+
+<Warning>
+Installing only one half is the most common integration mistake. With only the main-process SDK you lose all front-end interaction data. With only the renderer SDK you lose the session, main-process errors, and native crashes, and events carry `source: browser` instead of `electron`. Integrate both processes.
+</Warning>
+
+## How it works
+
+The main-process SDK is the **single exit point** for the whole pipeline. It does three things:
+
+1. Uses `dd-trace` to hook `require('electron')`, wrap `BrowserWindow`, and inject a preload script into every renderer process that exposes a global `DatadogEventBridge` object.
+2. The renderer's `@flashcatcloud/browser-rum` detects that bridge and sends its collected events back to the main process over IPC instead of uploading them itself.
+3. The main process enriches events from both sides with common context (application, session, view, version), buffers them to disk in batches, and uploads them to `POST https://<site>/api/v2/rum`.
+
+```mermaid
+graph TB
+    subgraph Electron application
+        subgraph Renderer process
+            BR["@flashcatcloud/browser-rum"]
+        end
+        subgraph Main process
+            DDT["dd-trace"]
+            SDK["@flashcatcloud/electron-sdk"]
+        end
+    end
+    FC[("Flashduty RUM")]
+    BR -->|DatadogEventBridge / IPC| SDK
+    DDT -->|HTTP span| SDK
+    SDK -->|POST /api/v2/rum| FC
+```
+
+<Note>
+Internal module names, plugin names, and the bridge object keep the `Datadog` / `dd-` prefix (for example `DatadogEventBridge` and `datadogVitePlugin`). This follows the upstream fork naming convention and does not affect data routing — events are only sent to the Flashduty `site` you configure.
+</Note>
+
+## Prerequisites
+
+- Electron 39 or later (the SDK declares `peerDependencies: electron >= 39`)
+- An **Electron** application created on the [RUM applications](https://console.flashcat.cloud/rum/apps) page of the Flashduty console, with its **Application ID** and **Client Token**
+- Network access from your application to `https://browser.flashcat.cloud/api/v2/rum`
+
+## Install
+
+```bash
+# Main process
+npm install @flashcatcloud/electron-sdk
+
+# Renderer process
+npm install @flashcatcloud/browser-rum
+```
+
+## Main process integration
+
+### Import the instrument entry point
+
+`@flashcatcloud/electron-sdk/instrument` must run **before any `electron` import**. It initializes `dd-trace`, which has to register its module hooks before `require('electron')` happens. Otherwise `BrowserWindow` preload injection never takes effect and renderer processes never receive the bridge object.
+
+```ts main.ts
+// Must be the first import in the file
+import '@flashcatcloud/electron-sdk/instrument';
+
+import { app, BrowserWindow } from 'electron';
+```
+
+<Warning>
+Do not let a formatter or import-sorting rule move this line down. If your project uses ESLint's `import/order` or `simple-import-sort`, add an ignore comment for this line.
+</Warning>
+
+### Initialize the SDK
+
+Call `init()` before creating any `BrowserWindow`. It is asynchronous and returns `true` when the configuration is valid and initialization succeeded.
+
+```ts main.ts
+import '@flashcatcloud/electron-sdk/instrument';
+
+import { app, BrowserWindow } from 'electron';
+import { init } from '@flashcatcloud/electron-sdk';
+
+void app.whenReady().then(async () => {
+  await init({
+    applicationId: '<YOUR_APPLICATION_ID>',
+    clientToken: '<YOUR_CLIENT_TOKEN>',
+    service: 'my-electron-app',
+    site: 'browser.flashcat.cloud',
+    env: 'production',
+    version: app.getVersion(),
+    // Allows renderer processes to report through the bridge, see below
+    allowedWebViewHosts: ['localhost'],
+  });
+
+  createWindow();
+});
+```
+
+#### Required parameters
+
+<ParamField body="applicationId" type="string" required>
+Application ID, available on the applications page
+</ParamField>
+
+<ParamField body="clientToken" type="string" required>
+Client token, available on the applications page
+</ParamField>
+
+<ParamField body="service" type="string" required>
+Service name used to distinguish services. Use the same value when uploading source maps
+</ParamField>
+
+<ParamField body="site" type="string" required>
+Reporting site, used directly as the intake host. Only `browser.flashcat.cloud` (production) and `jira.flashcat.cloud` (internal staging) are accepted
+</ParamField>
+
+<Warning>
+`clientToken` is only for client-side RUM reporting — never put a server-side key in client code. Passing a `site` outside the allowlist makes `init()` return `false`, and the SDK does not start.
+</Warning>
+
+See [Advanced configuration](/en/rum/sdk/electron/advanced-config) for the full list of optional parameters.
+
+## Bundler plugins
+
+`dd-trace` depends on runtime module loading order, but bundlers (Vite, Webpack, esbuild) reorder, inline, or hoist `require()` calls, which strips `import '@flashcatcloud/electron-sdk/instrument'` of its "runs first" position. The SDK therefore ships three bundler plugins that:
+
+- Mark `dd-trace` and `@flashcatcloud/electron-sdk` as external so they stay runtime `require`s
+- Prepend the instrument initialization to the very top of the main-process entry chunk (**so you no longer need to write that import by hand**)
+- Copy the `dd-trace` preload script and the externalized dependencies into the build output's `node_modules`, so packaged applications (such as Electron Forge asars) can resolve them at runtime
+
+Pick **one** that matches your build setup.
+
+<Tabs>
+<Tab title="Vite">
+For electron-vite and Electron Forge + Vite.
+
+```ts vite.config.ts
+import { defineConfig } from 'vite';
+import { datadogVitePlugin } from '@flashcatcloud/electron-sdk/vite-plugin';
+
+export default defineConfig({
+  plugins: [datadogVitePlugin()],
+});
+```
+
+<Note>
+Add the plugin to the **main process** build configuration. In electron-vite that is the `main` section, not `renderer`.
+</Note>
+</Tab>
+
+<Tab title="Webpack">
+For Electron Forge + Webpack.
+
+```js webpack.main.config.js
+const { DatadogWebpackPlugin } = require('@flashcatcloud/electron-sdk/webpack-plugin');
+
+module.exports = {
+  plugins: [new DatadogWebpackPlugin()],
+};
+```
+
+The plugin also excludes `dd-trace` and the SDK from `@vercel/webpack-asset-relocator-loader`, which would otherwise break `dd-trace`'s internal dynamic `require.resolve`.
+</Tab>
+
+<Tab title="esbuild">
+```ts build.ts
+import * as esbuild from 'esbuild';
+import { datadogEsbuildPlugin } from '@flashcatcloud/electron-sdk/esbuild-plugin';
+
+await esbuild.build({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  platform: 'node',
+  outfile: 'dist/main.js',
+  plugins: [datadogEsbuildPlugin()],
+});
+```
+</Tab>
+</Tabs>
+
+<Tip>
+With ESM output, static imports are evaluated before module code runs, so `dd-trace`'s hooks cannot intercept `import 'electron'`. All three plugins handle this by registering the preload directly through `session.defaultSession.registerPreloadScript()`, which is equivalent. No extra configuration is needed.
+</Tip>
+
+## Renderer process integration
+
+Pages loaded by renderer processes are integrated exactly like a [Web SDK](/en/rum/sdk/web/sdk-integration) NPM installation — the initialization code is unchanged.
+
+```ts renderer.ts
+import { flashcatRum } from '@flashcatcloud/browser-rum';
+
+flashcatRum.init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  site: 'browser.flashcat.cloud',
+  env: 'production',
+  version: '1.0.0',
+  sessionSampleRate: 100,
+  trackResources: true,
+  trackLongTasks: true,
+  trackUserInteractions: true,
+});
+```
+
+<Tip>
+Keep `applicationId`, `clientToken`, `service`, `env`, and `version` identical to the main-process `init()`. Otherwise the two sides land in different applications or versions and cannot be correlated in a single session.
+</Tip>
+
+### Enable the bridge with allowedWebViewHosts
+
+The renderer SDK only routes events through the bridge when **the current page host matches the main process `allowedWebViewHosts` allowlist**. Otherwise it falls back to behaving like a plain web application, uploading directly to the intake with `source: browser` instead of `electron`.
+
+`allowedWebViewHosts` defaults to an empty array `[]`, which means **the bridge is disabled by default**. Configure it explicitly based on how you load pages:
+
+| How the renderer loads its page | `location.hostname` | Recommended configuration |
+|---------------------------------|---------------------|---------------------------|
+| `win.loadURL('http://localhost:5173')` (dev server) | `localhost` | `allowedWebViewHosts: ['localhost']` |
+| `win.loadURL('https://app.example.com')` (remote page) | `app.example.com` | `allowedWebViewHosts: ['example.com']` — matching supports subdomain suffixes |
+| `win.loadFile('dist/index.html')` (`file://`) | empty string | See the note below |
+
+<Warning>
+With `loadFile()` the page runs under the `file://` protocol, where `location.hostname` is an empty string. It cannot match any allowlist entry, so the bridge stays disabled and the renderer uploads directly — main-process and renderer events will not share a session.
+
+If you need full two-process session correlation, load the page over a custom protocol or a local HTTP server in packaged builds (for example register an `app://` protocol with `protocol.handle()` and call `loadURL('app://index.html')`), then add that host to `allowedWebViewHosts`.
+</Warning>
+
+### Behavior with and without the bridge
+
+| Behavior | Bridge enabled | Bridge disabled |
+|----------|----------------|-----------------|
+| Event `source` | `electron` | `browser` |
+| Upload path | Batched by the main process | Each renderer uploads directly to the intake |
+| Session | Shares the main-process `session.id` | Renderer generates its own session |
+| Offline retry | Buffered to disk under the main process `userData`, resent after restart | Relies on browser-side buffering, lost when the process exits |
+| User activity | Renderer clicks extend the main-process session | No effect on each other |
+
+## Verify the integration
+
+<Steps>
+<Step title="Start the application and watch the console">
+The main-process log prints SDK initialization output. When `init()` returns `false` it also prints the specific configuration error, such as a `site` outside the allowlist.
+</Step>
+
+<Step title="Trigger events">
+- Main process: make an HTTP request and throw an uncaught exception
+- Renderer process: click page elements, change routes, and issue a `fetch`
+</Step>
+
+<Step title="Confirm the data in the console">
+Open the corresponding RUM application and filter by `source:electron` in the [Explorer](/en/rum/explorer/overview) to confirm that `view`, `action`, `resource`, and `error` events appear.
+
+The default upload interval is one batch every 10 seconds, so wait a moment before refreshing.
+</Step>
+
+<Step title="Confirm the two processes are correlated">
+Seeing both main-process events (`resource.type` of `native`) and renderer events (`action`, Web Vitals) under the same session means the bridge is working. If renderer events carry `source: browser`, revisit [Enable the bridge](#enable-the-bridge-with-allowedwebviewhosts) and check `allowedWebViewHosts`.
+</Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={3}>
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/electron/advanced-config">
+Configure batching, proxy, manual reporting, and source map upload.
+</Card>
+
+<Card title="Compatibility" icon="shield-check" href="/en/rum/sdk/electron/compatible">
+Review supported Electron versions, operating systems, bundlers, and current limits.
+</Card>
+
+<Card title="Data collection" icon="database" href="/en/rum/sdk/electron/data-collection">
+See which event types, fields, and upload behavior each process contributes.
+</Card>
+</CardGroup>
