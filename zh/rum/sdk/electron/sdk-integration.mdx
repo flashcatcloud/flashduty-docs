@@ -12,7 +12,7 @@ Electron 应用由**主进程**（Node.js）和**渲染进程**（Chromium）组
 | 渲染进程 | `@flashcatcloud/browser-rum` | 页面 view、用户操作、前端资源请求、JS 错误、Web Vitals |
 
 <Warning>
-只装一半是最常见的接入错误。只装主进程 SDK 会丢失全部前端交互数据；只装渲染进程 SDK 则拿不到会话、主进程错误和原生崩溃，且事件的 `source` 是 `browser` 而不是 `electron`。请两个进程都完成接入。
+只装一半是最常见的接入错误。只装主进程 SDK 会丢失全部前端交互数据；只装渲染进程 SDK 则拿不到会话、主进程错误和原生崩溃，事件也不会带上关联两个进程的 `container` 信息。请两个进程都完成接入。
 </Warning>
 
 ## 工作原理
@@ -21,7 +21,7 @@ Electron 应用由**主进程**（Node.js）和**渲染进程**（Chromium）组
 
 1. 通过 `dd-trace` 挂钩 `require('electron')`，包装 `BrowserWindow` 并向每个渲染进程注入 preload 脚本，暴露全局对象 `DatadogEventBridge`
 2. 渲染进程的 `@flashcatcloud/browser-rum` 检测到该桥接对象后，把采集到的事件通过 IPC 发回主进程，而不是自己直连上报
-3. 主进程把两侧事件统一补充公共上下文（应用、会话、view、版本），落盘成批，再上报到 `POST https://<site>/api/v2/rum`
+3. 主进程给两侧事件统一补充上下文——自己的事件补全套公共属性，渲染进程事件只覆盖 `session.id` / `application.id` 并补 `container`——然后落盘成批，上报到 `POST https://<site>/api/v2/rum`
 
 ```mermaid
 graph TB
@@ -95,8 +95,6 @@ void app.whenReady().then(async () => {
     site: 'browser.flashcat.cloud',
     env: 'production',
     version: app.getVersion(),
-    // 允许渲染进程通过桥接上报，见下文「渲染进程接入」
-    allowedWebViewHosts: ['localhost'],
   });
 
   createWindow();
@@ -214,33 +212,48 @@ flashcatRum.init({
 `applicationId`、`clientToken`、`service`、`env`、`version` 建议与主进程 `init()` 保持一致，否则两侧数据会被归到不同的应用或版本，无法在同一个会话里串起来。
 </Tip>
 
-### 配置 allowedWebViewHosts 启用桥接
+### 桥接无需配置
 
-渲染进程 SDK 只有在**当前页面的 host 命中主进程的 `allowedWebViewHosts` 白名单**时，才会走桥接把事件交给主进程；否则它会退化成普通 Web 应用，直连 intake 上报，事件的 `source` 为 `browser` 而非 `electron`。
+渲染进程侧**不需要任何额外接线**。主进程注入的 preload 在组装 host 白名单时，总是把窗口自身的 `location.hostname` 并进去：
 
-`allowedWebViewHosts` 的默认值是空数组 `[]`，也就是**默认不启用桥接**。请务必按页面加载方式显式配置：
+```js
+const allowedHosts = [...new Set([location.hostname, ...configuredHosts])]
+```
 
-| 渲染进程页面加载方式 | `location.hostname` | 建议配置 |
-|----------------------|---------------------|----------|
-| `win.loadURL('http://localhost:5173')`（开发态 dev server） | `localhost` | `allowedWebViewHosts: ['localhost']` |
-| `win.loadURL('https://app.example.com')`（远程页面） | `app.example.com` | `allowedWebViewHosts: ['example.com']`，匹配规则支持子域名后缀 |
-| `win.loadFile('dist/index.html')`（`file://` 本地文件） | 空字符串 | 见下方说明 |
+因此窗口自身的页面**永远命中白名单**，桥接开箱即用。`file://` 也不例外——此时 `location.hostname` 是空字符串，白名单为 `[""]`，仍然自匹配。
 
-<Warning>
-使用 `loadFile()` 时页面运行在 `file://` 协议下，`location.hostname` 为空字符串，无法匹配任何白名单项，桥接不会启用。此时渲染进程会直连上报，主进程与渲染进程的事件将不共享同一个会话。
+<Note>
+`allowedWebViewHosts` 不是桥接开关，而是**额外 host 的白名单**。只有当你想接收 `<webview>` 或 `BrowserView` 里加载的**第三方页面**的事件时才需要配置它，例如 `allowedWebViewHosts: ['partner.example.com']`。匹配规则支持子域名后缀。
+</Note>
 
-如果你需要完整的双进程会话关联，请在打包产物中改用自定义协议或本地 HTTP 服务加载页面（例如通过 `protocol.handle()` 注册 `app://` 协议并 `loadURL('app://index.html')`），再把对应 host 加入 `allowedWebViewHosts`。
-</Warning>
+### 桥接未生效时会怎样
 
-### 桥接生效后的行为差异
+桥接失效的原因不是配置，而是 **preload 没有被注入**——通常是主进程未接入 SDK，或主进程被打包但没挂对应的[打包工具插件](#打包工具插件)，导致 `instrument` 入口失去了最先执行的位置。
 
 | 行为 | 桥接生效 | 桥接未生效 |
 |------|----------|------------|
-| 事件 `source` | `electron` | `browser` |
+| 渲染进程事件的 `container.source` | `electron` | 字段缺失 |
 | 上报出口 | 主进程统一批量上报 | 渲染进程各自直连 intake |
 | 会话 | 与主进程共享同一个 `session.id` | 渲染进程独立生成会话 |
 | 离线补报 | 事件落盘到主进程 `userData`，重启后续传 | 依赖浏览器端缓冲，进程退出即丢失 |
 | 用户活跃度 | 渲染进程的点击会续期主进程会话 | 互不影响 |
+
+<Tip>
+`container.source` 是判断桥接是否生效的可靠信号：渲染进程事件带上它，说明 preload 注入成功、事件确实经主进程上报。
+</Tip>
+
+### 两个进程的 source 取值
+
+桥接生效时，主进程只覆盖渲染进程事件的 `session.id` 和 `application.id`，并补上 `container`；渲染进程事件**保留自己的 `source: browser`**。两类事件的标识因此不同：
+
+| 事件来源 | `source` | `container.source` | `view.url` |
+|----------|----------|--------------------|------------|
+| 主进程 | `electron` | 无 | `electron://main-process` |
+| 渲染进程窗口 | `browser` | `electron` | 页面 URL |
+
+<Warning>
+在查看器里筛选时，只用 `source:electron` **只能查到主进程事件**。要选中一个 Electron 应用产生的全部数据，请用 `source:electron OR container.source:electron`。
+</Warning>
 
 ## 验证接入
 
@@ -255,13 +268,15 @@ flashcatRum.init({
 </Step>
 
 <Step title="在控制台确认数据">
-打开对应的 RUM 应用，在[查看器](/zh/rum/explorer/overview)中按 `source:electron` 过滤，确认出现 `view`、`action`、`resource`、`error` 事件。
+打开对应的 RUM 应用，在[查看器](/zh/rum/explorer/overview)中按 `source:electron OR container.source:electron` 过滤，确认出现 `view`、`action`、`resource`、`error` 事件。
 
 默认上报频率为 10 秒一批，请稍等片刻再刷新。
 </Step>
 
 <Step title="确认双进程已关联">
-在同一条会话下同时看到主进程事件（`resource.type` 为 `native`）和渲染进程事件（`action`、Web Vitals），说明桥接已生效。若渲染进程事件的 `source` 是 `browser`，请回到[启用桥接](#配置-allowedwebviewhosts-启用桥接)一节检查 `allowedWebViewHosts`。
+在同一条会话下同时看到主进程事件（`view.url` 为 `electron://main-process`）和渲染进程事件（`action`、Web Vitals），说明桥接已生效。
+
+若渲染进程事件**没有 `container.source` 字段**，说明 preload 未被注入：请检查主进程是否已调用 `init()`，以及主进程被打包时是否挂了[打包工具插件](#打包工具插件)。
 </Step>
 </Steps>
 
