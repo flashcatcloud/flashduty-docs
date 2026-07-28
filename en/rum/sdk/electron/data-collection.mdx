@@ -21,9 +21,9 @@ Electron RUM data comes from two processes and is uploaded by the main process. 
 | Page views, user actions, front-end resources, JS errors, Web Vitals | Renderer process | Enabled | `view` / `action` / `resource` / `error` |
 | SDK internal telemetry | Main process | Enabled (20% sampled) | `telemetry` |
 
-## Common event attributes
+## Common attributes of main-process events
 
-Before sending, the main process enriches every RUM event with common context:
+RUM events produced **by the main process itself** are enriched with the following common context before sending. Renderer events go through a different assembly path — see [How renderer events are identified](#how-renderer-events-are-identified).
 
 | Field | Description |
 |-------|-------------|
@@ -34,11 +34,34 @@ Before sending, the main process enriches every RUM event with common context:
 | `session.type` | Always `user` |
 | `source` | Always `electron` |
 | `view.id` | The active view when the event occurred |
+| `view.name` / `view.url` | Always `main process` / `electron://main-process` |
 | `ddtags` | Includes `sdk_version:<SDK version>` |
 | `_dd.format_version` | Always `2` |
 
+## How renderer events are identified
+
+When the bridge is working, the main process does **not** rewrite the `source` of renderer events. It overrides three fields and adds one:
+
+| Field | What the main process does |
+|-------|----------------------------|
+| `session.id` | Overridden with the main-process session ID |
+| `application.id` | Overridden with the configured application ID |
+| `container.source` | Added as `electron` |
+| `container.view.id` | Added as the current main-process view ID |
+
+The renderer's own `source`, `view`, `service`, and other attributes are preserved. The two kinds of events are therefore identified differently:
+
+| Origin | `source` | `container.source` | `view.url` |
+|--------|----------|--------------------|------------|
+| Main process | `electron` | absent | `electron://main-process` |
+| Renderer window | `browser` | `electron` | the page URL |
+
+<Warning>
+Filtering on `source:electron` alone in the Explorer returns **main-process events only**. To select everything an Electron application produces, use `source:electron OR container.source:electron`.
+</Warning>
+
 <Note>
-Renderer events only carry `source: electron` and the main-process `session.id` when the bridge is enabled. Without the bridge the renderer behaves as a standalone web application and uploads directly with `source: browser`. See [Integration](/en/rum/sdk/electron/sdk-integration#enable-the-bridge-with-allowedwebviewhosts).
+When the bridge is broken (the main process has not integrated the SDK, or it is bundled without the plugin so the preload is never injected), the renderer behaves as a standalone web application and uploads directly: `source` is still `browser`, but there is **no `container` field** and the session is unrelated to the main process. See [What a broken bridge looks like](/en/rum/sdk/electron/sdk-integration#what-a-broken-bridge-looks-like).
 </Note>
 
 ## Session
@@ -153,7 +176,7 @@ The SDK's own requests to the intake (or proxy) are detected and skipped so they
 
 Renderer processes use `@flashcatcloud/browser-rum` and collect exactly what the Web SDK collects: page views, user actions, `fetch` / XHR / static resources, JS errors, long tasks, and Web Vitals (LCP, INP, CLS, and others). See [Web SDK data collection](/en/rum/sdk/web/data-collection) for field details.
 
-When the bridge is enabled, these events go to the main process over IPC for unified upload and additionally receive the main-process `session.id` and common context.
+When the bridge is working, these events go to the main process over IPC for unified upload and additionally receive the main-process `session.id`, `application.id`, and `container` fields — see [How renderer events are identified](#how-renderer-events-are-identified).
 
 <Tip>
 The main process is a Node.js runtime with no DOM and no rendering pipeline, so it produces **no** Web Vitals, long tasks, or user action data. Page performance analysis in the console is based on renderer data.

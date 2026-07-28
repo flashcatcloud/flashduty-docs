@@ -21,9 +21,9 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 | 页面 view、用户操作、前端资源、JS 错误、Web Vitals | 渲染进程 | 开启 | `view` / `action` / `resource` / `error` |
 | SDK 自身遥测 | 主进程 | 开启（采样 20%） | `telemetry` |
 
-## 通用事件属性
+## 主进程事件的公共属性
 
-主进程在发送前会为每条 RUM 事件补充公共上下文：
+**主进程自己产生的** RUM 事件在发送前会被补充以下公共上下文。渲染进程事件走另一条装配路径，见[渲染进程事件的标识](#渲染进程事件的标识)。
 
 | 字段 | 说明 |
 |------|------|
@@ -34,11 +34,34 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 | `session.type` | 固定为 `user` |
 | `source` | 固定为 `electron` |
 | `view.id` | 事件发生时的活跃 view ID |
+| `view.name` / `view.url` | 固定为 `main process` / `electron://main-process` |
 | `ddtags` | 包含 `sdk_version:<SDK 版本>` |
 | `_dd.format_version` | 固定为 `2` |
 
+## 渲染进程事件的标识
+
+桥接生效时，主进程**不会**改写渲染进程事件的 `source`。它只覆盖三处、补上一处：
+
+| 字段 | 主进程的处理 |
+|------|--------------|
+| `session.id` | 覆盖为主进程会话 ID |
+| `application.id` | 覆盖为主进程配置的应用 ID |
+| `container.source` | 补充为 `electron` |
+| `container.view.id` | 补充为主进程当前 view ID |
+
+渲染进程自己的 `source`、`view`、`service` 等属性一律保留。因此两类事件的标识不同：
+
+| 事件来源 | `source` | `container.source` | `view.url` |
+|----------|----------|--------------------|------------|
+| 主进程 | `electron` | 无 | `electron://main-process` |
+| 渲染进程窗口 | `browser` | `electron` | 页面 URL |
+
+<Warning>
+在查看器里筛选时，只用 `source:electron` **只能查到主进程事件**。要选中一个 Electron 应用产生的全部数据，请用 `source:electron OR container.source:electron`。
+</Warning>
+
 <Note>
-渲染进程事件只有在桥接生效时才会带上 `source: electron` 和主进程的 `session.id`。桥接未生效时，渲染进程会作为独立的 Web 应用直连上报，`source` 为 `browser`。配置方式见[接入指南](/zh/rum/sdk/electron/sdk-integration#配置-allowedwebviewhosts-启用桥接)。
+桥接未生效时（主进程未接入 SDK，或主进程打包时缺少插件导致 preload 未注入），渲染进程会作为独立的 Web 应用直连上报：`source` 仍是 `browser`，但**没有 `container` 字段**，会话也与主进程无关。详见[接入指南](/zh/rum/sdk/electron/sdk-integration#桥接未生效时会怎样)。
 </Note>
 
 ## 会话
@@ -153,7 +176,7 @@ SDK 自身上报到 intake（或代理）的请求会被识别并跳过，不会
 
 渲染进程使用 `@flashcatcloud/browser-rum`，采集内容与 Web SDK 完全一致：页面 view、用户操作、`fetch` / XHR / 静态资源、JS 错误、long task 和 Web Vitals（LCP、INP、CLS 等）。字段明细见 [Web SDK 数据收集](/zh/rum/sdk/web/data-collection)。
 
-桥接生效时，这些事件经 IPC 交给主进程统一上报，并额外获得主进程的 `session.id` 与公共上下文。
+桥接生效时，这些事件经 IPC 交给主进程统一上报，并额外获得主进程的 `session.id`、`application.id` 与 `container` 字段——具体见[渲染进程事件的标识](#渲染进程事件的标识)。
 
 <Tip>
 主进程是 Node.js 运行时，没有 DOM 也没有渲染管线，因此**不会**产生 Web Vitals、long task 和用户操作数据。在控制台按页面性能维度分析时，数据来自渲染进程。

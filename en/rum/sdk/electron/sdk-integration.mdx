@@ -12,7 +12,7 @@ An Electron application runs a **main process** (Node.js) and one or more **rend
 | Renderer process | `@flashcatcloud/browser-rum` | Page views, user actions, front-end resources, JS errors, Web Vitals |
 
 <Warning>
-Installing only one half is the most common integration mistake. With only the main-process SDK you lose all front-end interaction data. With only the renderer SDK you lose the session, main-process errors, and native crashes, and events carry `source: browser` instead of `electron`. Integrate both processes.
+Installing only one half is the most common integration mistake. With only the main-process SDK you lose all front-end interaction data. With only the renderer SDK you lose the session, main-process errors, and native crashes, and events never carry the `container` information that correlates the two processes. Integrate both processes.
 </Warning>
 
 ## How it works
@@ -21,7 +21,7 @@ The main-process SDK is the **single exit point** for the whole pipeline. It doe
 
 1. Uses `dd-trace` to hook `require('electron')`, wrap `BrowserWindow`, and inject a preload script into every renderer process that exposes a global `DatadogEventBridge` object.
 2. The renderer's `@flashcatcloud/browser-rum` detects that bridge and sends its collected events back to the main process over IPC instead of uploading them itself.
-3. The main process enriches events from both sides with common context (application, session, view, version), buffers them to disk in batches, and uploads them to `POST https://<site>/api/v2/rum`.
+3. The main process enriches events from both sides — its own events get the full set of common attributes, while renderer events only have `session.id` / `application.id` overridden and `container` added — then buffers them to disk in batches and uploads them to `POST https://<site>/api/v2/rum`.
 
 ```mermaid
 graph TB
@@ -95,8 +95,6 @@ void app.whenReady().then(async () => {
     site: 'browser.flashcat.cloud',
     env: 'production',
     version: app.getVersion(),
-    // Allows renderer processes to report through the bridge, see below
-    allowedWebViewHosts: ['localhost'],
   });
 
   createWindow();
@@ -214,33 +212,48 @@ flashcatRum.init({
 Keep `applicationId`, `clientToken`, `service`, `env`, and `version` identical to the main-process `init()`. Otherwise the two sides land in different applications or versions and cannot be correlated in a single session.
 </Tip>
 
-### Enable the bridge with allowedWebViewHosts
+### The bridge needs no configuration
 
-The renderer SDK only routes events through the bridge when **the current page host matches the main process `allowedWebViewHosts` allowlist**. Otherwise it falls back to behaving like a plain web application, uploading directly to the intake with `source: browser` instead of `electron`.
+The renderer side requires **no extra wiring**. When the injected preload assembles its host allowlist, it always includes the window's own `location.hostname`:
 
-`allowedWebViewHosts` defaults to an empty array `[]`, which means **the bridge is disabled by default**. Configure it explicitly based on how you load pages:
+```js
+const allowedHosts = [...new Set([location.hostname, ...configuredHosts])]
+```
 
-| How the renderer loads its page | `location.hostname` | Recommended configuration |
-|---------------------------------|---------------------|---------------------------|
-| `win.loadURL('http://localhost:5173')` (dev server) | `localhost` | `allowedWebViewHosts: ['localhost']` |
-| `win.loadURL('https://app.example.com')` (remote page) | `app.example.com` | `allowedWebViewHosts: ['example.com']` — matching supports subdomain suffixes |
-| `win.loadFile('dist/index.html')` (`file://`) | empty string | See the note below |
+A window's own page therefore **always matches the allowlist**, and the bridge works out of the box. `file://` is no exception — `location.hostname` is an empty string there, the allowlist becomes `[""]`, and it still self-matches.
 
-<Warning>
-With `loadFile()` the page runs under the `file://` protocol, where `location.hostname` is an empty string. It cannot match any allowlist entry, so the bridge stays disabled and the renderer uploads directly — main-process and renderer events will not share a session.
+<Note>
+`allowedWebViewHosts` is not a bridge switch — it is an allowlist for **additional hosts**. Configure it only when you also want to accept events from **third-party** pages loaded in a `<webview>` or `BrowserView`, for example `allowedWebViewHosts: ['partner.example.com']`. Matching supports subdomain suffixes.
+</Note>
 
-If you need full two-process session correlation, load the page over a custom protocol or a local HTTP server in packaged builds (for example register an `app://` protocol with `protocol.handle()` and call `loadURL('app://index.html')`), then add that host to `allowedWebViewHosts`.
-</Warning>
+### What a broken bridge looks like
 
-### Behavior with and without the bridge
+The bridge fails because of a **missing preload injection**, not because of configuration — usually the main process has not integrated the SDK, or it is bundled without the matching [bundler plugin](#bundler-plugins), so the `instrument` entry point loses its "runs first" position.
 
-| Behavior | Bridge enabled | Bridge disabled |
-|----------|----------------|-----------------|
-| Event `source` | `electron` | `browser` |
+| Behavior | Bridge working | Bridge broken |
+|----------|----------------|---------------|
+| `container.source` on renderer events | `electron` | field absent |
 | Upload path | Batched by the main process | Each renderer uploads directly to the intake |
 | Session | Shares the main-process `session.id` | Renderer generates its own session |
 | Offline retry | Buffered to disk under the main process `userData`, resent after restart | Relies on browser-side buffering, lost when the process exits |
 | User activity | Renderer clicks extend the main-process session | No effect on each other |
+
+<Tip>
+`container.source` is a reliable signal: when renderer events carry it, the preload was injected and the events really did travel through the main process.
+</Tip>
+
+### The `source` value of each process
+
+When the bridge is working, the main process only overrides `session.id` and `application.id` on renderer events and adds `container` — renderer events **keep their own `source: browser`**. The two kinds of events are therefore identified differently:
+
+| Origin | `source` | `container.source` | `view.url` |
+|--------|----------|--------------------|------------|
+| Main process | `electron` | absent | `electron://main-process` |
+| Renderer window | `browser` | `electron` | the page URL |
+
+<Warning>
+Filtering on `source:electron` alone in the Explorer returns **main-process events only**. To select everything an Electron application produces, use `source:electron OR container.source:electron`.
+</Warning>
 
 ## Verify the integration
 
@@ -255,13 +268,15 @@ The main-process log prints SDK initialization output. When `init()` returns `fa
 </Step>
 
 <Step title="Confirm the data in the console">
-Open the corresponding RUM application and filter by `source:electron` in the [Explorer](/en/rum/explorer/overview) to confirm that `view`, `action`, `resource`, and `error` events appear.
+Open the corresponding RUM application and filter by `source:electron OR container.source:electron` in the [Explorer](/en/rum/explorer/overview) to confirm that `view`, `action`, `resource`, and `error` events appear.
 
 The default upload interval is one batch every 10 seconds, so wait a moment before refreshing.
 </Step>
 
 <Step title="Confirm the two processes are correlated">
-Seeing both main-process events (`resource.type` of `native`) and renderer events (`action`, Web Vitals) under the same session means the bridge is working. If renderer events carry `source: browser`, revisit [Enable the bridge](#enable-the-bridge-with-allowedwebviewhosts) and check `allowedWebViewHosts`.
+Seeing both main-process events (`view.url` of `electron://main-process`) and renderer events (`action`, Web Vitals) under the same session means the bridge is working.
+
+If renderer events have **no `container.source` field**, the preload was not injected: check that the main process calls `init()`, and that a [bundler plugin](#bundler-plugins) is applied when the main process is bundled.
 </Step>
 </Steps>
 
