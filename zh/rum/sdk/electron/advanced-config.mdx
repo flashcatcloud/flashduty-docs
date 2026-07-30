@@ -29,10 +29,10 @@ await init({
 | `applicationId` | `string` | 是 | — | RUM 应用 ID |
 | `clientToken` | `string` | 是 | — | 客户端 Token |
 | `service` | `string` | 是 | — | 服务名称，需与 sourcemap 上传时一致 |
-| `site` | `string` | 是 | — | 上报站点，只接受 `browser.flashcat.cloud` 或 `jira.flashcat.cloud` |
+| `site` | `string` | 否 | `browser.flashcat.cloud` | 上报站点，直接作为 intake 域名。私有化部署填自己的域名；纯 HTTP intake 见[什么时候必须用 proxy](#什么时候必须用-proxy) |
 | `env` | `string` | 否 | — | 环境标识，如 `production`、`staging` |
 | `version` | `string` | 否 | — | 应用版本号，需与 sourcemap 上传时一致 |
-| `proxy` | `string` | 否 | — | 自定义上报地址，见[使用代理上报](#使用代理上报) |
+| `proxy` | `string` | 否 | — | 自定义上报地址，见[私有化部署与代理上报](#私有化部署与代理上报) |
 | `allowedWebViewHosts` | `string[]` | 否 | `[]` | **额外**允许通过桥接上报的 host。窗口自身的 host 始终被允许，因此只有接收 `<webview>` / `BrowserView` 中第三方页面的事件时才需要配置 |
 | `telemetrySampleRate` | `number` | 否 | `20` | SDK 自身遥测采样率（0–100），设为 `0` 关闭 |
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | 否 | `MEDIUM` | 单批上报大小 |
@@ -40,7 +40,7 @@ await init({
 | `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | 否 | `mask` | 传递给渲染进程的隐私级别；当前版本不支持 Session Replay，该参数暂无实际效果 |
 
 <Note>
-`init()` 是异步的，返回 `false` 表示配置校验失败（例如缺少必填项或 `site` 不在白名单），此时 SDK 不会启动，并在控制台打印具体原因。
+`init()` 是异步的，返回 `false` 表示配置校验失败（例如缺少必填项），此时 SDK 不会启动，并在控制台打印具体原因。
 </Note>
 
 ## 上报批次与频率
@@ -63,19 +63,41 @@ await init({
 接入调试阶段可临时使用 `batchSize: 'SMALL'` + `uploadFrequency: 'FREQUENT'`，让事件更快出现在控制台；上线前改回默认值。
 </Tip>
 
-## 使用代理上报
+## 私有化部署与代理上报
 
-`site` 只接受 Flashduty SaaS 的域名。如果你是**私有化部署**，或客户端网络无法直连 intake、需要统一出网口，请配置 `proxy`。SDK 会把请求发到你的代理地址，并通过 `ddforward` 查询参数携带原始路径。
+### 直接改 site
+
+私有化部署且 intake 支持 HTTPS 时，把 `site` 填成你自己的域名即可，不需要代理：
 
 ```ts
 await init({
   // ...
-  site: 'browser.flashcat.cloud', // 必填，但设置 proxy 后不参与拼接上报地址
-  proxy: 'https://rum.example.internal/forward',
+  site: 'rum.example.internal',
+});
+```
+
+上报地址即 `https://rum.example.internal/api/v2/rum`。
+
+### 什么时候必须用 proxy
+
+SDK 拼接上报地址的模板是 `https://<site>/api/v2/rum`，**其中的 `https://` 是写死的**。因此以下场景 `site` 解决不了，必须改用 `proxy`：
+
+- 内网 intake 只提供**纯 HTTP**，没有 HTTPS
+- 上报路径不是 `/api/v2/rum`，需要网关改写
+- 客户端网络无法直连 intake，需要统一出网口
+
+```ts
+await init({
+  // ...
+  proxy: 'https://rum-proxy.example.internal/forward',
 });
 ```
 
 实际请求形如 `POST <proxy>?ddforward=%2Fapi%2Fv2%2Frum`。代理服务需要把请求体转发到你的 Flashduty 实例的 `/api/v2/rum`，并保留 `DD-API-KEY` 请求头。请求体是换行分隔的 JSON，`Content-Type` 为 `text/plain;charset=UTF-8`，转发时不要改写。
+
+<Note>
+设置 `proxy` 后，`site` 不再参与拼接上报地址，可以省略不填。
+</Note>
 
 <Warning>
 配置 `proxy` 后，SDK 会用代理的 host 来识别并跳过自身上报请求，避免循环采集。请确保代理地址是完整的绝对 URL。
