@@ -158,7 +158,28 @@ Electron 应用发布时通常会压缩 JavaScript 产物，错误堆栈因此�
 当前版本**只有渲染进程的 JavaScript 错误栈**支持反混淆。主进程错误栈是 Node.js 原生的 V8 格式，服务端的 JavaScript 栈解析器暂不识别，会按原始栈展示。上传 sourcemap 不会改变主进程错误的展示效果。
 </Warning>
 
-### 生成 sourcemap
+### 匹配原则
+
+**上报的压缩前缀，要和错误栈里的 path 能对应上。**
+
+服务端只用 URL 的 **path 部分**做匹配，协议和 host 会被忽略——`file:///dist/renderer.js`、`app:///dist/renderer.js` 与 `/dist/renderer.js` 三者等价。因此接入分两步：
+
+1. 在有 sourcemap 的目录执行 CLI 上传，用 `--minified-path-prefix` **指定一个前缀**
+2. 在渲染进程的 `beforeSend` 钩子里**处理错误栈的 path**，与上报的前缀对齐
+
+### 为什么需要第二步
+
+Electron 打包后，错误栈里的路径是**应用运行时的安装路径**，构建期不可知，且逐台机器不同：
+
+| 平台 | 栈里的实际路径 | 构建期可预知？ |
+|------|----------------|----------------|
+| macOS | `/Applications/My.app/Contents/Resources/app.asar/dist/renderer.js` | 否，用户可能装到 `~/Applications` |
+| Windows | `C:/Users/<用户名>/AppData/Local/Programs/<app>/resources/app.asar/dist/renderer.js` | 否，含用户名 |
+| Linux AppImage | `/tmp/.mount_XXXXXX/resources/app.asar/dist/renderer.js` | 否，每次启动都变 |
+
+如果直接拿安装路径当前缀上传，一次上传只能匹配一台机器。所以要在上报前把这段不稳定的前缀**归一化成一个固定的虚拟前缀**，让所有机器的栈都长一样。
+
+### 第一步：生成并上传 sourcemap
 
 在渲染进程的打包配置中开启 sourcemap 输出：
 
@@ -183,48 +204,74 @@ await esbuild.build({
 ```
 </CodeGroup>
 
-<Warning>
-不要把 `.map` 文件打进最终分发的应用包。请在上传后、打包 asar 之前把它们从产物目录中移除，避免泄露源码。
-</Warning>
-
-### 上传到 Flashduty
-
-使用 [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli) 上传：
+在 sourcemap 所在目录执行 [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli)，用 `--minified-path-prefix` 指定你选定的虚拟前缀（这里用 `/dist`）：
 
 ```bash
 flashcat-cli sourcemaps upload \
   --service my-electron-app \
   --release-version 1.0.0 \
-  --minified-path-prefix <压缩文件路径前缀> \
+  --minified-path-prefix /dist \
   --api-key <YOUR_API_KEY> \
   ./out/renderer
 ```
 
-`--minified-path-prefix` 需要与错误堆栈中实际出现的 URL 前缀一致。**匹配只使用 URL 的 path 部分**，协议和 host 会被忽略——例如 `file:///opt/app/dist/renderer.js`、`app:///opt/app/dist/renderer.js` 与 `/opt/app/dist/renderer.js` 三者等价。
+<Warning>
+不要把 `.map` 文件打进最终分发的应用包。请在上传后、打包 asar 之前把它们从产物目录中移除，避免泄露源码。
+</Warning>
 
-Electron 下的前缀取决于渲染进程的页面加载方式：
+### 第二步：在 beforeSend 里对齐前缀
+
+在渲染进程初始化时加上 `beforeSend`，把错误栈里的安装路径替换成**同一个** `/dist` 前缀：
+
+```ts renderer.ts
+import { flashcatRum } from '@flashcatcloud/browser-rum';
+
+// 必须与上传时的 --minified-path-prefix 完全一致
+const MINIFIED_PATH_PREFIX = '/dist';
+
+flashcatRum.init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  site: 'browser.flashcat.cloud',
+  version: '1.0.0',
+  sessionSampleRate: 100,
+  beforeSend: (event) => {
+    if (event.type === 'error' && event.error.stack) {
+      // 把 "…<任意安装路径>/dist/renderer.js" 归一成 "/dist/renderer.js"
+      event.error.stack = event.error.stack.replace(
+        /(?:file:\/\/)?[^\s()]*?\/dist\//g,
+        `${MINIFIED_PATH_PREFIX}/`
+      );
+    }
+  },
+});
+```
+
+<Warning>
+代码里的 `MINIFIED_PATH_PREFIX` 与上传命令的 `--minified-path-prefix` **必须逐字一致**。这是两处唯一需要对齐的地方，写错就匹配不上——sourcemap 能上传成功，但堆栈不会被还原。
+</Warning>
+
+<Tip>
+正则里的 `/dist/` 要换成你构建产物目录在路径中的实际片段。改完后建议先在控制台的异常详情里确认栈已变成 `/dist/renderer.js` 这种稳定形态，再验证反混淆效果。
+</Tip>
+
+<Note>
+`beforeSend` 只能修改事件的部分字段，`error.stack` 在可修改之列。回调不需要返回值；返回 `false` 会丢弃整条事件。完整说明见 [Web SDK 高级配置](/zh/rum/sdk/web/advanced-config)。
+</Note>
+
+### 无需归一化的场景
+
+如果渲染进程页面本来就通过**稳定 URL** 加载，栈里的路径在所有机器上一致，可以跳过第二步，直接用真实前缀上传：
 
 | 页面加载方式 | 堆栈中的 URL 形态 | `--minified-path-prefix` |
 |--------------|-------------------|--------------------------|
 | 开发态 dev server | `http://localhost:5173/assets/index.js` | `http://localhost:5173/assets` |
-| 自定义协议 | `app://assets/index.js` | `app://assets` |
 | 远程页面 | `https://app.example.com/assets/index.js` | `https://app.example.com/assets` |
-| `loadFile()`（`file://`） | `file:///opt/myapp/resources/app.asar/dist/renderer.js` | `file:///opt/myapp/resources/app.asar/dist`，或等价的 `/opt/myapp/resources/app.asar/dist` |
-
-<Warning>
-使用 `loadFile()` 时，堆栈里的路径是**应用运行时的安装路径**，它在构建期不可知，且逐台机器不同：
-
-- macOS：装在 `/Applications` 还是 `~/Applications` 由用户决定
-- Windows：路径通常形如 `C:/Users/<用户名>/AppData/Local/Programs/<app>/…`，包含用户名
-- Linux AppImage：每次启动都挂载到新的 `/tmp/.mount_XXXXXX/…`
-
-因此一次上传只能匹配一个固定的安装位置，无法覆盖真实分发场景。若你需要在分发的应用里做栈还原，**可以改用自定义协议加载渲染进程页面**（通过 `protocol.handle()` 注册 `app://` 并 `loadURL('app://index.html')`），这样堆栈路径在所有机器上都稳定。
-
-这条建议**只为解决 sourcemap 路径稳定性**。桥接本身在 `file://` 下也能正常工作，不需要为它改变页面加载方式。
-</Warning>
+| 自定义协议 | `app://assets/index.js` | `app://assets` |
 
 <Tip>
-上传前先在控制台的异常详情里查看真实错误堆栈中的文件 URL，再据此确定前缀。前缀对不上时，sourcemap 能上传成功但堆栈不会被还原。
+自定义协议（通过 `protocol.handle()` 注册 `app://` 并 `loadURL('app://index.html')`）也能让路径天然稳定，可作为归一化之外的另一种选择。它只影响 sourcemap 路径——桥接在 `file://` 下本来就能正常工作，不需要为此改变页面加载方式。
 </Tip>
 
 <Warning>
