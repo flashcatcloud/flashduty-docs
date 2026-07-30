@@ -29,10 +29,10 @@ await init({
 | `applicationId` | `string` | Yes | — | RUM application ID |
 | `clientToken` | `string` | Yes | — | Client token |
 | `service` | `string` | Yes | — | Service name; must match the value used when uploading source maps |
-| `site` | `string` | Yes | — | Reporting site; only `browser.flashcat.cloud` or `jira.flashcat.cloud` are accepted |
+| `site` | `string` | No | `browser.flashcat.cloud` | Reporting site, used directly as the intake host. Self-hosted deployments set their own domain; for a plain-HTTP intake see [When a proxy is required](#when-a-proxy-is-required) |
 | `env` | `string` | No | — | Environment identifier such as `production` or `staging` |
 | `version` | `string` | No | — | Application version; must match the value used when uploading source maps |
-| `proxy` | `string` | No | — | Custom reporting endpoint, see [Report through a proxy](#report-through-a-proxy) |
+| `proxy` | `string` | No | — | Custom reporting endpoint, see [Self-hosted deployments and proxies](#self-hosted-deployments-and-proxies) |
 | `allowedWebViewHosts` | `string[]` | No | `[]` | **Additional** hosts allowed to report through the bridge. A window's own host is always allowed, so configure this only to accept events from third-party pages in a `<webview>` / `BrowserView` |
 | `telemetrySampleRate` | `number` | No | `20` | SDK internal telemetry sample rate (0–100); set to `0` to disable |
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | No | `MEDIUM` | Batch size per upload |
@@ -40,7 +40,7 @@ await init({
 | `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | No | `mask` | Privacy level forwarded to renderers; Session Replay is not supported in this version, so it currently has no effect |
 
 <Note>
-`init()` is asynchronous. It returns `false` when validation fails (a missing required option, or a `site` outside the allowlist). The SDK does not start in that case and prints the specific reason to the console.
+`init()` is asynchronous. It returns `false` when validation fails (for example a missing required option). The SDK does not start in that case and prints the specific reason to the console.
 </Note>
 
 ## Batching and upload frequency
@@ -63,19 +63,41 @@ Uploads are disk-buffered: events are written to batch files under `app.getPath(
 During integration, temporarily use `batchSize: 'SMALL'` with `uploadFrequency: 'FREQUENT'` so events reach the console faster, then revert to the defaults before shipping.
 </Tip>
 
-## Report through a proxy
+## Self-hosted deployments and proxies
 
-`site` only accepts Flashduty SaaS hosts. For a **self-hosted deployment**, or when clients cannot reach the intake directly and you need a single egress point, configure `proxy`. The SDK sends requests to your proxy and carries the original path in the `ddforward` query parameter.
+### Just set `site`
+
+For a self-hosted deployment whose intake speaks HTTPS, set `site` to your own domain — no proxy needed:
 
 ```ts
 await init({
   // ...
-  site: 'browser.flashcat.cloud', // required, but unused for building the upload URL once proxy is set
-  proxy: 'https://rum.example.internal/forward',
+  site: 'rum.example.internal',
+});
+```
+
+The upload endpoint becomes `https://rum.example.internal/api/v2/rum`.
+
+### When a proxy is required
+
+The SDK builds its upload URL from the template `https://<site>/api/v2/rum`, and **the `https://` scheme is hardcoded**. `site` therefore cannot cover these cases, which require `proxy`:
+
+- The internal intake serves **plain HTTP** only, with no HTTPS
+- The upload path is not `/api/v2/rum` and a gateway has to rewrite it
+- Clients cannot reach the intake directly and need a single egress point
+
+```ts
+await init({
+  // ...
+  proxy: 'https://rum-proxy.example.internal/forward',
 });
 ```
 
 The resulting request is `POST <proxy>?ddforward=%2Fapi%2Fv2%2Frum`. Your proxy must forward the request body to `/api/v2/rum` on your Flashduty instance, preserving the `DD-API-KEY` header. The body is newline-delimited JSON with a `Content-Type` of `text/plain;charset=UTF-8` — do not rewrite it.
+
+<Note>
+Once `proxy` is set, `site` no longer contributes to the upload URL and can be omitted.
+</Note>
 
 <Warning>
 With `proxy` set, the SDK uses the proxy host to detect and skip its own reporting requests, preventing a collection loop. Make sure the proxy value is a complete absolute URL.
