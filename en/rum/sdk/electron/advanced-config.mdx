@@ -158,7 +158,28 @@ Released Electron applications usually minify their JavaScript, so error stacks 
 In the current version, **only renderer JavaScript stacks** can be resolved. Main-process stacks use the native Node.js V8 format, which the backend JavaScript stack parser does not recognize yet, so they are displayed as-is. Uploading source maps does not change how main-process errors are displayed.
 </Warning>
 
-### Generate source maps
+### The matching rule
+
+**The prefix you upload must correspond to the path in the error stack.**
+
+The backend matches on the **path portion** of the URL only — scheme and host are ignored, so `file:///dist/renderer.js`, `app:///dist/renderer.js`, and `/dist/renderer.js` are equivalent. Integration therefore has two steps:
+
+1. Run the CLI in the directory holding your source maps and **declare a prefix** with `--minified-path-prefix`
+2. **Rewrite the stack paths** in the renderer's `beforeSend` hook so they align with the prefix you uploaded
+
+### Why the second step is needed
+
+In a packaged Electron application, the paths in an error stack are the **runtime installation paths**. They are unknown at build time and differ per machine:
+
+| Platform | Actual path in the stack | Predictable at build time? |
+|----------|--------------------------|----------------------------|
+| macOS | `/Applications/My.app/Contents/Resources/app.asar/dist/renderer.js` | No — the user may install to `~/Applications` |
+| Windows | `C:/Users/<username>/AppData/Local/Programs/<app>/resources/app.asar/dist/renderer.js` | No — contains the user name |
+| Linux AppImage | `/tmp/.mount_XXXXXX/resources/app.asar/dist/renderer.js` | No — changes on every launch |
+
+Uploading with an installation path as the prefix would match exactly one machine. So the unstable prefix has to be **normalized to a fixed virtual prefix** before the event is sent, making every machine's stack look the same.
+
+### Step 1: generate and upload source maps
 
 Enable source map output in your renderer build configuration:
 
@@ -183,48 +204,74 @@ await esbuild.build({
 ```
 </CodeGroup>
 
-<Warning>
-Do not ship `.map` files inside the distributed application. Remove them from the output directory after uploading and before packaging the asar, to avoid leaking your source code.
-</Warning>
-
-### Upload to Flashduty
-
-Use the [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli):
+Run the [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli) in the directory containing the source maps, declaring your chosen virtual prefix (`/dist` here):
 
 ```bash
 flashcat-cli sourcemaps upload \
   --service my-electron-app \
   --release-version 1.0.0 \
-  --minified-path-prefix <minified path prefix> \
+  --minified-path-prefix /dist \
   --api-key <YOUR_API_KEY> \
   ./out/renderer
 ```
 
-`--minified-path-prefix` must match the URL prefix that actually appears in error stacks. **Matching uses only the path portion of the URL** — the scheme and host are ignored, so `file:///opt/app/dist/renderer.js`, `app:///opt/app/dist/renderer.js`, and `/opt/app/dist/renderer.js` are equivalent.
+<Warning>
+Do not ship `.map` files inside the distributed application. Remove them from the output directory after uploading and before packaging the asar, to avoid leaking your source code.
+</Warning>
 
-In Electron the prefix depends on how the renderer loads its page:
+### Step 2: align the prefix in beforeSend
+
+Add `beforeSend` to the renderer initialization to replace installation paths in error stacks with the **same** `/dist` prefix:
+
+```ts renderer.ts
+import { flashcatRum } from '@flashcatcloud/browser-rum';
+
+// Must match the --minified-path-prefix used at upload time
+const MINIFIED_PATH_PREFIX = '/dist';
+
+flashcatRum.init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  site: 'browser.flashcat.cloud',
+  version: '1.0.0',
+  sessionSampleRate: 100,
+  beforeSend: (event) => {
+    if (event.type === 'error' && event.error.stack) {
+      // Normalize "…<any install path>/dist/renderer.js" to "/dist/renderer.js"
+      event.error.stack = event.error.stack.replace(
+        /(?:file:\/\/)?[^\s()]*?\/dist\//g,
+        `${MINIFIED_PATH_PREFIX}/`
+      );
+    }
+  },
+});
+```
+
+<Warning>
+`MINIFIED_PATH_PREFIX` in the code and `--minified-path-prefix` on the upload command **must match exactly**. These are the only two places that need to agree — get them wrong and nothing matches: the source maps upload successfully, but stacks are never resolved.
+</Warning>
+
+<Tip>
+Replace `/dist/` in the regular expression with the actual path segment of your build output directory. After the change, confirm in the console error details that stacks now take the stable `/dist/renderer.js` form before verifying resolution.
+</Tip>
+
+<Note>
+`beforeSend` can only modify a subset of event fields, and `error.stack` is one of them. The callback needs no return value; returning `false` discards the whole event. See [Web SDK advanced configuration](/en/rum/sdk/web/advanced-config) for the full contract.
+</Note>
+
+### When normalization is unnecessary
+
+If your renderer pages are loaded from a **stable URL**, stack paths are already identical across machines. Skip step 2 and upload with the real prefix:
 
 | Loading method | URL in the stack | `--minified-path-prefix` |
 |----------------|------------------|--------------------------|
 | Dev server | `http://localhost:5173/assets/index.js` | `http://localhost:5173/assets` |
-| Custom protocol | `app://assets/index.js` | `app://assets` |
 | Remote page | `https://app.example.com/assets/index.js` | `https://app.example.com/assets` |
-| `loadFile()` (`file://`) | `file:///opt/myapp/resources/app.asar/dist/renderer.js` | `file:///opt/myapp/resources/app.asar/dist`, or the equivalent `/opt/myapp/resources/app.asar/dist` |
-
-<Warning>
-With `loadFile()`, the path in the stack is the **runtime installation path**. It is unknown at build time and differs per machine:
-
-- macOS: the user chooses between `/Applications` and `~/Applications`
-- Windows: paths typically look like `C:/Users/<username>/AppData/Local/Programs/<app>/…` and contain the user name
-- Linux AppImage: every launch mounts to a new `/tmp/.mount_XXXXXX/…`
-
-A single upload can therefore only match one fixed installation location, which does not cover real distribution scenarios. If you need stack resolution in distributed builds, **you can load renderer pages over a custom protocol** (register `app://` with `protocol.handle()` and call `loadURL('app://index.html')`), which keeps stack paths stable across machines.
-
-This recommendation exists **only to stabilize source map paths**. The bridge itself works fine under `file://` and needs no change to how pages are loaded.
-</Warning>
+| Custom protocol | `app://assets/index.js` | `app://assets` |
 
 <Tip>
-Before uploading, check a real error stack in the console error details to see the actual file URL, then derive the prefix from it. With a mismatched prefix the upload succeeds but stacks are never resolved.
+A custom protocol (register `app://` with `protocol.handle()` and call `loadURL('app://index.html')`) also makes paths stable by construction, and is an alternative to normalization. It only affects source map paths — the bridge works fine under `file://` and needs no change to how pages are loaded.
 </Tip>
 
 <Warning>
