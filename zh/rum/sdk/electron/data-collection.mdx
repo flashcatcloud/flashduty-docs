@@ -16,6 +16,7 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 | Node 未捕获异常与 Promise 拒绝 | 主进程 | 开启 | `error` |
 | 手动上报错误 | 主进程 | 手动 | `error` |
 | 原生崩溃（minidump） | 主进程 | 开启 | `error`（`is_crash: true`） |
+| 渲染进程 / 子进程终止 | 主进程 | 开启 | `error`（`is_crash: false`） |
 | 主进程 HTTP 请求 | 主进程 | 开启 | `resource` |
 | Operation 监控 | 主进程 / 渲染进程 | 手动（预览） | `vital` |
 | 页面 view、用户操作、前端资源、JS 错误、Web Vitals | 渲染进程 | 开启 | `view` / `action` / `resource` / `error` |
@@ -112,8 +113,18 @@ SDK 在初始化时注册 `process.on('uncaughtException')` 与 `process.on('unh
 
 错误事件包含 `error.id`、`error.message`、`error.stack`、`error.type`（取自 `Error.name`）。抛出的不是 `Error` 实例时，SDK 会把值序列化并加上 `Uncaught` / `Provided` 前缀作为消息，此时没有堆栈。
 
+SDK 会把主进程栈转换成后端解析所用的帧格式（`at <函数> @ <url>:<行>:<列>`），与渲染进程一致：
+
+```
+Error: something went wrong
+  at handleClick @ /Applications/MyApp.app/Contents/Resources/app/dist/main.js:97:15
+  at <anonymous> @ process.processTimers (node:internal/timers:541:7)
+```
+
+帧 URL 是主进程打包产物的绝对路径，正是 sourcemap 上传所用的匹配键，因此**主进程栈同样可以反混淆**，见[高级配置 · 上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap)。
+
 <Note>
-主进程的 `error.stack` 是 Node.js 原生的 V8 栈，原样上报。当前版本不对主进程栈做 sourcemap 反混淆，控制台展示的是原始栈。渲染进程的 JS 错误栈不受此限制。
+Node 自身的内部帧（`node:internal/…`）没有有意义的 URL，会整段落在 URL 位置，显示为 `at <anonymous> @ …`。SDK 保留它们（读起来有价值），后端在反混淆时会跳过这类无法解析的帧。
 </Note>
 
 手动上报可以附带业务上下文：
@@ -132,7 +143,11 @@ try {
 
 SDK 启动时会开启 Electron 的 `crashReporter`（`uploadToServer: false`、`ignoreSystemCrashHandler: true`），崩溃时由 Electron 在 `app.getPath('crashDumps')` 下写出 `.dmp` minidump 文件。
 
-崩溃发生的那一刻进程已经死亡，无法上报。SDK 在**下一次启动**且 `app.whenReady()` 后递归扫描该目录，用内置的 WASM minidump 解析器逐个解析，生成 RUM error 事件，上报成功后删除对应 `.dmp` 文件。
+崩溃发生的那一刻进程已经死亡，无法上报。SDK 在**下一次启动**且 `app.whenReady()` 后递归扫描该目录，用内置的 WASM minidump 解析器逐个解析，生成 RUM error 事件，随后删除对应 `.dmp` 文件。
+
+<Note>
+无论解析成功与否，`.dmp` 都会被删除。留在磁盘上的 dump 每次启动都会被重新拾取，一个永远解析不了的 dump 会被无限重试、让崩溃目录无限增长，并且因为每个 dump 都要加载 WASM 解析器而拖慢每次启动。
+</Note>
 
 崩溃事件的字段：
 
@@ -141,17 +156,47 @@ SDK 启动时会开启 Electron 的 `crashReporter`（`uploadToServer: false`、
 | `error.is_crash` | 固定为 `true` |
 | `error.message` | 固定为 `Application crashed` |
 | `error.category` | 固定为 `Exception` |
-| `error.type` / `error.meta.exception_type` | minidump 中的崩溃类型 |
+| `error.type` / `error.meta.exception_type` | minidump 中的崩溃类型；dump 缺少异常信息时不带该字段 |
 | `error.source_type` | 按操作系统取 `macos`、`windows` 或 `linux` |
 | `error.meta.code_type` | CPU 架构 |
 | `error.meta.process` | 应用名称 |
 | `error.stack` | 崩溃线程的调用栈 |
-| `error.threads` | 所有线程的栈，`crashed` 标记崩溃线程 |
+| `error.threads` | 所有线程的栈，`crashed` 标记崩溃线程；无法确定崩溃线程时所有线程均为 `false` |
 | `error.binary_images` | 加载的模块列表，含 `uuid`（debug identifier）、加载地址区间、架构，并标记系统模块 |
 
+<Note>
+部分 minidump 没有异常流——例如进程是被强制终止而非抛出异常。这类 dump 仍会照常上报：线程栈、模块列表和系统信息都在，只是崩溃类型与崩溃线程未知。
+</Note>
+
 <Warning>
-当前版本的原生崩溃栈以**原始地址形式**存储和展示，Flashduty 尚未提供桌面端（macOS / Windows / Linux）原生符号化能力。你可以据此判断崩溃模块与频次，但无法直接看到函数名和行号。**渲染进程**的 JavaScript 错误栈不受影响，上传 sourcemap 后可正常还原。
+原生崩溃栈以**原始地址形式**存储和展示，Flashduty 尚未提供桌面端（macOS / Windows / Linux）原生符号化能力。你可以据此判断崩溃模块与频次，但无法直接看到函数名和行号。这只影响原生崩溃栈——两个进程的 **JavaScript** 错误栈都可以通过 sourcemap 正常还原。
 </Warning>
+
+### 渲染进程与子进程终止
+
+崩溃只是进程消失的其中一种方式。SDK 同时在 `app` 上监听 `render-process-gone` 与 `child-process-gone`，覆盖不产生 minidump 的那些终止——被系统 OOM killer 杀死、被任务管理器结束、沙箱拆除、启动失败等。监听挂在 `app` 而非单个 `webContents` 上，因此不属于任何 `BrowserWindow` 的渲染进程（`WebContentsView`、`<webview>`）也不会漏掉。
+
+| 字段 | 说明 |
+|------|------|
+| `error.is_crash` | 固定为 `false` |
+| `error.type` | `RenderProcessGone` 或 `ChildProcessGone` |
+| `error.message` | 形如 `Renderer process gone: killed`、`GPU process gone: launch-failed` |
+| `error.category` | 固定为 `Exception` |
+| `error.meta.process` | 渲染进程为 `renderer`；子进程为 Electron 报告的类型，如 `GPU`、`Utility`、`Zygote` |
+| `error.meta.exit_reason` | Electron 给出的终止原因 |
+| `error.meta.exit_code` | 进程退出码 |
+| `error.meta.url` | 渲染进程终止时所显示文档的 URL（子进程无此字段） |
+| `container.view.id` | 渲染进程终止时，关联到它当时的 RUM view |
+
+<Note>
+这类事件**没有堆栈**。主进程无法回溯一个已经消失的进程的调用栈。
+</Note>
+
+<Tip>
+`is_crash` 为 `false` 是有意为之：终止的是子进程，宿主应用本身还活着，而后端会把每条 `is_crash` 错误升级为严重告警。要区分两类事件，用 `error.type` 或 `error.is_crash` 筛选。
+</Tip>
+
+**与原生崩溃的去重**：会产生 minidump 的终止原因（`crashed`、`oom`）在这里被跳过，交给下次启动的崩溃采集上报，避免同一次事故被记两遍。正常退出（`clean-exit`）也不上报。其余原因——包括 `killed`——都会上报：除 macOS 的 `forcefullyCrashRenderer()` 外，`killed` 在各平台通常不写 dump，漏报的代价高于偶发重复。
 
 ## 主进程网络请求
 
@@ -199,6 +244,12 @@ SDK 自身上报到 intake（或代理）的请求会被识别并跳过，不会
 ## SDK 自身遥测
 
 SDK 会上报自身运行时的内部错误，用于定位 SDK 问题。默认采样率为 20%，可通过 `telemetrySampleRate` 调整，设为 `0` 可完全关闭。遥测事件的 `service` 固定为 `electron-sdk`，不会计入你的 RUM 事件量口径。
+
+### dd-trace 自身的遥测（默认关闭）
+
+`dd-trace` 另有一套与 Flashduty RUM 无关的 instrumentation telemetry：它会尝试连本机 `127.0.0.1:8126` 的 Datadog agent；请求失败且环境中恰好存在 `DD_API_KEY` 时，还会直接发往 Datadog。这两种行为都不适合出现在客户的桌面应用里，因此 **SDK 默认将其关闭**。
+
+关闭通过环境变量完成——dd-trace 5.x 只认 `DD_INSTRUMENTATION_TELEMETRY_ENABLED`（别名 `DD_TRACE_TELEMETRY_ENABLED`），传给 `tracer.init()` 的 `telemetry: false` 会被静默忽略。如果你的应用已经显式设置过这两个变量之一（包括显式开启），SDK 会保留你的设置。
 
 ## 上报行为
 
