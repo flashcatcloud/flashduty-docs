@@ -16,6 +16,7 @@ Electron RUM data comes from two processes and is uploaded by the main process. 
 | Node uncaught exceptions and promise rejections | Main process | Enabled | `error` |
 | Manually reported errors | Main process | Manual | `error` |
 | Native crashes (minidump) | Main process | Enabled | `error` (`is_crash: true`) |
+| Renderer / child process terminations | Main process | Enabled | `error` (`is_crash: false`) |
 | Main-process HTTP requests | Main process | Enabled | `resource` |
 | Operation monitoring | Main / renderer | Manual (preview) | `vital` |
 | Page views, user actions, front-end resources, JS errors, Web Vitals | Renderer process | Enabled | `view` / `action` / `resource` / `error` |
@@ -112,8 +113,18 @@ At initialization the SDK registers `process.on('uncaughtException')` and `proce
 
 Error events include `error.id`, `error.message`, `error.stack`, and `error.type` (taken from `Error.name`). When the thrown value is not an `Error` instance, the SDK serializes it and prefixes the message with `Uncaught` or `Provided`; no stack is available in that case.
 
+The SDK converts main-process stacks into the frame format the backend parses (`at <function> @ <url>:<line>:<column>`), matching the renderer:
+
+```
+Error: something went wrong
+  at handleClick @ /Applications/MyApp.app/Contents/Resources/app/dist/main.js:97:15
+  at <anonymous> @ process.processTimers (node:internal/timers:541:7)
+```
+
+Frame URLs are the absolute paths of your bundled main-process code, which is exactly what source map upload keys on — so **main-process stacks can be un-minified too**. See [Advanced configuration · Upload source maps](/en/rum/sdk/electron/advanced-config#upload-source-maps).
+
 <Note>
-Main-process `error.stack` is the native Node.js V8 stack, reported verbatim. The current version does not apply source map resolution to main-process stacks, so the console shows the raw stack. Renderer JS stacks are not subject to this limit.
+Node's own internal frames (`node:internal/…`) have no meaningful URL and land wholly in the URL position as `at <anonymous> @ …`. The SDK keeps them because they are useful to read, and the backend skips frames whose URL it cannot parse during un-minification.
 </Note>
 
 Manual reports can carry business context:
@@ -132,7 +143,11 @@ try {
 
 At startup the SDK enables Electron's `crashReporter` (`uploadToServer: false`, `ignoreSystemCrashHandler: true`). On a crash, Electron writes a `.dmp` minidump under `app.getPath('crashDumps')`.
 
-The process is already dead at crash time, so nothing can be reported then. On the **next startup**, after `app.whenReady()`, the SDK scans that directory recursively, parses each dump with a built-in WASM minidump processor, emits a RUM error event, and deletes the `.dmp` once it has been uploaded.
+The process is already dead at crash time, so nothing can be reported then. On the **next startup**, after `app.whenReady()`, the SDK scans that directory recursively, parses each dump with a built-in WASM minidump processor, emits a RUM error event, and then deletes the `.dmp`.
+
+<Note>
+The `.dmp` is deleted whether or not it could be parsed. A dump left on disk is picked up again on every startup, so a permanently unparseable one would be retried forever, grow the crash directory without bound, and slow every startup down since each dump loads the WASM processor.
+</Note>
 
 Crash event fields:
 
@@ -141,17 +156,47 @@ Crash event fields:
 | `error.is_crash` | Always `true` |
 | `error.message` | Always `Application crashed` |
 | `error.category` | Always `Exception` |
-| `error.type` / `error.meta.exception_type` | Crash type from the minidump |
+| `error.type` / `error.meta.exception_type` | Crash type from the minidump; absent when the dump carries no exception information |
 | `error.source_type` | `macos`, `windows`, or `linux` depending on the operating system |
 | `error.meta.code_type` | CPU architecture |
 | `error.meta.process` | Application name |
 | `error.stack` | Call stack of the crashing thread |
-| `error.threads` | Stacks of all threads, with `crashed` marking the crashing one |
+| `error.threads` | Stacks of all threads, with `crashed` marking the crashing one; all `false` when the crashing thread cannot be determined |
 | `error.binary_images` | Loaded modules with `uuid` (debug identifier), load address range, architecture, and a system-module flag |
 
+<Note>
+Some minidumps carry no exception stream — for instance when a process was force-terminated rather than raising an exception. Those dumps are still reported: threads, module list, and system info are all present; only the crash type and the crashing thread are unknown.
+</Note>
+
 <Warning>
-In the current version, native crash stacks are stored and displayed as **raw addresses**. Flashduty does not yet provide desktop (macOS / Windows / Linux) native symbolication. You can still identify the crashing module and its frequency, but not function names or line numbers. **Renderer** JavaScript stacks are unaffected and resolve normally once source maps are uploaded.
+Native crash stacks are stored and displayed as **raw addresses**. Flashduty does not yet provide desktop (macOS / Windows / Linux) native symbolication. You can still identify the crashing module and its frequency, but not function names or line numbers. This applies to native crash stacks only — **JavaScript** stacks from both processes resolve normally once source maps are uploaded.
 </Warning>
+
+### Renderer and child process terminations
+
+A crash is only one way a process disappears. The SDK also listens on `app` for `render-process-gone` and `child-process-gone`, covering the terminations that produce no minidump — killed by the OS OOM killer, ended from the task manager, sandbox teardown, launch failure. The listeners are bound to `app` rather than to individual `webContents`, so renderers that belong to no `BrowserWindow` (`WebContentsView`, `<webview>`) are not missed.
+
+| Field | Description |
+|-------|-------------|
+| `error.is_crash` | Always `false` |
+| `error.type` | `RenderProcessGone` or `ChildProcessGone` |
+| `error.message` | For example `Renderer process gone: killed`, `GPU process gone: launch-failed` |
+| `error.category` | Always `Exception` |
+| `error.meta.process` | `renderer` for renderers; for child processes, the type Electron reports such as `GPU`, `Utility`, `Zygote` |
+| `error.meta.exit_reason` | The termination reason given by Electron |
+| `error.meta.exit_code` | Process exit code |
+| `error.meta.url` | URL of the document a renderer was displaying (absent for child processes) |
+| `container.view.id` | For renderer terminations, links the event to the RUM view that was running |
+
+<Note>
+These events carry **no stack trace**. The main process cannot unwind the stack of a process that is already gone.
+</Note>
+
+<Tip>
+`is_crash: false` is deliberate: a child process terminated, but the host application is still alive — and the backend escalates every `is_crash` error to a critical alert. Filter on `error.type` or `error.is_crash` to tell the two kinds apart.
+</Tip>
+
+**Deduplication against native crashes**: exit reasons that produce a minidump (`crashed`, `oom`) are skipped here and left to crash collection on the next startup, so one incident is not reported twice. Clean shutdowns (`clean-exit`) are not reported either. Every other reason — including `killed` — is reported: outside of macOS's `forcefullyCrashRenderer()`, `killed` usually writes no dump, and missing a whole class of terminations costs more than an occasional duplicate.
 
 ## Main-process network requests
 
@@ -199,6 +244,12 @@ This API is in preview and its signatures may change before the stable release.
 ## SDK internal telemetry
 
 The SDK reports its own runtime errors to help diagnose SDK issues. The default sample rate is 20%, adjustable through `telemetrySampleRate`; set it to `0` to disable telemetry entirely. Telemetry events use a fixed `service` of `electron-sdk` and are not counted toward your RUM event volume.
+
+### dd-trace's own telemetry (disabled by default)
+
+`dd-trace` ships a separate instrumentation telemetry unrelated to Flashduty RUM. It reports to a local Datadog agent on `127.0.0.1:8126` and, when that request fails and `DD_API_KEY` happens to be present in the environment, falls back to sending directly to Datadog. Neither belongs in a customer's desktop application, so **the SDK disables it by default**.
+
+This is done through the environment: dd-trace 5.x resolves the setting exclusively from `DD_INSTRUMENTATION_TELEMETRY_ENABLED` (alias `DD_TRACE_TELEMETRY_ENABLED`) and silently ignores `telemetry: false` passed to `tracer.init()`. If your application already sets either variable — including an explicit opt-in — the SDK preserves your choice.
 
 ## Upload behavior
 
