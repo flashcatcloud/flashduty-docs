@@ -1,0 +1,333 @@
+---
+title: "理解 RUM 采样：机制、规则与最佳实践"
+sidebarTitle: "采样策略"
+description: "深入理解 RUM 会话采样的工作原理，掌握采样率选择、动态调整与业务自定义采样的最佳实践。"
+keywords: ["RUM", "采样", "采样率", "sessionSampleRate", "最佳实践", "前端监控"]
+---
+
+采样决定了有多少真实用户数据会被采集上报。采样率设置过高会带来不必要的数据量与费用，设置过低则可能漏掉关键问题。本文介绍 RUM 采样的工作机制，并给出选择和动态管理采样率的最佳实践。
+
+## 采样是什么
+
+RUM SDK 通过 `sessionSampleRate` 参数控制采样，取值 0 到 100，表示**被采集的会话百分比**：
+
+```js
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 20, // 采集 20% 的会话
+  sessionReplaySampleRate: 10, // 已采集会话中，再抽 10% 录制会话重放
+});
+```
+
+被采样命中的会话会上报全部数据（页面浏览、资源、错误、用户行为等）；未命中的会话不上报任何数据——**包括错误**。这是理解采样的第一个关键点：采样率 20% 意味着线上 80% 的用户出了错，您在平台上是看不到的。
+
+`sessionReplaySampleRate` 是在已采集会话基础上的**二次抽样**：`sessionSampleRate: 20` 且 `sessionReplaySampleRate: 10` 时，实际有会话重放录制的会话占全部流量的 2%。
+
+## 采样的工作规则
+
+理解以下四条规则，可以避免绝大多数「为什么配了采样率但行为不符合预期」的困惑。
+
+### 1. 以会话为单位，而不是用户或事件
+
+采样判定发生在**会话开始时**：SDK 按 `sessionSampleRate` 的概率抛一次硬币，中签则整个会话完整上报，不中签则整个会话完全静默。不存在「一个会话里 20% 的事件被上报」这种情况——会话数据要么完整，要么没有。
+
+同一个用户今天的会话可能中签、明天的会话可能不中签。默认的采样机制**不锚定具体用户**。
+
+### 2. 判定结果在会话内粘滞
+
+抽签结果会随会话状态持久化（Web 端存储在 Cookie 中）。会话在用户持续活跃时最长保持 4 小时，不活跃 15 分钟后过期；期间用户刷新页面、跳转页面都不会重新抽签。只有会话过期后产生新会话时，才会按当时的采样率重新判定。
+
+<Note>
+这意味着修改采样率后，**新会话立即按新采样率判定，存量会话维持原判定直到自然过期**。这正是渐进放量的正确语义，但也意味着调整不是瞬时全量生效的。
+</Note>
+
+### 3. 是概率，不是精确配额
+
+每个会话的抽签相互独立，没有全局协调。采样率 20% 表示**期望值**是 20%：流量越大，实际采集比例越接近 20%（大数定律）；流量较小时会有明显波动，100 个会话实际采到 13 个或 28 个都是正常的。
+
+### 4. 采样率在初始化时固化
+
+`sessionSampleRate` 在 `init()` 调用时确定，初始化后无法在运行时修改，页面生命周期内也不能二次 `init()`。想改变采样率，需要让下一次初始化（Web 端即下一次页面加载）拿到新的值——下文的动态调整方案正是围绕这一点展开。
+
+## 如何选择采样率
+
+| 场景 | 建议 |
+| --- | --- |
+| 测试 / 预发环境 | `sessionSampleRate: 100`，流量小，全量采集便于验证 |
+| 生产环境（中小流量） | 50–100，优先保证问题可见性 |
+| 生产环境（大流量） | 10–30，结合数据量与费用权衡 |
+| 会话重放 | 通常 1–10，重放是 SDK 开销与数据量的主要来源 |
+| 新版本发布期 | 临时调高（如 100），稳定后降回常规值 |
+| 线上故障排查期 | 临时调至 100，尽可能多地捕捉现场 |
+
+<Tip>
+错误是低频事件。如果您的核心诉求是错误监控而非性能统计，宁可选择更高的采样率——性能指标 20% 的样本足够代表整体，而某个只影响 1% 用户的错误在 20% 采样下可能很久才出现一次。
+</Tip>
+
+## 最佳实践一：让采样率可以动态调整
+
+采样率写死在代码里，意味着每次调整都要发版。推荐把采样率外置到您自己的配置中心，SDK 初始化时读取：
+
+<Tabs>
+<Tab title="Web">
+```js
+const CACHE_KEY = "rum-sample-rate";
+
+// 1. 用本地缓存的值立即初始化，不阻塞 SDK 启动
+const cached = Number(localStorage.getItem(CACHE_KEY));
+const sampleRate = Number.isFinite(cached) && cached > 0 ? cached : 20;
+
+flashcatRum.init({
+  // ...其他配置
+  sessionSampleRate: sampleRate,
+});
+
+// 2. 异步拉取最新值，供下一次页面加载使用
+fetch("https://your-config-server.example.com/rum-config")
+  .then((res) => res.json())
+  .then(({ sessionSampleRate: latest }) => {
+    localStorage.setItem(CACHE_KEY, String(latest));
+    // 3. 采样率变化时结束当前会话，让新判定尽快生效
+    if (latest !== sampleRate) {
+      flashcatRum.stopSession();
+    }
+  })
+  .catch(() => {}); // 拉取失败时沿用缓存值，不影响采集
+```
+</Tab>
+
+<Tab title="Android">
+```kotlin
+val prefs = getSharedPreferences("rum_config", Context.MODE_PRIVATE)
+
+// 1. 用本地缓存的值立即初始化，不阻塞 SDK 启动
+val sampleRate = prefs.getFloat("session_sample_rate", 20f)
+
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(sampleRate)
+    .build()
+Rum.enable(rumConfig)
+
+// 2. 异步拉取最新值写入缓存，下次冷启动生效
+CoroutineScope(Dispatchers.IO).launch {
+    runCatching { fetchRumConfig() } // 请求您自己的配置服务
+        .onSuccess { config ->
+            prefs.edit()
+                .putFloat("session_sample_rate", config.sessionSampleRate)
+                .apply()
+        } // 拉取失败时沿用缓存值，不影响采集
+}
+```
+</Tab>
+
+<Tab title="iOS">
+```swift
+let defaults = UserDefaults.standard
+
+// 1. 用本地缓存的值立即初始化，不阻塞 SDK 启动
+let sampleRate = defaults.object(forKey: "rumSessionSampleRate") as? Float ?? 20
+
+var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
+rumConfig.sessionSampleRate = sampleRate
+RUM.enable(with: rumConfig)
+
+// 2. 异步拉取最新值写入缓存，下次冷启动生效
+URLSession.shared.dataTask(with: configURL) { data, _, _ in
+    guard let data,
+          let config = try? JSONDecoder().decode(RumRemoteConfig.self, from: data)
+    else { return } // 拉取失败时沿用缓存值，不影响采集
+    defaults.set(config.sessionSampleRate, forKey: "rumSessionSampleRate")
+}.resume()
+```
+</Tab>
+</Tabs>
+
+三个要点：
+
+1. **不要为等配置阻塞初始化**。同步等待配置接口会漏掉页面早期的数据，配置服务抖动还会拖垮 RUM 启动。正确姿势是「缓存值立即初始化 + 异步刷新缓存供下次使用」，新采样率晚一个页面周期生效完全可以接受。
+2. **采样率变化时调用 `stopSession()`（仅 Web / 小程序）**。由于判定结果在会话内粘滞（规则 2），一个在 20% 时代未中签的用户，即使新页面以 100% 初始化，也会因为存量会话的旧判定而继续静默，最长持续 4 小时。`stopSession()` 会让当前会话立即过期，用户的下一次交互产生新会话并按新采样率重新抽签。注意这招在移动端无效：移动端采样率在初始化时就冻结在采样器里，`stopSession()` 之后的新会话仍按旧值抽签，新值默认要等下次冷启动重新初始化才生效。如需立即生效，参见下方[移动端进阶方案](#移动端进阶让新采样率立即生效)。
+3. **拉取失败必须有兜底**。配置接口不可用时沿用缓存值或内置默认值，保证采集不中断。
+
+<Warning>
+`stopSession()` 会把一个用户的连续行为切分成两个会话，导致会话数轻微膨胀、会话时长统计断开。只在采样率确实变化时调用它，不要每次页面加载都调用。
+</Warning>
+
+### 移动端进阶：让新采样率立即生效
+
+移动端 App 进程可能存活数天，"下次冷启动生效"在事故排查这类需要**立即全量采集**的场景下不够用。此时可以走完整重建路径：`stopInstance()` 停止当前 SDK 实例，再用新采样率重新初始化。要点是**拉到新配置时只记录、不立刻重建，等 App 回前台这类安静的生命周期点再执行**——在用户操作中途重建会切断当前视图和会话上下文。
+
+<Tabs>
+<Tab title="Android">
+```kotlin
+// 拉取到新配置时只记录待生效值，不立刻重建
+fun onConfigFetched(latest: RumRemoteConfig) {
+    prefs.edit().putFloat("session_sample_rate", latest.sessionSampleRate).apply()
+    pendingSampleRate = latest.sessionSampleRate.takeIf { it != currentSampleRate }
+}
+
+// App 回前台这类安静时机再执行重建
+ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+    override fun onStart(owner: LifecycleOwner) {
+        val newRate = pendingSampleRate ?: return
+        pendingSampleRate = null
+
+        Datadog.stopInstance() // 停止当前实例
+        Datadog.initialize(context, coreConfiguration, TrackingConsent.GRANTED)
+        val rumConfig = RumConfiguration.Builder(applicationId)
+            .setSessionSampleRate(newRate)
+            .build()
+        Rum.enable(rumConfig) // 启用过的其他产品（Logs、Trace 等）也要一并重新 enable
+        currentSampleRate = newRate
+    }
+})
+```
+</Tab>
+
+<Tab title="iOS">
+```swift
+// 拉取到新配置时只记录待生效值，不立刻重建
+func onConfigFetched(_ latest: RumRemoteConfig) {
+    defaults.set(latest.sessionSampleRate, forKey: "rumSessionSampleRate")
+    pendingSampleRate = latest.sessionSampleRate != currentSampleRate
+        ? latest.sessionSampleRate : nil
+}
+
+// App 回前台这类安静时机再执行重建
+NotificationCenter.default.addObserver(
+    forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+) { _ in
+    guard let newRate = pendingSampleRate else { return }
+    pendingSampleRate = nil
+
+    Datadog.stopInstance() // 停止当前实例
+    Datadog.initialize(with: coreConfiguration, trackingConsent: .granted)
+    var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
+    rumConfig.sessionSampleRate = newRate
+    RUM.enable(with: rumConfig) // 启用过的其他产品（Logs、Trace 等）也要一并重新 enable
+    currentSampleRate = newRate
+}
+```
+</Tab>
+</Tabs>
+
+<Warning>
+重建是有代价的进阶操作，上线前请确认以下风险：
+
+- **时机敏感**：在用户操作中途重建会切断当前视图/会话上下文，把连续行为切成两段会话。务必挑安静的生命周期点执行（如上例的 App 回前台时），而不是配置一到就立刻重建。
+- **数据丢失风险**：`stopInstance()` 时本地缓冲区中尚未上传的数据是否会被完整发送，需要在您的环境中实测验证。
+- **重建负担**：同一实例上启用过的所有产品（RUM、Logs、Trace、Session Replay）以及视图追踪策略、网络拦截器都要重新注册，漏掉任何一块就是静默的采集降级。
+- **适用边界**：建议仅用于"事故排查需要立即全量"这类场景；常规的采样率调整走"下次冷启动生效"即可，零风险。React Native 未暴露 `stopInstance`，只能下次启动生效。
+</Warning>
+
+## 最佳实践二：业务自定义采样
+
+默认的随机抽签对所有用户一视同仁，但业务往往希望差异化：VIP 用户全量采集、灰度用户重点观察、出过错的用户下次必采。这时可以把**抽签逻辑从 SDK 挪到业务代码**：业务自行判定当前会话是否采样，SDK 的 `sessionSampleRate` 只传 `0` 或 `100`，退化为开关。
+
+<Tabs>
+<Tab title="Web">
+```js
+function decideSampling(user, config) {
+  // 优先级从高到低的短路规则
+  if (config.incidentMode) return true;           // 故障排查模式：全量采集
+  if (user.isInternal || user.isBeta) return true; // 内部/灰度用户：必采
+  if (user.isVip) return true;                     // 重点用户：必采
+  if (localStorage.getItem("rum-had-error")) return true; // 上次出过错：必采
+
+  // 底座：按 userId 确定性哈希分桶
+  return hash(user.id + config.salt) % 100 < config.sampleRate;
+}
+
+const sampled = decideSampling(currentUser, cachedConfig);
+
+flashcatRum.init({
+  // ...其他配置
+  sessionSampleRate: sampled ? 100 : 0,
+});
+```
+</Tab>
+
+<Tab title="Android">
+```kotlin
+fun decideSampling(user: User, config: RumRemoteConfig): Boolean {
+    // 优先级从高到低的短路规则
+    if (config.incidentMode) return true            // 故障排查模式：全量采集
+    if (user.isInternal || user.isBeta) return true // 内部/灰度用户：必采
+    if (user.isVip) return true                     // 重点用户：必采
+    if (prefs.getBoolean("rum_had_error", false)) return true // 上次出过错：必采
+
+    // 底座：按 userId 确定性哈希分桶
+    return hash(user.id + config.salt) % 100 < config.sampleRate
+}
+
+val sampled = decideSampling(currentUser, cachedConfig)
+
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(if (sampled) 100f else 0f)
+    .build()
+Rum.enable(rumConfig)
+```
+</Tab>
+
+<Tab title="iOS">
+```swift
+func decideSampling(user: User, config: RumRemoteConfig) -> Bool {
+    // 优先级从高到低的短路规则
+    if config.incidentMode { return true }            // 故障排查模式：全量采集
+    if user.isInternal || user.isBeta { return true } // 内部/灰度用户：必采
+    if user.isVip { return true }                     // 重点用户：必采
+    if UserDefaults.standard.bool(forKey: "rumHadError") { return true } // 上次出过错：必采
+
+    // 底座：按 userId 确定性哈希分桶
+    return hash(user.id + config.salt) % 100 < config.sampleRate
+}
+
+let sampled = decideSampling(user: currentUser, config: cachedConfig)
+
+var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
+rumConfig.sessionSampleRate = sampled ? 100 : 0
+RUM.enable(with: rumConfig)
+```
+</Tab>
+</Tabs>
+
+### 为什么用哈希分桶代替随机数
+
+底座规则用 `hash(userId) % 100` 而不是 `Math.random()`，带来两个默认抽签没有的性质：
+
+- **用户级稳定**：同一个用户的判定结果永远一致，您可以回答「用户 A 有没有数据」——中签用户的所有会话都在，未中签用户则明确没有。
+- **放量单调**：采样率从 20% 调到 100% 时，原本中签的用户全部继续中签，新增的是纯增量，前后数据连续可对比。换一个 `salt` 即可整体重新洗牌。
+
+### 注意事项
+
+- **判定必须在会话内稳定**。如果用 `Math.random()` 每次页面加载现抽，同一会话内不同页面可能得出不同结果，而 SDK 只认会话首次判定——表现为「配了 100 却不上报」，非常难排查。确定性哈希天然规避这个问题。
+- **规则变化时同样需要切换会话**。用户从「不采」桶进入「采」桶时，参照最佳实践一的做法：Web / 小程序在检测到本次判定与上次缓存的判定不同时调用一次 `stopSession()`；移动端默认下次冷启动生效，或参照进阶方案重建实例。
+- **用 `sessionSampleRate: 0` 而不是跳过 `init()`**。跳过初始化会让业务代码里的 `addAction` / `addError` 等调用失效，到处判空很繁琐；传 0 让 SDK 正常初始化为静默状态，代码路径统一。
+- **平台侧数据代表实际采集量**。自定义采样时，平台无法感知您的真实采样比例，看到的会话量即实际采集量，无法按采样率反推全量流量。如需估算全量，请在业务侧基于自己的采样规则换算。
+
+## 各端支持情况
+
+| 平台 | 采样率生效时机 | 让新采样率立即生效 |
+| --- | --- | --- |
+| Web（浏览器） | 每次页面加载 `init()` 时 | 支持，调用 `stopSession()` |
+| 微信小程序 | 每次冷启动 `init()` 时 | 支持，调用 `stopSession()` |
+| iOS / Android | App 冷启动初始化时 | 默认下次冷启动生效；可通过 `stopInstance()` 重建立即生效（见[进阶方案](#移动端进阶让新采样率立即生效)） |
+| React Native | App 冷启动初始化时 | 不支持，下次启动生效 |
+
+移动端默认建议「启动时读缓存值初始化 + 异步拉取最新值存缓存」的策略，新采样率在下次冷启动生效；确需立即生效的场景（如事故排查），参照进阶方案在安静的生命周期点重建 SDK 实例。
+
+## 常见问题
+
+<Accordion title="把采样率从 20% 改成 100%，为什么有些用户还是没有数据？">
+存量会话的判定结果是粘滞的（规则 2）。修改前未中签的会话会保持静默直到过期（不活跃 15 分钟或持续 4 小时）。如果使用了动态配置方案，请确认在采样率变化时调用了 `stopSession()`。
+</Accordion>
+
+<Accordion title="采样率 20%，为什么实际采集的会话比例不是精确的 20%？">
+采样是独立概率抽签，不是配额（规则 3）。流量越大越接近设定值，小流量下波动是正常现象。如需要精确控制「哪些用户被采集」，请使用业务自定义采样的哈希分桶方案。
+</Accordion>
+
+<Accordion title="能不能只上报错误，不上报其他数据？">
+采样以会话为单位（规则 1），无法做到「未采样会话只上报错误」。替代方案：用业务自定义采样，把「上次出过错的用户」列为必采人群，定向提高错误现场的捕获率。
+</Accordion>
