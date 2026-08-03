@@ -38,6 +38,9 @@ await init({
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | 否 | `MEDIUM` | 单批上报大小 |
 | `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | 否 | `NORMAL` | 上报间隔 |
 | `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | 否 | `mask` | 传递给渲染进程的隐私级别；当前版本不支持 Session Replay，该参数暂无实际效果 |
+| `correctPrewarmedViewTimings` | `boolean` | 否 | `true` | 是否把预热窗口的 FCP / LCP 校正到窗口首次可见的时刻，见[预热窗口的 FCP 与 LCP 校正](#预热窗口的-fcp-与-lcp-校正) |
+| `normalizeStackPaths` | `boolean` | 否 | `true` | 是否把错误栈里的绝对路径归一化为 `app:///<相对应用根的路径>`，见[栈路径已自动归一化](#栈路径已自动归一化) |
+| `normalizeStackPath` | `(absolutePath: string) => string \| undefined` | 否 | — | 自定义单个栈帧路径的改写，在内置归一化之前执行，见[自定义路径映射](#自定义路径映射) |
 
 <Note>
 `init()` 是异步的，返回 `false` 表示配置校验失败（例如缺少必填项），此时 SDK 不会启动，并在控制台打印具体原因。
@@ -61,6 +64,46 @@ await init({
 
 <Tip>
 接入调试阶段可临时使用 `batchSize: 'SMALL'` + `uploadFrequency: 'FREQUENT'`，让事件更快出现在控制台；上线前改回默认值。
+</Tip>
+
+## 预热窗口的 FCP 与 LCP 校正
+
+Electron 应用常见做法是**提前创建隐藏窗口**、把页面先加载好，等需要时再 `show()`：
+
+```ts
+const win = new BrowserWindow({ show: false });
+await win.loadURL(pageUrl);
+// …若干秒之后，用户点击托盘图标
+win.show();
+```
+
+窗口虽然是隐藏的，但 `paintWhenInitiallyHidden` 默认为 `true`：页面照常渲染，也不会触发 `visibilitychange`，渲染进程始终认为自己可见。如果页面把首屏渲染推迟到 `show()` 之后，这个 view 的 FCP / LCP 就会把**整段预热时间**算进去。LCP 受影响的范围更广——它会一直更新到用户首次交互为止，而窗口隐藏时不可能发生交互，因此哪怕 FCP 看着正常，`show()` 时出现的大元素也会成为 LCP。实测有一例 FCP 404ms 完全正常、LCP 却高达 8084ms。
+
+SDK 默认（`correctPrewarmedViewTimings: true`）在主进程观测窗口首次可见的时刻，再按 W3C Paint Timing 规范处理预渲染页面的同一套公式扣掉这段时间：
+
+```
+activationStart = max(0, 窗口首次可见时刻 − view 开始时刻)
+校正后的指标    = max(0, 原始指标 − activationStart)
+```
+
+校正会改写 `view.first_contentful_paint`、`view.largest_contentful_paint`，以及对应的 `view.performance.fcp.timestamp` 与 `view.performance.lcp.timestamp`。
+
+### 什么情况下会校正
+
+| 场景 | 行为 |
+|------|------|
+| 窗口在 view 开始之后才第一次可见（典型的预热窗口） | 按上面的公式扣减 |
+| 窗口在 view 开始时已经可见（普通窗口、复用的窗口） | `activationStart` 归零，不做改写 |
+| 窗口直到 view 上报时都没有被 `show()` 过 | **丢弃**该 view 的 FCP / LCP（含 `largest_contentful_paint_target_selector`）——没有可参照的激活时刻，任何数值都没有意义 |
+| `loading_type` 不是 `initial_load`（例如路由切换） | 不做改写：已运行文档内的路由切换不是一次「激活」 |
+| `WebContentsView`、`<webview>`，或 SDK 启动前就已存在的窗口 | 不做改写——「没观测到」不等于「从未可见」 |
+
+<Note>
+校正发生在主进程转发渲染进程 view 事件的那一步，只读 `view` 事件、只写上述几个绘制指标字段；`view.id`、`view.url`、`loading_time`、`action.count` 等其他字段不受影响。关闭该开关时，SDK 连窗口可见性都不会去监听。
+</Note>
+
+<Tip>
+不预创建窗口的应用可以不用管这个开关：普通窗口在 view 开始时就已可见，`activationStart` 恒为 0，校正是空操作。只有在需要看未经处理的文档级原始数值时，才设 `correctPrewarmedViewTimings: false`。
 </Tip>
 
 ## 私有化部署与代理上报
@@ -176,7 +219,7 @@ failOperation('upload', 'abandoned', { operationKey: 'cover_photo' });
 
 Electron 应用发布时通常会压缩 JavaScript 产物，错误堆栈因此只有压缩后的文件名和行列号。上传 sourcemap 后，Flashduty 会在异常详情中展示还原后的源码位置。
 
-**两个进程的 JavaScript 栈都支持反混淆。** SDK 会把主进程栈也转成后端解析所用的帧格式，帧 URL 是主进程打包产物的绝对路径，与 sourcemap 上传的匹配键一致。请把主进程产物的 sourcemap 和渲染进程的一起上传。
+**两个进程的 JavaScript 栈都支持反混淆。** SDK 会把主进程栈转成后端解析所用的帧格式，并把两个进程栈里的绝对路径统一归一化成稳定形态，因此上传 sourcemap 时无需再自己处理路径。请把主进程产物的 sourcemap 和渲染进程的一起上传。
 
 <Note>
 原生崩溃栈（来自 `crashReporter` minidump）是另一套基于地址的格式，不受此影响，也不支持符号化。见[数据收集 · 原生崩溃](/zh/rum/sdk/electron/data-collection#原生崩溃)。
@@ -186,26 +229,46 @@ Electron 应用发布时通常会压缩 JavaScript 产物，错误堆栈因此�
 
 **上报的压缩前缀，要和错误栈里的 path 能对应上。**
 
-服务端只用 URL 的 **path 部分**做匹配，协议和 host 会被忽略——`file:///dist/renderer.js`、`app:///dist/renderer.js` 与 `/dist/renderer.js` 三者等价。因此接入分两步：
+服务端只用 URL 的 **path 部分**做匹配，协议和 host 会被忽略——`file:///dist/renderer.js`、`app:///dist/renderer.js` 与 `/dist/renderer.js` 三者等价。
 
-1. 在有 sourcemap 的目录执行 CLI 上传，用 `--minified-path-prefix` **指定一个前缀**
-2. 在渲染进程的 `beforeSend` 钩子里**处理错误栈的 path**，与上报的前缀对齐
+栈里的路径本来是不稳定的，但 SDK 已经默认帮你归一化，因此实际接入只剩一件事：**上传时用与归一化结果对应的前缀**。
 
-### 为什么需要第二步
+### 栈路径已自动归一化
 
-Electron 打包后，错误栈里的路径是**应用运行时的安装路径**，构建期不可知，且逐台机器不同：
+Electron 打包后，错误栈里的原始路径是**应用运行时的安装路径**，构建期不可知，且逐台机器不同：
 
-| 平台 | 栈里的实际路径 | 构建期可预知？ |
+| 平台 | 栈里的原始路径 | 构建期可预知？ |
 |------|----------------|----------------|
 | macOS | `/Applications/My.app/Contents/Resources/app.asar/dist/renderer.js` | 否，用户可能装到 `~/Applications` |
 | Windows | `C:/Users/<用户名>/AppData/Local/Programs/<app>/resources/app.asar/dist/renderer.js` | 否，含用户名 |
 | Linux AppImage | `/tmp/.mount_XXXXXX/resources/app.asar/dist/renderer.js` | 否，每次启动都变 |
 
-如果直接拿安装路径当前缀上传，一次上传只能匹配一台机器。所以要在上报前把这段不稳定的前缀**归一化成一个固定的虚拟前缀**，让所有机器的栈都长一样。
+直接拿安装路径当前缀上传，一次上传只能匹配一台机器。因此 SDK 默认（`normalizeStackPaths: true`）把应用根目录以下的帧路径改写成 `app:///<相对应用根的路径>`，**主进程和渲染进程的栈都会处理**：
 
-### 第一步：生成并上传 sourcemap
+```
+Error: something went wrong
+  at handleClick @ app:///dist/renderer.js:97:15
+  at <anonymous> @ process.processTimers (node:internal/timers:541:7)
+```
 
-在渲染进程的打包配置中开启 sourcemap 输出：
+应用根取自 `app.getAppPath()`，asar 打包时它已经指向包内，所以打包态与开发态会收敛到同一个 `app:///dist/renderer.js`。这与 Sentry Electron SDK 使用的是同一套 `app:///` 方案，覆盖 macOS、Windows（含盘符与反斜杠形态）、Linux AppImage 与开发态。
+
+`app:///dist/renderer.js` 的 path 部分是 `/dist/renderer.js`，因此上传时前缀填 `/dist`。
+
+**不在应用根之下的路径一律原样保留**：
+
+| 路径形态 | 是否改写 |
+|----------|----------|
+| 应用根以下的打包产物（`…/app.asar/dist/main.js`） | 改写为 `app:///dist/main.js` |
+| Node 内部帧（`node:internal/…`） | 不改写（保留可读性，后端反混淆时会跳过） |
+| `http(s)://` 加载的脚本（开发态 dev server、远程页面） | 不改写 |
+| `app.asar.unpacked` 下的原生模块 | 不改写 |
+| 已经被你自己归一化过的路径（`/dist/x.js`、`app:///…`） | 不改写，不会被二次改写 |
+| `view.url` 与资源 URL | 不改写：它们标识的是页面而非代码，改了会影响 view 归属 |
+
+### 生成并上传 sourcemap
+
+在打包配置中开启 sourcemap 输出（主进程与渲染进程都要开）：
 
 <CodeGroup>
 ```ts vite.config.ts
@@ -228,24 +291,77 @@ await esbuild.build({
 ```
 </CodeGroup>
 
-在 sourcemap 所在目录执行 [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli)，用 `--minified-path-prefix` 指定你选定的虚拟前缀（这里用 `/dist`）：
+在 sourcemap 所在目录执行 [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli)，用 `--minified-path-prefix` 指定归一化后路径的目录部分。若产物目录相对应用根是 `dist/renderer`，归一化结果就是 `app:///dist/renderer/index.js`，前缀即 `/dist/renderer`：
 
 ```bash
 flashcat-cli sourcemaps upload \
   --service my-electron-app \
   --release-version 1.0.0 \
-  --minified-path-prefix /dist \
+  --minified-path-prefix /dist/renderer \
   --api-key <YOUR_API_KEY> \
   ./out/renderer
 ```
 
 <Warning>
+前缀要填 **path**（`/dist/renderer`），不要连 `app:///` 一起写进去。服务端只按 URL path 匹配；CLI 要求前缀要么是带 host 的 URL（如 `http://localhost:5173/assets`），要么是以 `/` 开头的绝对路径——`app:///dist/renderer` 的 host 为空，会被判为非法前缀而直接报错。
+</Warning>
+
+主进程与渲染进程的产物通常不在同一个目录，两者的归一化前缀因此不同，需要**分别上传**：
+
+```bash
+# 主进程产物 → app:///dist/main/index.js
+flashcat-cli sourcemaps upload --minified-path-prefix /dist/main ./out/main
+# 渲染进程产物 → app:///dist/renderer/index.js
+flashcat-cli sourcemaps upload --minified-path-prefix /dist/renderer ./out/renderer
+```
+
+<Tip>
+不确定前缀该填什么时，先在控制台的异常详情里看一眼实际的栈——帧 URL 是 `app:///<X>/<文件名>`，前缀就填 `/<X>`。
+</Tip>
+
+<Warning>
 不要把 `.map` 文件打进最终分发的应用包。请在上传后、打包 asar 之前把它们从产物目录中移除，避免泄露源码。
 </Warning>
 
-### 第二步：在 beforeSend 里对齐前缀
+### 自定义路径映射
 
-`beforeSend` 是**渲染进程侧**（`@flashcatcloud/browser-rum`）的钩子。在渲染进程初始化时加上它，把错误栈里的安装路径替换成**同一个** `/dist` 前缀：
+内置归一化把整个应用根当作唯一基准。当你的构建布局无法用「一个应用根」表达时——例如产物落在 `<应用根>/public/dist`，但你希望 sourcemap 传在 `/dist` 下——用 `normalizeStackPath` 自己改写单个帧的路径。它在内置归一化**之前**执行，返回 `undefined` 表示交回内置逻辑处理：
+
+```ts main.ts
+await init({
+  // …
+  normalizeStackPath: (absolutePath) => {
+    // …/public/dist/renderer.js → /dist/renderer.js（吞掉中间的 public/ 一段）
+    const emitted = /\/public(\/dist\/.+)$/.exec(absolutePath);
+    if (emitted) {
+      return emitted[1];
+    }
+    // 软链进来的内部包，保持相对应用根的路径
+    const linked = /(\/node_modules\/@acme\/widgets\/dist\/.+)$/.exec(absolutePath);
+    return linked ? linked[1] : undefined; // 其余交给内置的 app:///
+  },
+});
+```
+
+这个钩子配在**主进程** `init()` 里，但**主进程与渲染进程的帧都会经过它**——渲染进程的栈经桥接到达主进程后同样会被处理。
+
+| 返回值 | 行为 |
+|--------|------|
+| 非空字符串 | 原样使用 |
+| `undefined`、空字符串或非字符串 | 交回内置的 `app:///` 归一化 |
+| 回调抛异常 | 记为一条 SDK 遥测错误，该帧回落到内置行为，不影响事件上报 |
+
+<Note>
+`normalizeStackPaths: false` 只关掉内置的 `app:///` 归一化，不影响 `normalizeStackPath`；两者可以单独使用，也可以组合使用。
+</Note>
+
+### 进阶：在 beforeSend 里自行改写（可选）
+
+在 SDK 内置归一化之前，通行做法是在渲染进程的 `beforeSend` 里用正则改写 `error.stack`。**现在这不再是必需步骤**——内置归一化已覆盖打包态、开发态与三大平台。以下场景才需要继续用它：
+
+- 改写逻辑要依赖事件本身的其他字段（例如按 `view.url` 决定映射），单帧路径不足以判断
+- 只想改渲染进程、不想改动主进程的初始化代码
+- 你已有一套在跑的实现，暂时不打算迁移
 
 ```ts renderer.ts
 import { flashcatRum } from '@flashcatcloud/browser-rum';
@@ -254,12 +370,7 @@ import { flashcatRum } from '@flashcatcloud/browser-rum';
 const MINIFIED_PATH_PREFIX = '/dist';
 
 flashcatRum.init({
-  applicationId: '<YOUR_APPLICATION_ID>',
-  clientToken: '<YOUR_CLIENT_TOKEN>',
-  service: 'my-electron-app',
-  site: 'browser.flashcat.cloud',
-  version: '1.0.0',
-  sessionSampleRate: 100,
+  // …
   beforeSend: (event) => {
     if (event.type === 'error' && event.error.stack) {
       // 把 "…<任意安装路径>/dist/renderer.js" 归一成 "/dist/renderer.js"
@@ -273,26 +384,25 @@ flashcatRum.init({
 ```
 
 <Warning>
-代码里的 `MINIFIED_PATH_PREFIX` 与上传命令的 `--minified-path-prefix` **必须逐字一致**。这是两处唯一需要对齐的地方，写错就匹配不上——sourcemap 能上传成功，但堆栈不会被还原。
+**手写正则最常见的坑是只覆盖了一个平台。** 例如下面这条只匹配 Windows 打包态的路径形态，在 macOS、Linux AppImage 和开发态下会**静默失效**——栈按原样上报，没有任何报错，只是 sourcemap 永远匹配不上：
+
+```js
+stack.replace(
+  /file:\/\/\/[A-Z]:\/.*?\/resources\/app\.asar\/dist\/([^:\s)]+\.js)(?=:\d+:\d+)/g,
+  '/dist/$1'
+);
+```
+
+需要自定义映射时，优先用 [`normalizeStackPath`](#自定义路径映射)：它拿到的是已经跨平台统一过的绝对路径，且主进程与渲染进程都生效。
 </Warning>
 
-<Tip>
-正则里的 `/dist/` 要换成你构建产物目录在路径中的实际片段。改完后建议先在控制台的异常详情里确认栈已变成 `/dist/renderer.js` 这种稳定形态，再验证反混淆效果。
-</Tip>
-
 <Note>
-`beforeSend` 只能修改事件的部分字段，`error.stack` 在可修改之列。回调不需要返回值；返回 `false` 会丢弃整条事件。完整说明见 [Web SDK 高级配置](/zh/rum/sdk/web/advanced-config)。
+内置归一化对**已经归一化过的路径是严格空操作**（`/dist/renderer.js` 不在应用根之下，不会被识别），因此存量的 `beforeSend` 写法可以继续保留，不会被二次改写。`beforeSend` 只能修改事件的部分字段，`error.stack` 在可修改之列；回调不需要返回值，返回 `false` 会丢弃整条事件。完整说明见 [Web SDK 高级配置](/zh/rum/sdk/web/advanced-config)。
 </Note>
-
-### 主进程栈的路径
-
-主进程栈的帧 URL 同样是运行时安装路径，因此有同样的稳定性问题。但 `beforeSend` 只存在于渲染进程，主进程 SDK 当前没有对应的钩子。
-
-因此主进程栈的反混淆目前依赖**路径可预知**：开发态、或安装位置固定的部署可以直接用真实前缀上传；安装位置不固定时，主进程栈能正常解析和展示，但不会被还原到源码位置。
 
 ### 无需归一化的场景
 
-如果渲染进程页面本来就通过**稳定 URL** 加载，栈里的路径在所有机器上一致，可以跳过第二步，直接用真实前缀上传：
+如果页面本来就通过**稳定 URL** 加载，栈里的路径在所有机器上一致，内置归一化对它们本来就是空操作（不在应用根之下），直接用真实前缀上传即可：
 
 | 页面加载方式 | 堆栈中的 URL 形态 | `--minified-path-prefix` |
 |--------------|-------------------|--------------------------|
@@ -300,9 +410,7 @@ flashcatRum.init({
 | 远程页面 | `https://app.example.com/assets/index.js` | `https://app.example.com/assets` |
 | 自定义协议 | `app://assets/index.js` | `app://assets` |
 
-<Tip>
-自定义协议（通过 `protocol.handle()` 注册 `app://` 并 `loadURL('app://index.html')`）也能让路径天然稳定，可作为归一化之外的另一种选择。它只影响 sourcemap 路径——桥接在 `file://` 下本来就能正常工作，不需要为此改变页面加载方式。
-</Tip>
+只有在需要看**未经处理的运行时绝对路径**时，才设 `normalizeStackPaths: false`。此时上传前缀要填真实安装路径，因此仅适用于安装位置固定的部署；CLI 也接受直接从栈里拷出来的 `file://` 前缀（如 `--minified-path-prefix file:///opt/myapp/resources/app.asar/dist`），它会被规约成等价的绝对路径。
 
 <Warning>
 `--service` 与 `--release-version` 必须与 SDK 初始化中的 `service` 和 `version` 完全一致。请把 sourcemap 上传纳入发布构建流程，并在每次版本发布时重新上传。
