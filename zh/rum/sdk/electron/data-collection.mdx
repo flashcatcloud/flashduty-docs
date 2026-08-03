@@ -113,15 +113,15 @@ SDK 在初始化时注册 `process.on('uncaughtException')` 与 `process.on('unh
 
 错误事件包含 `error.id`、`error.message`、`error.stack`、`error.type`（取自 `Error.name`）。抛出的不是 `Error` 实例时，SDK 会把值序列化并加上 `Uncaught` / `Provided` 前缀作为消息，此时没有堆栈。
 
-SDK 会把主进程栈转换成后端解析所用的帧格式（`at <函数> @ <url>:<行>:<列>`），与渲染进程一致：
+SDK 会把主进程栈转换成后端解析所用的帧格式（`at <函数> @ <url>:<行>:<列>`），与渲染进程一致，并把应用根以下的帧路径归一化为 `app:///<相对应用根的路径>`：
 
 ```
 Error: something went wrong
-  at handleClick @ /Applications/MyApp.app/Contents/Resources/app/dist/main.js:97:15
+  at handleClick @ app:///dist/main.js:97:15
   at <anonymous> @ process.processTimers (node:internal/timers:541:7)
 ```
 
-帧 URL 是主进程打包产物的绝对路径，正是 sourcemap 上传所用的匹配键，因此**主进程栈同样可以反混淆**，见[高级配置 · 上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap)。
+归一化后的路径与安装位置无关，正是 sourcemap 上传所用的匹配键，因此**主进程栈同样可以反混淆**，见[高级配置 · 上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap)。
 
 <Note>
 Node 自身的内部帧（`node:internal/…`）没有有意义的 URL，会整段落在 URL 位置，显示为 `at <anonymous> @ …`。SDK 保留它们（读起来有价值），后端在反混淆时会跳过这类无法解析的帧。
@@ -222,6 +222,13 @@ SDK 自身上报到 intake（或代理）的请求会被识别并跳过，不会
 渲染进程使用 `@flashcatcloud/browser-rum`，采集内容与 Web SDK 完全一致：页面 view、用户操作、`fetch` / XHR / 静态资源、JS 错误、long task 和 Web Vitals（LCP、INP、CLS 等）。字段明细见 [Web SDK 数据收集](/zh/rum/sdk/web/data-collection)。
 
 桥接生效时，这些事件经 IPC 交给主进程统一上报，并额外获得主进程的 `session.id`、`application.id` 与 `container` 字段——具体见[渲染进程事件的标识](#渲染进程事件的标识)。
+
+主进程在转发时还会对渲染进程事件做两处改写，两者都可以关闭：
+
+| 改写 | 作用对象 | 说明 |
+|------|----------|------|
+| 栈路径归一化 | `error` 事件的 `error.stack` 及其 `causes` | 应用根以下的帧路径改写为 `app:///<相对路径>`，便于 sourcemap 匹配。`view.url` 与资源 URL 不改写。见[上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap) |
+| 绘制指标校正 | `initial_load` 类型 `view` 事件的 FCP / LCP | 预创建的隐藏窗口按其首次可见时刻扣减预热耗时。见[预热窗口的 FCP 与 LCP 校正](/zh/rum/sdk/electron/advanced-config#预热窗口的-fcp-与-lcp-校正) |
 
 <Tip>
 主进程是 Node.js 运行时，没有 DOM 也没有渲染管线，因此**不会**产生 Web Vitals、long task 和用户操作数据。控制台已对主进程合成 view 特判：详情页不再展示性能指标区，不会出现 LCP / FCP 为 0 的误导数值。按页面性能维度分析时，数据来自渲染进程。

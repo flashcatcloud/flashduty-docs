@@ -38,6 +38,9 @@ await init({
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | No | `MEDIUM` | Batch size per upload |
 | `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | No | `NORMAL` | Upload interval |
 | `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | No | `mask` | Privacy level forwarded to renderers; Session Replay is not supported in this version, so it currently has no effect |
+| `correctPrewarmedViewTimings` | `boolean` | No | `true` | Whether to rebase the FCP / LCP of pre-warmed windows onto the moment the window first became visible, see [FCP and LCP of pre-warmed windows](#fcp-and-lcp-of-pre-warmed-windows) |
+| `normalizeStackPaths` | `boolean` | No | `true` | Whether to rewrite absolute paths in error stacks to `app:///<path relative to the app root>`, see [Stack paths are normalized automatically](#stack-paths-are-normalized-automatically) |
+| `normalizeStackPath` | `(absolutePath: string) => string \| undefined` | No | — | Rewrite a single stack frame's path yourself, before the built-in normalization runs, see [Custom path mapping](#custom-path-mapping) |
 
 <Note>
 `init()` is asynchronous. It returns `false` when validation fails (for example a missing required option). The SDK does not start in that case and prints the specific reason to the console.
@@ -61,6 +64,46 @@ Uploads are disk-buffered: events are written to batch files under `app.getPath(
 
 <Tip>
 During integration, temporarily use `batchSize: 'SMALL'` with `uploadFrequency: 'FREQUENT'` so events reach the console faster, then revert to the defaults before shipping.
+</Tip>
+
+## FCP and LCP of pre-warmed windows
+
+Electron applications commonly **pre-create a hidden window**, load the page ahead of time, and only `show()` it when it is needed:
+
+```ts
+const win = new BrowserWindow({ show: false });
+await win.loadURL(pageUrl);
+// …several seconds later, the user clicks the tray icon
+win.show();
+```
+
+Although the window is hidden, `paintWhenInitiallyHidden` defaults to `true`: the page renders as usual and never fires `visibilitychange`, so the renderer considers itself visible the whole time. If the page defers its first render until `show()`, the view's FCP / LCP includes the **entire pre-warm interval**. LCP is affected more widely — it keeps updating until the first user interaction, which cannot happen while the window is hidden, so a large element appearing at `show()` becomes the LCP even when FCP looks perfectly healthy. One measured case reported a normal FCP of 404ms alongside an LCP of 8084ms.
+
+By default (`correctPrewarmedViewTimings: true`) the SDK observes, from the main process, the moment the window first became visible, and subtracts that interval using the same formula the W3C Paint Timing spec applies to prerendered pages:
+
+```
+activationStart  = max(0, first visible at − view start)
+corrected metric = max(0, raw metric − activationStart)
+```
+
+The correction rewrites `view.first_contentful_paint` and `view.largest_contentful_paint`, plus their `view.performance.fcp.timestamp` and `view.performance.lcp.timestamp` counterparts.
+
+### When the correction applies
+
+| Situation | Behavior |
+|-----------|----------|
+| The window first became visible after the view started (a typical pre-warmed window) | Metrics are reduced using the formula above |
+| The window was already visible when the view started (ordinary or reused windows) | `activationStart` clamps to zero, nothing is rewritten |
+| The window had never been `show()`n by the time the view was reported | The view's FCP / LCP are **discarded** (including `largest_contentful_paint_target_selector`) — with no activation instant to rebase onto, any value would be meaningless |
+| `loading_type` is not `initial_load` (a route change, for example) | Nothing is rewritten: a route change inside an already-running document is not an activation |
+| `WebContentsView`, `<webview>`, or a window that already existed before the SDK started | Nothing is rewritten — "not observed" must not be mistaken for "never visible" |
+
+<Note>
+The correction happens as the main process forwards a renderer view event. It reads `view` events only and writes only the paint metric fields listed above; `view.id`, `view.url`, `loading_time`, `action.count`, and everything else are untouched. With the option off, the SDK does not even observe window visibility.
+</Note>
+
+<Tip>
+Applications that do not pre-create windows can ignore this option: an ordinary window is already visible when its view starts, so `activationStart` is always 0 and the correction is a no-op. Set `correctPrewarmedViewTimings: false` only when you need the raw document-level values.
 </Tip>
 
 ## Self-hosted deployments and proxies
@@ -176,7 +219,7 @@ This API is in preview and its signatures may change before the stable release.
 
 Released Electron applications usually minify their JavaScript, so error stacks only contain minified file names and line/column numbers. Uploading source maps lets Flashduty show the original source location in the error details.
 
-**JavaScript stacks from both processes can be resolved.** The SDK converts main-process stacks into the frame format the backend parses, and their frame URLs are the absolute paths of the bundled main-process code — the same key source map upload uses. Upload the source maps for your main-process bundle alongside the renderer ones.
+**JavaScript stacks from both processes can be resolved.** The SDK converts main-process stacks into the frame format the backend parses, and normalizes the absolute paths in both processes' stacks into a stable form — so you no longer have to handle paths yourself when uploading source maps. Upload the source maps for your main-process bundle alongside the renderer ones.
 
 <Note>
 Native crash stacks (from `crashReporter` minidumps) use a different, address-based format. They are unaffected by this and are not symbolicated. See [Data collection · Native crashes](/en/rum/sdk/electron/data-collection#native-crashes).
@@ -186,26 +229,46 @@ Native crash stacks (from `crashReporter` minidumps) use a different, address-ba
 
 **The prefix you upload must correspond to the path in the error stack.**
 
-The backend matches on the **path portion** of the URL only — scheme and host are ignored, so `file:///dist/renderer.js`, `app:///dist/renderer.js`, and `/dist/renderer.js` are equivalent. Integration therefore has two steps:
+The backend matches on the **path portion** of the URL only — scheme and host are ignored, so `file:///dist/renderer.js`, `app:///dist/renderer.js`, and `/dist/renderer.js` are equivalent.
 
-1. Run the CLI in the directory holding your source maps and **declare a prefix** with `--minified-path-prefix`
-2. **Rewrite the stack paths** in the renderer's `beforeSend` hook so they align with the prefix you uploaded
+Stack paths are unstable by nature, but the SDK already normalizes them for you, so only one thing is left to do: **upload with a prefix matching the normalized result**.
 
-### Why the second step is needed
+### Stack paths are normalized automatically
 
-In a packaged Electron application, the paths in an error stack are the **runtime installation paths**. They are unknown at build time and differ per machine:
+In a packaged Electron application, the raw paths in an error stack are the **runtime installation paths**. They are unknown at build time and differ per machine:
 
-| Platform | Actual path in the stack | Predictable at build time? |
-|----------|--------------------------|----------------------------|
+| Platform | Raw path in the stack | Predictable at build time? |
+|----------|-----------------------|----------------------------|
 | macOS | `/Applications/My.app/Contents/Resources/app.asar/dist/renderer.js` | No — the user may install to `~/Applications` |
 | Windows | `C:/Users/<username>/AppData/Local/Programs/<app>/resources/app.asar/dist/renderer.js` | No — contains the user name |
 | Linux AppImage | `/tmp/.mount_XXXXXX/resources/app.asar/dist/renderer.js` | No — changes on every launch |
 
-Uploading with an installation path as the prefix would match exactly one machine. So the unstable prefix has to be **normalized to a fixed virtual prefix** before the event is sent, making every machine's stack look the same.
+Uploading with an installation path as the prefix would match exactly one machine. So by default (`normalizeStackPaths: true`) the SDK rewrites every frame path below the application root to `app:///<path relative to the app root>`, **for main-process and renderer stacks alike**:
 
-### Step 1: generate and upload source maps
+```
+Error: something went wrong
+  at handleClick @ app:///dist/renderer.js:97:15
+  at <anonymous> @ process.processTimers (node:internal/timers:541:7)
+```
 
-Enable source map output in your renderer build configuration:
+The application root comes from `app.getAppPath()`, which already points inside the archive for an asar-packaged application, so packaged and development builds converge on the same `app:///dist/renderer.js`. This is the same `app:///` scheme the Sentry Electron SDK uses, and it covers macOS, Windows (drive letters and backslashes included), Linux AppImage, and development builds.
+
+The path portion of `app:///dist/renderer.js` is `/dist/renderer.js`, so the upload prefix is `/dist`.
+
+**Anything not below the application root is left exactly as it is:**
+
+| Path shape | Rewritten? |
+|------------|------------|
+| Bundled output below the app root (`…/app.asar/dist/main.js`) | Yes — becomes `app:///dist/main.js` |
+| Node internal frames (`node:internal/…`) | No (kept readable; the backend skips them during un-minification) |
+| Scripts served over `http(s)://` (dev server, remote page) | No |
+| Native modules under `app.asar.unpacked` | No |
+| Paths you already normalized yourself (`/dist/x.js`, `app:///…`) | No — never rewritten twice |
+| `view.url` and resource URLs | No — they identify the page, not the code, and rewriting them would change view attribution |
+
+### Generate and upload source maps
+
+Enable source map output in your build configuration (for both the main process and the renderer):
 
 <CodeGroup>
 ```ts vite.config.ts
@@ -228,24 +291,77 @@ await esbuild.build({
 ```
 </CodeGroup>
 
-Run the [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli) in the directory containing the source maps, declaring your chosen virtual prefix (`/dist` here):
+Run the [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli) in the directory containing the source maps, passing the directory part of the normalized path to `--minified-path-prefix`. If your output directory is `dist/renderer` relative to the app root, the normalized frame is `app:///dist/renderer/index.js`, so the prefix is `/dist/renderer`:
 
 ```bash
 flashcat-cli sourcemaps upload \
   --service my-electron-app \
   --release-version 1.0.0 \
-  --minified-path-prefix /dist \
+  --minified-path-prefix /dist/renderer \
   --api-key <YOUR_API_KEY> \
   ./out/renderer
 ```
 
 <Warning>
+Pass the **path** (`/dist/renderer`) — do not include the `app:///` part. The backend matches on the URL path only, and the CLI requires the prefix to be either a URL with a host (such as `http://localhost:5173/assets`) or an absolute path starting with `/`. `app:///dist/renderer` has an empty host, so it is rejected as an invalid prefix.
+</Warning>
+
+Main-process and renderer bundles usually live in different directories, so their normalized prefixes differ and each needs **its own upload**:
+
+```bash
+# main-process bundle → app:///dist/main/index.js
+flashcat-cli sourcemaps upload --minified-path-prefix /dist/main ./out/main
+# renderer bundle → app:///dist/renderer/index.js
+flashcat-cli sourcemaps upload --minified-path-prefix /dist/renderer ./out/renderer
+```
+
+<Tip>
+Unsure which prefix to use? Look at an actual stack in the console's error details: frame URLs are `app:///<X>/<file name>`, so the prefix is `/<X>`.
+</Tip>
+
+<Warning>
 Do not ship `.map` files inside the distributed application. Remove them from the output directory after uploading and before packaging the asar, to avoid leaking your source code.
 </Warning>
 
-### Step 2: align the prefix in beforeSend
+### Custom path mapping
 
-`beforeSend` is a **renderer-side** hook, provided by `@flashcatcloud/browser-rum`. Add it to the renderer initialization to replace installation paths in error stacks with the **same** `/dist` prefix:
+The built-in normalization treats the application root as the single anchor. When your build layout cannot be expressed that way — output landing in `<app root>/public/dist` while you want the source maps uploaded under `/dist`, for example — use `normalizeStackPath` to rewrite individual frame paths yourself. It runs **before** the built-in normalization, and returning `undefined` hands the frame back to it:
+
+```ts main.ts
+await init({
+  // …
+  normalizeStackPath: (absolutePath) => {
+    // …/public/dist/renderer.js → /dist/renderer.js (swallow the intermediate public/ segment)
+    const emitted = /\/public(\/dist\/.+)$/.exec(absolutePath);
+    if (emitted) {
+      return emitted[1];
+    }
+    // a linked internal package, kept relative to the application root
+    const linked = /(\/node_modules\/@acme\/widgets\/dist\/.+)$/.exec(absolutePath);
+    return linked ? linked[1] : undefined; // everything else → the built-in app:///
+  },
+});
+```
+
+The hook is configured on the **main-process** `init()`, but **frames from both processes go through it** — renderer stacks are processed once they reach the main process over the bridge.
+
+| Return value | Behavior |
+|--------------|----------|
+| A non-empty string | Used verbatim |
+| `undefined`, an empty string, or a non-string | Falls through to the built-in `app:///` normalization |
+| The callback throws | Reported as an SDK telemetry error; the frame falls back to the built-in behavior and event reporting is unaffected |
+
+<Note>
+`normalizeStackPaths: false` only disables the built-in `app:///` normalization; it does not affect `normalizeStackPath`. The two can be used separately or together.
+</Note>
+
+### Advanced: rewriting paths yourself in beforeSend (optional)
+
+Before the SDK had built-in normalization, the common practice was to rewrite `error.stack` with a regular expression in the renderer's `beforeSend`. **This is no longer a required step** — the built-in normalization already covers packaged builds, development builds, and all three platforms. Reach for `beforeSend` only when:
+
+- the rewrite depends on other fields of the event (mapping decided by `view.url`, say), so a single frame path is not enough to decide
+- you want to touch the renderer only, without changing the main-process initialization
+- you already have a working implementation and are not ready to migrate
 
 ```ts renderer.ts
 import { flashcatRum } from '@flashcatcloud/browser-rum';
@@ -254,12 +370,7 @@ import { flashcatRum } from '@flashcatcloud/browser-rum';
 const MINIFIED_PATH_PREFIX = '/dist';
 
 flashcatRum.init({
-  applicationId: '<YOUR_APPLICATION_ID>',
-  clientToken: '<YOUR_CLIENT_TOKEN>',
-  service: 'my-electron-app',
-  site: 'browser.flashcat.cloud',
-  version: '1.0.0',
-  sessionSampleRate: 100,
+  // …
   beforeSend: (event) => {
     if (event.type === 'error' && event.error.stack) {
       // Normalize "…<any install path>/dist/renderer.js" to "/dist/renderer.js"
@@ -273,26 +384,25 @@ flashcatRum.init({
 ```
 
 <Warning>
-`MINIFIED_PATH_PREFIX` in the code and `--minified-path-prefix` on the upload command **must match exactly**. These are the only two places that need to agree — get them wrong and nothing matches: the source maps upload successfully, but stacks are never resolved.
+**The most common trap with a hand-written regular expression is covering only one platform.** The one below, for instance, matches the Windows packaged path shape only, and **fails silently** on macOS, Linux AppImage, and development builds — stacks are reported as they are, with no error anywhere, and the source maps simply never match:
+
+```js
+stack.replace(
+  /file:\/\/\/[A-Z]:\/.*?\/resources\/app\.asar\/dist\/([^:\s)]+\.js)(?=:\d+:\d+)/g,
+  '/dist/$1'
+);
+```
+
+When you do need custom mapping, prefer [`normalizeStackPath`](#custom-path-mapping): it receives an absolute path that is already unified across platforms, and it applies to both processes.
 </Warning>
 
-<Tip>
-Replace `/dist/` in the regular expression with the actual path segment of your build output directory. After the change, confirm in the console error details that stacks now take the stable `/dist/renderer.js` form before verifying resolution.
-</Tip>
-
 <Note>
-`beforeSend` can only modify a subset of event fields, and `error.stack` is one of them. The callback needs no return value; returning `false` discards the whole event. See [Web SDK advanced configuration](/en/rum/sdk/web/advanced-config) for the full contract.
+The built-in normalization is a **strict no-op on paths that are already normalized** (`/dist/renderer.js` is not below the application root, so it is not recognized), which means an existing `beforeSend` keeps working and its output is never rewritten a second time. `beforeSend` can only modify a subset of event fields, and `error.stack` is one of them; the callback needs no return value, and returning `false` discards the whole event. See [Web SDK advanced configuration](/en/rum/sdk/web/advanced-config) for the full contract.
 </Note>
-
-### Main-process stack paths
-
-Main-process frame URLs are runtime installation paths too, so they have the same stability problem. But `beforeSend` exists only in the renderer — the main-process SDK has no equivalent hook yet.
-
-Main-process stack resolution therefore depends on the path being **predictable**: development builds, or deployments with a fixed install location, can upload with the real prefix. Where the install location varies, main-process stacks still parse and display correctly but are not mapped back to source.
 
 ### When normalization is unnecessary
 
-If your renderer pages are loaded from a **stable URL**, stack paths are already identical across machines. Skip step 2 and upload with the real prefix:
+If your pages are loaded from a **stable URL**, stack paths are already identical across machines — the built-in normalization is a no-op on them anyway (they are not below the application root), so just upload with the real prefix:
 
 | Loading method | URL in the stack | `--minified-path-prefix` |
 |----------------|------------------|--------------------------|
@@ -300,9 +410,7 @@ If your renderer pages are loaded from a **stable URL**, stack paths are already
 | Remote page | `https://app.example.com/assets/index.js` | `https://app.example.com/assets` |
 | Custom protocol | `app://assets/index.js` | `app://assets` |
 
-<Tip>
-A custom protocol (register `app://` with `protocol.handle()` and call `loadURL('app://index.html')`) also makes paths stable by construction, and is an alternative to normalization. It only affects source map paths — the bridge works fine under `file://` and needs no change to how pages are loaded.
-</Tip>
+Set `normalizeStackPaths: false` only when you need the **raw runtime absolute paths**. The upload prefix then has to be the real installation path, which works only for deployments with a fixed install location; the CLI does accept a `file://` prefix copied straight out of a stack (`--minified-path-prefix file:///opt/myapp/resources/app.asar/dist`) and reduces it to the equivalent absolute path.
 
 <Warning>
 `--service` and `--release-version` must exactly match the `service` and `version` passed to the SDK. Make source map upload part of your release build and re-upload on every version.

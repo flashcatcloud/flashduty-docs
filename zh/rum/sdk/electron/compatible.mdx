@@ -56,6 +56,8 @@ keywords: ["RUM", "Electron SDK", "兼容性", "打包工具", "已知限制"]
 | 渲染进程 / 子进程终止 | 支持 | 监听 `render-process-gone` / `child-process-gone`，覆盖不产生 dump 的终止 |
 | 原生崩溃符号化 | 不支持 | 见「当前限制」 |
 | 渲染进程 view / action / resource / error / Web Vitals | 支持 | 由 `@flashcatcloud/browser-rum` 采集 |
+| 错误栈路径归一化 | 支持 | 两个进程的栈都改写为 `app:///<相对应用根的路径>`，sourcemap 无需按安装路径上传；`normalizeStackPaths: false` 可关闭 |
+| 预热窗口 FCP / LCP 校正 | 支持 | 隐藏创建的 `BrowserWindow` 的绘制指标按首次可见时刻校正；`correctPrewarmedViewTimings: false` 可关闭 |
 | Session Replay | 不支持 | 见「当前限制」 |
 
 ## 当前限制
@@ -63,7 +65,7 @@ keywords: ["RUM", "Electron SDK", "兼容性", "打包工具", "已知限制"]
 | 限制 | 说明 |
 |------|------|
 | 原生崩溃符号化 | 桌面端（macOS / Windows / Linux）尚无符号解析链路。崩溃事件能正常落库并展示线程栈与模块列表，但只有**原始地址**，不会还原为函数名和行号 |
-| `file://` 页面的 sourcemap 匹配 | 使用 `loadFile()` 时堆栈路径是运行时安装路径，逐台机器不同。需在 `beforeSend` 里把前缀归一化后再上传，见[高级配置 · 上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap)。这只影响 sourcemap 反混淆，不影响数据采集与桥接 |
+| 应用根之外的代码不归一化 | 栈路径归一化以 `app.getAppPath()` 为基准，`app.asar.unpacked` 下的原生模块、以及从应用根之外加载的脚本会按原样上报。这类文件的 sourcemap 需自行按真实路径对齐 |
 | 渲染进程事件的 `source` | 桥接生效时渲染进程事件仍是 `source: browser`，靠 `container.source: electron` 标识归属。筛选整个应用需用 `source:electron OR container.source:electron` |
 | Session Replay | 当前不支持。`defaultPrivacyLevel` 参数会传递给渲染进程，但暂不产生实际效果 |
 | APM / 分布式追踪 | Flashduty 当前没有 span 上报入口。`dd-trace` 采集的 IPC 调用与子进程命令 span 在本地丢弃，只有 HTTP span 会转成 RUM `resource` 事件 |
@@ -72,15 +74,15 @@ keywords: ["RUM", "Electron SDK", "兼容性", "打包工具", "已知限制"]
 | 会话续期信号 | 目前只有渲染进程的 `click` action 会续期会话。纯后台运行的主进程会在 15 分钟无交互后进入新会话 |
 | 上报协议固定 HTTPS | 上报地址模板 `https://<site>/api/v2/rum` 中的 `https://` 是写死的。私有化部署若 intake 只提供纯 HTTP，改 `site` 无效，必须走 `proxy`，见[高级配置](/zh/rum/sdk/electron/advanced-config#什么时候必须用-proxy) |
 | 进程终止事件无堆栈 | `render-process-gone` / `child-process-gone` 事件不含调用栈——主进程无法回溯一个已消失进程的栈 |
-| 主进程栈路径归一化 | 主进程栈可反混淆，但 `beforeSend` 是渲染进程侧钩子，主进程暂无对应钩子。安装位置不固定时，主进程栈能解析但不会还原到源码 |
+| 绘制指标校正只覆盖 `BrowserWindow` | `WebContentsView`、`<webview>` 没有 `show` 事件，SDK 观测不到其可见时刻，绘制指标按原样上报。此外，从未被 `show()` 过的窗口，其 view 的 FCP / LCP 会被丢弃而非上报，见[高级配置 · 预热窗口的 FCP 与 LCP 校正](/zh/rum/sdk/electron/advanced-config#预热窗口的-fcp-与-lcp-校正) |
 | 主进程 view 计数 | `view.action.count` 等计数只统计主进程事件，不包含桥接过来的渲染进程事件 |
 
 ## 符号解析兼容性
 
 | 栈帧类型 | 解析方式 | 所需上传文件 |
 |----------|----------|--------------|
-| 渲染进程 JavaScript | 使用 sourcemap 还原源文件、函数名和行列号；打包后需在 `beforeSend` 里归一化栈路径 | 构建产生的 `.map` 文件 |
-| 主进程 JavaScript | 使用 sourcemap 还原；SDK 已把主进程栈转成后端解析所用的帧格式 | 主进程产物的 `.map` 文件 |
+| 渲染进程 JavaScript | 使用 sourcemap 还原源文件、函数名和行列号；SDK 默认已把栈路径归一化为 `app:///…` | 构建产生的 `.map` 文件 |
+| 主进程 JavaScript | 使用 sourcemap 还原；SDK 已把主进程栈转成后端解析所用的帧格式，路径同样归一化 | 主进程产物的 `.map` 文件 |
 | 原生崩溃帧（C/C++） | 当前不解析 | — |
 
 上传方式见[高级配置 · 上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap)。
