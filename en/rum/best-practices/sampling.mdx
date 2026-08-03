@@ -1,0 +1,333 @@
+---
+title: "Understanding RUM sampling: mechanism, rules, and best practices"
+sidebarTitle: "Sampling strategy"
+description: "Understand how RUM session sampling works, and learn best practices for choosing, dynamically adjusting, and customizing sampling rates."
+keywords: ["RUM", "sampling", "sample rate", "sessionSampleRate", "best practices", "frontend monitoring"]
+---
+
+Sampling determines how much real user data gets collected and reported. Set the sampling rate too high and you pay for data you don't need; set it too low and you may miss critical issues. This article explains how RUM sampling works and provides best practices for choosing and dynamically managing sampling rates.
+
+## What is sampling
+
+The RUM SDK controls sampling through the `sessionSampleRate` parameter, a value from 0 to 100 representing the **percentage of sessions to collect**:
+
+```js
+import { flashcatRum } from "@flashcatcloud/browser-rum";
+
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 20, // collect 20% of sessions
+  sessionReplaySampleRate: 10, // of collected sessions, record session replay for 10%
+});
+```
+
+A sampled session reports all of its data (page views, resources, errors, user actions, and so on); an unsampled session reports nothing — **including errors**. This is the first key point about sampling: with a 20% sampling rate, if an error affects users in the other 80%, you will not see it on the platform.
+
+`sessionReplaySampleRate` is a **second-stage sample** applied on top of collected sessions: with `sessionSampleRate: 20` and `sessionReplaySampleRate: 10`, sessions with replay recordings account for 2% of total traffic.
+
+## How sampling works
+
+Understanding the following four rules resolves most "I configured the sampling rate but it doesn't behave as expected" confusion.
+
+### 1. The unit is the session, not the user or the event
+
+The sampling decision happens **when a session starts**: the SDK flips a coin once with probability `sessionSampleRate`. If the session wins the draw, it is reported in full; otherwise it stays completely silent. There is no such thing as "20% of events within a session get reported" — session data is either complete or absent.
+
+The same user's session may be sampled today and not sampled tomorrow. The default sampling mechanism is **not anchored to specific users**.
+
+### 2. The decision is sticky within a session
+
+The draw result is persisted with the session state (stored in a cookie on the web). A session lasts up to 4 hours while the user stays active, and expires after 15 minutes of inactivity; refreshing or navigating between pages does not trigger a new draw. Only when the session expires and a new one starts is the decision made again, using the sampling rate in effect at that time.
+
+<Note>
+This means that after you change the sampling rate, **new sessions immediately follow the new rate, while existing sessions keep their original decision until they expire naturally**. This is exactly the right semantics for gradual rollout, but it also means the change does not take full effect instantly.
+</Note>
+
+### 3. It is a probability, not an exact quota
+
+Each session's draw is independent, with no global coordination. A 20% sampling rate is an **expected value**: the more traffic you have, the closer the actual collection ratio gets to 20% (law of large numbers); with low traffic, fluctuation is noticeable — collecting 13 or 28 out of 100 sessions is perfectly normal.
+
+### 4. The sampling rate is frozen at initialization
+
+`sessionSampleRate` is fixed when `init()` is called. It cannot be changed at runtime, and `init()` cannot be called a second time within a page's lifecycle. To change the sampling rate, the next initialization (on the web, the next page load) must receive the new value — the dynamic adjustment approaches below are built around this fact.
+
+## Choosing a sampling rate
+
+| Scenario | Recommendation |
+| --- | --- |
+| Testing / staging environments | `sessionSampleRate: 100` — traffic is low, and full collection makes verification easier |
+| Production (small to medium traffic) | 50–100, prioritizing issue visibility |
+| Production (high traffic) | 10–30, balancing data volume and cost |
+| Session replay | Typically 1–10 — replay is the main source of SDK overhead and data volume |
+| New release window | Temporarily raise (e.g., to 100), then return to the normal value once stable |
+| Production incident investigation | Temporarily raise to 100 to capture as much evidence as possible |
+
+<Tip>
+Errors are low-frequency events. If your primary goal is error monitoring rather than performance statistics, lean toward a higher sampling rate — a 20% sample is plenty representative for performance metrics, but an error affecting only 1% of users may take a long time to show up under 20% sampling.
+</Tip>
+
+## Best practice 1: make the sampling rate dynamically adjustable
+
+A sampling rate hardcoded in your source requires a release for every adjustment. Instead, externalize it to your own configuration service and read it during SDK initialization:
+
+<Tabs>
+<Tab title="Web">
+```js
+const CACHE_KEY = "rum-sample-rate";
+
+// 1. Initialize immediately with the locally cached value; never block SDK startup
+const cached = Number(localStorage.getItem(CACHE_KEY));
+const sampleRate = Number.isFinite(cached) && cached > 0 ? cached : 20;
+
+flashcatRum.init({
+  // ...other options
+  sessionSampleRate: sampleRate,
+});
+
+// 2. Fetch the latest value asynchronously for the next page load
+fetch("https://your-config-server.example.com/rum-config")
+  .then((res) => res.json())
+  .then(({ sessionSampleRate: latest }) => {
+    localStorage.setItem(CACHE_KEY, String(latest));
+    // 3. When the rate changes, end the current session so the new decision applies sooner
+    if (latest !== sampleRate) {
+      flashcatRum.stopSession();
+    }
+  })
+  .catch(() => {}); // on fetch failure, keep using the cached value; collection is unaffected
+```
+</Tab>
+
+<Tab title="Android">
+```kotlin
+val prefs = getSharedPreferences("rum_config", Context.MODE_PRIVATE)
+
+// 1. Initialize immediately with the locally cached value; never block SDK startup
+val sampleRate = prefs.getFloat("session_sample_rate", 20f)
+
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(sampleRate)
+    .build()
+Rum.enable(rumConfig)
+
+// 2. Fetch the latest value asynchronously and cache it; takes effect on next cold start
+CoroutineScope(Dispatchers.IO).launch {
+    runCatching { fetchRumConfig() } // request your own config service
+        .onSuccess { config ->
+            prefs.edit()
+                .putFloat("session_sample_rate", config.sessionSampleRate)
+                .apply()
+        } // on fetch failure, keep using the cached value; collection is unaffected
+}
+```
+</Tab>
+
+<Tab title="iOS">
+```swift
+let defaults = UserDefaults.standard
+
+// 1. Initialize immediately with the locally cached value; never block SDK startup
+let sampleRate = defaults.object(forKey: "rumSessionSampleRate") as? Float ?? 20
+
+var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
+rumConfig.sessionSampleRate = sampleRate
+RUM.enable(with: rumConfig)
+
+// 2. Fetch the latest value asynchronously and cache it; takes effect on next cold start
+URLSession.shared.dataTask(with: configURL) { data, _, _ in
+    guard let data,
+          let config = try? JSONDecoder().decode(RumRemoteConfig.self, from: data)
+    else { return } // on fetch failure, keep using the cached value; collection is unaffected
+    defaults.set(config.sessionSampleRate, forKey: "rumSessionSampleRate")
+}.resume()
+```
+</Tab>
+</Tabs>
+
+Three key points:
+
+1. **Never block initialization waiting for configuration.** Synchronously waiting for a config API loses early page data, and config service jitter would delay RUM startup. The right pattern is "initialize immediately with the cached value + refresh the cache asynchronously for next time" — the new rate taking effect one page load later is perfectly acceptable.
+2. **Call `stopSession()` when the rate changes (web / Mini Program only).** Because the decision is sticky within a session (rule 2), a user who lost the draw under 20% will stay silent even after a new page initializes at 100% — for up to 4 hours — because the existing session keeps its old decision. `stopSession()` expires the current session immediately; the user's next interaction starts a new session and re-draws under the new rate. Note that this trick does not work on mobile: the sampling rate is frozen into the sampler at initialization, so a new session after `stopSession()` still draws under the old rate. By default the new value takes effect at the next cold start; if you need it immediately, see the [advanced approach for mobile](#advanced-for-mobile-applying-a-new-sampling-rate-immediately) below.
+3. **Always have a fallback for fetch failures.** When the config API is unavailable, fall back to the cached or built-in default value so collection is never interrupted.
+
+<Warning>
+`stopSession()` splits one user's continuous activity into two sessions, slightly inflating session counts and breaking session duration statistics. Call it only when the sampling rate has actually changed, not on every page load.
+</Warning>
+
+### Advanced for mobile: applying a new sampling rate immediately
+
+A mobile app process can stay alive for days, so "takes effect at the next cold start" may not be enough for scenarios like incident investigation, where you need **full collection right now**. In that case, use the full rebuild path: call `stopInstance()` to stop the current SDK instance, then re-initialize with the new sampling rate. The key discipline: **when a new config arrives, only record it — don't rebuild immediately. Wait for a quiet lifecycle moment, such as the app returning to the foreground** — rebuilding in the middle of user activity cuts off the current view and session context.
+
+<Tabs>
+<Tab title="Android">
+```kotlin
+// When a new config arrives, only record the pending value — don't rebuild immediately
+fun onConfigFetched(latest: RumRemoteConfig) {
+    prefs.edit().putFloat("session_sample_rate", latest.sessionSampleRate).apply()
+    pendingSampleRate = latest.sessionSampleRate.takeIf { it != currentSampleRate }
+}
+
+// Rebuild at a quiet moment, such as the app returning to the foreground
+ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+    override fun onStart(owner: LifecycleOwner) {
+        val newRate = pendingSampleRate ?: return
+        pendingSampleRate = null
+
+        Datadog.stopInstance() // stop the current instance
+        Datadog.initialize(context, coreConfiguration, TrackingConsent.GRANTED)
+        val rumConfig = RumConfiguration.Builder(applicationId)
+            .setSessionSampleRate(newRate)
+            .build()
+        Rum.enable(rumConfig) // also re-enable every other product you use (Logs, Trace, etc.)
+        currentSampleRate = newRate
+    }
+})
+```
+</Tab>
+
+<Tab title="iOS">
+```swift
+// When a new config arrives, only record the pending value — don't rebuild immediately
+func onConfigFetched(_ latest: RumRemoteConfig) {
+    defaults.set(latest.sessionSampleRate, forKey: "rumSessionSampleRate")
+    pendingSampleRate = latest.sessionSampleRate != currentSampleRate
+        ? latest.sessionSampleRate : nil
+}
+
+// Rebuild at a quiet moment, such as the app returning to the foreground
+NotificationCenter.default.addObserver(
+    forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+) { _ in
+    guard let newRate = pendingSampleRate else { return }
+    pendingSampleRate = nil
+
+    Datadog.stopInstance() // stop the current instance
+    Datadog.initialize(with: coreConfiguration, trackingConsent: .granted)
+    var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
+    rumConfig.sessionSampleRate = newRate
+    RUM.enable(with: rumConfig) // also re-enable every other product you use (Logs, Trace, etc.)
+    currentSampleRate = newRate
+}
+```
+</Tab>
+</Tabs>
+
+<Warning>
+Rebuilding is an advanced operation with real costs. Confirm these risks before shipping it:
+
+- **Timing sensitivity**: rebuilding in the middle of user activity cuts off the current view/session context and splits continuous behavior into two sessions. Always run it at a quiet lifecycle moment (like the foreground transition in the examples above), never the instant a new config arrives.
+- **Data loss risk**: whether data still buffered locally at `stopInstance()` gets fully uploaded needs to be verified through testing in your environment.
+- **Rebuild burden**: every product enabled on the instance (RUM, Logs, Trace, Session Replay) plus view tracking strategies and network interceptors must be re-registered — anything missed becomes a silent collection downgrade.
+- **Scope of use**: recommended only for "incident investigation needs full collection right now" scenarios; for routine sampling rate adjustments, "takes effect at the next cold start" is risk-free and sufficient. React Native does not expose `stopInstance`, so it can only take effect at the next launch.
+</Warning>
+
+## Best practice 2: business-defined custom sampling
+
+The default random draw treats every user equally, but businesses often want differentiation: collect all VIP users, watch canary users closely, always sample users who recently hit errors. You can achieve this by **moving the draw from the SDK into your business code**: your code decides whether the current session is sampled, and passes only `0` or `100` as `sessionSampleRate`, reducing it to an on/off switch.
+
+<Tabs>
+<Tab title="Web">
+```js
+function decideSampling(user, config) {
+  // Short-circuit rules, highest priority first
+  if (config.incidentMode) return true;           // incident investigation mode: collect everything
+  if (user.isInternal || user.isBeta) return true; // internal/canary users: always sample
+  if (user.isVip) return true;                     // key users: always sample
+  if (localStorage.getItem("rum-had-error")) return true; // hit an error last time: always sample
+
+  // Base rule: deterministic hash bucketing by userId
+  return hash(user.id + config.salt) % 100 < config.sampleRate;
+}
+
+const sampled = decideSampling(currentUser, cachedConfig);
+
+flashcatRum.init({
+  // ...other options
+  sessionSampleRate: sampled ? 100 : 0,
+});
+```
+</Tab>
+
+<Tab title="Android">
+```kotlin
+fun decideSampling(user: User, config: RumRemoteConfig): Boolean {
+    // Short-circuit rules, highest priority first
+    if (config.incidentMode) return true            // incident investigation mode: collect everything
+    if (user.isInternal || user.isBeta) return true // internal/canary users: always sample
+    if (user.isVip) return true                     // key users: always sample
+    if (prefs.getBoolean("rum_had_error", false)) return true // hit an error last time: always sample
+
+    // Base rule: deterministic hash bucketing by userId
+    return hash(user.id + config.salt) % 100 < config.sampleRate
+}
+
+val sampled = decideSampling(currentUser, cachedConfig)
+
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(if (sampled) 100f else 0f)
+    .build()
+Rum.enable(rumConfig)
+```
+</Tab>
+
+<Tab title="iOS">
+```swift
+func decideSampling(user: User, config: RumRemoteConfig) -> Bool {
+    // Short-circuit rules, highest priority first
+    if config.incidentMode { return true }            // incident investigation mode: collect everything
+    if user.isInternal || user.isBeta { return true } // internal/canary users: always sample
+    if user.isVip { return true }                     // key users: always sample
+    if UserDefaults.standard.bool(forKey: "rumHadError") { return true } // hit an error last time: always sample
+
+    // Base rule: deterministic hash bucketing by userId
+    return hash(user.id + config.salt) % 100 < config.sampleRate
+}
+
+let sampled = decideSampling(user: currentUser, config: cachedConfig)
+
+var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
+rumConfig.sessionSampleRate = sampled ? 100 : 0
+RUM.enable(with: rumConfig)
+```
+</Tab>
+</Tabs>
+
+### Why hash bucketing instead of random numbers
+
+The base rule uses `hash(userId) % 100` instead of `Math.random()`, which brings two properties the default draw lacks:
+
+- **User-level stability**: the same user always gets the same decision, so you can answer "does user A have data?" — all sessions of a sampled user are present, and an unsampled user definitively has none.
+- **Monotonic rollout**: when the rate goes from 20% to 100%, every previously sampled user stays sampled, and the newly added users are a pure increment, keeping the data continuous and comparable. Changing the `salt` reshuffles all buckets.
+
+### Caveats
+
+- **The decision must be stable within a session.** If you draw with `Math.random()` on every page load, different pages within the same session may reach different conclusions, while the SDK only honors the session's first decision — the symptom is "configured 100 but nothing gets reported", which is very hard to debug. Deterministic hashing avoids this by construction.
+- **Rule changes also require switching sessions.** When a user moves from the "not sampled" bucket to the "sampled" bucket, follow best practice 1: on web / Mini Program, call `stopSession()` once when the current decision differs from the previously cached one; on mobile, the change takes effect at the next cold start by default, or rebuild the instance following the advanced approach.
+- **Use `sessionSampleRate: 0` instead of skipping `init()`.** Skipping initialization breaks `addAction` / `addError` calls scattered through your code, forcing null checks everywhere; passing 0 initializes the SDK into a silent state with a unified code path.
+- **Platform-side data reflects what was actually collected.** With custom sampling, the platform cannot know your true sampling ratio; the session volume you see is the collected volume, and cannot be extrapolated to total traffic. If you need full-traffic estimates, compute them on your side based on your own sampling rules.
+
+## Platform support
+
+| Platform | When the sampling rate takes effect | Applying a new rate immediately |
+| --- | --- | --- |
+| Web (browser) | At `init()` on every page load | Supported, via `stopSession()` |
+| WeChat Mini Program | At `init()` on every cold start | Supported, via `stopSession()` |
+| iOS / Android | At initialization on app cold start | Next cold start by default; immediate via `stopInstance()` rebuild (see the [advanced approach](#advanced-for-mobile-applying-a-new-sampling-rate-immediately)) |
+| React Native | At initialization on app cold start | Not supported; takes effect on next launch |
+
+For mobile platforms, the default recommendation is the "initialize with the cached value at startup + fetch and cache the latest value asynchronously" strategy, with the new rate taking effect on the next cold start. For scenarios that truly need immediate effect (such as incident investigation), follow the advanced approach and rebuild the SDK instance at a quiet lifecycle moment.
+
+## FAQ
+
+<Accordion title="I changed the sampling rate from 20% to 100% — why do some users still have no data?">
+Existing sessions' decisions are sticky (rule 2). Sessions that lost the draw before the change stay silent until they expire (15 minutes of inactivity, or 4 hours maximum). If you use the dynamic configuration approach, make sure `stopSession()` is called when the rate changes.
+</Accordion>
+
+<Accordion title="With a 20% sampling rate, why isn't the actual collected ratio exactly 20%?">
+Sampling is an independent probabilistic draw, not a quota (rule 3). The more traffic, the closer to the configured value; fluctuation under low traffic is normal. If you need precise control over which users are collected, use the hash bucketing approach from business-defined custom sampling.
+</Accordion>
+
+<Accordion title="Can I report only errors and nothing else?">
+Sampling operates on whole sessions (rule 1), so "unsampled sessions report only errors" is not possible. Alternative: use business-defined custom sampling and treat "users who hit an error last time" as an always-sample cohort, raising your capture rate for error evidence.
+</Accordion>
