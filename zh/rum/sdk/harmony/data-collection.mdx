@@ -192,6 +192,7 @@ Error 事件包含：
 | `error.category` | Crash 模块写入 `Exception` 或 `App Hang` |
 | `error.source_type` | Crash 模块写入 `harmony`；未处理的 Promise rejection 写入 `promise` |
 | `crash.recovered` | 通过 `REPORT_AND_RECOVER` 软着陆并在后续启动回放的崩溃中存在且为 `true` |
+| `crash.crashed_at_ms` | 仅在崩溃无法归因回原会话、只能记入当前会话时写入，保留真实故障发生时间（毫秒） |
 | `error.binary_images` | Native 崩溃关联的动态库符号信息 |
 | `build_id` | 用于匹配 Native 符号的 build-id |
 
@@ -206,6 +207,21 @@ Crash 模块通过实时和事后两条路径采集故障：
 同一次 ArkTS 崩溃可能同时到达 `onUnhandledException`、`onException` 和后续的 `hiAppEvent.APP_CRASH`。SDK 会对两个实时回调进行指纹去重，并通过持久化的已消费记录去重系统回放，保证一次策略管理的崩溃在 RUM 管道中只生成一个 crash error 事件。
 
 未处理的 Promise rejection 会单独采集为 `error.source_type: promise` 的普通非崩溃 RUM error。它不会使进程退出，也不会进入崩溃策略路径。
+
+### 崩溃归因
+
+崩溃和卡死会归因到**故障真正发生的那个会话和视图**，而不是回放它的那次启动。两类故障的归因依据不同：
+
+- SDK 能在进程内观察到的故障（主线程上未捕获的 ArkTS 异常）在退出前会把当时的 RUM 会话和视图一并写入待处理记录，下次启动按该记录回放
+- SDK 无法在进程内观察到的故障（Native 信号崩溃、卡死）会直接杀死进程，来不及记录任何东西。从 `0.3.2` 起，SDK 会把每次写出的 view 事件快照到本地，下次启动时读取（读取后立即删除）并据此还原崩溃所属的会话和视图。`0.3.1` 及更早版本会把这类故障记入重启后的实时会话，并使用回放时刻的时间，导致崩溃出现在用户并未崩溃的那个会话里，真正崩溃的会话反而显示无崩溃
+
+回放这类故障时，SDK 会写入两条数据：一条带真实故障时间戳的 `is_crash` error，以及一份更新后的 view 文档（`document_version` 递增、`is_active` 置为 `false`、`crash` 和 `error` 计数各 +1）。两条都持久化成功后才会删除待处理记录；只有一条写入成功时会保留记录，在下次启动重试，避免会话读起来是无崩溃的。
+
+以下情况会回退为记入**当前会话**并使用当前时间，真实故障时间保留在 `crash.crashed_at_ms` 属性中：
+
+- view 快照对应的视图已开始超过 4 小时。这是会话的最大生命周期，此时后端上的会话已经关闭，不应再改写它的文档
+- 故障发生距今已超过 23 小时。服务端会静默丢弃超过 24 小时的事件，回填时间戳会让崩溃被判定为已投递却实际丢失
+- 崩溃发生在第一个会话建立之前，或本地没有可用的 view 快照
 
 崩溃事件会通过 RUM error 管道上报：
 
@@ -224,8 +240,8 @@ SDK 以 NDJSON 形式批量上报事件。
 | Content-Type | `text/plain;charset=UTF-8` |
 | Content-Encoding | `deflate`（0.3.0 起请求体默认 zlib 压缩，压缩失败时回退为未压缩上传） |
 | 鉴权 | 请求头 `DD-API-KEY: <clientToken>` |
-| User-Agent | `flashcat-sdk-harmony/0.3.1` |
-| 查询参数 | `ddsource=harmony`，`ddtags` 包含 `sdk_version:0.3.1`，并在存在时追加 `env`、`service`、`version` |
+| User-Agent | `flashcat-sdk-harmony/0.3.2` |
+| 查询参数 | `ddsource=harmony`，`ddtags` 包含 `sdk_version:0.3.2`，并在存在时追加 `env`、`service`、`version` |
 | 默认上传间隔 | 5 秒 |
 | 网络超时 | 连接超时和读取超时均为 30 秒 |
 | 重试 | 网络错误、`401`、`403`、`408`、`429` 和 `5xx` 会保留批次并指数退避重试 |
