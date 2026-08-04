@@ -19,8 +19,10 @@ SDK 初始化后，会为每条事件附加通用上下文。
 | `session.id` | SDK 生成 | 用户会话 ID |
 | `os.name` / `os.version` | `@kit.BasicServicesKit.deviceInfo` | 操作系统名称和版本 |
 | `device.brand` / `device.model` / `device.type` | `deviceInfo` | 设备品牌、型号和类型 |
-| `connectivity.status` | SDK 网络上下文 | 当前版本默认为 `unknown` |
+| `connectivity.status` | SDK 网络上下文 | `connected` / `not_connected` / `maybe`（`maybe` 对应 schema 的 unknown，权限缺失或接口不可用时使用） |
+| `connectivity.interfaces` | SDK 网络上下文 | 当前网络接口，取值 `wifi` / `cellular` / `ethernet` / `other`，未知时为空数组 |
 | `usr.id` / `usr.name` / `usr.email` | `setUserInfo()` | 已识别用户信息；服务端不接收其他用户字段 |
+| `usr.anonymous_id` | SDK 持久化生成 | 匿名设备标识，随每条事件上报，用于在用户未登录时串联会话；`NOT_GRANTED` 状态下不会生成或写入 |
 | `context.*` | 全局属性或单事件属性 | 自定义业务上下文 |
 
 <Note>
@@ -184,12 +186,13 @@ Error 事件包含：
 |------|------|
 | `error.message` | 错误消息 |
 | `error.source` | 错误来源 |
-| `error.stack` | 错误栈，存在时上报 |
+| `error.stack` | 错误栈，存在时上报。只包含栈帧：errorManager 回调文本里的 `Error name:` / `Error message:` / `Stacktrace:` 标签行和 sourcemap 提示行会被剥离，它们属于回调格式而非栈内容 |
 | `error.handling` | `handled` 或 `unhandled` |
 | `error.is_crash` | 崩溃和卡死事件为 `true` |
 | `error.category` | Crash 模块写入 `Exception` 或 `App Hang` |
 | `error.source_type` | Crash 模块写入 `harmony`；未处理的 Promise rejection 写入 `promise` |
 | `crash.recovered` | 通过 `REPORT_AND_RECOVER` 软着陆并在后续启动回放的崩溃中存在且为 `true` |
+| `crash.crashed_at_ms` | 仅在崩溃无法归因回原会话、只能记入当前会话时写入，保留真实故障发生时间（毫秒） |
 | `error.binary_images` | Native 崩溃关联的动态库符号信息 |
 | `build_id` | 用于匹配 Native 符号的 build-id |
 
@@ -204,6 +207,21 @@ Crash 模块通过实时和事后两条路径采集故障：
 同一次 ArkTS 崩溃可能同时到达 `onUnhandledException`、`onException` 和后续的 `hiAppEvent.APP_CRASH`。SDK 会对两个实时回调进行指纹去重，并通过持久化的已消费记录去重系统回放，保证一次策略管理的崩溃在 RUM 管道中只生成一个 crash error 事件。
 
 未处理的 Promise rejection 会单独采集为 `error.source_type: promise` 的普通非崩溃 RUM error。它不会使进程退出，也不会进入崩溃策略路径。
+
+### 崩溃归因
+
+崩溃和卡死会归因到**故障真正发生的那个会话和视图**，而不是回放它的那次启动。两类故障的归因依据不同：
+
+- SDK 能在进程内观察到的故障（主线程上未捕获的 ArkTS 异常）在退出前会把当时的 RUM 会话和视图一并写入待处理记录，下次启动按该记录回放
+- SDK 无法在进程内观察到的故障（Native 信号崩溃、卡死）会直接杀死进程，来不及记录任何东西。从 `0.3.2` 起，SDK 会把每次写出的 view 事件快照到本地，下次启动时读取（读取后立即删除）并据此还原崩溃所属的会话和视图。`0.3.1` 及更早版本会把这类故障记入重启后的实时会话，并使用回放时刻的时间，导致崩溃出现在用户并未崩溃的那个会话里，真正崩溃的会话反而显示无崩溃
+
+回放这类故障时，SDK 会写入两条数据：一条带真实故障时间戳的 `is_crash` error，以及一份更新后的 view 文档（`document_version` 递增、`is_active` 置为 `false`、`crash` 和 `error` 计数各 +1）。两条都持久化成功后才会删除待处理记录；只有一条写入成功时会保留记录，在下次启动重试，避免会话读起来是无崩溃的。
+
+以下情况会回退为记入**当前会话**并使用当前时间，真实故障时间保留在 `crash.crashed_at_ms` 属性中：
+
+- view 快照对应的视图已开始超过 4 小时。这是会话的最大生命周期，此时后端上的会话已经关闭，不应再改写它的文档
+- 故障发生距今已超过 23 小时。服务端会静默丢弃超过 24 小时的事件，回填时间戳会让崩溃被判定为已投递却实际丢失
+- 崩溃发生在第一个会话建立之前，或本地没有可用的 view 快照
 
 崩溃事件会通过 RUM error 管道上报：
 
@@ -220,9 +238,10 @@ SDK 以 NDJSON 形式批量上报事件。
 | 上报地址 | `{site}/api/v2/rum`，默认 site 为 `https://browser.flashcat.cloud` |
 | 请求方法 | `POST` |
 | Content-Type | `text/plain;charset=UTF-8` |
+| Content-Encoding | `deflate`（0.3.0 起请求体默认 zlib 压缩，压缩失败时回退为未压缩上传） |
 | 鉴权 | 请求头 `DD-API-KEY: <clientToken>` |
-| User-Agent | `flashcat-sdk-harmony/0.2.0` |
-| 查询参数 | `ddsource=harmony`，`ddtags` 包含 `sdk_version:0.2.0`，并在存在时追加 `env`、`service`、`version` |
+| User-Agent | `flashcat-sdk-harmony/0.3.2` |
+| 查询参数 | `ddsource=harmony`，`ddtags` 包含 `sdk_version:0.3.2`，并在存在时追加 `env`、`service`、`version` |
 | 默认上传间隔 | 5 秒 |
 | 网络超时 | 连接超时和读取超时均为 30 秒 |
 | 重试 | 网络错误、`401`、`403`、`408`、`429` 和 `5xx` 会保留批次并指数退避重试 |
@@ -238,4 +257,4 @@ SDK 以 NDJSON 形式批量上报事件。
 - Web Vitals 或浏览器页面性能指标
 - HarmonyOS 页面渲染性能指标
 - 自动 frustration 事件
-- 网络连接类型变化；`connectivity.status` 目前保持为 `unknown`
+
