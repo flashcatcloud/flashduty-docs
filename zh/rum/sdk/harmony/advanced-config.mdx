@@ -54,6 +54,18 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 如果初始化时使用 `TrackingConsent.PENDING`，SDK 会将事件写入单独的本地缓冲区，但在同意状态更改为 `GRANTED` 之前不会发送；变更为 `GRANTED` 后缓冲数据自动迁移并上传，变更为 `NOT_GRANTED` 则清空缓冲。
 </Info>
 
+### 应用是同意状态的唯一权威
+
+**每次启动都以你传给 `Flashcat.initialize` 的值为准。** SDK 不会用历史状态覆盖它——这一点与 Android、iOS SDK 完全一致。你的应用负责保存用户的选择，并在每次初始化时传回给 SDK。
+
+<Warning>
+如果你的应用在每次启动时都用固定值（例如 `GRANTED`）初始化 SDK，那么用户撤销授权后重启，采集会重新开启。请在用户做出选择的那一刻调用 `setTrackingConsent`，并把该选择保存下来、下次启动时传给 `initialize`。
+</Warning>
+
+同意状态同时会被持久化到本地，但**只服务于一个用途**：后台上传使用的 `WorkSchedulerExtensionAbility` 是独立进程，它面前没有用户、也拿不到应用的判断，只能读取主进程最后一次记录的决定。详见[后台和延迟上传](#后台和延迟上传)。
+
+撤销授权时（变更为 `NOT_GRANTED`），SDK 不仅清空未发送的 pre-consent 缓冲区，还会**删除已经落盘、尚未上传的批次**。0.2.0 及更早版本只清空缓冲区，已采集批次仍会在恢复授权后发出。
+
 ### 设置与更改同意状态
 
 初始化时设置：
@@ -101,8 +113,17 @@ FlashcatRum.enable(
 | `setTrackUserInteractions(enabled)` | boolean | `false` | 控制 `FlashcatRum.trackTap()` 是否记录 tap action |
 | `setTrackNavigation(enabled)` | boolean | `false` | 控制 `FlashcatRum.startViewTracking()` 是否注册 ArkUI `routerPageUpdate` 监听 |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | 控制 Trace 发布的网络生命周期是否转换为 RUM resource |
+| `setTrackErrors(enabled)` | boolean | `true` | 控制是否**自动**采集未捕获错误和未处理的 Promise rejection |
 | `setTrackFrustrations(enabled)` | boolean | `false` | 保留开关；当前版本尚未生成 frustration 事件 |
 | `setEventMapper(mapper)` | function | `null` | 在事件写入磁盘前修改或丢弃 view、action、error、resource 事件 |
+
+<Warning>
+`setTrackNetworkRequests(false)`（默认值）从 0.3.0 起才真正生效。更早的版本接收这个开关但忽略它，无论如何都会把 Trace 发布的网络生命周期转成 RUM resource。如果你依赖旧版本的实际行为，升级后需要显式调用 `setTrackNetworkRequests(true)`，否则 resource 事件会消失。
+</Warning>
+
+<Note>
+`setTrackErrors(false)` 只关闭**自动**错误采集。崩溃不受影响：启用 Crash 模块后，未捕获异常仍按 `JsCrashPolicy` 持久化、计数，并作为 `is_crash` error 回放到崩溃发生的那个会话；手动调用的 `addError` 属于应用的显式意图，同样照常上报。如需连这两类一起过滤，请使用 `setEventMapper()`。
+</Note>
 
 ### 事件过滤和脱敏
 
@@ -153,7 +174,25 @@ const monitor = GlobalRumMonitor.get();
 monitor.addAttribute('tenant', 'acme');
 monitor.addError('checkout failed', RumErrorSource.CUSTOM);
 monitor.removeAttribute('tenant');
+
+// 读取当前全局属性快照
+const attrs = monitor.getAttributes();
+
+// 一次性清除全部全局属性（例如用户退出登录时）
+monitor.clearAttributes();
 ```
+
+| 方法 | 说明 |
+|------|------|
+| `addAttribute(key, value)` | 新增或覆盖一个全局属性 |
+| `removeAttribute(key)` | 移除指定全局属性 |
+| `getAttributes()` | 返回当前全局属性的快照 |
+| `clearAttributes()` | 移除全部全局属性 |
+| `stopSession()` | 立即结束当前会话。活跃 view 会带着最终 `time_spent` 关闭；下一个事件会开启新会话，并在新会话中重启该 view |
+
+<Note>
+用户退出登录时，建议先 `clearAttributes()` 清掉上一位用户的业务属性，再 `stopSession()` 结束会话，避免两位用户的行为落在同一个会话里。
+</Note>
 
 用户信息通过核心实例设置。`id`、`name` 和 `email` 会写入后续事件的 `usr` 对象。
 
@@ -311,9 +350,29 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setUploadOnWifiOnly(enabled)` | `false` | 为延迟上传任务设置 Wi-Fi 网络限制 |
 | `setDeferredUploadRequiresCharging(enabled)` | `true` | 为延迟上传任务设置充电状态限制 |
 
-<Note>
-SDK 负责注册 WorkScheduler 任务；你的 `WorkSchedulerExtensionAbility` 被唤醒后，应调用 `Flashcat.flushAndWait()` 执行有界批量上传。
-</Note>
+SDK 负责注册 WorkScheduler 任务。任务是持久化的（`isPersisted`，跨重启存活），按 2 小时周期唤醒。
+
+### 在扩展进程中初始化
+
+`WorkSchedulerExtensionAbility` 是**独立进程**，不共享主进程的 SDK 实例。被唤醒后必须先用 `initializeForDeferredUpload` 初始化，再调用 `flushAndWait()`：
+
+```ts MyUploadExtensionAbility.ets
+import { Flashcat } from '@flashcatcloud/core';
+
+async onWorkStart(workInfo: workScheduler.WorkInfo): Promise<void> {
+  Flashcat.initializeForDeferredUpload(this.context, buildConfig());
+  await Flashcat.flushAndWait();
+}
+```
+
+`initializeForDeferredUpload` 与 `initialize` 有两点关键差别：
+
+- **不接收同意状态参数。** 扩展进程面前没有用户，只能依据主进程最后一次持久化的决定行事；没有持久化记录（主进程从未初始化过）或记录为 `NOT_GRANTED` 时，它不读取、不迁移、也不上传任何数据。
+- **只读。** 它不会写回同意状态、设备标识或任务注册信息。HarmonyOS Preferences 是按进程的整文件缓存，扩展进程的写入可能覆盖主进程正在进行的撤销操作。
+
+<Warning>
+不要在扩展进程里调用 `Flashcat.initialize()`。它会用你传入的字面值覆盖持久化的同意状态，从而在用户已经撤销授权后仍然上传数据。`setTrackingConsent` 在扩展进程中也会被忽略并打印错误日志。
+</Warning>
 
 ## 上传 HarmonyOS 崩溃符号
 
@@ -353,8 +412,12 @@ export default {
 ```
 
 <Note>
-`flashcatSymbolUploadPlugin()` 还接受两个可选参数：`buildDir`（构建产物目录，默认 `build/default`）和 `pluginVersion`（写入上传请求头 `DD-EVP-ORIGIN-VERSION` 的版本号，默认 `0.1.0`）。一般无需设置。
+`flashcatSymbolUploadPlugin()` 还接受两个可选参数：`buildDir`（构建产物目录，默认 `build/default`）和 `pluginVersion`（写入上传请求头 `DD-EVP-ORIGIN-VERSION` 的版本号，默认与插件版本一致，当前为 `0.1.2`）。一般无需设置。
 </Note>
+
+<Warning>
+请使用 `0.1.2` 及以上版本。在更早的版本中，上传任务被错误地编排在 `assembleHap` / `assembleHar` **之前**执行，导致上传的是上一次构建残留的 sourcemap 和 `.so`，却标记为本次构建的版本号——符号文件与版本对不上，新版本的崩溃无法还原。若此前用 `0.1.1` 或 `0.1.0` 上传过符号，升级插件后请重新构建并上传一次。
+</Warning>
 
 发布构建后执行上传任务：
 
