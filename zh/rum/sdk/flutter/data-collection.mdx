@@ -1,0 +1,98 @@
+---
+title: "Flutter SDK 数据收集"
+description: "了解 Flutter RUM SDK 采集的事件类型、字段与上报行为"
+keywords: ["RUM", "Flutter SDK", "数据收集", "view", "action", "resource", "error"]
+---
+
+本文说明 Flutter SDK 采集哪些数据、如何上报，以及如何控制采集范围。所有事件都写入 `source: "flutter"`。
+
+## 事件类型
+
+| 事件 | 触发方式 | 说明 |
+|------|----------|------|
+| view | 路由切换（`DatadogNavigationObserver`）或手动 API | 一次页面停留，记录加载耗时、内部的 action / resource / error 数量 |
+| action | `RumUserActionDetector` 自动识别或 `rum.addAction` | 用户交互（tap / scroll / swipe / custom），可关联 frustration 信号 |
+| resource | `enableHttpTracking()` 或 `DatadogClient` | 一次网络请求，记录 URL、方法、状态码、耗时、大小 |
+| error | 自动（未处理异常 / 原生崩溃）或 `rum.addError` | 错误与崩溃，含类型、消息、堆栈 |
+| long task | `detectLongTasks` 默认开启 | 超过 `longTaskThreshold`（默认 0.1s）的主线程阻塞 |
+
+## 自动采集的上下文
+
+每个事件会自动附带以下上下文（由原生层采集）：
+
+- **应用信息**：`service`、`version`、`env`，以及 `application.id`
+- **设备信息**：设备型号、操作系统与版本、屏幕尺寸
+- **会话信息**：`session.id`，按 `sessionSamplingRate` 采样
+- **连接信息**：网络类型（如可用）
+- **用户信息**：通过 `setUserInfo` 设置的 `usr.id` / `usr.name` / `usr.email`
+
+## 性能数据
+
+控制台会为 Flutter 应用展示「性能」页，并支持以下原生 iOS / Android 性能数据：
+
+| 指标 | 平台 | 说明 |
+|------|------|------|
+| 启动耗时（TTID） | iOS / Android | 从应用启动到首个画面完成显示的耗时 |
+| 刷新率 | iOS / Android | 页面渲染流畅度 |
+| 内存 | iOS / Android | 应用运行期间的内存使用情况 |
+| ANR | Android | 应用无响应事件；非致命 ANR 是否默认采集取决于 Android 版本，可通过 `trackNonFatalAnrs` 覆盖 |
+| App Hang | iOS | 主线程卡顿事件；需设置 `appHangThreshold`，默认关闭 |
+| Flutter build / raster timing | iOS / Android | 需显式设置 `reportFlutterPerformance: true` |
+
+启动耗时、刷新率和内存指标由 `vitalUpdateFrequency` 控制，默认为 `VitalsFrequency.average`；设置为 `null` 可关闭。`reportFlutterPerformance` 只控制 Flutter 帧的 build / raster timing，默认关闭，不影响这些原生指标。
+
+## 手动埋点
+
+除了自动采集，你可以手动记录事件与属性。
+
+```dart
+final rum = DatadogSdk.instance.rum;
+
+// 手动管理视图
+rum?.startView('checkout', 'Checkout');
+rum?.stopView('checkout');
+
+// 手动记录操作
+rum?.addAction(RumActionType.tap, 'pay_button');
+
+// 手动上报错误
+rum?.addErrorInfo('payment failed', RumErrorSource.source);
+
+// 附加全局属性（写入后续所有事件）
+rum?.addAttribute('tenant', 'acme');
+```
+
+## 采样与控制
+
+| 配置 | 默认值 | 说明 |
+|------|--------|------|
+| `sessionSamplingRate` | 100.0 | 会话采样率（百分比）；未命中的会话不产生 RUM 数据 |
+| `traceSampleRate` | 100.0 | resource 上分布式追踪的采样率 |
+| `telemetrySampleRate` | 20.0 | SDK 自身遥测采样率 |
+| `detectLongTasks` | true | 是否采集 long task |
+| `trackFrustrations` | true | 是否从用户操作生成 frustration 信号 |
+| `trackAnonymousUser` | true | 是否为未登录用户生成匿名 ID |
+| `vitalUpdateFrequency` | `VitalsFrequency.average` | 原生移动端性能指标的采集频率；设为 `null` 关闭 |
+| `reportFlutterPerformance` | false | 是否采集 Flutter build / raster timing |
+| `trackNonFatalAnrs` | 平台默认 | 是否采集非致命 ANR；Android 30+ 默认关闭，Android 29 及以下默认开启 |
+| `appHangThreshold` | null | iOS App Hang 的判定阈值（秒）；`null` 表示关闭 |
+
+## 数据脱敏
+
+通过事件映射器（event mapper）可以在事件上报前修改或丢弃数据，用于脱敏或过滤噪声。详见 <a href="/zh/rum/sdk/flutter/advanced-config">高级配置</a>。
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  resourceEventMapper: (event) {
+    // 返回 null 丢弃事件，或修改后返回
+    return event;
+  },
+);
+```
+
+## 上报行为
+
+- SDK 在原生层做批量缓存，按 `batchSize` 与 `uploadFrequency` 分批上报
+- 网络不可用时事件会持久化到本地，恢复后重试
+- 上报地址默认为 `https://browser.flashcat.cloud/api/v2/rum`；私有化部署可通过 `customEndpoint` 配置完整的 RUM intake URL（必须包含 `/api/v2/rum`，并保留部署的路径前缀）

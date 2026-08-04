@@ -1,0 +1,162 @@
+---
+title: "Flutter SDK advanced configuration"
+description: "Configure sampling, tracking consent, event filtering, distributed tracing, and symbol file upload for the Flutter RUM SDK"
+keywords: ["RUM", "Flutter SDK", "advanced configuration", "sampling", "tracking consent", "symbol upload"]
+---
+
+This page describes the advanced configuration options of the Flutter SDK. All configuration is passed through `DatadogConfiguration` and `DatadogRumConfiguration`.
+
+## Sampling rate
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  sessionSamplingRate: 100.0, // Session sampling rate
+  traceSampleRate: 20.0,      // Trace sampling rate on resources
+);
+```
+
+## Tracking consent
+
+`TrackingConsent` controls whether data is collected and reported, to meet compliance requirements such as GDPR:
+
+| Value | Behavior |
+|------|------|
+| `TrackingConsent.granted` | Collect and report |
+| `TrackingConsent.notGranted` | Do not collect |
+| `TrackingConsent.pending` | Cache first, then decide whether to report or drop after the user grants consent |
+
+```dart
+// Pass in during initialization
+await DatadogSdk.runApp(configuration, TrackingConsent.pending, () async {
+  runApp(const MyApp());
+});
+
+// Update after the user grants consent
+DatadogSdk.instance.setTrackingConsent(TrackingConsent.granted);
+```
+
+## Event filtering and masking
+
+Event mappers run before events are reported; return `null` to drop the event, or return it after modification. You can use them to mask sensitive fields, remove noise, or rename views.
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  viewEventMapper: (event) => event,
+  actionEventMapper: (event) => event,
+  resourceEventMapper: (event) {
+    // For example, remove the query token from the URL
+    return event;
+  },
+  errorEventMapper: (event) => event,
+  longTaskEventMapper: (event) => event,
+);
+```
+
+## Distributed tracing
+
+For hosts that match `firstPartyHosts`, the SDK injects the W3C `traceparent` to correlate frontend RUM with backend APM. Tracing requires network collection (`enableHttpTracking()`).
+
+```dart
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+import 'package:flashcat_tracking_http_client/flashcat_tracking_http_client.dart';
+
+DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  firstPartyHosts: ['api.example.com', 'gateway.example.com'],
+  rumConfiguration: DatadogRumConfiguration(
+    applicationId: '<APPLICATION_ID>',
+    traceSampleRate: 100.0,
+  ),
+)..enableHttpTracking();
+```
+
+## Custom reporting endpoint
+
+For on-premises deployments, override the default reporting endpoint through `customEndpoint`:
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  customEndpoint: 'https://your-ingest.example.com/api/v2/rum',
+);
+```
+
+<Warning>
+`customEndpoint` is the final RUM intake URL, not a base origin. It must include `/api/v2/rum`. If the deployment uses a path prefix, preserve it as well, for example `https://example.com/flashduty/api/v2/rum`.
+</Warning>
+
+## WebView tracking
+
+When a Flutter screen embeds a WebView, use `flashcat_webview_tracking` to correlate Browser RUM events from the WebView with the current native RUM session.
+
+```yaml pubspec.yaml
+dependencies:
+  flashcat_flutter_plugin: ^0.1.3
+  webview_flutter: ^4.0.4
+  flashcat_webview_tracking: ^0.1.0
+```
+
+```dart
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+import 'package:flashcat_webview_tracking/flashcat_webview_tracking.dart';
+import 'package:webview_flutter/webview_flutter.dart';
+
+final webViewController = WebViewController()
+  ..setJavaScriptMode(JavaScriptMode.unrestricted)
+  ..trackDatadogEvents(
+    DatadogSdk.instance,
+    ['myapp.example'],
+  )
+  ..loadRequest(Uri.parse('https://myapp.example'));
+```
+
+Pass the allowed hostnames to `trackDatadogEvents`. A hostname matches its subdomains, but wildcards are not supported. The page loaded in the WebView must already use the <a href="/en/rum/sdk/web/sdk-integration">Flashduty Browser SDK</a>. On Android, you must also enable `JavaScriptMode.unrestricted`, or correlation will not work.
+
+## Symbol file upload
+
+To resolve crash and error stacks back to source locations, you need to upload symbol files. A Flutter application may contain both Dart and native frames:
+
+| Frame type | Required files | How to generate |
+|----------|----------|----------|
+| Dart (Android) | Flutter symbols | `flutter build apk --split-debug-info=<dir> --obfuscate` |
+| Dart (iOS) | Not supported yet, see the note below | — |
+| iOS Native | dSYM | Xcode build output |
+| Android Native | mapping files | R8 / ProGuard output |
+
+<Warning>
+**Dart stacks cannot be symbolicated on iOS yet.** The symbol file Flutter produces for Apple targets is a Mach-O, and the platform currently parses only the ELF format used on Android, so an iOS `.symbols` upload is rejected. iOS native crashes are unaffected — upload dSYMs to symbolicate them.
+
+If you ship both iOS and Android, you can still enable `--obfuscate`: Android Dart stacks resolve normally while iOS Dart stacks stay obfuscated. If readable iOS stacks matter more, leave `--obfuscate` off for that platform's build.
+</Warning>
+
+Use the FlashCat CLI to upload symbol files:
+
+```bash
+# Requires @flashcatcloud/flashcat-cli 0.2.0 or later
+FLASHCAT_API_KEY=<API_KEY> flashcat-cli flutter-symbols upload <symbols-dir> \
+  --service <SERVICE_NAME> --release-version <VERSION>
+```
+
+<Note>
+Symbol files are matched to crash events by the build's **build ID**; `service` and `release-version` take no part in the lookup. Symbolication therefore still works when they differ from the SDK initialization values — the difference only affects how the file is grouped and filtered in the console's Source code mapping list. Keeping them aligned is still recommended, and Flutter's build-number suffix (for example `1.2.3+45`) is an easy way for them to drift apart.
+
+What must match is the build ID: the `app.<platform>-<arch>.symbols` file produced by `--split-debug-info`, the `libapp.so` inside the APK, and the Build ID column in the console's Source code mapping → Flutter list must all be identical. Every change to your Dart code produces a new build ID, so **symbol upload has to be part of every release build** — otherwise that version's stacks silently degrade to unresolved.
+</Note>
+
+## Other configuration
+
+| Configuration | Default | Description |
+|------|--------|------|
+| `nativeCrashReportEnabled` | false | Whether to collect native crashes |
+| `detectLongTasks` | true | Whether to collect long tasks |
+| `longTaskThreshold` | 0.1s | Long task threshold |
+| `trackBackgroundEvents` | false | Whether to collect events while the application is in the background |
+| `vitalUpdateFrequency` | `VitalsFrequency.average` | Collection frequency for native mobile performance metrics; set to `null` to disable |
+| `reportFlutterPerformance` | false | Whether to additionally collect Flutter build / raster timings |
+| `trackNonFatalAnrs` | Platform default | Whether to collect non-fatal ANRs; disabled by default on Android 30+ and enabled by default on Android 29 and earlier |
+| `appHangThreshold` | null | iOS App Hang threshold in seconds; `null` disables collection |
+| `batchSize` / `uploadFrequency` | — | Upload batch size and frequency, balancing real-time delivery against battery usage |

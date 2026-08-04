@@ -11,6 +11,7 @@ Flashduty 支持多平台的符号文件上传与源码映射，帮助开发者�
 - **HarmonyOS**：通过 `@flashcatcloud/hvigor-plugin` 上传 ArkTS `sourceMaps.map`、可选 `nameCache.json` 和 Native `.so` 符号文件
 - **Android**：通过 Gradle 插件自动上传 ProGuard/R8 mapping 文件和 NDK 符号文件
 - **iOS**：通过 Flashduty CLI 上传 dSYM 符号文件
+- **Flutter**：通过 Flashduty CLI 上传 `--split-debug-info` 生成的 Dart AOT 符号文件（`.symbols`），还原 Android 上混淆后的 Dart 异常堆栈；iOS 原生崩溃与原生 iOS 应用一样走 dSYM
 
 用户可在「应用管理」-「源码管理」菜单查看已上传的符号文件，并通过上传面板生成脚本在本地执行上传操作。
 
@@ -109,6 +110,10 @@ Flashduty 支持多平台的符号文件上传与源码映射，帮助开发者�
     <ParamField path="压缩文件前缀" type="string" required>
       压缩文件的路径前缀（例如 `/assets`）
     </ParamField>
+
+    <ParamField path="自定义上传 Endpoint" type="string">
+      仅私有化部署需要填写。私有化部署时面板会自动填入部署下发的上报地址，可手动覆盖（协议 + 域名，不带路径，例如 `https://rum.example.com`）；留空则默认上传到 Flashcat SaaS。
+    </ParamField>
   </Step>
   <Step title="执行上传">
     在项目根目录下运行生成的脚本：
@@ -121,6 +126,10 @@ Flashduty 支持多平台的符号文件上传与源码映射，帮助开发者�
       --api-key your-api-key \
       ./dist
     ```
+
+    <Note>
+    私有化部署时，在命令前加上 `FLASHCAT_SOURCEMAP_INTAKE_URL` 环境变量即可将符号文件上传至自定义入口，例如 `FLASHCAT_SOURCEMAP_INTAKE_URL=https://rum.example.com flashcat-cli sourcemaps upload ...`（协议 + 域名，不带路径）；未设置时默认上传到 Flashcat SaaS。填写「自定义上传 Endpoint」后，面板生成的命令会自动带上该变量。
+    </Note>
   </Step>
 </Steps>
 
@@ -377,6 +386,9 @@ iOS 应用在编译时会生成 dSYM（Debug Symbol）文件，其中包含将�
 
     ```bash
     FLASHCAT_API_KEY=your-api-key flashcat-cli dsyms upload ./app.dSYM
+
+    # 可选：私有化部署时指定自定义上传入口（协议 + 域名，不带路径）；未设置时默认上传到 Flashcat SaaS
+    FLASHCAT_API_KEY=your-api-key FLASHCAT_SOURCEMAP_INTAKE_URL=https://rum.example.com flashcat-cli dsyms upload ./app.dSYM
     ```
 
     <Tip>
@@ -385,14 +397,66 @@ iOS 应用在编译时会生成 dSYM（Debug Symbol）文件，其中包含将�
   </Step>
 </Steps>
 
+## 上传 Flutter 符号文件
+
+Flutter 应用使用 `--obfuscate` 混淆构建后，Dart 异常堆栈中的符号会被剥离，只剩地址信息。通过上传 `--split-debug-info` 生成的 Dart AOT 符号文件（`app.<platform>-<arch>.symbols`），Flashduty 会读取符号文件的 ELF GNU build-id，与堆栈中携带的 build ID 匹配，还原 Android 上的 Dart 异常堆栈。Flutter 符号文件在上传 API 中以 `event.type=flutter_symbol_file` 标识。
+
+<Steps>
+  <Step title="混淆构建生成符号目录">
+    Android 构建时开启混淆并指定符号输出目录：
+
+    ```bash
+    flutter build apk --obfuscate --split-debug-info=./debug-symbols
+    ```
+  </Step>
+  <Step title="配置上传参数">
+    在「应用管理」-「源码管理」菜单切换到「Flutter」标签页，点击「上传源码」。上传面板会根据表单内容生成命令。
+
+    <ParamField path="API Key" type="string" required>
+      用于认证上传请求，对应命令中的 `FLASHCAT_API_KEY` 环境变量。
+    </ParamField>
+
+    <ParamField path="split-debug-info 目录" type="string" required>
+      `--split-debug-info` 指定的符号目录，例如 `./debug-symbols`。
+    </ParamField>
+
+    <ParamField path="服务名" type="string" required>
+      应用的服务名，例如 `my-app`。建议与 SDK 初始化时设置的 `service` 保持一致，便于在控制台按服务归类筛选。
+    </ParamField>
+
+    <ParamField path="发布版本" type="string" required>
+      应用的发布版本，例如 `1.0.0`。建议与 SDK 初始化时设置的 `releaseVersion` 保持一致。
+    </ParamField>
+  </Step>
+  <Step title="执行上传">
+    在项目根目录下运行生成的命令：
+
+    ```bash
+    FLASHCAT_API_KEY=your-api-key flashcat-cli flutter-symbols upload ./debug-symbols \
+      --service my-app \
+      --release-version 1.0.0
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+**iOS 的 Dart 堆栈暂不支持符号化。** Flutter 为 Apple 平台生成的符号文件是 Mach-O 格式，平台当前只能解析 Android 侧的 ELF 格式，因此 iOS 的 `.symbols` 上传会被拒绝。iOS 原生崩溃（Objective-C / Swift / C / C++）不受影响，与原生 iOS 应用一样上传 dSYM 即可符号化。
+
+如果你的应用同时发布 iOS 和 Android，`--obfuscate` 仍可开启：Android 的 Dart 堆栈会正常还原，iOS 的 Dart 堆栈则保持混淆状态。若 iOS 的可读堆栈更重要，则该端构建时不要开启 `--obfuscate`。
+</Warning>
+
+<Note>
+符号文件与崩溃事件通过 build ID 匹配，`service` 与 `release-version` 不参与解析，仅影响控制台列表的归类与筛选。符号文件支持 `arm`、`arm64`、`x64` 架构，由 `.symbols` 文件名自动识别。每次改动 Dart 代码都会生成新的 build ID，因此符号上传必须纳入每一次发布构建。更完整的 Flutter 符号化说明请参阅 [Flutter SDK 高级配置](/zh/rum/sdk/flutter/advanced-config)。
+</Note>
+
 ## 符号文件管理
 
 在 Flashduty 平台上，符号文件的管理通过「应用管理」-「源码管理」菜单完成：
 
 | 功能 | 说明 |
 |------|------|
-| 查看已上传的符号文件 | 列出所有已上传的文件（SourceMap、小程序 SourceMap、ProGuard mapping 文件、dSYM、NDK 原生符号文件），包括路径、服务名、版本号、大小和上传时间。Android 标签页同时展示 ProGuard mapping 文件和 NDK 原生符号文件，NDK 行会显示 build_id、arch 和 lib_name 列 |
-| 按平台筛选 | 在 Web、微信小程序、iOS 和 Android 标签页之间切换，查看不同平台的符号文件 |
+| 查看已上传的符号文件 | 列出所有已上传的文件（SourceMap、小程序 SourceMap、ProGuard mapping 文件、dSYM、NDK 原生符号文件、Flutter 符号文件），包括路径、服务名、版本号、大小和上传时间。Android 标签页同时展示 ProGuard mapping 文件和 NDK 原生符号文件，NDK 行会显示 build_id、arch 和 lib_name 列 |
+| 按平台筛选 | 在 Web、iOS、Android、微信小程序、HarmonyOS 和 Flutter 标签页之间切换，查看不同平台的符号文件 |
 | 版本管理 | 通过 `service` 和 `release-version` 参数为不同版本的应用分别管理 |
 | 小程序维度 | 微信小程序列表会展示符号文件元数据中的 AppID（取自 `metadata.appid`）和分包（取自 `metadata.subpackage`）两列；主包没有分包标识时显示「主包」，AppID 未上传时显示 `-` |
 | 权限控制 | 通过 `API Key` 确保只有授权用户可以上传或管理 |

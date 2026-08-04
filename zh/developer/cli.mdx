@@ -420,6 +420,8 @@ flashduty safari --help          # 查看 AI SRE 相关的生成命令
 flashduty alert --help           # 查看告警相关的生成命令
 ```
 
+生成命令的时间窗口参数（`--start-time` / `--end-time`）与精选命令一样支持人性化的时间格式：相对时长（`7d`、`24h`，表示从当前往前推）、`+7d`（从当前往后推，即未来时间）、`now`、日期或日期时间（如 `2026-05-01`、`2026-05-01 10:00:00`）、Unix 秒级时间戳。此外，`--since` 和 `--until` 分别是 `--start-time` 和 `--end-time` 的别名，可互换使用；若两种写法同时传入且取值不同，CLI 会报冲突错误。
+
 ### 工具命令
 
 ```bash
@@ -460,7 +462,7 @@ Showing 2 results (page 1, total 2).
 </Tab>
 
 <Tab title="JSON（--json / --output-format json）">
-机器可解析，完整数据，不截断。适合脚本、CI/CD 流水线消费。
+机器可解析。除下方列出的默认紧凑字段命令外，返回命令的完整响应数据；表格列截断不适用于 JSON。适合脚本、CI/CD 流水线消费。
 
 ```bash
 flashduty incident list --json | jq '.[].title'
@@ -468,7 +470,7 @@ flashduty incident list --json | jq '.[].title'
 </Tab>
 
 <Tab title="TOON（--output-format toon）">
-TOON（Token-Oriented Object Notation）输出完整数据且不截断，但对同构数组省去了 JSON 中每行重复的字段名，列表输出可显著减少 token 消耗，更适合喂给 AI / 智能体消费。
+TOON（Token-Oriented Object Notation）对同构数组省去了 JSON 中每行重复的字段名，列表输出可显著减少 token 消耗，更适合喂给 AI / 智能体消费。下方列出的默认紧凑字段命令会按其字段投影输出，并受大小限制。
 
 ```bash
 flashduty incident list --output-format toon
@@ -484,9 +486,28 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 </Tab>
 </Tabs>
 
+### 结构化输出的字段投影
+
+以下命令在 `json` 或 `toon` 输出时支持 `--fields`。用逗号分隔顶层响应字段；未知字段会直接报错，表格输出会忽略此参数。
+
+| 命令 | 未指定 `--fields` 时的结构化输出 | 上限 |
+| --- | --- | --- |
+| `flashduty incident list` | `incident_id`、`title`、`incident_severity`、`progress`、`start_time`、`channel_id` | 16 KiB |
+| `flashduty incident similar <id>` | `incident_id`、`title`、`incident_severity`、`progress`、`start_time`、`close_time`、`ack_time`、`alert_cnt`、`root_cause`、`score` | 16 KiB |
+| `flashduty incident detail <id>` | 不指定 `--fields` 时返回完整详情；指定后只返回所选字段 | 仅投影输出为 8 KiB |
+| `flashduty alert-event list` | `event_id`、`alert_id`、`event_severity`、`event_status`、`event_time`、`title` | 16 KiB |
+
+例如，只导出故障编号、标题和处理进度：
+
+```bash
+flashduty incident list --json --fields incident_id,title,progress
+```
+
+投影后的结构化输出超过上限时，CLI 会在保留字段名的前提下截短过长的字符串，并以 `...` 标记；若非字符串字段本身已超过上限，命令会提示减少字段或结果数。`incident detail` 不使用 `--fields` 时不受该投影上限影响。
+
 ## Agent Skills
 
-Flashduty CLI 内置 10 个 Agent Skills，可让 Claude Code、Cursor、Codex、Gemini CLI、Windsurf 等 AI 编程代理通过 CLI 操作 Flashduty。
+Flashduty CLI 内置一个名为 `flashduty` 的 Agent Skill，可让 Claude Code、Cursor、Codex、Gemini CLI、Windsurf 等 AI 编程代理通过 CLI 操作 Flashduty。
 
 一键安装到当前机器上检测到的所有代理：
 
@@ -494,20 +515,7 @@ Flashduty CLI 内置 10 个 Agent Skills，可让 Claude Code、Cursor、Codex�
 npx skills add flashcatcloud/flashduty-cli -y -g
 ```
 
-可用技能列表：
-
-| 技能 | 覆盖范围 |
-|------|----------|
-| `flashduty-shared` | 基础：认证、三层降噪模型、全局参数、安全规则 |
-| `flashduty-incident` | 故障生命周期：分诊、调查、解决、合并、暂停、转派 |
-| `flashduty-alert` | 告警与告警事件调查：下钻、追踪、合并 |
-| `flashduty-change` | 变更事件追踪与部署频率趋势 |
-| `flashduty-oncall` | 值班查询：当前值班人、排班详情 |
-| `flashduty-channel` | 协作空间与分派策略查询 |
-| `flashduty-statuspage` | 状态页管理以及从 Atlassian 迁移到 Flashduty |
-| `flashduty-insight` | 分析：MTTA/MTTR、降噪率、通知趋势 |
-| `flashduty-admin` | 团队/成员查询与审计日志搜索 |
-| `flashduty-template` | 通知模板验证与预览 |
+技能采用「路由 + 参考卡」结构：`SKILL.md` 承载认证、全局参数、安全规则等共享约定，并按领域索引参考卡——故障、告警、变更、值班与排班、协作空间与分派、状态页、洞察、监控、RUM 与 sourcemap、自动化、通知模板、成员与团队等。代理执行任务前先读取对应领域的参考卡，即可获得该领域的全部命令、参数与工作流，无需 `--help` 试探。
 
 ## 常见用法
 
