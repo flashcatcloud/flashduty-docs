@@ -54,6 +54,18 @@ To comply with privacy regulations such as GDPR and CCPA, the SDK requires a tra
 When initialized with `TrackingConsent.PENDING`, the SDK writes events to a separate local buffer and sends nothing until consent changes to `GRANTED` — at which point the buffered data is migrated and uploaded automatically. Changing to `NOT_GRANTED` clears the buffer instead.
 </Info>
 
+### The application owns the consent state
+
+**Every launch uses the value you pass to `Flashcat.initialize`.** The SDK never overrides it with a previously stored state — the same contract as the Android and iOS SDKs. Your application is responsible for storing the user's choice and passing it back at every initialization.
+
+<Warning>
+If your application initializes the SDK with a hard-coded value (for example `GRANTED`) on every launch, collection resumes after a restart even for a user who revoked consent. Call `setTrackingConsent` at the moment the user makes a choice, persist that choice yourself, and pass it to `initialize` on the next launch.
+</Warning>
+
+The consent state is also persisted locally, but it serves **exactly one purpose**: the `WorkSchedulerExtensionAbility` used for background upload runs in a separate process with no user in front of it and no access to the application's decision, so it reads the main process's last recorded state. See [Background and deferred upload](#background-and-deferred-upload).
+
+When consent is revoked (changed to `NOT_GRANTED`), the SDK clears the unsent pre-consent buffer *and* **deletes batches already written to disk but not yet uploaded**. On 0.2.0 and earlier only the buffer was cleared, so collected batches were still sent once consent came back.
+
 ### Setting and changing consent
 
 At initialization:
@@ -101,8 +113,17 @@ FlashcatRum.enable(
 | `setTrackUserInteractions(enabled)` | boolean | `false` | Controls whether `FlashcatRum.trackTap()` records tap actions |
 | `setTrackNavigation(enabled)` | boolean | `false` | Controls whether `FlashcatRum.startViewTracking()` registers the ArkUI `routerPageUpdate` observer |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | Controls whether network lifecycle events published by Trace become RUM resources |
+| `setTrackErrors(enabled)` | boolean | `true` | Controls **automatic** capture of uncaught errors and unhandled Promise rejections |
 | `setTrackFrustrations(enabled)` | boolean | `false` | Reserved toggle; the current version does not generate frustration events |
 | `setEventMapper(mapper)` | function | `null` | Modifies or drops view, action, error, and resource events before disk write |
+
+<Warning>
+`setTrackNetworkRequests(false)` — the default — only takes effect from 0.3.0 onwards. Earlier versions accepted the toggle and ignored it, turning network lifecycle events published by Trace into RUM resources regardless. If you relied on that behavior, call `setTrackNetworkRequests(true)` explicitly after upgrading or your resource events will disappear.
+</Warning>
+
+<Note>
+`setTrackErrors(false)` disables **automatic** error capture only. Crash reporting is unaffected: with the crash module enabled, uncaught exceptions still follow `JsCrashPolicy` — they are persisted, counted, and replayed as `is_crash` errors into the session that crashed. Manual `addError` calls are the application's explicit intent and are also still delivered. Use `setEventMapper()` if you need to filter those too.
+</Note>
 
 ### Event mapping and redaction
 
@@ -153,7 +174,25 @@ const monitor = GlobalRumMonitor.get();
 monitor.addAttribute('tenant', 'acme');
 monitor.addError('checkout failed', RumErrorSource.CUSTOM);
 monitor.removeAttribute('tenant');
+
+// Read a snapshot of the current global attributes
+const attrs = monitor.getAttributes();
+
+// Remove every global attribute at once, for example on sign-out
+monitor.clearAttributes();
 ```
+
+| Method | Description |
+|--------|-------------|
+| `addAttribute(key, value)` | Adds or overwrites one global attribute |
+| `removeAttribute(key)` | Removes the named global attribute |
+| `getAttributes()` | Returns a snapshot of the current global attributes |
+| `clearAttributes()` | Removes all global attributes |
+| `stopSession()` | Ends the current session immediately. The active view is closed with its final `time_spent`; the next event starts a fresh session and restarts that view inside it |
+
+<Note>
+On sign-out, call `clearAttributes()` to drop the previous user's business attributes and then `stopSession()`, so two users' behavior never lands in the same session.
+</Note>
 
 Set user information through the core instance. `id`, `name`, and `email` are written to the `usr` object on subsequent events.
 
@@ -311,9 +350,29 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setUploadOnWifiOnly(enabled)` | `false` | Restricts deferred upload work to Wi-Fi |
 | `setDeferredUploadRequiresCharging(enabled)` | `true` | Restricts deferred upload work to charging state |
 
-<Note>
-The SDK registers the WorkScheduler task. When your `WorkSchedulerExtensionAbility` wakes, call `Flashcat.flushAndWait()` to perform a bounded batch drain.
-</Note>
+The SDK registers the WorkScheduler task. The task is persisted (`isPersisted`, surviving reboots) and repeats on a 2-hour cycle.
+
+### Initializing inside the extension process
+
+A `WorkSchedulerExtensionAbility` runs in a **separate process** and does not share the main process's SDK instance. When it wakes, initialize with `initializeForDeferredUpload` before calling `flushAndWait()`:
+
+```ts MyUploadExtensionAbility.ets
+import { Flashcat } from '@flashcatcloud/core';
+
+async onWorkStart(workInfo: workScheduler.WorkInfo): Promise<void> {
+  Flashcat.initializeForDeferredUpload(this.context, buildConfig());
+  await Flashcat.flushAndWait();
+}
+```
+
+`initializeForDeferredUpload` differs from `initialize` in two important ways:
+
+- **It takes no consent argument.** The extension has no user in front of it, so it acts only on the main process's last persisted decision. If nothing is persisted (the main application never initialized) or the stored decision is `NOT_GRANTED`, it reads, migrates, and uploads nothing.
+- **It is read-only.** It never writes back consent, device identity, or work registrations. HarmonyOS Preferences are per-process whole-file caches, so a write from the extension could clobber a revocation happening concurrently in the main process.
+
+<Warning>
+Do not call `Flashcat.initialize()` inside the extension process. It would overwrite the persisted consent state with the literal you pass, which can resume uploads after the user revoked consent. `setTrackingConsent` is also ignored in the extension process and logs an error.
+</Warning>
 
 ## Upload HarmonyOS crash symbols
 
@@ -353,8 +412,12 @@ export default {
 ```
 
 <Note>
-`flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, default `0.1.0`). Neither is normally required.
+`flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, which defaults to the plugin's own version, currently `0.1.2`). Neither is normally required.
 </Note>
+
+<Warning>
+Use `0.1.2` or later. Earlier versions scheduled the upload task *before* `assembleHap` / `assembleHar`, so they uploaded the previous build's sourcemap and `.so` files while tagging them with the new version number — the symbol files never matched the version, and crashes in the new build could not be symbolicated. If you uploaded symbols with `0.1.1` or `0.1.0`, rebuild and upload once after upgrading the plugin.
+</Warning>
 
 Run the upload task after a release build:
 
