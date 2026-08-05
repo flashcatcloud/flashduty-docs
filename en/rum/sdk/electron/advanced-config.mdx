@@ -37,7 +37,7 @@ await init({
 | `telemetrySampleRate` | `number` | No | `20` | SDK internal telemetry sample rate (0–100); set to `0` to disable |
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | No | `MEDIUM` | Batch size per upload |
 | `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | No | `NORMAL` | Upload interval |
-| `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | No | `mask` | Privacy level forwarded to renderers; Session Replay is not supported in this version, so it currently has no effect |
+| `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | No | `mask` | Default privacy level forwarded to renderers. A renderer falls back to this value when its own `flashcatRum.init()` does not set `defaultPrivacyLevel`; it only has an effect once Session Replay is enabled, see [Session Replay](/en/rum/sdk/electron/sdk-integration#session-replay) |
 | `correctPrewarmedViewTimings` | `boolean` | No | `true` | Whether to rebase the FCP / LCP of pre-warmed windows onto the moment the window first became visible, see [FCP and LCP of pre-warmed windows](#fcp-and-lcp-of-pre-warmed-windows) |
 | `normalizeStackPaths` | `boolean` | No | `true` | Whether to rewrite absolute paths in error stacks to `app:///<path relative to the app root>`, see [Stack paths are normalized automatically](#stack-paths-are-normalized-automatically) |
 | `normalizeStackPath` | `(absolutePath: string) => string \| undefined` | No | — | Rewrite a single stack frame's path yourself, before the built-in normalization runs, see [Custom path mapping](#custom-path-mapping) |
@@ -232,6 +232,39 @@ Native crash stacks (from `crashReporter` minidumps) use a different, address-ba
 The backend matches on the **path portion** of the URL only — scheme and host are ignored, so `file:///dist/renderer.js`, `app:///dist/renderer.js`, and `/dist/renderer.js` are equivalent.
 
 Stack paths are unstable by nature, but the SDK already normalizes them for you, so only one thing is left to do: **upload with a prefix matching the normalized result**.
+
+### The version must match the renderer process
+
+Besides the path prefix, the backend also looks up source maps by `service` and `version` — and this is easy to get wrong: **a renderer event takes its `version` entirely from the renderer's own `flashcatRum.init()`**. The `version` passed to the main-process `init()` is written onto main-process events only; it is never added to renderer events. So when you upload the source map of a renderer bundle, `--release-version` must be **exactly** the value in `flashcatRum.init({ version })`. Setting `version` on the main process alone does not count.
+
+**Symptom**: stacks in the error details still show minified positions such as `app:///dist/renderer.js:12315:24`, with no source snippet when expanded.
+
+**Why nothing complains**: symbolication happens **when you view the error**, not at ingestion. If the version does not match, the frames are returned as-is — no error, no warning. The upload side is just as quiet: the CLI always reports success.
+
+Make both sides use the same version:
+
+```ts renderer.ts
+flashcatRum.init({
+  // …
+  version: '1.4.2',
+});
+```
+
+```bash
+flashcat-cli sourcemaps upload \
+  --service my-electron-app \
+  --release-version 1.4.2 \
+  --minified-path-prefix /dist/renderer \
+  ./out/renderer
+```
+
+<Tip>
+Renderer code is usually built separately by a bundler and cannot read the main process's `app.getVersion()` at runtime. Inject the version into the renderer bundle at build time (Vite's `define`, Webpack's `DefinePlugin`, esbuild's `--define`) so it comes from the same variable your release pipeline passes to `--release-version`, instead of being kept in sync by hand.
+</Tip>
+
+<Note>
+The same applies to `service`: `--service` must match the `service` used to initialize the SDK. Source maps for the main-process bundle are matched against the main process's own `init()` `version` — ideally both processes use the same value anyway.
+</Note>
 
 ### Stack paths are normalized automatically
 

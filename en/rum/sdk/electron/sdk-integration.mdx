@@ -15,6 +15,18 @@ An Electron application runs a **main process** (Node.js) and one or more **rend
 Installing only one half is the most common integration mistake. With only the main-process SDK you lose all front-end interaction data. With only the renderer SDK you lose the session, main-process errors, and native crashes, and events never carry the `container` information that correlates the two processes. Integrate both processes.
 </Warning>
 
+## Read this first: three misconfigurations that never raise an error
+
+The three items below share one property: **when you get them wrong, nothing complains**. The application keeps running, the SDK stays quiet, and the console shows no warning — one kind of data simply never shows up, or a feature just looks like it "did not work". They are painful to diagnose after the fact, so skim them before you start.
+
+| What you see | What is actually happening | What to do |
+|--------------|----------------------------|------------|
+| Session Replay is enabled, but no session ever has a replay — `session.has_replay` stays `0` and not a single segment arrives. It looks exactly like recording was never turned on | The page's own CSP blocks the entire replay pipeline. Recording creates a blob Worker in the renderer and sends segments straight to the intake, and a common `script-src 'self'` policy blocks both | Allow `worker-src blob:` and the intake origin in your CSP — see [CSP requirements for Session Replay](#csp-requirements-for-session-replay) |
+| Source maps are uploaded, yet stacks still show minified positions such as `app:///dist/renderer.js:12315:24`, with no source snippet | The `--release-version` you uploaded does not match the **renderer's** `version`. A renderer event takes its `version` only from `flashcatRum.init()`; the `version` on the main-process `init()` does not apply to it | Keep both values identical — see [The version must match the renderer process](/en/rum/sdk/electron/advanced-config#the-version-must-match-the-renderer-process) |
+| A replay plays back with a garbled, out-of-sync stretch in the middle, even though the timeline looks continuous | Replay segments produced while the network was down were dropped, and they are never resent | A known limitation of the current version that configuration cannot work around — see [Replay segments are lost during a network outage](#replay-segments-are-lost-during-a-network-outage) |
+
+The first and third items only affect applications with Session Replay enabled; the second applies to every application.
+
 ## How it works
 
 The main-process SDK is the **single exit point** for the whole pipeline. It does three things:
@@ -259,6 +271,76 @@ When the bridge is working, the main process only overrides `session.id` and `ap
 
 <Warning>
 Filtering on `source:electron` alone in the Explorer returns **main-process events only**. To select everything an Electron application produces, use `source:electron OR container.source:electron`.
+</Warning>
+
+## Session Replay
+
+In Electron, Session Replay is recorded by `@flashcatcloud/browser-rum` in the renderer. By default, as soon as the renderer detects the bridge injected by the main process it hands recording over to the host application — and the main-process SDK does not record replays, so **nothing gets recorded at all**. To use Session Replay in Electron you must explicitly turn on `sessionReplayDirectUpload`, which keeps the renderer recording and uploading on its own:
+
+```ts renderer.ts
+flashcatRum.init({
+  // …the rest of the configuration is unchanged
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+  defaultPrivacyLevel: 'mask',
+});
+```
+
+<Note>
+`sessionReplaySampleRate` defaults to `0`, so turning on `sessionReplayDirectUpload` alone records nothing. Set both.
+</Note>
+
+Once it is on, replay data follows a **different path** from everything else: regular RUM events still travel over the bridge and are buffered to disk and uploaded by the main process, while replay segments are sent **directly to the intake by the renderer**, bypassing the main process entirely. Both pitfalls below come from that difference.
+
+### CSP requirements for Session Replay
+
+To record a replay, the renderer does two things that a Content Security Policy blocks by default:
+
+1. Creates a Worker from a `blob:` URL — segments are compressed inside that Worker.
+2. Sends requests straight to the intake — compressed segments go to `POST https://<site>/api/v2/rum`.
+
+Electron applications commonly ship a CSP for security, for example `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'">`. A policy like that blocks both of the above, and **the whole replay pipeline fails silently**.
+
+**Symptom**: no session in the console has a replay, `session.has_replay` stays `0`, and not a single segment arrives. This is indistinguishable from never having enabled recording if you only look at the data.
+
+**Why nothing complains**: the only trace is two lines in the renderer's DevTools console. Nothing surfaces in the data — no error event is reported, and the console shows no warning:
+
+```
+Creating a worker from 'blob:file:///…' violates the following Content Security Policy directive: "script-src 'self'". Note that 'worker-src' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.
+Datadog Browser SDK: Datadog Session Replay failed to start: an error occurred while initializing the worker
+```
+
+<Note>
+This has nothing to do with how the page is loaded. Serving the page over `http://` gets the Worker blocked just the same — the block comes from the page's own CSP, not from the `file://` scheme, and not from Electron or the SDK.
+</Note>
+
+**How to configure it**: allow `worker-src blob:` in your CSP and add the intake origin to `connect-src`. Note that when `worker-src` is not declared explicitly it falls back to `script-src`, so `script-src 'self'` alone is not enough — `worker-src` has to be spelled out:
+
+```html
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  worker-src 'self' blob:;
+  connect-src 'self' https://browser.flashcat.cloud;
+">
+```
+
+Put your actual intake origin in `connect-src`: `https://browser.flashcat.cloud` for SaaS, your own `site` for a self-hosted deployment, or the `proxy` origin if you configured one. If your CSP is not written in a `<meta>` tag but delivered by a server response header or by `session.webRequest.onHeadersReceived` in the main process, apply the same allowances there.
+
+**How to confirm it is open**: call `flashcatRum.getSessionReplayLink()` in the renderer. A link containing `error-type=replay-not-started` means recording never started; when it is working the call returns a replay URL you can open directly.
+
+### Replay segments are lost during a network outage
+
+Replay segments are uploaded directly by the renderer through the browser SDK's own transport, which **does not use the main process's disk-backed retry**. Segments produced while the network is unreachable are dropped, and they are not resent once connectivity returns.
+
+**Symptom**: the replay plays, but a stretch in the middle is **missing** — the segment index `index_in_view` skips, for example straight from 1 to 4, with segments 2 and 3 gone for good. Worse, the first segment after recovery carries **no full snapshot** (`has_full_snapshot` is `0`), so the player keeps applying incremental changes on top of the stale page state from before the outage. That stretch of the replay renders garbled and misaligned, rather than simply being a few seconds short.
+
+**Why nothing complains**: this transport retries only once, in memory, and it only queues a request for retry when the browser believes it is **already offline** — the condition is `navigator.onLine === false`. The far more common failure is "the network adapter is up but the intake is unreachable": a dropped VPN, a corporate gateway blocking the request, or a temporarily unavailable intake. In those cases `navigator.onLine` is still `true`, so a failed request is neither retried nor queued — the segment is dropped on the spot, without producing any error event.
+
+**Compared with the main process**: main-process events use disk-backed batch upload — each event is written to a batch file under `userData` and the file is deleted only after a successful upload. Main-process views, errors, and resources are therefore **lost-free** across an outage: everything is resent once the network recovers, and pending batches even survive a forced termination and restart. The difference affects replay segments only.
+
+<Warning>
+This is a known and accepted limitation of the current version, not a defect awaiting a fix, and configuration cannot work around it. If replay completeness matters to your business — for example if replays are used as evidence in dispute resolution — take this into account up front.
 </Warning>
 
 ## Verify the integration
