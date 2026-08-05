@@ -15,6 +15,18 @@ Electron 应用由**主进程**（Node.js）和**渲染进程**（Chromium）组
 只装一半是最常见的接入错误。只装主进程 SDK 会丢失全部前端交互数据；只装渲染进程 SDK 则拿不到会话、主进程错误和原生崩溃，事件也不会带上关联两个进程的 `container` 信息。请两个进程都完成接入。
 </Warning>
 
+## 接入前必读：三个配错了也不报错的坑
+
+下面三件事有一个共同点：**配错了不会有任何报错**。应用照常运行，SDK 不会告警，控制台里也看不出异常，只是某一类数据永远不出现，或者某个功能看起来「没生效」。排查起来很费劲，所以请在动手前先扫一眼。
+
+| 你会看到的现象 | 真正的原因 | 怎么处理 |
+|----------------|------------|----------|
+| 开了会话回放，但筛不到任何带回放的会话——`session.has_replay` 恒为 `0`，一个分段都没有。表象和「压根没开录制」一模一样 | 页面自带的 CSP 把回放整条链路拦掉了。录制要在渲染进程里创建 blob Worker，还要直接把分段发到上报域名，`script-src 'self'` 这类常见写法会同时挡掉这两件事 | 在 CSP 里放行 `worker-src blob:` 和上报域名，见[会话回放的 CSP 要求](#会话回放的-csp-要求) |
+| sourcemap 传了，错误详情里的栈还是 `app:///dist/renderer.js:12315:24` 这样的压缩位置，点开也没有源码 | 上传时的 `--release-version` 和**渲染进程**的 `version` 对不上。渲染进程事件的 `version` 只认 `flashcatRum.init()` 里的配置，主进程 `init()` 配的那个不算数 | 让两处版本号完全一致，见[版本号必须与渲染进程一致](/zh/rum/sdk/electron/advanced-config#版本号必须与渲染进程一致) |
+| 回放播到中间突然花屏错位、少了一截，进度条却是连续的 | 网络不通那段时间产生的回放分段被丢弃了，且不会补发 | 这是当前版本的已知限制，配置规避不了，见[网络中断期间的回放分段会丢失](#网络中断期间的回放分段会丢失) |
+
+第一条和第三条只影响开启了会话回放的应用，第二条对所有应用都适用。
+
 ## 工作原理
 
 主进程 SDK 是整个链路的**统一出口**。它做三件事：
@@ -259,6 +271,76 @@ const allowedHosts = [...new Set([location.hostname, ...configuredHosts])]
 
 <Warning>
 在查看器里筛选时，只用 `source:electron` **只能查到主进程事件**。要选中一个 Electron 应用产生的全部数据，请用 `source:electron OR container.source:electron`。
+</Warning>
+
+## 会话回放
+
+Electron 的会话回放由渲染进程的 `@flashcatcloud/browser-rum` 录制。默认情况下，渲染进程一旦检测到主进程注入的桥接对象，就会把回放交给宿主应用处理——而主进程 SDK 并不录制回放，结果是**什么都录不到**。要在 Electron 里用回放，必须显式打开 `sessionReplayDirectUpload`，让渲染进程自己录、自己传：
+
+```ts renderer.ts
+flashcatRum.init({
+  // …其余配置同上
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+  defaultPrivacyLevel: 'mask',
+});
+```
+
+<Note>
+`sessionReplaySampleRate` 默认是 `0`，只打开 `sessionReplayDirectUpload` 什么也录不到，两个都要配。
+</Note>
+
+打开之后，回放数据的链路和其他数据**不一样**：普通 RUM 事件仍然经桥接交给主进程落盘、批量上报，而回放分段由渲染进程**直接发往上报域名**，完全不经过主进程。下面两节的两个坑都来自这个差异。
+
+### 会话回放的 CSP 要求
+
+录制回放时，渲染进程要做两件事，而它们恰好都是 CSP 默认会拦住的：
+
+1. 用 `blob:` URL 创建一个 Worker——分段在这个 Worker 里压缩
+2. 直接向上报域名发请求——把压缩好的分段送到 `POST https://<site>/api/v2/rum`
+
+Electron 应用出于安全考虑通常都给页面配了 CSP，例如 `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'">`。这样一条常见的 CSP 会把上面两件事同时挡掉，**回放整条链路就此静默失效**。
+
+**症状**：控制台里筛不到任何带回放的会话，`session.has_replay` 恒为 `0`，一个分段都没有。这和「压根没开录制」的表现完全一样，光看数据分辨不出来。
+
+**为什么没有报错**：唯一的线索是渲染进程 DevTools console 里的两行报错，数据层面完全无声——不会产生错误事件，控制台里也不会有任何提示：
+
+```
+Creating a worker from 'blob:file:///…' violates the following Content Security Policy directive: "script-src 'self'". Note that 'worker-src' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.
+Datadog Browser SDK: Datadog Session Replay failed to start: an error occurred while initializing the worker
+```
+
+<Note>
+这和页面用什么协议加载没有关系。把页面换成 `http://` 托管，Worker 一样被拦——拦截来自页面自己的 CSP，既不是 `file://` 协议的问题，也不是 Electron 或 SDK 的问题。
+</Note>
+
+**怎么配**：CSP 里要放行 `worker-src blob:`，并把上报域名加进 `connect-src`。注意 `worker-src` 没有显式声明时会回退到 `script-src`，所以只写 `script-src 'self'` 是不够的，必须单独写出 `worker-src`：
+
+```html
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  worker-src 'self' blob:;
+  connect-src 'self' https://browser.flashcat.cloud;
+">
+```
+
+`connect-src` 里填你实际的上报地址：SaaS 用户是 `https://browser.flashcat.cloud`，私有化部署填自己的 `site`，配了 `proxy` 的填 `proxy` 的域名。如果你的 CSP 不是写在 `<meta>` 里，而是由服务端响应头或主进程的 `session.webRequest.onHeadersReceived` 下发，也要做同样的放行。
+
+**怎么确认放开了**：在渲染进程里调用 `flashcatRum.getSessionReplayLink()`。返回的链接里带 `error-type=replay-not-started` 说明录制没起来；正常起来时返回的是一个可以直接打开的回放地址。
+
+### 网络中断期间的回放分段会丢失
+
+回放分段由渲染进程直传，走的是浏览器 SDK 自己的传输层，**不经过主进程的落盘重试**。网络不通期间产生的分段会被直接丢弃，网络恢复后也不会补发。
+
+**症状**：回放能播，但中间**少掉一段**——分段序号 `index_in_view` 出现跳号，例如从 1 直接跳到 4，中间的 2、3 号永久消失。更麻烦的是恢复后的第一个分段**不带全量快照**（`has_full_snapshot` 为 `0`），播放器只能在中断前那个过时的页面状态上继续叠加增量，于是那一段回放会花屏错位，而不只是「少了几秒」。
+
+**为什么没有报错**：这条传输链路只有一次内存里的重试，而且只有当浏览器**认为自己已经离线**时才会把请求排进重试队列——判断依据是 `navigator.onLine === false`。实际最常见的故障是「网卡是通的，但连不上上报地址」：VPN 掉线、公司网关拦截、上报服务临时不可用。这时 `navigator.onLine` 仍然是 `true`，请求失败后既不重试也不排队，分段就地丢弃，也不会产生任何错误事件。
+
+**对比主进程**：主进程的事件走的是落盘批量上传——事件先写进 `userData` 下的批次文件，上传成功才删除。所以断网期间主进程的 view、error、resource 是**零丢失**的，网络恢复后会完整补发，应用被强杀再启动也会续传。这个差异只影响回放分段。
+
+<Warning>
+这是当前版本已知并接受的限制，不是待修复的缺陷，也无法通过配置规避。如果你的业务对回放完整性敏感（例如要靠回放做纠纷取证），请提前把这一点纳入考量。
 </Warning>
 
 ## 验证接入

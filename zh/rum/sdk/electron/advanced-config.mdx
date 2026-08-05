@@ -37,7 +37,7 @@ await init({
 | `telemetrySampleRate` | `number` | 否 | `20` | SDK 自身遥测采样率（0–100），设为 `0` 关闭 |
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | 否 | `MEDIUM` | 单批上报大小 |
 | `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | 否 | `NORMAL` | 上报间隔 |
-| `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | 否 | `mask` | 传递给渲染进程的隐私级别；当前版本不支持 Session Replay，该参数暂无实际效果 |
+| `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | 否 | `mask` | 传递给渲染进程的默认隐私级别。渲染进程 `flashcatRum.init()` 未显式配置 `defaultPrivacyLevel` 时会采用这里的值；仅在开启会话回放后有实际效果，见[会话回放](/zh/rum/sdk/electron/sdk-integration#会话回放) |
 | `correctPrewarmedViewTimings` | `boolean` | 否 | `true` | 是否把预热窗口的 FCP / LCP 校正到窗口首次可见的时刻，见[预热窗口的 FCP 与 LCP 校正](#预热窗口的-fcp-与-lcp-校正) |
 | `normalizeStackPaths` | `boolean` | 否 | `true` | 是否把错误栈里的绝对路径归一化为 `app:///<相对应用根的路径>`，见[栈路径已自动归一化](#栈路径已自动归一化) |
 | `normalizeStackPath` | `(absolutePath: string) => string \| undefined` | 否 | — | 自定义单个栈帧路径的改写，在内置归一化之前执行，见[自定义路径映射](#自定义路径映射) |
@@ -232,6 +232,39 @@ Electron 应用发布时通常会压缩 JavaScript 产物，错误堆栈因此�
 服务端只用 URL 的 **path 部分**做匹配，协议和 host 会被忽略——`file:///dist/renderer.js`、`app:///dist/renderer.js` 与 `/dist/renderer.js` 三者等价。
 
 栈里的路径本来是不稳定的，但 SDK 已经默认帮你归一化，因此实际接入只剩一件事：**上传时用与归一化结果对应的前缀**。
+
+### 版本号必须与渲染进程一致
+
+除了 path 前缀，服务端查找 sourcemap 还要看 `service` 和 `version`。这里有一个很容易踩的坑：**渲染进程事件的 `version` 完全来自渲染进程 `flashcatRum.init()` 的配置**。主进程 `init()` 里的 `version` 只会写进主进程自己的事件，不会补到渲染进程事件上。因此上传渲染进程产物的 sourcemap 时，`--release-version` 必须与 `flashcatRum.init({ version })` 填的值**完全一致**——只在主进程配了 `version` 不算数。
+
+**症状**：错误详情里的栈还是 `app:///dist/renderer.js:12315:24` 这样的压缩位置，展开也没有源码片段。
+
+**为什么没有报错**：符号化是在**查看错误的时候**做的，不是入库时做的。版本号对不上就原样返回，既不报错也不告警；上传那一侧同样没有提示，CLI 永远显示上传成功。
+
+正确的做法是让两处共用同一个版本号：
+
+```ts renderer.ts
+flashcatRum.init({
+  // …
+  version: '1.4.2',
+});
+```
+
+```bash
+flashcat-cli sourcemaps upload \
+  --service my-electron-app \
+  --release-version 1.4.2 \
+  --minified-path-prefix /dist/renderer \
+  ./out/renderer
+```
+
+<Tip>
+渲染进程代码通常由打包工具单独构建，运行时拿不到主进程的 `app.getVersion()`。建议在构建时把版本号注入渲染进程产物（Vite 的 `define`、Webpack 的 `DefinePlugin`、esbuild 的 `--define`），让它和发布流水线里 `--release-version` 用的是同一个变量，避免手工同步时漏改。
+</Tip>
+
+<Note>
+`service` 同理：`--service` 要与 SDK 初始化里的 `service` 一致。主进程产物的 sourcemap 则与主进程 `init()` 的 `version` 对齐——两个进程的 `version` 建议本来就填同一个值。
+</Note>
 
 ### 栈路径已自动归一化
 
