@@ -401,7 +401,9 @@ def rate_limits_cell(lang: str, op: dict | None = None) -> str:
     per_s = rl["per_second"]
     per_m = rl["per_minute"]
     if lang == "en":
-        return f"**{per_m:,} requests/minute**; **{per_s} requests/second** per account"
+        noun_m = "request" if per_m == 1 else "requests"
+        noun_s = "request" if per_s == 1 else "requests"
+        return f"**{per_m:,} {noun_m}/minute**; **{per_s} {noun_s}/second** per account"
     return f"每个账户 **{per_m:,} 次/分钟**；**{per_s} 次/秒**"
 
 
