@@ -1,0 +1,206 @@
+---
+title: "ServiceMap"
+description: "A service dependency topology automatically generated from real-time eBPF connection evidence, so you can confirm who a host or service is actually communicating with right now"
+keywords: ["ServiceMap", "service dependency topology", "eBPF", "dependency graph", "monitoring objects"]
+sidebarTitle: "ServiceMap"
+---
+
+<Info>
+  **Beta**: ServiceMap is in beta — its behavior and interface may still change. It relies on `monit-agent`'s eBPF observation: if the Agent is too old, the runtime doesn't support it, or ServiceMap isn't enabled, the host shows as "Unsupported" or "Disabled" and has no topology data.
+</Info>
+
+ServiceMap automatically builds a dependency topology among hosts, processes, containers, and workloads, based on the real network connections that `monit-agent` observes through eBPF. It doesn't depend on any manual configuration or static architecture diagram — it shows who this machine is actually communicating with right now, not who the documentation says it should be communicating with.
+
+**Entry point**: the monitoring object page (the "Topology" button on each row in the object list, or the "ServiceMap Hosts" button in the toolbar).
+
+## Overview
+
+Every dependency (edge) in the topology comes from a real connection the Agent observed: a source entity (a process, container, or workload) issued a `connect` to a target endpoint (`ip:port/protocol`). ServiceMap's resolver tries to match this target endpoint to a known listener within the same network scope, turning a "connection" into a "service dependency":
+
+- If the endpoint matches exactly one listener, the dependency is marked **Confirmed**.
+- If the endpoint matches multiple possible listeners, it's marked **Candidate**, and you need to use context to determine the actual counterpart.
+- If the endpoint doesn't match any listener, it's marked **Unresolved**, and by default it doesn't enter the topology canvas (this keeps noise such as external addresses and short-lived connections from obscuring real dependencies).
+
+During troubleshooting, use ServiceMap to quickly confirm who this host or service currently depends on and is depended on by, and to gauge the blast radius of a change or anomaly, without having to log in to the host and check connections one by one. When you click "AI Analysis" in the monitoring object list, if the host's ServiceMap topology is available and you have permission to view it, the system automatically includes a summary of the current topology as context for AI-SRE — you don't need to attach it manually.
+
+<Note>
+Viewing ServiceMap requires the `MonitServiceMapVisit` permission. Without it, the topology drawer shows "ServiceMap Read permission is required to view the current topology", but the object list and host list themselves remain usable.
+</Note>
+
+## How to open ServiceMap
+
+On the monitoring object page (`/monit/targets`), there are two entry points:
+
+- **The "Topology" button in the object list**: when a row meets all of the following conditions, a "Topology" link appears in the action column; clicking it opens the host's current topology directly.
+  - `host_id` exists and has a valid format;
+  - the object reports the `servicemap` capability with no error code;
+  - `graph_available` is true (a readable graph currently exists);
+  - the ServiceMap status is one of **Healthy**, **Degraded**, or **Stale**.
+- **The "ServiceMap Hosts" button in the toolbar**: opens the account-wide ServiceMap host list (see "Host list" below), where you can filter by Agent version, Edge cluster, collection mode, and status before opening a specific host's topology; the same rule above applies.
+
+The topology drawer that opens contains two tabs: **Topology** (the visual canvas) and **Data Details** (query info + a dependency details table). The title bar shows whether the current graph is "live" or "stale", the collection mode, and the observation time.
+
+## Topology canvas
+
+### Resolution status filters
+
+Above the canvas is a row of buttons corresponding to dependency resolution status, each with a count badge:
+
+| Button | Meaning |
+|---|---|
+| **Confirmed** | Dependencies resolved to a single counterpart service. Click to toggle the visibility of confirmed dependency nodes/edges on the canvas. |
+| **Candidate** | Dependencies with multiple possible counterparts that haven't been uniquely determined yet. Click to toggle visibility the same way. |
+| **Unresolved** (red) | Clicking it doesn't toggle canvas visibility — it opens the "Unresolved Endpoint Groups" drawer instead (see below). Unresolved endpoints don't enter the canvas by default. The button is disabled when the count is 0. |
+
+If a dependency's resolution status is neither "Confirmed" nor "Candidate/Unresolved" (abnormal data where the backend returns a confirmed status but the candidate count isn't 1), an extra **Unknown N** label appears in the toolbar as a hint; these edges are rendered as gray dash-dot lines on the canvas.
+
+### Hop range and focus mode
+
+- When you're not in focus mode, the left side of the toolbar shows a "Range" selector with **1 hop / 2 hops / 3 hops**. Selecting a range triggers a new backend query — it's not a pure frontend filter. The more hops, the more nodes and edges are loaded, and the more likely the query hits its cap. A single query returns at most 100 nodes and 200 edges by default.
+- **Double-click any node** to enter focus mode: the canvas keeps only the local dependency graph expanded upstream and downstream from that node. Entering focus mode always resets the upstream hop count to 1; the downstream hop count keeps the value you last set (starting at 1 hop). Upstream and downstream hop counts can each be adjusted independently from 0 to 3. Upstream edges represent callers that depend on you; downstream edges represent what you depend on.
+- You can also use the search box in the top-right corner of the canvas (search by name, ID, container, or workload) to locate and focus a node directly.
+- Click "Exit Focus" or press <kbd>Esc</kbd> to exit focus mode and return to the overall topology within the current hop range.
+
+### Canvas controls and interaction
+
+- The bottom-left corner provides **zoom in / zoom out**, the current zoom percentage, and a toggle to **show/hide the minimap**.
+- **Fit to canvas** scales the entire graph to the visible area; **Re-layout** rearranges node positions using a new random seed (useful for separating heavily overlapping nodes).
+- When you hover over a node, the nodes/edges directly connected to it stay highlighted while the rest of the graph fades. Edges **originating from** that node (its downstream dependencies) additionally show metric labels, such as `↑ 12.3 KB/s` / `↓ 4.1 KB/s` (send/receive rate), `✕ 3` (connection failures within the observation window), and `↻ 2` (retransmission count), or `● 5` (current active connection count) when no meaningful rate data is available. Rates are shown only when the window's metrics are complete.
+- Clicking a node or edge opens a details panel on the right (see below); the panel width is resizable by dragging. Clicking an empty area of the canvas clears the current selection.
+- A set of stat cards is always visible in the top-left corner of the canvas: **Services** (node count), **Confirmed Dependencies**, and **Dependencies Checked** (the total number of dependencies actually examined by this query, including confirmed, candidate, and unresolved).
+- When the query is truncated (hits the node/edge cap), a banner appears above the canvas reading "Checked N dependencies, reached the query limit", with a "Focus Service" button that lets you search for and focus directly on the service you care about, narrowing the scope for another look.
+
+Node shape and edge color are the first-level signals for judging dependency trustworthiness:
+
+| Visual | Meaning |
+|---|---|
+| Circle node | A known entity (process / container / workload) |
+| Circle node + question mark icon | Candidate node: one possible counterpart entity for a "candidate" dependency |
+| Diamond node | A target endpoint not yet merged into an entity: an endpoint node expanded from a candidate dependency, or an unresolved endpoint temporarily located through the "Unresolved Endpoints" panel |
+| Green solid line | Confirmed dependency |
+| Orange dashed line (animated) | Candidate dependency; connects from the endpoint diamond node to each of multiple candidate entities |
+| Red dash-dot line | Unresolved dependency; appears only temporarily when you actively "Locate Source" |
+| Gray dash-dot line | Unknown (data marked confirmed by the backend but with an abnormal candidate count) |
+
+## Node details
+
+Clicking an entity or candidate node opens a details panel on the right, showing information in three groups:
+
+| Group | Field | Description |
+|---|---|---|
+| Identity | Display Name | The name shown for this entity on the page |
+| | Type | The entity type (e.g., `process_workload`, `container`) |
+| | Entity ID | The entity's unique identifier |
+| | Host ID | The identifier of the host the entity resides on |
+| Runtime | Executable | The executable file name for this entity |
+| | Systemd Unit | The systemd service unit for this entity (if any) |
+| | Container | The container name (if the entity runs inside a container) |
+| | Image | The image repository and version, in `repository:version` format |
+| | Workload | The Kubernetes namespace/workload name, in `namespace/workload_name` format |
+| | Instance Count | The number of instances merged into this entity |
+| Observation | First Observed | When this entity was first observed |
+| | Last Observed | When this entity was most recently observed |
+| | Entity Identity | The raw identity (JSON) returned by the backend, for precise troubleshooting |
+
+Hovering over the right side of any row reveals a copy button so you can copy the field's raw value directly. There's also a "View upstream/downstream only" button at the top of the panel that lets you enter focus mode on this node directly from the details panel.
+
+## Dependency details
+
+Clicking an edge (or a candidate/endpoint node) shows this dependency's information in three groups in the details panel:
+
+| Group | Field | Description |
+|---|---|---|
+| Identity | Edge ID | The dependency's unique identifier |
+| | Source Entity ID | The ID of the source entity that initiated the connection |
+| | Source NetNS ID | The network namespace ID of the source entity |
+| | Target Endpoint | The target endpoint, in `ip:port/protocol` format |
+| | Evidence | How this dependency was observed (free text, e.g., `connect`, meaning the connection was observed through a connect system call) |
+| Resolution | Resolution Status | The raw resolution status, such as `resolved` / `ambiguous` / `unresolved` |
+| | Resolution Reason | The reason returned by the resolver |
+| | Candidate Count | The number of possible counterpart services the resolver found for this endpoint; the dependency is marked as candidate when this is greater than 1 |
+| | Candidates Truncated | "Yes" when the candidate list exceeds the return limit, meaning only a partial candidate list was returned |
+| | Match Type | How the candidate was matched (e.g., `exact` for exact match, `wildcard` for wildcard match) |
+| | Confidence | The confidence score for this candidate |
+| | Listener ID | The identifier of the candidate counterpart's actual listener |
+| Observation | First Observed | When this dependency was first observed |
+| | Last Observed | When this dependency was most recently observed |
+
+To judge whether a dependency is trustworthy, look first at **Resolution Status** and **Candidate Count**: a dependency is judged confirmed only when the candidate count is 1; when the candidate count is greater than 1, it's a candidate dependency, and you need to use **Match Type** and **Confidence** together to determine which candidate is more likely to be the real counterpart.
+
+## Data Details tab
+
+The "Data Details" tab in the topology drawer provides a table view that doesn't depend on canvas interaction; the tab itself shows a count badge for confirmed dependencies, and has two parts:
+
+**Query Info**: shows this query's Host ID, Network Scope, observation time, direction and depth, hosts covered, and more (see the field descriptions in the next section, "How to judge whether a topology is trustworthy").
+
+**Dependency Details**: lists only confirmed and candidate dependencies (not unresolved ones); each row includes the source, target, protocol/port, confidence (High / Medium / Low), and last observed time. Confidence is graded by the highest confidence value among the dependency's candidates: 0.85 or above is High, 0.5 or above is Medium, and the rest is Low.
+
+## Unresolved endpoints
+
+Unresolved endpoints are dependencies whose target endpoint doesn't match any known listener. They don't enter the topology canvas by default; instead, they're shown grouped by reason in a separate "Unresolved Endpoint Groups" drawer.
+
+To open it, click the "Unresolved" filter button at the top of the canvas. The first time you open it, if the current topology query used summary mode (group counts only, no specific endpoint list), a supplementary query is automatically issued to load the full list.
+
+Known group reasons and their meanings:
+
+| Reason | Description |
+|---|---|
+| `no_current_listener` | No current listener was found |
+| `listener_address_family_unknown` | The listener's address family is uncertain |
+| `invalid_endpoint` | The endpoint information is invalid |
+
+When the backend returns a reason without preset copy, it's shown with a generic "Unresolved" label, and the raw reason string is still displayed alongside it.
+
+Within a group, you can:
+
+- Use the search box in the top-left corner to filter records within the current group by target endpoint or source service;
+- Click the "Locate Source" icon on a row to close the drawer and temporarily highlight this unresolved dependency's source entity and target endpoint on the canvas (this corresponds to the "Locating unresolved endpoint" banner on the canvas; click "Exit Locate" or press <kbd>Esc</kbd> to exit);
+- Click "Export CSV" in the top-right corner to export all unresolved endpoints (not limited to the currently selected group); the CSV columns, in order, are: **Target Endpoint**, **Source Service**, **Source Entity ID**, **Resolution Reason**.
+
+## Host list
+
+Opened from the "ServiceMap Hosts" button in the toolbar, this shows all hosts under the account that report the ServiceMap capability, independent of any single host's topology view.
+
+**Filters**: Agent version (multi-value input, confirm with Enter, up to 20), Edge cluster (multi-value input, confirm with Enter, up to 20), collection mode (multi-select: eBPF / Polling / Unknown).
+
+**Status distribution**: a set of stat cards showing the host count for each of the seven statuses — "Healthy / Degraded / Stale / Initializing / Disabled / Unsupported / No Data" — in a fixed order. Click a card to filter the list below by that status (click again, or click "Clear Status Filter", to cancel). Above the cards is scan coverage info: "Scanned N (cap M), matched X, classified Y successfully, Z failed", along with the time the counts were generated. If this count is a bounded scan (it hit the scan cap) or some hosts' status failed to load, the page shows "Represents this bounded scan only" or "Counts incomplete" respectively.
+
+What each status means:
+
+| Status | Meaning |
+|---|---|
+| Healthy | The current topology is fresh and usable for analysis |
+| Degraded | Collection is still running, but the current evidence is incomplete or not authoritative |
+| Stale | The last trustworthy topology is past the freshness window |
+| Initializing | The Agent is generating its first usable snapshot |
+| Disabled | The Agent hasn't enabled ServiceMap |
+| Unsupported | The current Agent or runtime environment doesn't support ServiceMap |
+| No Data | The capability was discovered, but no usable current topology exists yet |
+
+<Note>
+The monitoring object list and host list may also show two additional display states: **Not Reported** (the Agent hasn't reported the ServiceMap capability, which can't be directly interpreted as unsupported) and **Status Unavailable** (the ServiceMap status can't be read temporarily, but the monitoring object itself remains usable). Neither of these is a formal ServiceMap status value — they're just fallback displays for the status column itself.
+</Note>
+
+**Host list**: lists Host ID, Agent version, Edge cluster (the name of the `monitedge` cluster the host's Agent connects through), ServiceMap status, collection mode, and topology observation time. Rows that meet the conditions in "How to open ServiceMap" above show a "Topology" action button that opens the host's topology directly.
+
+The list uses cursor-based pagination and loads on demand, so the exact total is unknown until all matching results have loaded: the bottom shows either "N hosts loaded" (more can be loaded) or "N hosts total" (this is the complete result set). If this browse hits the scan boundary or some hosts' status is unavailable, a banner above the list reads "Host list reached the scan boundary or some statuses are unavailable — keep paging or narrow the filters".
+
+## How to judge whether a topology is trustworthy
+
+A topology is generated from connection evidence within a recent observation window — it's not a live snapshot, and it isn't guaranteed to be complete. After opening any host's topology, you can gauge how trustworthy it is by looking at the "Query Info" section of the "Data Details" tab, together with the topology drawer's title bar and the banner above the canvas:
+
+| Field | Description |
+|---|---|
+| Network Scope | The network scope identifier; endpoint resolution only happens within the same scope. Scopes are automatically divided by Edge cluster by default, with no manual configuration needed. |
+| Collection Mode | The collection method that produced this topology's evidence, e.g., `ebpf` kernel observation; it can also be `polling` or `hybrid`. |
+| Freshness | `fresh` means the evidence is within the observation window and can be treated as live; any other status means this graph is stale — the drawer's title bar shows a "Stale" label with an added note: "Use the observation time and coverage together to judge this; don't treat a stale graph as a live dependency." |
+| Hosts Covered | The number of hosts actually loaded by this topology query. |
+| Network Inventory | The state of the listening-endpoint inventory projection, which affects the completeness of endpoint resolution (e.g., whether this projection is fully available). |
+| Kubernetes Enrichment | The state of Kubernetes metadata enrichment, which affects whether container and workload information is complete. |
+| Query Limits | The list of truncation reasons triggered by this query — **its presence alone means this graph is incomplete** (e.g., it hit the node or edge cap). |
+
+<Warning>
+When the topology has degraded or incomplete evidence (`degraded_hosts` is greater than 0, or a degradation reason exists), the drawer shows an added note: "The current topology includes degraded or incomplete evidence." When the query itself times out or is rate-limited, it shows "Please retry later or reduce the depth" and "Please retry later" respectively. None of these are errors — they're reminders that the dependencies you're seeing right now may be incomplete; consider narrowing the hop range or retrying later.
+</Warning>
+
+In short: if **Freshness isn't `fresh`**, the **Query Limits list isn't empty**, or a **degraded/incomplete evidence notice appears**, this topology can't be treated as a live, complete set of dependencies for drawing conclusions directly — confirm further using the observation time.
