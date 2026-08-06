@@ -23,7 +23,7 @@ The three items below share one property: **when you get them wrong, nothing com
 |--------------|----------------------------|------------|
 | Session Replay is enabled, but no session ever has a replay — `session.has_replay` stays `0` and not a single segment arrives. It looks exactly like recording was never turned on | The page's own CSP blocks the entire replay pipeline. Recording creates a blob Worker in the renderer and sends segments straight to the intake, and a common `script-src 'self'` policy blocks both | Allow `worker-src blob:` and the intake origin in your CSP — see [CSP requirements for Session Replay](#csp-requirements-for-session-replay) |
 | Source maps are uploaded, yet stacks still show minified positions such as `app:///dist/renderer.js:12315:24`, with no source snippet | The `--release-version` you uploaded does not match the **renderer's** `version`. A renderer event takes its `version` only from `flashcatRum.init()`; the `version` on the main-process `init()` does not apply to it | Keep both values identical — see [The version must match the renderer process](/en/rum/sdk/electron/advanced-config#the-version-must-match-the-renderer-process) |
-| A replay plays back with a garbled, out-of-sync stretch in the middle, even though the timeline looks continuous | Replay segments produced while the network was down were dropped, and they are never resent | A known limitation of the current version that configuration cannot work around — see [Replay segments are lost during a network outage](#replay-segments-are-lost-during-a-network-outage) |
+| A replay plays back with a garbled, out-of-sync stretch in the middle, even though the timeline looks continuous | The intake was unreachable during that stretch (request blocked, intake down, DNS or proxy failure) and the segments were dropped on the spot. This is not "the network was down" — a genuine outage queues segments for retry and resends them on recovery | Allow the intake origin in your network policy — see [Replay segments are dropped when the intake is unreachable](#replay-segments-are-dropped-when-the-intake-is-unreachable) |
 
 The first and third items only affect applications with Session Replay enabled; the second applies to every application.
 
@@ -253,7 +253,7 @@ The bridge fails because of a **missing preload injection**, not because of conf
 | `container.source` on renderer events | `electron` | field absent |
 | Upload path | Batched by the main process | Each renderer uploads directly to the intake |
 | Session | Shares the main-process `session.id` | Renderer generates its own session |
-| Offline retry | Buffered to disk under the main process `userData`, resent after restart | Relies on browser-side buffering, lost when the process exits |
+| Offline retry | Buffered to disk under the main process `userData`, resent after restart | Relies on the browser-side in-memory retry queue: covers a genuine outage only, lost when the process exits |
 | User activity | Renderer clicks extend the main-process session | No effect on each other |
 
 <Tip>
@@ -329,19 +329,30 @@ Put your actual intake origin in `connect-src`: `https://browser.flashcat.cloud`
 
 **How to confirm it is open**: call `flashcatRum.getSessionReplayLink()` in the renderer. A link containing `error-type=replay-not-started` means recording never started; when it is working the call returns a replay URL you can open directly.
 
-### Replay segments are lost during a network outage
+### Replay segments are dropped when the intake is unreachable
 
-Replay segments are uploaded directly by the renderer through the browser SDK's own transport, which **does not use the main process's disk-backed retry**. Segments produced while the network is unreachable are dropped, and they are not resent once connectivity returns.
+Replay segments are uploaded directly by the renderer through the browser SDK's own transport, which **does not use the main process's disk-backed retry**. That transport does buffer and retry, but it only covers one class of failure; the other is dropped outright.
 
-**Symptom**: the replay plays, but a stretch in the middle is **missing** — the segment index `index_in_view` skips, for example straight from 1 to 4, with segments 2 and 3 gone for good. Worse, the first segment after recovery carries **no full snapshot** (`has_full_snapshot` is `0`), so the player keeps applying incremental changes on top of the stale page state from before the outage. That stretch of the replay renders garbled and misaligned, rather than simply being a few seconds short.
+A request is retried when it comes back as HTTP 408, 429 or 5xx, or when it never left at all (`status` is `0`) **and** `navigator.onLine === false`. In practice that splits into two outcomes:
 
-**Why nothing complains**: this transport retries only once, in memory, and it only queues a request for retry when the browser believes it is **already offline** — the condition is `navigator.onLine === false`. The far more common failure is "the network adapter is up but the intake is unreachable": a dropped VPN, a corporate gateway blocking the request, or a temporarily unavailable intake. In those cases `navigator.onLine` is still `true`, so a failed request is neither retried nor queued — the segment is dropped on the spot, without producing any error event.
+| Situation | `navigator.onLine` | Behavior |
+|-----------|--------------------|----------|
+| A genuine outage: the adapter goes down, Wi-Fi is turned off, the cable is pulled, airplane mode | `false` | Segments are queued and resent, in order, once connectivity returns |
+| The intake is unreachable: the request is blocked by a gateway or endpoint security tool, the intake is down, DNS fails, a firewall or proxy misbehaves | `true` | Dropped immediately — not queued, not retried |
 
-**Compared with the main process**: main-process events use disk-backed batch upload — each event is written to a batch file under `userData` and the file is deleted only after a successful upload. Main-process views, errors, and resources are therefore **lost-free** across an outage: everything is resent once the network recovers, and pending batches even survive a forced termination and restart. The difference affects replay segments only.
+**A genuine outage is recovered from**: failed segments go into an in-memory retry queue (3 MiB cap) and are resent with exponential backoff, starting at 1 second and doubling up to a maximum of 1 minute; once one attempt succeeds, the queued segments are flushed in order. Turning Wi-Fi off, walking away, and reconnecting therefore usually yields a complete replay.
 
-<Warning>
-This is a known and accepted limitation of the current version, not a defect awaiting a fix, and configuration cannot work around it. If replay completeness matters to your business — for example if replays are used as evidence in dispute resolution — take this into account up front.
-</Warning>
+**Loss happens when the machine is online but the intake is not reachable**: the browser considers itself connected, `navigator.onLine` is still `true`, so a failed request is neither retried nor queued — the segment is dropped on the spot, without producing any error event. A dropped VPN, a corporate gateway or endpoint security tool blocking the intake origin, a temporarily unavailable intake, and a misconfigured proxy all fall into this class.
+
+**Symptom**: the replay plays, but a stretch in the middle is **missing** — the segment index `index_in_view` skips, for example straight from 1 to 4, and segments 2 and 3 never arrive. The first segment after recovery also carries **no full snapshot** (`has_full_snapshot` is `0`), so the player keeps applying incremental changes on top of the stale page state from before the gap. That stretch of the replay renders garbled and misaligned, rather than simply being a few seconds short.
+
+**One more way segments are lost**: the retry queue lives in memory and is never written to disk. Segments still waiting to be resent when the application exits or is force-killed are not carried over to the next startup.
+
+**Compared with the main process**: main-process events use disk-backed batch upload — each event is written to a batch file under `userData` and the file is deleted only after a successful upload. Neither failure class above affects main-process views, errors, or resources: everything is resent once the network or the intake recovers, and pending batches even survive a forced termination and restart. The difference affects replay segments only.
+
+<Note>
+This is the behavior boundary of the renderer's direct-upload path, not a defect, and no SDK option changes it. If replay completeness matters to your business — for example if replays are used as evidence in dispute resolution — allowing the intake origin in your network policy, proxy, and endpoint security tooling removes the most common source of loss.
+</Note>
 
 ## Verify the integration
 
