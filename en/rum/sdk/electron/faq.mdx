@@ -1,0 +1,119 @@
+---
+title: "Electron SDK troubleshooting"
+description: "Troubleshoot missing Electron RUM data, process bridging, Session Replay, and stack symbolication"
+keywords: ["RUM", "Electron SDK", "troubleshooting", "Session Replay", "bridge", "source maps"]
+---
+
+Use the symptom you see in the application or Flashduty console to find the relevant checks.
+
+<AccordionGroup>
+<Accordion title="Why is there no data in the console?">
+Check the following in order:
+
+1. Confirm that main-process `init()` returns `true`, and check the main-process console for configuration errors.
+2. Confirm that `applicationId`, `clientToken`, and `service` are non-empty strings.
+3. Confirm that the application can reach `https://browser.flashcat.cloud/api/v2/rum` or your self-hosted endpoint.
+4. Wait for one upload cycle. Regular RUM events upload every 10 seconds by default.
+5. Filter with `source:electron OR container.source:electron` in the Explorer.
+
+During integration testing, set `batchSize: 'SMALL'` and `uploadFrequency: 'FREQUENT'` to shorten the wait.
+</Accordion>
+
+<Accordion title="Why do I only see main-process data?">
+If `source: electron` events appear but renderer views, actions, and resources do not, check that:
+
+1. The renderer installs and initializes `@flashcatcloud/browser-rum`.
+2. The main process finishes `init()` before creating a `BrowserWindow`.
+3. For an unbundled main process, `instrument` is imported before `electron`.
+4. For a bundled main process, the matching Vite, Webpack, or esbuild plugin is configured.
+
+After successful renderer integration, renderer events contain `container.source: electron`.
+</Accordion>
+
+<Accordion title="Why is container.source missing from renderer events?">
+A missing `container.source` means the Browser SDK did not use the Electron bridge and uploaded as a standalone web page.
+
+Common causes include:
+
+- The main process did not start instrumentation.
+- The bundle did not preserve the Electron SDK or its preload.
+- SDK initialization failed.
+
+First, verify the build setup under [Integration steps](/en/rum/sdk/electron/sdk-integration#integration-steps), then restart the application.
+
+The current window does not need `allowedWebViewHosts`. Use that option only for third-party pages in a `<webview>` or `BrowserView`.
+</Accordion>
+
+<Accordion title="Why is Session Replay missing?">
+Check each requirement:
+
+1. `@flashcatcloud/browser-rum` is version 0.0.7 or later.
+2. The renderer sets both `sessionReplaySampleRate` and `sessionReplayDirectUpload: true`.
+3. `sessionReplaySampleRate` is greater than 0 and the current session is sampled.
+4. The page CSP allows `worker-src blob:`.
+5. The CSP `connect-src` contains the actual replay upload endpoint.
+6. A self-hosted deployment sets `proxy` in the renderer.
+
+Open the renderer DevTools Console and Network panels. A blocked Worker produces a CSP error in Console. An invalid upload endpoint produces failed replay requests in Network.
+</Accordion>
+
+<Accordion title="Why is part of a replay missing or visually corrupted?">
+The renderer uploads replay segments directly and does not use the main-process disk buffer.
+
+When the device is truly offline, the Browser SDK places segments in an in-memory queue and retries after connectivity returns. If the device appears online but a request fails because of DNS, a proxy, gateway, security software, or an intake outage, the failed segment is not queued. Later segments may not contain the full snapshot needed to reconstruct the page, causing a gap or visual corruption.
+
+Check that:
+
+- Firewalls and endpoint security software allow the upload host.
+- DNS and proxy settings can reach the endpoint reliably.
+- The page CSP allows the actual replay endpoint.
+- Your self-hosted forwarding service remains available.
+
+A segment that was already dropped cannot be recovered from main-process storage.
+</Accordion>
+
+<Accordion title="Why does a self-hosted deployment receive regular events but no replay?">
+Regular RUM events and Session Replay use separate upload paths:
+
+- Regular events are bridged to the main process and use main-process `site` or `proxy`.
+- Replay segments upload directly from the renderer and use the renderer Browser SDK `proxy`.
+
+Configuring only the main process does not change the replay endpoint. Set `proxy` in `flashcatRum.init()` and add it to the page CSP `connect-src` directive.
+
+See [Custom upload endpoints](/en/rum/sdk/electron/advanced-config#custom-upload-endpoints) for a complete example.
+</Accordion>
+
+<Accordion title="Why did a source map upload succeed without restoring the stack?">
+Flashduty matches source maps using `service`, `version`, and the minified file path. Check that:
+
+1. `--service` matches the process that produced the error.
+2. `--release-version` matches that process's `version`.
+3. The renderer also sets `version`; the main-process version does not propagate to renderer events.
+4. `--minified-path-prefix` matches the directory in the stack frame shown in error details.
+5. Main-process and renderer artifacts were uploaded separately.
+
+For `app:///dist/renderer/index.js`, use `/dist/renderer` as the prefix. Do not include `app:///`.
+
+See [Electron error symbolication](/en/rum/sdk/electron/error-symbolication#symbolicate-javascript-errors) for the complete workflow.
+</Accordion>
+
+<Accordion title="Why do native crash stacks contain only addresses?">
+Native minidumps do not use JavaScript source maps. Upload Breakpad symbols that match the exact application release, operating system, and CPU architecture.
+
+Start with the official symbol bundle for your Electron version. If the application includes native modules or `.node` plugins, generate and upload `.sym` files for those modules as well.
+
+After upload, historical crashes can also be symbolicated when viewed. See [Symbolicate native crashes](/en/rum/sdk/electron/error-symbolication#symbolicate-native-crashes).
+</Accordion>
+</AccordionGroup>
+
+## If the issue continues
+
+When you contact support, include:
+
+- Electron, `@flashcatcloud/electron-sdk`, and `@flashcatcloud/browser-rum` versions
+- Bundler and module format
+- Main-process initialization options with the Client Token removed
+- Main-process and renderer console errors
+- Failed request URL, status code, and error type
+
+Do not send Client Tokens, server-side keys, or data that contains user-sensitive information.

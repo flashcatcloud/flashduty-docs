@@ -1,0 +1,197 @@
+---
+title: "Electron 错误还原"
+description: "上传 Electron 应用的 JavaScript sourcemap 和原生崩溃符号，还原生产环境调用栈"
+keywords: ["RUM", "Electron", "sourcemap", "Breakpad", "原生崩溃", "错误还原"]
+---
+
+Electron 应用包含 JavaScript 错误和原生崩溃，两者使用不同的还原方式：
+
+| 错误类型 | 原始调用栈 | 需要上传 |
+|----------|------------|----------|
+| 主进程和渲染进程 JavaScript 错误 | 压缩后的文件名和行列号 | 构建生成的 sourcemap |
+| Electron 或原生模块崩溃 | 模块名和内存地址 | Breakpad `.sym` 文件 |
+
+## 还原 JavaScript 错误
+
+SDK 默认将应用目录中的栈帧转换为稳定的 `app:///<相对路径>`。无论用户把应用安装到哪里，同一份构建都会得到相同的路径。
+
+例如：
+
+```text
+Error: something went wrong
+  at handleClick @ app:///dist/renderer/index.js:97:15
+```
+
+上传时只使用 URL 的 path 部分。上例对应的目录前缀是 `/dist/renderer`。
+
+### 1. 统一 service 和 version
+
+Flashduty 使用以下信息匹配 sourcemap：
+
+- 事件中的 `service`
+- 事件中的 `version`
+- 栈帧中的压缩文件路径
+
+建议让主进程和渲染进程使用相同的版本变量：
+
+```ts main.ts
+await init({
+  // 其余配置
+  service: 'my-electron-app',
+  version: '1.4.2',
+});
+```
+
+```ts renderer.ts
+flashcatRum.init({
+  // 其余配置
+  service: 'my-electron-app',
+  version: '1.4.2',
+});
+```
+
+主进程的 `version` 不会自动写入渲染进程事件，因此两侧都需要配置。
+
+### 2. 生成 sourcemap
+
+为主进程和渲染进程构建开启 sourcemap：
+
+<CodeGroup>
+```ts Vite
+export default defineConfig({
+  build: { sourcemap: true },
+});
+```
+
+```js Webpack
+module.exports = {
+  mode: 'production',
+  devtool: 'source-map',
+};
+```
+
+```ts esbuild
+await esbuild.build({
+  sourcemap: true,
+});
+```
+</CodeGroup>
+
+### 3. 上传主进程和渲染进程产物
+
+安装 [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli)，然后分别上传两个进程的 sourcemap：
+
+```bash
+npm install --global @flashcatcloud/flashcat-cli
+```
+
+```bash
+# 主进程栈：app:///dist/main/index.js
+flashcat-cli sourcemaps upload ./out/main \
+  --service my-electron-app \
+  --release-version 1.4.2 \
+  --minified-path-prefix /dist/main \
+  --api-key <YOUR_API_KEY>
+
+# 渲染进程栈：app:///dist/renderer/index.js
+flashcat-cli sourcemaps upload ./out/renderer \
+  --service my-electron-app \
+  --release-version 1.4.2 \
+  --minified-path-prefix /dist/renderer \
+  --api-key <YOUR_API_KEY>
+```
+
+`--minified-path-prefix` 应与错误详情中栈帧的目录一致。不要在前缀中包含 `app:///`。
+
+<Warning>
+不要将 `.map` 文件打入最终分发的应用包。完成上传后，请在生成安装包前从分发产物中排除它们。
+</Warning>
+
+### 自定义路径映射
+
+大多数项目可以直接使用默认的 `app:///` 路径。只有构建目录无法按应用根目录表达时，才配置 `normalizeStackPath`：
+
+```ts main.ts
+await init({
+  // 其余配置
+  normalizeStackPath: (absolutePath) => {
+    const normalized = absolutePath.replace(/\\/g, '/');
+    const match = /\/public(\/dist\/.+)$/.exec(normalized);
+    return match ? match[1] : undefined;
+  },
+});
+```
+
+该回调同时应用于主进程和通过桥接上报的渲染进程栈。返回 `undefined` 时，SDK 会继续使用默认规则。
+
+## 还原原生崩溃
+
+原生崩溃来自 Electron `crashReporter` 生成的 minidump。未上传符号时，调用栈会显示模块和地址：
+
+```text
+0  Electron Framework  0x000000010ab12345
+1  libsystem_kernel    0x00007ff81a2b3c4d
+```
+
+上传匹配的 Breakpad 符号后，Flashduty 可以还原函数名、文件名和行号。
+
+### 1. 准备符号文件
+
+从 [Electron releases](https://github.com/electron/electron/releases) 下载与你实际发布的 Electron **版本、操作系统和 CPU 架构**完全一致的符号包：
+
+```text
+electron-v<version>-<platform>-<arch>-symbols.zip
+```
+
+真实崩溃中的大多数栈帧通常位于 Electron 自带模块中，因此建议优先上传官方符号包。
+
+如果应用包含自己的原生模块或 `.node` 插件，请使用 [dump_syms](https://github.com/mozilla/dump_syms) 为这些模块生成 `.sym` 文件。
+
+### 2. 上传符号
+
+将 `.sym` 文件放在同一个目录中，然后执行：
+
+```bash
+flashcat-cli electron-symbols upload ./breakpad_symbols \
+  --service my-electron-app \
+  --release-version 1.4.2
+```
+
+使用 `--dry-run` 可以先查看将要上传的文件。
+
+原生符号按模块 ID 匹配。命令中的 `service` 和 `release-version` 用于标记上传批次，方便查询，不参与符号匹配。这一点与 JavaScript sourcemap 不同。
+
+### 3. 随版本发布符号
+
+每次升级 Electron 或重新构建原生模块后，模块 ID 都可能变化。请为实际发布的每个操作系统和 CPU 架构上传对应符号。
+
+未上传符号不会阻止崩溃事件上报。你可以先收到地址形式的崩溃栈，再补传符号；历史崩溃会在查看时重新还原。
+
+## 验证错误还原
+
+### JavaScript 错误
+
+1. 在测试版本中触发一个包含稳定调用栈的错误
+2. 在错误详情中确认事件的 `service` 和 `version`
+3. 检查栈帧路径与 `--minified-path-prefix` 是否对应
+4. 确认详情页显示原始文件名、函数名和源码位置
+
+### 原生崩溃
+
+1. 使用与发布版本相同的 Electron 构建触发测试崩溃
+2. 重新启动应用，让 SDK 上报 minidump
+3. 在崩溃详情中确认 Electron 模块帧已显示函数名和行号
+
+如果上传成功但调用栈仍未还原，请参阅 [Electron SDK 问题排查](/zh/rum/sdk/electron/faq#为什么-sourcemap-上传成功但错误栈没有还原)。
+
+## 相关页面
+
+<CardGroup cols={2}>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/electron/advanced-config">
+配置版本、路径映射和其他进阶选项。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/electron/data-collection">
+了解 JavaScript 错误与原生崩溃的采集方式。
+</Card>
+</CardGroup>
