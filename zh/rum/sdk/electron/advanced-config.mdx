@@ -30,7 +30,7 @@ await init({
 | `clientToken` | `string` | 是 | — | 客户端 Token |
 | `service` | `string` | 是 | — | 服务名称，需与 sourcemap 上传时一致 |
 | `site` | `string` | 否 | `browser.flashcat.cloud` | 上报站点，直接作为 intake 域名。私有化部署填自己的域名；纯 HTTP intake 见[什么时候必须用 proxy](#什么时候必须用-proxy) |
-| `env` | `string` | 否 | — | 环境标识，如 `production`、`staging` |
+| `env` | `string` | 否 | — | 环境标识，如 `production`、`staging`。当前只写入尚未上报的 span 包络，主进程 RUM 事件不带该字段；渲染进程需在 `flashcatRum.init()` 中单独配置 |
 | `version` | `string` | 否 | — | 应用版本号，需与 sourcemap 上传时一致 |
 | `proxy` | `string` | 否 | — | 自定义上报地址，见[私有化部署与代理上报](#私有化部署与代理上报) |
 | `allowedWebViewHosts` | `string[]` | 否 | `[]` | **额外**允许通过桥接上报的 host。窗口自身的 host 始终被允许，因此只有接收 `<webview>` / `BrowserView` 中第三方页面的事件时才需要配置 |
@@ -179,6 +179,40 @@ import { stopSession } from '@flashcatcloud/electron-sdk';
 stopSession();
 ```
 
+## 关联登录用户
+
+在用户登录后调用 `setUser()`，主进程后续产生的事件和经桥接转发的渲染进程事件都会带上同一份 `usr` 身份。登出时调用 `clearUser()`；`getUser()` 可读取当前身份。
+
+```ts
+import { clearUser, getUser, setUser } from '@flashcatcloud/electron-sdk';
+
+setUser({
+  id: 'user-123',
+  name: 'Alice',
+  email: 'alice@example.com',
+});
+
+console.log(getUser()); // 返回副本：{ id, name, email }
+
+clearUser();
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `id` | 是 | 非空字符串，写入 `usr.id` |
+| `name` | 否 | 字符串，写入 `usr.name` |
+| `email` | 否 | 字符串，写入 `usr.email` |
+
+SDK 只接收这三个字段；`id` 缺失或任一可选字段不是字符串时，整次调用都会被忽略并打印警告。主进程身份存在时，它会**整体替换**渲染进程事件原有的 `id` / `name` / `email`，不会逐字段合并；`usr.anonymous_id` 始终保留，用于跨登录状态识别同一设备。
+
+<Warning>
+主进程 `setUser()` 覆盖主进程事件和经桥接转发的普通 RUM 事件，但不会改写由渲染进程直传的会话回放分段。开启回放时，请在同一套登录 / 登出流程中同步调用渲染进程的 `flashcatRum.setUser()` / `flashcatRum.clearUser()`。
+</Warning>
+
+<Note>
+`clearUser()` 只影响之后发生的事件，不会改写已经上报的数据。SDK 会把身份历史明文保存在 `app.getPath('userData')/_dd_user_history`，以便应用下次启动时仍能把延迟解析的原生崩溃归到崩溃发生时的用户。请按你的本地数据与隐私策略保护 `userData` 目录。
+</Note>
+
 ## Operation 监控（预览）
 
 用成对的起止调用跟踪关键业务流程，服务端按 `name`（及可选的 `operationKey`）关联，生成 `vital` 事件。
@@ -209,7 +243,7 @@ failOperation('upload', 'abandoned', { operationKey: 'cover_photo' });
 | `options.context` | 合并进事件 `context` 的自定义属性 |
 | `options.description` | 写入 `vital.description` 的描述 |
 
-由于关联发生在服务端，你可以**在一个进程开始、在另一个进程结束**——例如渲染进程点击「结算」时 `startOperation`，主进程完成落单后 `succeedOperation`。
+这些 API 由主进程的 `@flashcatcloud/electron-sdk` 提供。当前要求的 `@flashcatcloud/browser-rum` `0.0.7` 不提供同名 Operation API；如果流程从渲染进程触发，请通过应用自己的 preload / IPC 接口调用主进程 API，并在主进程完成时调用对应的结束方法。
 
 <Warning>
 该 API 处于预览阶段，签名可能在正式版前调整。
@@ -364,13 +398,15 @@ flashcat-cli sourcemaps upload --minified-path-prefix /dist/renderer ./out/rende
 await init({
   // …
   normalizeStackPath: (absolutePath) => {
+    // 回调拿到内置归一化前的原始帧 URL；先统一 Windows 分隔符
+    const framePath = absolutePath.replace(/\\/g, '/');
     // …/public/dist/renderer.js → /dist/renderer.js（吞掉中间的 public/ 一段）
-    const emitted = /\/public(\/dist\/.+)$/.exec(absolutePath);
+    const emitted = /\/public(\/dist\/.+)$/.exec(framePath);
     if (emitted) {
       return emitted[1];
     }
     // 软链进来的内部包，保持相对应用根的路径
-    const linked = /(\/node_modules\/@acme\/widgets\/dist\/.+)$/.exec(absolutePath);
+    const linked = /(\/node_modules\/@acme\/widgets\/dist\/.+)$/.exec(framePath);
     return linked ? linked[1] : undefined; // 其余交给内置的 app:///
   },
 });
@@ -426,7 +462,7 @@ stack.replace(
 );
 ```
 
-需要自定义映射时，优先用 [`normalizeStackPath`](#自定义路径映射)：它拿到的是已经跨平台统一过的绝对路径，且主进程与渲染进程都生效。
+需要自定义映射时，优先用 [`normalizeStackPath`](#自定义路径映射)，且主进程与渲染进程都生效。回调拿到的是**内置处理前的原始帧 URL**，可能包含 `file://`、百分号转义或 Windows 反斜杠；自定义规则需要自己覆盖会遇到的路径形态。
 </Warning>
 
 <Note>

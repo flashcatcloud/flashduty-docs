@@ -5,7 +5,7 @@ description: "了解 Electron RUM SDK 在主进程与渲染进程分别采集的
 keywords: ["RUM", "Electron SDK", "数据收集", "主进程", "渲染进程", "崩溃"]
 ---
 
-Electron RUM 的数据来自两个进程，最终由主进程统一上报。本文按进程说明采集内容。
+Electron RUM 的数据来自两个进程。普通 RUM 事件最终由主进程统一上报；会话回放分段由渲染进程直传。本文按进程说明采集内容。
 
 ## 采集概览
 
@@ -18,7 +18,7 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 | 原生崩溃（minidump） | 主进程 | 开启 | `error`（`is_crash: true`） |
 | 渲染进程 / 子进程终止 | 主进程 | 开启 | `error`（`is_crash: false`） |
 | 主进程 HTTP 请求 | 主进程 | 开启 | `resource` |
-| Operation 监控 | 主进程 / 渲染进程 | 手动（预览） | `vital` |
+| Operation 监控 | 主进程 | 手动（预览） | `vital` |
 | 页面 view、用户操作、前端资源、JS 错误、Web Vitals | 渲染进程 | 开启 | `view` / `action` / `resource` / `error` |
 | SDK 自身遥测 | 主进程 | 开启（采样 20%） | `telemetry` |
 
@@ -36,12 +36,18 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 | `source` | 固定为 `electron` |
 | `view.id` | 事件发生时的活跃 view ID |
 | `view.name` / `view.url` | 固定为 `main process` / `electron://main-process` |
+| `usr.anonymous_id` | SDK 生成并持久化的设备标识 |
+| `usr.id` / `usr.name` / `usr.email` | 调用 `setUser()` 后附加的登录用户身份 |
 | `ddtags` | 包含 `sdk_version:<SDK 版本>` |
 | `_dd.format_version` | 固定为 `2` |
 
+<Note>
+当前主进程 RUM 事件不带 `env`。`env` 配置只进入尚未上报的 span 包络；渲染进程事件仍保留各自 `flashcatRum.init()` 中的 `env`。
+</Note>
+
 ## 渲染进程事件的标识
 
-桥接生效时，主进程**不会**改写渲染进程事件的 `source`。它只覆盖三处、补上一处：
+桥接生效时，主进程**不会**改写渲染进程事件的 `source`。它固定覆盖两处、补两处；如果主进程设置了登录用户，还会替换用户身份：
 
 | 字段 | 主进程的处理 |
 |------|--------------|
@@ -49,6 +55,7 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 | `application.id` | 覆盖为主进程配置的应用 ID |
 | `container.source` | 补充为 `electron` |
 | `container.view.id` | 补充为主进程当前 view ID |
+| `usr` | 调用过 `setUser()` 时，用主进程的 `id` / `name` / `email` 整体替换渲染进程身份，同时保留 `usr.anonymous_id`；未设置时保持渲染进程原值 |
 
 渲染进程自己的 `source`、`view`、`service` 等属性一律保留。因此两类事件的标识不同：
 
@@ -62,8 +69,24 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 </Warning>
 
 <Note>
-桥接未生效时（主进程未接入 SDK，或主进程打包时缺少插件导致 preload 未注入），渲染进程会作为独立的 Web 应用直连上报：`source` 仍是 `browser`，但**没有 `container` 字段**，会话也与主进程无关。详见[接入指南](/zh/rum/sdk/electron/sdk-integration#桥接未生效时会怎样)。
+桥接未生效时（例如主进程没有执行 `instrument`，或打包产物缺少 SDK / preload 运行时文件），渲染进程会作为独立的 Web 应用直连上报：`source` 仍是 `browser`，但**没有 `container` 字段**，会话也与主进程无关。详见[接入指南](/zh/rum/sdk/electron/sdk-integration#桥接未生效时会怎样)。
 </Note>
+
+## 用户身份
+
+SDK 启动时生成 `usr.anonymous_id` 并写入 `app.getPath('userData')/_dd_anonymous_id`。这个设备标识跨会话、应用重启和登录状态保持不变；登录用户身份由主进程的 `setUser()` 单独管理。
+
+| 状态 | 事件中的 `usr` |
+|------|----------------|
+| 尚未调用 `setUser()` | 只有 `anonymous_id`，不会把它回填到 `id` |
+| 已调用 `setUser({ id, name?, email? })` | 同时带设备 `anonymous_id` 与登录用户的标准字段 |
+| 调用 `clearUser()` 后 | 后续事件移除 `id` / `name` / `email`，`anonymous_id` 不变 |
+
+主进程会按**事件发生时间**查找当时的用户，而不是按上报时间。例如原生崩溃在下一次启动才解析，仍会归到崩溃发生时登录的用户。身份历史保存在 `userData/_dd_user_history`；新进程启动时不会自动恢复上次运行的“当前登录用户”，应用应在确认登录态后再次调用 `setUser()`。
+
+经桥接的普通渲染进程事件遵循主进程身份：主进程设置了用户时整体替换渲染进程的标准身份字段；主进程没有设置时，渲染进程自己通过 `flashcatRum.setUser()` 配置的身份保持不变。会话回放分段由渲染进程直传，不经过这一步；开启回放时，请在登录 / 登出流程中同步调用渲染进程的 `flashcatRum.setUser()` / `flashcatRum.clearUser()`。
+
+API 用法见[高级配置 · 关联登录用户](/zh/rum/sdk/electron/advanced-config#关联登录用户)。
 
 ## 会话
 
@@ -73,12 +96,14 @@ Electron RUM 的数据来自两个进程，最终由主进程统一上报。本�
 |------|----|
 | 无活跃过期时间 | 15 分钟 |
 | 会话最大时长 | 4 小时 |
-| 活跃信号 | 渲染进程桥接过来的 `click` 类型 action |
+| 活跃信号 | Electron `webContents` 的 `mouseDown`、`mouseWheel`、`keyDown`、`rawKeyDown` 输入事件 |
 | 过期行为 | 发送一条 `is_active: false` 的最终 view 更新，并删除 `_dd_s` |
 | 续期行为 | 会话过期后再次产生活跃信号时，创建新会话并开启新 view |
 
 <Note>
-当前只有渲染进程的点击会续期会话。如果你的应用长时间只有主进程后台活动而没有界面交互，会话会在 15 分钟后过期，此后的主进程事件会归属到新会话。
+续期直接监听 Electron 输入事件，不依赖 Browser SDK、桥接状态或 `trackUserInteractions`。鼠标移动、指针进入/离开窗口和按键释放不会计为活跃信号；这些动作可能在没有用户实际操作时触发，或已经有对应的按下事件。
+
+如果应用长时间只有主进程后台活动而没有上述界面输入，会话会在 15 分钟后过期。过期后的 RUM 事件会被丢弃，直到下一次有效输入创建新会话；后台任务本身不会自动开启新会话。
 </Note>
 
 ## 主进程 view
@@ -244,7 +269,9 @@ SDK 自身上报到 intake（或代理）的请求会被识别并跳过，不会
 
 ## Operation 监控（预览）
 
-`startOperation` / `succeedOperation` / `failOperation` 用于跟踪关键业务流程（登录、结算、文件上传等）的起止，生成 `vital` 事件。服务端按 `name` 和可选的 `operationKey` 关联起止步骤，因此**可以在一个进程开始、在另一个进程结束**。
+主进程的 `startOperation` / `succeedOperation` / `failOperation` 用于跟踪关键业务流程（登录、结算、文件上传等）的起止，生成 `vital` 事件。服务端按 `name` 和可选的 `operationKey` 关联起止步骤。
+
+当前要求的 `@flashcatcloud/browser-rum` `0.0.7` 不提供同名 Operation API。渲染进程触发的流程需要通过应用自己的 preload / IPC 接口调用主进程 API。
 
 | 字段 | 说明 |
 |------|------|

@@ -29,11 +29,11 @@ Electron 应用由**主进程**（Node.js）和**渲染进程**（Chromium）组
 
 ## 工作原理
 
-主进程 SDK 是整个链路的**统一出口**。它做三件事：
+主进程 SDK 是普通 RUM 事件的**统一出口**（会话回放分段除外）。它做三件事：
 
-1. 通过 `dd-trace` 挂钩 `require('electron')`，包装 `BrowserWindow` 并向每个渲染进程注入 preload 脚本，暴露全局对象 `DatadogEventBridge`
+1. 先初始化 `dd-trace` 的主进程网络追踪，再由 Electron SDK 在每个 Electron `session` 中注册自己的 preload 脚本，向渲染进程暴露全局对象 `DatadogEventBridge`
 2. 渲染进程的 `@flashcatcloud/browser-rum` 检测到该桥接对象后，把采集到的事件通过 IPC 发回主进程，而不是自己直连上报
-3. 主进程给两侧事件统一补充上下文——自己的事件补全套公共属性，渲染进程事件只覆盖 `session.id` / `application.id` 并补 `container`——然后落盘成批，上报到 `POST https://<site>/api/v2/rum`
+3. 主进程给两侧事件统一补充上下文——自己的事件补全套公共属性，渲染进程事件覆盖 `session.id` / `application.id`、补 `container`，并在设置了登录用户时替换用户身份——然后落盘成批，上报到 `POST https://<site>/api/v2/rum`
 
 ```mermaid
 graph TB
@@ -80,7 +80,7 @@ npm install @flashcatcloud/browser-rum@^0.0.7
 
 ### 引入 instrument 入口
 
-`@flashcatcloud/electron-sdk/instrument` 必须在**任何 `electron` 导入之前**执行。它负责初始化 `dd-trace`，而 `dd-trace` 需要在 `require('electron')` 发生前完成模块挂钩，否则 `BrowserWindow` 的 preload 注入不会生效，渲染进程也就拿不到桥接对象。
+`@flashcatcloud/electron-sdk/instrument` 必须在**任何 `electron` 导入之前**执行。它负责初始化 `dd-trace` 的模块挂钩，并让 Electron SDK 注册自己的桥接 preload。顺序错误会破坏主进程网络追踪；打包后还可能让 instrument 入口或运行时依赖缺失。
 
 ```ts main.ts
 // 必须是文件的第一行导入
@@ -153,7 +153,7 @@ SDK 拼接的上报地址固定为 `https://<site>/api/v2/rum`——**协议头 
 
 - 把 `dd-trace` 与 `@flashcatcloud/electron-sdk` 标记为 external，保留为运行时 `require`
 - 在主进程入口 chunk 的最顶部注入 instrument 初始化代码（**因此使用插件后无需再手写那行 import**）
-- 把 `dd-trace` 的 preload 脚本和被 external 的依赖复制进构建产物的 `node_modules`，保证打包后的应用（如 Electron Forge 的 asar）在运行时能解析到它们
+- 把被 external 的包及其运行时依赖复制进构建产物的 `node_modules`；Electron SDK 自己的 preload 随 SDK 包一同复制，保证打包后的应用（如 Electron Forge 的 asar）能在运行时解析到它
 
 请按你的构建方式**任选其一**。
 
@@ -206,7 +206,7 @@ await esbuild.build({
 </Tabs>
 
 <Tip>
-输出 ESM 格式时，静态 `import` 会先于模块代码求值，`dd-trace` 的钩子无法拦截 `import 'electron'`。三个插件都对 ESM 做了处理：改为直接调用 `session.defaultSession.registerPreloadScript()` 注册 preload，效果等价。你不需要额外配置。
+输出 ESM 格式时，静态 `import` 会先于模块代码求值，`dd-trace` 无法通过包装 `BrowserWindow` 来注入 preload。三个插件会用 `createRequire()` 在入口执行 instrument；instrument 再按 Electron `session` 注册 SDK 自己的 preload，因此桥接不依赖 `BrowserWindow` 包装。你不需要额外配置。
 </Tip>
 
 ## 渲染进程接入
@@ -220,7 +220,6 @@ flashcatRum.init({
   applicationId: '<YOUR_APPLICATION_ID>',
   clientToken: '<YOUR_CLIENT_TOKEN>',
   service: 'my-electron-app',
-  site: 'browser.flashcat.cloud',
   env: 'production',
   version: '1.0.0',
   sessionSampleRate: 100,
@@ -231,7 +230,7 @@ flashcatRum.init({
 ```
 
 <Tip>
-`applicationId`、`clientToken`、`service`、`env`、`version` 建议与主进程 `init()` 保持一致，否则两侧数据会被归到不同的应用或版本，无法在同一个会话里串起来。
+让 `applicationId`、`clientToken`、`service`、`env`、`version` 与主进程保持一致。普通渲染进程事件经桥接后会采用主进程的 `applicationId` 和 `session.id`，但仍保留渲染进程自己的 `service`、`env`、`version`；会话回放又使用渲染进程自己的凭证直传。统一配置可以避免同一应用的数据被拆到不同维度。
 </Tip>
 
 ### 桥接无需配置
@@ -250,7 +249,7 @@ const allowedHosts = [...new Set([location.hostname, ...configuredHosts])]
 
 ### 桥接未生效时会怎样
 
-桥接失效的原因不是配置，而是 **preload 没有被注入**——通常是主进程未接入 SDK，或主进程被打包但没挂对应的[打包工具插件](#打包工具插件)，导致 `instrument` 入口失去了最先执行的位置。
+桥接失效说明 **SDK 自己的 preload 没有运行**。常见原因是主进程根本没有执行 `instrument`，或打包时没有使用对应的[打包工具插件](#打包工具插件)，导致 instrument 入口、SDK 包或其运行时依赖没有被正确保留。preload 由 Electron SDK 按 `session` 注册，不依赖 `dd-trace` 包装 `BrowserWindow`。
 
 | 行为 | 桥接生效 | 桥接未生效 |
 |------|----------|------------|
@@ -258,7 +257,6 @@ const allowedHosts = [...new Set([location.hostname, ...configuredHosts])]
 | 上报出口 | 主进程统一批量上报 | 渲染进程各自直连 intake |
 | 会话 | 与主进程共享同一个 `session.id` | 渲染进程独立生成会话 |
 | 离线补报 | 事件落盘到主进程 `userData`，重启后续传 | 依赖浏览器端的内存重试队列：只覆盖真断网，进程退出即丢失 |
-| 用户活跃度 | 渲染进程的点击会续期主进程会话 | 互不影响 |
 
 <Tip>
 `container.source` 是判断桥接是否生效的可靠信号：渲染进程事件带上它，说明 preload 注入成功、事件确实经主进程上报。
@@ -290,6 +288,17 @@ flashcatRum.init({
 });
 ```
 
+Browser SDK 的公开 `init()` 不接受 `site`。SaaS 会话回放默认直传 `browser.flashcat.cloud`；私有化部署需要在**渲染进程**配置 `proxy`，让回放分段转发到自己的 intake：
+
+```ts renderer.ts
+flashcatRum.init({
+  // …其余配置同上
+  proxy: 'https://rum-proxy.example.internal/forward',
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+});
+```
+
 <Note>
 `sessionReplaySampleRate` 默认是 `0`，只打开 `sessionReplayDirectUpload` 什么也录不到，两个都要配。
 </Note>
@@ -305,7 +314,7 @@ flashcatRum.init({
 录制回放时，渲染进程要做两件事，而它们恰好都是 CSP 默认会拦住的：
 
 1. 用 `blob:` URL 创建一个 Worker——分段在这个 Worker 里压缩
-2. 直接向上报域名发请求——把压缩好的分段送到 `POST https://<site>/api/v2/rum`
+2. 直接向 Browser SDK 的默认上报域名发请求；配置了渲染进程 `proxy` 时则发往代理
 
 Electron 应用出于安全考虑通常都给页面配了 CSP，例如 `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'">`。这样一条常见的 CSP 会把上面两件事同时挡掉，**回放整条链路就此静默失效**。
 
@@ -333,7 +342,7 @@ Datadog Browser SDK: Datadog Session Replay failed to start: an error occurred w
 ">
 ```
 
-`connect-src` 里填你实际的上报地址：SaaS 用户是 `https://browser.flashcat.cloud`，私有化部署填自己的 `site`，配了 `proxy` 的填 `proxy` 的域名。如果你的 CSP 不是写在 `<meta>` 里，而是由服务端响应头或主进程的 `session.webRequest.onHeadersReceived` 下发，也要做同样的放行。
+`connect-src` 里填渲染进程实际直传的地址：SaaS 用户是 `https://browser.flashcat.cloud`，私有化部署填 Browser SDK `proxy` 的域名。如果你的 CSP 不是写在 `<meta>` 里，而是由服务端响应头或主进程的 `session.webRequest.onHeadersReceived` 下发，也要做同样的放行。
 
 **怎么确认放开了**：在渲染进程里调用 `flashcatRum.getSessionReplayLink()`。返回的链接里带 `error-type=replay-not-started` 说明录制没起来；正常起来时返回的是一个可以直接打开的回放地址。
 

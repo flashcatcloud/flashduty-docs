@@ -5,7 +5,7 @@ description: "Learn which event types, fields, and upload behavior the Electron 
 keywords: ["RUM", "Electron SDK", "data collection", "main process", "renderer process", "crash"]
 ---
 
-Electron RUM data comes from two processes and is uploaded by the main process. This page describes what each process collects.
+Electron RUM data comes from two processes. Regular RUM events are uploaded by the main process, while Session Replay segments are uploaded directly by the renderer. This page describes what each process collects.
 
 ## Collection overview
 
@@ -18,7 +18,7 @@ Electron RUM data comes from two processes and is uploaded by the main process. 
 | Native crashes (minidump) | Main process | Enabled | `error` (`is_crash: true`) |
 | Renderer / child process terminations | Main process | Enabled | `error` (`is_crash: false`) |
 | Main-process HTTP requests | Main process | Enabled | `resource` |
-| Operation monitoring | Main / renderer | Manual (preview) | `vital` |
+| Operation monitoring | Main process | Manual (preview) | `vital` |
 | Page views, user actions, front-end resources, JS errors, Web Vitals | Renderer process | Enabled | `view` / `action` / `resource` / `error` |
 | SDK internal telemetry | Main process | Enabled (20% sampled) | `telemetry` |
 
@@ -36,12 +36,18 @@ RUM events produced **by the main process itself** are enriched with the followi
 | `source` | Always `electron` |
 | `view.id` | The active view when the event occurred |
 | `view.name` / `view.url` | Always `main process` / `electron://main-process` |
+| `usr.anonymous_id` | Device identifier generated and persisted by the SDK |
+| `usr.id` / `usr.name` / `usr.email` | Signed-in user identity added after `setUser()` is called |
 | `ddtags` | Includes `sdk_version:<SDK version>` |
 | `_dd.format_version` | Always `2` |
 
+<Note>
+Main-process RUM events currently do not carry `env`. The `env` configuration is only written into the span envelope that is not uploaded; renderer events keep the `env` from their own `flashcatRum.init()` configuration.
+</Note>
+
 ## How renderer events are identified
 
-When the bridge is working, the main process does **not** rewrite the `source` of renderer events. It overrides three fields and adds one:
+When the bridge is working, the main process does **not** rewrite the `source` of renderer events. It overrides two fields and adds two; if a main-process user is set, it also replaces the user identity:
 
 | Field | What the main process does |
 |-------|----------------------------|
@@ -49,6 +55,7 @@ When the bridge is working, the main process does **not** rewrite the `source` o
 | `application.id` | Overridden with the configured application ID |
 | `container.source` | Added as `electron` |
 | `container.view.id` | Added as the current main-process view ID |
+| `usr` | When `setUser()` has been called, replaces the renderer identity with the main-process `id` / `name` / `email` while preserving `usr.anonymous_id`; otherwise leaves the renderer value unchanged |
 
 The renderer's own `source`, `view`, `service`, and other attributes are preserved. The two kinds of events are therefore identified differently:
 
@@ -62,8 +69,24 @@ Filtering on `source:electron` alone in the Explorer returns **main-process even
 </Warning>
 
 <Note>
-When the bridge is broken (the main process has not integrated the SDK, or it is bundled without the plugin so the preload is never injected), the renderer behaves as a standalone web application and uploads directly: `source` is still `browser`, but there is **no `container` field** and the session is unrelated to the main process. See [What a broken bridge looks like](/en/rum/sdk/electron/sdk-integration#what-a-broken-bridge-looks-like).
+When the bridge is broken (for example, the main process never runs `instrument`, or the packaged application is missing the SDK / preload runtime files), the renderer behaves as a standalone web application and uploads directly: `source` is still `browser`, but there is **no `container` field** and the session is unrelated to the main process. See [What a broken bridge looks like](/en/rum/sdk/electron/sdk-integration#what-a-broken-bridge-looks-like).
 </Note>
+
+## User identity
+
+At startup, the SDK generates `usr.anonymous_id` and stores it at `app.getPath('userData')/_dd_anonymous_id`. This device identifier remains stable across sessions, application restarts, and login state; the main process manages signed-in identity separately through `setUser()`.
+
+| State | `usr` on events |
+|-------|-----------------|
+| Before `setUser()` | Contains only `anonymous_id`; it is not copied into `id` |
+| After `setUser({ id, name?, email? })` | Contains both the device `anonymous_id` and the signed-in user's standard fields |
+| After `clearUser()` | Future events omit `id` / `name` / `email`; `anonymous_id` remains unchanged |
+
+The main process resolves the user at the **time the event occurred**, not when it is uploaded. For example, a native crash parsed on the next startup is still assigned to the user who was signed in when the crash happened. Identity history is stored in `userData/_dd_user_history`; a new process does not automatically restore the previous run's current signed-in user, so call `setUser()` again after confirming login state.
+
+Regular bridged renderer events follow the main-process identity: when the main process has a user, its standard identity fields replace the renderer's; otherwise an identity set through the renderer's `flashcatRum.setUser()` is preserved. Session Replay segments upload directly from the renderer and bypass this step. When Replay is enabled, also call renderer-side `flashcatRum.setUser()` / `flashcatRum.clearUser()` in the login and logout flows.
+
+See [Advanced configuration · Identify the signed-in user](/en/rum/sdk/electron/advanced-config#identify-the-signed-in-user) for the API.
 
 ## Session
 
@@ -73,12 +96,14 @@ The main process owns the session lifecycle. Session state is persisted in the `
 |------|-------|
 | Inactivity timeout | 15 minutes |
 | Maximum session duration | 4 hours |
-| Activity signal | `click` actions bridged from the renderer |
+| Activity signal | Electron `webContents` input events: `mouseDown`, `mouseWheel`, `keyDown`, and `rawKeyDown` |
 | On expiry | Sends a final view update with `is_active: false` and deletes `_dd_s` |
 | On renewal | After expiry, the next activity signal creates a new session and a new view |
 
 <Note>
-Only renderer clicks currently extend the session. If your application runs main-process background work for a long time without UI interaction, the session expires after 15 minutes and later main-process events belong to a new session.
+Renewal listens directly to Electron input events; it does not depend on the Browser SDK, bridge status, or `trackUserInteractions`. Mouse movement, pointer entry/exit, and key-up events do not count because they can occur without intentional interaction or already have a corresponding press event.
+
+If the application performs only background main-process work without these UI inputs, the session expires after 15 minutes. RUM events after expiry are discarded until the next valid input creates a new session; background work does not start one by itself.
 </Note>
 
 ## Main-process view
@@ -244,7 +269,9 @@ The main process is a Node.js runtime with no DOM and no rendering pipeline, so 
 
 ## Operation monitoring (preview)
 
-`startOperation` / `succeedOperation` / `failOperation` track the start and end of critical business workflows (login, checkout, file upload) and emit `vital` events. The backend correlates start and end steps by `name` and an optional `operationKey`, so an operation **can start in one process and finish in the other**.
+The main-process `startOperation` / `succeedOperation` / `failOperation` APIs track the start and end of critical business workflows (login, checkout, file upload) and emit `vital` events. The backend correlates start and end steps by `name` and an optional `operationKey`.
+
+The currently required `@flashcatcloud/browser-rum` `0.0.7` does not expose matching Operation APIs. For a workflow triggered in a renderer, use your application's own preload / IPC surface to call the main-process API.
 
 | Field | Description |
 |-------|-------------|
