@@ -222,7 +222,7 @@ Electron 应用发布时通常会压缩 JavaScript 产物，错误堆栈因此�
 **两个进程的 JavaScript 栈都支持反混淆。** SDK 会把主进程栈转成后端解析所用的帧格式，并把两个进程栈里的绝对路径统一归一化成稳定形态，因此上传 sourcemap 时无需再自己处理路径。请把主进程产物的 sourcemap 和渲染进程的一起上传。
 
 <Note>
-原生崩溃栈（来自 `crashReporter` minidump）是另一套基于地址的格式，不受此影响，也不支持符号化。见[数据收集 · 原生崩溃](/zh/rum/sdk/electron/data-collection#原生崩溃)。
+原生崩溃栈（来自 `crashReporter` minidump）是另一套基于地址的格式，不受 sourcemap 影响，走的是独立的符号文件链路，见[上传原生崩溃符号](#上传原生崩溃符号)。
 </Note>
 
 ### 匹配原则
@@ -450,6 +450,55 @@ stack.replace(
 </Warning>
 
 更多说明见[源码映射与异常追踪](/zh/rum/error-tracking/source-mapping)。
+
+## 上传原生崩溃符号
+
+原生崩溃（来自 `crashReporter` 的 minidump）的栈是**地址式**的，只有模块名和偏移量：
+
+```
+0  Electron Framework      0x000000010ab12345  0x000000010a000000 + 11282245
+1  libsystem_kernel.dylib  0x00007ff81a2b3c4d  0x00007ff81a2b0000 + 15437
+```
+
+上传 Breakpad 符号文件（`.sym`）后，Flashduty 会在你查看崩溃时把这些地址还原成函数名、文件名和行号。这与 JavaScript 栈走的是两条独立的链路：JavaScript 用 sourcemap，原生崩溃用符号文件，互不影响。
+
+### 先拿到 Electron 自己的符号
+
+真实崩溃里**绝大多数帧落在 Electron 自带的二进制里**（`Electron Framework`、`electron.exe`），而不是你自己的代码。只传自己的模块，栈看上去几乎不会有变化。
+
+Electron 每个版本都发布符号包，请从 [Electron releases](https://github.com/electron/electron/releases) 下载与你**实际发布的版本、平台、架构**完全对应的那个：
+
+```
+electron-v<version>-<platform>-<arch>-symbols.zip
+```
+
+自己的原生模块或 `.node` 插件，用 [dump_syms](https://github.com/mozilla/dump_syms) 生成 `.sym`，放进同一个目录即可。
+
+### 上传
+
+```bash
+npm i -g @flashcatcloud/flashcat-cli
+
+flashcat-cli electron-symbols upload ./breakpad_symbols \
+  --service my-app \
+  --release-version 1.2.3
+```
+
+`<basePath>` 指向一个目录，其中所有 `.sym` 文件都会被上传。加 `--dry-run` 可以先看会传哪些文件而不真正上传。
+
+<Warning>
+**符号只按模块 id 匹配，与 `--service`、`--release-version` 无关。** 这两个参数只是给这批上传打标签，方便你之后在控制台的符号表页面里找到它们，不参与匹配。
+
+这一点与 sourcemap **正好相反**——sourcemap 的 `service` 和 `version` 对不上就还原不了。两者不要套用同一套心智模型。
+</Warning>
+
+### 每次升级 Electron 都要重新上传
+
+新版本的 Electron 二进制带着不同的模块 id，之前上传的符号会**静默地**不再匹配。同理，你实际发布的**每个平台和架构**都要各传一份。
+
+### 没有符号会怎样
+
+崩溃事件照常落库和展示，线程栈与模块列表都在，只是帧保持原始地址形态——**不会报错，也不会有任何提示**。符号解析发生在你**查看崩溃的时候**，不是入库时，所以事后补传符号，历史崩溃同样能还原。
 
 ## 相关页面
 

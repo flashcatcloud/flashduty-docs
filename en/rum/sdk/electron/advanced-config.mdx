@@ -222,7 +222,7 @@ Released Electron applications usually minify their JavaScript, so error stacks 
 **JavaScript stacks from both processes can be resolved.** The SDK converts main-process stacks into the frame format the backend parses, and normalizes the absolute paths in both processes' stacks into a stable form — so you no longer have to handle paths yourself when uploading source maps. Upload the source maps for your main-process bundle alongside the renderer ones.
 
 <Note>
-Native crash stacks (from `crashReporter` minidumps) use a different, address-based format. They are unaffected by this and are not symbolicated. See [Data collection · Native crashes](/en/rum/sdk/electron/data-collection#native-crashes).
+Native crash stacks (from `crashReporter` minidumps) use a different, address-based format. Source maps do not apply to them; they go through a separate symbol-file pipeline, see [Upload native crash symbols](#upload-native-crash-symbols).
 </Note>
 
 ### The matching rule
@@ -450,6 +450,55 @@ Set `normalizeStackPaths: false` only when you need the **raw runtime absolute p
 </Warning>
 
 For more details, see [Source mapping and error tracking](/en/rum/error-tracking/source-mapping).
+
+## Upload native crash symbols
+
+Native crash stacks (from `crashReporter` minidumps) are **address-based** — a module name and an offset, nothing more:
+
+```
+0  Electron Framework      0x000000010ab12345  0x000000010a000000 + 11282245
+1  libsystem_kernel.dylib  0x00007ff81a2b3c4d  0x00007ff81a2b0000 + 15437
+```
+
+Upload Breakpad symbol files (`.sym`) and Flashduty resolves those addresses into function names, file names and line numbers when you open the crash. This is a separate pipeline from JavaScript stacks: JavaScript uses source maps, native crashes use symbol files, and neither affects the other.
+
+### Start with Electron's own symbols
+
+In a real crash, **almost every frame lands in Electron's own binaries** (`Electron Framework`, `electron.exe`) rather than in your code. Uploading only your own modules leaves the stack looking essentially unchanged.
+
+Electron publishes a symbol bundle per release. Download the one matching the exact version, platform and architecture **you ship** from [Electron releases](https://github.com/electron/electron/releases):
+
+```
+electron-v<version>-<platform>-<arch>-symbols.zip
+```
+
+For your own native modules or `.node` addons, generate a `.sym` with [dump_syms](https://github.com/mozilla/dump_syms) and put it in the same directory.
+
+### Upload
+
+```bash
+npm i -g @flashcatcloud/flashcat-cli
+
+flashcat-cli electron-symbols upload ./breakpad_symbols \
+  --service my-app \
+  --release-version 1.2.3
+```
+
+`<basePath>` points at a directory; every `.sym` file under it is uploaded. Add `--dry-run` to see which files would go without uploading anything.
+
+<Warning>
+**Symbols match on the module id alone — not on `--service` or `--release-version`.** Those two only label the upload so you can find it later on the console's symbol page. They have no bearing on whether a symbol file matches a crash.
+
+This is the **opposite** of source maps, where a mismatched `service` or `version` means nothing resolves. Do not carry one mental model over to the other.
+</Warning>
+
+### Re-upload on every Electron upgrade
+
+A new Electron version ships binaries with different module ids, so yesterday's symbols **silently** stop matching. For the same reason, upload a set for **every platform and architecture you ship**.
+
+### What happens without symbols
+
+Crash events are still stored and displayed, thread stacks and module lists included — the frames just stay as raw addresses, with **no error and no warning anywhere**. Resolution happens when you **open the crash**, not at ingestion, so uploading symbols after the fact also resolves crashes already reported.
 
 ## Related pages
 
