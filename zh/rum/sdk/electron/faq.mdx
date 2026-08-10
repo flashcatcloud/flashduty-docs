@@ -1,0 +1,119 @@
+---
+title: "Electron SDK 问题排查"
+description: "排查 Electron RUM SDK 的数据缺失、进程桥接、会话回放和错误还原问题"
+keywords: ["RUM", "Electron SDK", "问题排查", "会话回放", "桥接", "sourcemap"]
+---
+
+本页按照你在应用或 Flashduty 控制台中看到的现象，提供对应的检查方法。
+
+<AccordionGroup>
+<Accordion title="为什么控制台中没有任何数据？">
+请按以下顺序检查：
+
+1. 确认主进程 `init()` 返回 `true`，并查看主进程控制台是否有配置错误
+2. 确认 `applicationId`、`clientToken` 和 `service` 为非空字符串
+3. 确认应用可以访问 `https://browser.flashcat.cloud/api/v2/rum` 或你配置的私有化地址
+4. 等待一个上报周期；默认每 10 秒上报一批普通 RUM 事件
+5. 在查看器中使用 `source:electron OR container.source:electron` 筛选
+
+接入调试时，可以配置 `batchSize: 'SMALL'` 和 `uploadFrequency: 'FREQUENT'` 缩短等待时间。
+</Accordion>
+
+<Accordion title="为什么只有主进程数据？">
+如果能看到 `source: electron`，但看不到渲染进程的 view、action 或 resource，请检查：
+
+1. 渲染进程是否安装并初始化了 `@flashcatcloud/browser-rum`
+2. 主进程是否在创建 `BrowserWindow` 之前完成 `init()`
+3. 主进程不打包时，`instrument` 是否位于 `electron` import 之前
+4. 主进程打包时，是否使用了对应的 Vite、Webpack 或 esbuild 插件
+
+渲染进程接入成功后，其事件会带有 `container.source: electron`。
+</Accordion>
+
+<Accordion title="为什么渲染进程事件没有 container.source？">
+缺少 `container.source` 表示 Browser SDK 没有通过 Electron 桥接上报，而是作为普通 Web 页面直接连接上报地址。
+
+常见原因包括：
+
+- 主进程没有执行 instrumentation
+- 打包配置没有保留 Electron SDK 或其 preload
+- SDK 初始化失败
+
+请先按[接入指南 · 配置主进程入口](/zh/rum/sdk/electron/sdk-integration#接入步骤)检查构建方式，再重新启动应用验证。
+
+当前窗口本身不需要配置 `allowedWebViewHosts`。该参数只用于 `<webview>` 或 `BrowserView` 中加载的第三方页面。
+</Accordion>
+
+<Accordion title="为什么没有会话回放？">
+请依次检查以下条件：
+
+1. `@flashcatcloud/browser-rum` 版本为 0.0.7 或更高
+2. 渲染进程同时设置了 `sessionReplaySampleRate` 和 `sessionReplayDirectUpload: true`
+3. `sessionReplaySampleRate` 大于 0，并且当前会话被采样
+4. 页面 CSP 允许 `worker-src blob:`
+5. 页面 CSP 的 `connect-src` 包含实际使用的回放上报地址
+6. 私有化部署已在渲染进程配置 `proxy`
+
+在渲染进程 DevTools 中查看 Console 和 Network 面板。CSP 阻止 Worker 时，Console 会显示相关错误；上报地址错误时，Network 面板中的 replay 请求会失败。
+</Accordion>
+
+<Accordion title="为什么会话回放中间缺失或花屏？">
+会话回放分段由渲染进程直接上传，不使用主进程的磁盘缓冲。
+
+设备真正离线时，Browser SDK 会将分段放入内存队列，并在网络恢复后尝试补发。但如果设备显示在线，而请求因 DNS、代理、网关、安全软件或数据接收端故障而失败，失败分段不会进入重试队列。后续分段可能缺少恢复画面所需的完整快照，从而表现为缺失或花屏。
+
+请检查：
+
+- 上报域名是否加入防火墙和终端安全软件的允许列表
+- DNS 和代理配置是否可以稳定访问上报地址
+- 页面 CSP 是否允许实际的回放地址
+- 私有化转发服务是否持续可用
+
+已经丢失的分段无法从主进程磁盘恢复。
+</Accordion>
+
+<Accordion title="为什么私有化部署能收到普通事件，却没有回放？">
+普通 RUM 事件和会话回放使用两条上报链路：
+
+- 普通事件通过桥接交给主进程，使用主进程的 `site` 或 `proxy`
+- 回放分段由渲染进程直接上传，使用渲染进程 Browser SDK 的 `proxy`
+
+因此，只配置主进程不会改变回放地址。请在 `flashcatRum.init()` 中配置渲染进程 `proxy`，并将该地址加入 CSP 的 `connect-src`。
+
+完整示例见[自定义上报地址](/zh/rum/sdk/electron/advanced-config#自定义上报地址)。
+</Accordion>
+
+<Accordion title="为什么 sourcemap 上传成功，但错误栈没有还原？">
+Flashduty 使用 `service`、`version` 和压缩文件路径匹配 sourcemap。请检查：
+
+1. `--service` 是否与产生错误的进程配置一致
+2. `--release-version` 是否与产生错误的进程 `version` 一致
+3. 渲染进程是否也配置了 `version`；主进程的版本不会自动应用到渲染进程
+4. `--minified-path-prefix` 是否与错误详情中栈帧的目录一致
+5. 主进程和渲染进程产物是否分别上传
+
+如果栈帧是 `app:///dist/renderer/index.js`，前缀应填写 `/dist/renderer`，不要包含 `app:///`。
+
+完整步骤见 [Electron 错误还原](/zh/rum/sdk/electron/error-symbolication#还原-javascript-错误)。
+</Accordion>
+
+<Accordion title="为什么原生崩溃栈只有地址？">
+原生 minidump 不使用 JavaScript sourcemap。你需要上传与应用实际发布版本、操作系统和 CPU 架构匹配的 Breakpad 符号文件。
+
+建议先上传对应 Electron 版本的官方符号包；如果应用包含自己的原生模块或 `.node` 插件，也需要为这些模块生成并上传 `.sym` 文件。
+
+上传后，历史崩溃也可以在查看时完成还原。操作方法见[还原原生崩溃](/zh/rum/sdk/electron/error-symbolication#还原原生崩溃)。
+</Accordion>
+</AccordionGroup>
+
+## 仍然无法解决
+
+联系支持人员时，请提供：
+
+- Electron、`@flashcatcloud/electron-sdk` 和 `@flashcatcloud/browser-rum` 版本
+- 使用的打包工具和模块格式
+- 主进程初始化配置（移除 Client Token）
+- 主进程与渲染进程 Console 错误
+- 失败请求的 URL、状态码和错误类型
+
+请不要发送 Client Token、服务端密钥或包含用户隐私的数据。
