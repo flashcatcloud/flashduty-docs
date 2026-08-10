@@ -1,0 +1,413 @@
+---
+title: "Electron SDK integration"
+description: "Integrate the Flashduty RUM SDK into Electron desktop applications, covering both the main process and renderer processes"
+keywords: ["RUM", "Electron SDK", "desktop monitoring", "main process", "renderer process"]
+---
+
+An Electron application runs a **main process** (Node.js) and one or more **renderer processes** (Chromium). Because the two runtimes are completely different, Electron RUM integration requires two packages:
+
+| Process | Package | What it collects |
+|---------|---------|------------------|
+| Main process | `@flashcatcloud/electron-sdk` | Session, view, Node errors, native crashes, main-process network requests |
+| Renderer process | `@flashcatcloud/browser-rum` | Page views, user actions, front-end resources, JS errors, Web Vitals |
+
+<Warning>
+Installing only one half is the most common integration mistake. With only the main-process SDK you lose all front-end interaction data. With only the renderer SDK you lose the session, main-process errors, and native crashes, and events never carry the `container` information that correlates the two processes. Integrate both processes.
+</Warning>
+
+## Read this first: three misconfigurations that never raise an error
+
+The three items below share one property: **when you get them wrong, nothing complains**. The application keeps running, the SDK stays quiet, and the console shows no warning — one kind of data simply never shows up, or a feature just looks like it "did not work". They are painful to diagnose after the fact, so skim them before you start.
+
+| What you see | What is actually happening | What to do |
+|--------------|----------------------------|------------|
+| Session Replay is enabled, but no session ever has a replay — `session.has_replay` stays `0` and not a single segment arrives. It looks exactly like recording was never turned on | The page's own CSP blocks the entire replay pipeline. Recording creates a blob Worker in the renderer and sends segments straight to the intake, and a common `script-src 'self'` policy blocks both | Allow `worker-src blob:` and the intake origin in your CSP — see [CSP requirements for Session Replay](#csp-requirements-for-session-replay) |
+| Source maps are uploaded, yet stacks still show minified positions such as `app:///dist/renderer.js:12315:24`, with no source snippet | The `--release-version` you uploaded does not match the **renderer's** `version`. A renderer event takes its `version` only from `flashcatRum.init()`; the `version` on the main-process `init()` does not apply to it | Keep both values identical — see [The version must match the renderer process](/en/rum/sdk/electron/advanced-config#the-version-must-match-the-renderer-process) |
+| A replay plays back with a garbled, out-of-sync stretch in the middle, even though the timeline looks continuous | The intake was unreachable during that stretch (request blocked, intake down, DNS or proxy failure) and the segments were dropped on the spot. This is not "the network was down" — a genuine outage queues segments for retry and resends them on recovery | Allow the intake origin in your network policy — see [Replay segments are dropped when the intake is unreachable](#replay-segments-are-dropped-when-the-intake-is-unreachable) |
+
+The first and third items only affect applications with Session Replay enabled; the second applies to every application.
+
+## How it works
+
+The main-process SDK is the **single exit point** for regular RUM events (Session Replay segments are the exception). It does three things:
+
+1. Initializes `dd-trace` for main-process network tracing, then has the Electron SDK register its own preload script on every Electron `session`, exposing a global `DatadogEventBridge` object to renderers.
+2. The renderer's `@flashcatcloud/browser-rum` detects that bridge and sends its collected events back to the main process over IPC instead of uploading them itself.
+3. The main process enriches events from both sides — its own events get the full set of common attributes, while renderer events have `session.id` / `application.id` overridden, `container` added, and their user identity replaced when the main process has one — then buffers them to disk in batches and uploads them to `POST https://<site>/api/v2/rum`.
+
+```mermaid
+graph TB
+    subgraph Electron application
+        subgraph Renderer process
+            BR["@flashcatcloud/browser-rum"]
+        end
+        subgraph Main process
+            DDT["dd-trace"]
+            SDK["@flashcatcloud/electron-sdk"]
+        end
+    end
+    FC[("Flashduty RUM")]
+    BR -->|DatadogEventBridge / IPC| SDK
+    DDT -->|HTTP span| SDK
+    SDK -->|POST /api/v2/rum| FC
+```
+
+<Note>
+Internal module names, plugin names, and the bridge object keep the `Datadog` / `dd-` prefix (for example `DatadogEventBridge` and `datadogVitePlugin`). This follows the upstream fork naming convention and does not affect data routing — events are only sent to the Flashduty `site` you configure.
+</Note>
+
+## Prerequisites
+
+- Electron 39 or later (the SDK declares `peerDependencies: electron >= 39`)
+- An **Electron** application created on the [RUM applications](https://console.flashcat.cloud/rum/apps) page of the Flashduty console, with its **Application ID** and **Client Token**
+- Network access from your application to `https://browser.flashcat.cloud/api/v2/rum` (or your own endpoint for self-hosted deployments)
+
+## Install
+
+```bash
+# Main process
+npm install @flashcatcloud/electron-sdk
+
+# Renderer process (0.0.7 is a minimum, see below)
+npm install @flashcatcloud/browser-rum@^0.0.7
+```
+
+<Warning>
+**`@flashcatcloud/browser-rum` must be `0.0.7` or newer.** `sessionReplayDirectUpload`, which Session Replay requires, landed in `0.0.7`, and the Browser SDK **silently drops** options it does not recognize — on anything earlier the option may as well be absent: nothing is recorded, and nothing reports why.
+</Warning>
+
+## Main process integration
+
+### Import the instrument entry point
+
+`@flashcatcloud/electron-sdk/instrument` must run **before any `electron` import**. It installs the `dd-trace` module hooks and has the Electron SDK register its own bridge preload. The wrong order breaks main-process network tracing; after bundling it can also leave the instrument entry point or runtime dependencies out of the package.
+
+```ts main.ts
+// Must be the first import in the file
+import '@flashcatcloud/electron-sdk/instrument';
+
+import { app, BrowserWindow } from 'electron';
+```
+
+<Warning>
+Do not let a formatter or import-sorting rule move this line down. If your project uses ESLint's `import/order` or `simple-import-sort`, add an ignore comment for this line.
+</Warning>
+
+### Initialize the SDK
+
+Call `init()` before creating any `BrowserWindow`. It is asynchronous and returns `true` when the configuration is valid and initialization succeeded.
+
+```ts main.ts
+import '@flashcatcloud/electron-sdk/instrument';
+
+import { app, BrowserWindow } from 'electron';
+import { init } from '@flashcatcloud/electron-sdk';
+
+void app.whenReady().then(async () => {
+  await init({
+    applicationId: '<YOUR_APPLICATION_ID>',
+    clientToken: '<YOUR_CLIENT_TOKEN>',
+    service: 'my-electron-app',
+    site: 'browser.flashcat.cloud',
+    env: 'production',
+    version: app.getVersion(),
+  });
+
+  createWindow();
+});
+```
+
+#### Required parameters
+
+<ParamField body="applicationId" type="string" required>
+Application ID, available on the applications page
+</ParamField>
+
+<ParamField body="clientToken" type="string" required>
+Client token, available on the applications page
+</ParamField>
+
+<ParamField body="service" type="string" required>
+Service name used to distinguish services. Use the same value when uploading source maps
+</ParamField>
+
+<Warning>
+`clientToken` is only for client-side RUM reporting — never put a server-side key in client code.
+</Warning>
+
+#### Reporting site
+
+<ParamField body="site" type="string" default="browser.flashcat.cloud">
+Reporting site, used directly as the intake host. SaaS users can leave it unset; self-hosted deployments set their own domain
+</ParamField>
+
+<Note>
+The SDK builds the upload URL as `https://<site>/api/v2/rum` — the **`https://` scheme is hardcoded**. If your internal intake is plain HTTP, no value of `site` will help; you must use `proxy` instead. See [When a proxy is required](/en/rum/sdk/electron/advanced-config#when-a-proxy-is-required).
+</Note>
+
+See [Advanced configuration](/en/rum/sdk/electron/advanced-config) for the full list of optional parameters.
+
+## Bundler plugins
+
+`dd-trace` depends on runtime module loading order, but bundlers (Vite, Webpack, esbuild) reorder, inline, or hoist `require()` calls, which strips `import '@flashcatcloud/electron-sdk/instrument'` of its "runs first" position. The SDK therefore ships three bundler plugins that:
+
+- Mark `dd-trace` and `@flashcatcloud/electron-sdk` as external so they stay runtime `require`s
+- Prepend the instrument initialization to the very top of the main-process entry chunk (**so you no longer need to write that import by hand**)
+- Copy the externalized packages and their runtime dependencies into the build output's `node_modules`. The Electron SDK's own preload ships inside the copied SDK package, so packaged applications such as Electron Forge asars can resolve it at runtime
+
+Pick **one** that matches your build setup.
+
+<Tabs>
+<Tab title="Vite">
+For electron-vite and Electron Forge + Vite.
+
+```ts vite.config.ts
+import { defineConfig } from 'vite';
+import { datadogVitePlugin } from '@flashcatcloud/electron-sdk/vite-plugin';
+
+export default defineConfig({
+  plugins: [datadogVitePlugin()],
+});
+```
+
+<Note>
+Add the plugin to the **main process** build configuration. In electron-vite that is the `main` section, not `renderer`.
+</Note>
+</Tab>
+
+<Tab title="Webpack">
+For Electron Forge + Webpack.
+
+```js webpack.main.config.js
+const { DatadogWebpackPlugin } = require('@flashcatcloud/electron-sdk/webpack-plugin');
+
+module.exports = {
+  plugins: [new DatadogWebpackPlugin()],
+};
+```
+
+The plugin also excludes `dd-trace` and the SDK from `@vercel/webpack-asset-relocator-loader`, which would otherwise break `dd-trace`'s internal dynamic `require.resolve`.
+</Tab>
+
+<Tab title="esbuild">
+```ts build.ts
+import * as esbuild from 'esbuild';
+import { datadogEsbuildPlugin } from '@flashcatcloud/electron-sdk/esbuild-plugin';
+
+await esbuild.build({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  platform: 'node',
+  outfile: 'dist/main.js',
+  plugins: [datadogEsbuildPlugin()],
+});
+```
+</Tab>
+</Tabs>
+
+<Tip>
+With ESM output, static imports are evaluated before module code runs, so `dd-trace` cannot inject a preload by wrapping `BrowserWindow`. All three plugins use `createRequire()` to run the instrument entry point; instrument then registers the SDK's own preload by Electron `session`, so the bridge does not depend on `BrowserWindow` wrapping. No extra configuration is needed.
+</Tip>
+
+## Renderer process integration
+
+Pages loaded by renderer processes are integrated exactly like a [Web SDK](/en/rum/sdk/web/sdk-integration) NPM installation — the initialization code is unchanged.
+
+```ts renderer.ts
+import { flashcatRum } from '@flashcatcloud/browser-rum';
+
+flashcatRum.init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  env: 'production',
+  version: '1.0.0',
+  sessionSampleRate: 100,
+  trackResources: true,
+  trackLongTasks: true,
+  trackUserInteractions: true,
+});
+```
+
+<Tip>
+Keep `applicationId`, `clientToken`, `service`, `env`, and `version` aligned with the main process. Bridged renderer events adopt the main-process `applicationId` and `session.id`, but preserve the renderer's own `service`, `env`, and `version`; Session Replay also uploads directly with the renderer's credentials. A shared configuration keeps one application from splitting across dimensions.
+</Tip>
+
+### The bridge needs no configuration
+
+The renderer side requires **no extra wiring**. When the injected preload assembles its host allowlist, it always includes the window's own `location.hostname`:
+
+```js
+const allowedHosts = [...new Set([location.hostname, ...configuredHosts])]
+```
+
+A window's own page therefore **always matches the allowlist**, and the bridge works out of the box. `file://` is no exception — `location.hostname` is an empty string there, the allowlist becomes `[""]`, and it still self-matches.
+
+<Note>
+`allowedWebViewHosts` is not a bridge switch — it is an allowlist for **additional hosts**. Configure it only when you also want to accept events from **third-party** pages loaded in a `<webview>` or `BrowserView`, for example `allowedWebViewHosts: ['partner.example.com']`. Matching supports subdomain suffixes.
+</Note>
+
+### What a broken bridge looks like
+
+A broken bridge means **the SDK's own preload did not run**. Common causes are a main process that never executes `instrument`, or a bundle built without the matching [bundler plugin](#bundler-plugins), leaving out the instrument entry point, the SDK package, or one of its runtime dependencies. The Electron SDK registers the preload by `session`; it does not depend on `dd-trace` wrapping `BrowserWindow`.
+
+| Behavior | Bridge working | Bridge broken |
+|----------|----------------|---------------|
+| `container.source` on renderer events | `electron` | field absent |
+| Upload path | Batched by the main process | Each renderer uploads directly to the intake |
+| Session | Shares the main-process `session.id` | Renderer generates its own session |
+| Offline retry | Buffered to disk under the main process `userData`, resent after restart | Relies on the browser-side in-memory retry queue: covers a genuine outage only, lost when the process exits |
+
+<Tip>
+`container.source` is a reliable signal: when renderer events carry it, the preload was injected and the events really did travel through the main process.
+</Tip>
+
+### The `source` value of each process
+
+When the bridge is working, the main process only overrides `session.id` and `application.id` on renderer events and adds `container` — renderer events **keep their own `source: browser`**. The two kinds of events are therefore identified differently:
+
+| Origin | `source` | `container.source` | `view.url` |
+|--------|----------|--------------------|------------|
+| Main process | `electron` | absent | `electron://main-process` |
+| Renderer window | `browser` | `electron` | the page URL |
+
+<Warning>
+Filtering on `source:electron` alone in the Explorer returns **main-process events only**. To select everything an Electron application produces, use `source:electron OR container.source:electron`.
+</Warning>
+
+## Session Replay
+
+In Electron, Session Replay is recorded by `@flashcatcloud/browser-rum` in the renderer. By default, as soon as the renderer detects the bridge injected by the main process it hands recording over to the host application — and the main-process SDK does not record replays, so **nothing gets recorded at all**. To use Session Replay in Electron you must explicitly turn on `sessionReplayDirectUpload`, which keeps the renderer recording and uploading on its own:
+
+```ts renderer.ts
+flashcatRum.init({
+  // …the rest of the configuration is unchanged
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+  defaultPrivacyLevel: 'mask',
+});
+```
+
+The Browser SDK's public `init()` does not accept `site`. SaaS Session Replay uploads to `browser.flashcat.cloud` by default. For a self-hosted deployment, configure `proxy` in the **renderer** so replay segments are forwarded to your intake:
+
+```ts renderer.ts
+flashcatRum.init({
+  // …the rest of the configuration is unchanged
+  proxy: 'https://rum-proxy.example.internal/forward',
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+});
+```
+
+<Note>
+`sessionReplaySampleRate` defaults to `0`, so turning on `sessionReplayDirectUpload` alone records nothing. Set both.
+</Note>
+
+<Warning>
+`sessionReplayDirectUpload` requires `@flashcatcloud/browser-rum` **0.0.7 or newer**. On anything earlier it is just a key the Browser SDK does not recognize and quietly drops — the configuration looks entirely correct and not a single segment is ever produced.
+</Warning>
+
+Once it is on, replay data follows a **different path** from everything else: regular RUM events still travel over the bridge and are buffered to disk and uploaded by the main process, while replay segments are sent **directly to the intake by the renderer**, bypassing the main process entirely. Both pitfalls below come from that difference.
+
+### CSP requirements for Session Replay
+
+To record a replay, the renderer does two things that a Content Security Policy blocks by default:
+
+1. Creates a Worker from a `blob:` URL — segments are compressed inside that Worker.
+2. Sends requests straight to the Browser SDK's default intake, or to the renderer `proxy` when configured.
+
+Electron applications commonly ship a CSP for security, for example `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'">`. A policy like that blocks both of the above, and **the whole replay pipeline fails silently**.
+
+**Symptom**: no session in the console has a replay, `session.has_replay` stays `0`, and not a single segment arrives. This is indistinguishable from never having enabled recording if you only look at the data.
+
+**Why nothing complains**: the only trace is two lines in the renderer's DevTools console. Nothing surfaces in the data — no error event is reported, and the console shows no warning:
+
+```
+Creating a worker from 'blob:file:///…' violates the following Content Security Policy directive: "script-src 'self'". Note that 'worker-src' was not explicitly set, so 'script-src' is used as a fallback. The action has been blocked.
+Datadog Browser SDK: Datadog Session Replay failed to start: an error occurred while initializing the worker
+```
+
+<Note>
+This has nothing to do with how the page is loaded. Serving the page over `http://` gets the Worker blocked just the same — the block comes from the page's own CSP, not from the `file://` scheme, and not from Electron or the SDK.
+</Note>
+
+**How to configure it**: allow `worker-src blob:` in your CSP and add the intake origin to `connect-src`. Note that when `worker-src` is not declared explicitly it falls back to `script-src`, so `script-src 'self'` alone is not enough — `worker-src` has to be spelled out:
+
+```html
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  worker-src 'self' blob:;
+  connect-src 'self' https://browser.flashcat.cloud;
+">
+```
+
+Put the renderer's actual direct-upload origin in `connect-src`: `https://browser.flashcat.cloud` for SaaS, or the Browser SDK `proxy` origin for a self-hosted deployment. If your CSP is not written in a `<meta>` tag but delivered by a server response header or by `session.webRequest.onHeadersReceived` in the main process, apply the same allowances there.
+
+**How to confirm it is open**: call `flashcatRum.getSessionReplayLink()` in the renderer. A link containing `error-type=replay-not-started` means recording never started; when it is working the call returns a replay URL you can open directly.
+
+### Replay segments are dropped when the intake is unreachable
+
+Replay segments are uploaded directly by the renderer through the browser SDK's own transport, which **does not use the main process's disk-backed retry**. That transport does buffer and retry, but it only covers one class of failure; the other is dropped outright.
+
+A request is retried when it comes back as HTTP 408, 429 or 5xx, or when it never left at all (`status` is `0`) **and** `navigator.onLine === false`. In practice that splits into two outcomes:
+
+| Situation | `navigator.onLine` | Behavior |
+|-----------|--------------------|----------|
+| A genuine outage: the adapter goes down, Wi-Fi is turned off, the cable is pulled, airplane mode | `false` | Segments are queued and resent, in order, once connectivity returns |
+| The intake is unreachable: the request is blocked by a gateway or endpoint security tool, the intake is down, DNS fails, a firewall or proxy misbehaves | `true` | Dropped immediately — not queued, not retried |
+
+**A genuine outage is recovered from**: failed segments go into an in-memory retry queue (3 MiB cap) and are resent with exponential backoff, starting at 1 second and doubling up to a maximum of 1 minute; once one attempt succeeds, the queued segments are flushed in order. Turning Wi-Fi off, walking away, and reconnecting therefore usually yields a complete replay.
+
+**Loss happens when the machine is online but the intake is not reachable**: the browser considers itself connected, `navigator.onLine` is still `true`, so a failed request is neither retried nor queued — the segment is dropped on the spot, without producing any error event. A dropped VPN, a corporate gateway or endpoint security tool blocking the intake origin, a temporarily unavailable intake, and a misconfigured proxy all fall into this class.
+
+**Symptom**: the replay plays, but a stretch in the middle is **missing** — the segment index `index_in_view` skips, for example straight from 1 to 4, and segments 2 and 3 never arrive. The first segment after recovery also carries **no full snapshot** (`has_full_snapshot` is `0`), so the player keeps applying incremental changes on top of the stale page state from before the gap. That stretch of the replay renders garbled and misaligned, rather than simply being a few seconds short.
+
+**One more way segments are lost**: the retry queue lives in memory and is never written to disk. Segments still waiting to be resent when the application exits or is force-killed are not carried over to the next startup.
+
+**Compared with the main process**: main-process events use disk-backed batch upload — each event is written to a batch file under `userData` and the file is deleted only after a successful upload. Neither failure class above affects main-process views, errors, or resources: everything is resent once the network or the intake recovers, and pending batches even survive a forced termination and restart. The difference affects replay segments only.
+
+<Note>
+This is the behavior boundary of the renderer's direct-upload path, not a defect, and no SDK option changes it. If replay completeness matters to your business — for example if replays are used as evidence in dispute resolution — allowing the intake origin in your network policy, proxy, and endpoint security tooling removes the most common source of loss.
+</Note>
+
+## Verify the integration
+
+<Steps>
+<Step title="Start the application and watch the console">
+The main-process log prints SDK initialization output. When `init()` returns `false` it also prints the specific configuration error, such as a missing required option.
+</Step>
+
+<Step title="Trigger events">
+- Main process: make an HTTP request and throw an uncaught exception
+- Renderer process: click page elements, change routes, and issue a `fetch`
+</Step>
+
+<Step title="Confirm the data in the console">
+Open the corresponding RUM application and filter by `source:electron OR container.source:electron` in the [Explorer](/en/rum/explorer/overview) to confirm that `view`, `action`, `resource`, and `error` events appear.
+
+The default upload interval is one batch every 10 seconds, so wait a moment before refreshing.
+</Step>
+
+<Step title="Confirm the two processes are correlated">
+Seeing both main-process events (`view.url` of `electron://main-process`) and renderer events (`action`, Web Vitals) under the same session means the bridge is working.
+
+If renderer events have **no `container.source` field**, the preload was not injected: check that the main process calls `init()`, and that a [bundler plugin](#bundler-plugins) is applied when the main process is bundled.
+</Step>
+</Steps>
+
+## Next steps
+
+<CardGroup cols={3}>
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/electron/advanced-config">
+Configure batching, proxy, manual reporting, and source map upload.
+</Card>
+
+<Card title="Compatibility" icon="shield-check" href="/en/rum/sdk/electron/compatible">
+Review supported Electron versions, operating systems, bundlers, and current limits.
+</Card>
+
+<Card title="Data collection" icon="database" href="/en/rum/sdk/electron/data-collection">
+See which event types, fields, and upload behavior each process contributes.
+</Card>
+</CardGroup>
