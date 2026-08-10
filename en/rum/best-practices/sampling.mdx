@@ -329,5 +329,44 @@ Sampling is an independent probabilistic draw, not a quota (rule 3). The more tr
 </Accordion>
 
 <Accordion title="Can I report only errors and nothing else?">
-Sampling operates on whole sessions (rule 1), so "unsampled sessions report only errors" is not possible. Alternative: use business-defined custom sampling and treat "users who hit an error last time" as an always-sample cohort, raising your capture rate for error evidence.
+Strictly reporting only errors is not possible — view events are the backbone of a session and cannot be turned off. But you can get very close, by combining two independent controls:
+
+- **The sampling rate decides which sessions are collected.** It operates on whole sessions, and an unsampled session reports nothing at all, errors included (rule 1). So lowering the sampling rate is not a way to save volume — it drops your errors along with everything else.
+- **The event switches decide which events each collected session reports.** `trackResources`, `trackLongTasks`, `trackUserInteractions` and `trackWebVitals` are independent of sampling and apply to every session that is collected.
+
+So the right configuration for "show me errors and as little else as possible" is: set `sessionSampleRate` to 100 so no error is missed, then use the event switches to suppress non-error data. Resource events are usually the bulk of the volume, so trimming them pays off the most.
+
+<Warning>
+**Do not simply set `trackResources: false`.** In the browser, HTTP 5xx responses and failed requests are **not** error events — they are resource events carrying a `status_code`. RUM error events come only from JavaScript runtime exceptions, `console.error`, the browser Report API and manual `addError` calls. Turning resource collection off makes API failures disappear from the platform entirely, and those are often exactly the "errors" you care about most.
+</Warning>
+
+Keep resource collection on instead, and use `beforeSend` to discard only the successful requests:
+
+```js
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 100, // Collect every session so no error is missed
+  trackResources: true, // Must stay on, otherwise API failures are invisible
+  trackLongTasks: false,
+  trackUserInteractions: false,
+  trackWebVitals: false,
+  beforeSend: (event) => {
+    // Keep only failed requests; successful ones are discarded and cost nothing
+    if (event.type === "resource") {
+      const statusCode = event.resource.status_code;
+      return statusCode === 0 || statusCode >= 400;
+    }
+    return true;
+  },
+});
+```
+
+Understand the three costs before adopting this setup:
+
+- **View events are still reported.** At least one per page, plus throttled updates whenever metrics or event counts change, plus a keep-alive update every 5 minutes while the session is active. This baseline cannot be removed, and `beforeSend` cannot discard view events either.
+- **Error evidence is reduced to a stack trace.** With `trackUserInteractions` off, you no longer know what the user clicked before the error, which makes investigation noticeably harder.
+- **Traced requests are not affected by the resource switch.** Requests matching `allowedTracingUrls` are still reported even with resource collection off (flagged as not indexed, so they do not count toward volume), so traffic does not drop to zero.
+
+If your goal is "errors first, but keep the evidence", business-defined custom sampling is the better fit: treat "users who hit an error last time" as an always-sample cohort, trading full session data for a higher error capture rate.
 </Accordion>
