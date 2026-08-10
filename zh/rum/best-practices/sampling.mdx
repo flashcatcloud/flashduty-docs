@@ -329,5 +329,44 @@ RUM.enable(with: rumConfig)
 </Accordion>
 
 <Accordion title="能不能只上报错误，不上报其他数据？">
-采样以会话为单位（规则 1），无法做到「未采样会话只上报错误」。替代方案：用业务自定义采样，把「上次出过错的用户」列为必采人群，定向提高错误现场的捕获率。
+严格意义上的「只上报错误」做不到——视图（view）事件是会话的骨架，无法关闭。但可以做到非常接近，思路是两个相互独立的开关叠加使用：
+
+- **采样率控制「哪些会话被采集」**：以会话为单位，未命中的会话连错误也不上报（规则 1）。所以不能靠调低采样率来省量，那会同步丢掉错误。
+- **事件开关控制「每个会话采集哪些事件」**：`trackResources`、`trackLongTasks`、`trackUserInteractions`、`trackWebVitals` 与采样无关，对每一个被采集的会话都生效。
+
+因此「尽量只看错误」的正确配置是：把 `sessionSampleRate` 开到 100 保证错误不漏，再用事件开关把非错误数据压下去。资源事件通常是数据量的大头，收敛它的收益最明显。
+
+<Warning>
+**不要直接设置 `trackResources: false`。** 浏览器端的 HTTP 5xx 和请求失败**不是**错误事件，而是带 `status_code` 的资源事件——RUM 的错误事件只来自 JS 运行时异常、`console.error`、浏览器 Report API 和手动 `addError`。关闭资源采集会让接口报错在平台上完全消失，而这往往正是您最想看的那类「错误」。
+</Warning>
+
+推荐的做法是保留资源采集，用 `beforeSend` 只丢弃成功的请求：
+
+```js
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 100, // 全量采集会话，保证错误不漏
+  trackResources: true, // 必须保持开启，否则接口报错不可见
+  trackLongTasks: false,
+  trackUserInteractions: false,
+  trackWebVitals: false,
+  beforeSend: (event) => {
+    // 资源事件只保留失败的请求，成功的直接丢弃，不占用数据量
+    if (event.type === "resource") {
+      const statusCode = event.resource.status_code;
+      return statusCode === 0 || statusCode >= 400;
+    }
+    return true;
+  },
+});
+```
+
+使用前请了解这套配置的三个代价：
+
+- **视图事件仍会上报**：每个页面至少一条，指标或事件计数变化时会节流更新，会话活跃期间每 5 分钟还有一次保活更新。这是无法消除的底噪，`beforeSend` 也无法丢弃视图事件。
+- **错误现场只剩堆栈**：关闭 `trackUserInteractions` 后，您无法知道用户点了什么才触发的错误，排查效率会明显下降。
+- **链路追踪请求不受资源开关影响**：命中 `allowedTracingUrls` 的请求即使关闭资源采集也仍会上报（标记为不索引，不计入数据量），因此流量并不会归零。
+
+如果您的目标是「错误优先，但仍要保留现场」，更推荐业务自定义采样：把「上次出过错的用户」列为必采人群，用整会话的完整数据换更高的错误捕获率。
 </Accordion>
