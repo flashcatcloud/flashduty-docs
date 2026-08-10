@@ -1,0 +1,329 @@
+---
+title: "Electron SDK 数据收集"
+sidebarTitle: "数据收集"
+description: "了解 Electron RUM SDK 在主进程与渲染进程分别采集的事件类型、字段和上报行为"
+keywords: ["RUM", "Electron SDK", "数据收集", "主进程", "渲染进程", "崩溃"]
+---
+
+Electron RUM 的数据来自两个进程。普通 RUM 事件最终由主进程统一上报；会话回放分段由渲染进程直传。本文按进程说明采集内容。
+
+## 采集概览
+
+| 数据类型 | 采集进程 | 默认状态 | 事件类型 |
+|----------|----------|----------|----------|
+| 应用会话 | 主进程 | 开启 | 写入所有事件的 `session` |
+| 主进程 view | 主进程 | 开启 | `view` |
+| Node 未捕获异常与 Promise 拒绝 | 主进程 | 开启 | `error` |
+| 手动上报错误 | 主进程 | 手动 | `error` |
+| 原生崩溃（minidump） | 主进程 | 开启 | `error`（`is_crash: true`） |
+| 渲染进程 / 子进程终止 | 主进程 | 开启 | `error`（`is_crash: false`） |
+| 主进程 HTTP 请求 | 主进程 | 开启 | `resource` |
+| Operation 监控 | 主进程 | 手动（预览） | `vital` |
+| 页面 view、用户操作、前端资源、JS 错误、Web Vitals | 渲染进程 | 开启 | `view` / `action` / `resource` / `error` |
+| SDK 自身遥测 | 主进程 | 开启（采样 20%） | `telemetry` |
+
+## 主进程事件的公共属性
+
+**主进程自己产生的** RUM 事件在发送前会被补充以下公共上下文。渲染进程事件走另一条装配路径，见[渲染进程事件的标识](#渲染进程事件的标识)。
+
+| 字段 | 说明 |
+|------|------|
+| `application.id` | RUM 应用 ID，来自 `applicationId` |
+| `service` | 服务名称，来自 `service` |
+| `version` | 应用版本，来自 `version` |
+| `session.id` | 主进程生成的会话 ID |
+| `session.type` | 固定为 `user` |
+| `source` | 固定为 `electron` |
+| `view.id` | 事件发生时的活跃 view ID |
+| `view.name` / `view.url` | 固定为 `main process` / `electron://main-process` |
+| `usr.anonymous_id` | SDK 生成并持久化的设备标识 |
+| `usr.id` / `usr.name` / `usr.email` | 调用 `setUser()` 后附加的登录用户身份 |
+| `ddtags` | 包含 `sdk_version:<SDK 版本>` |
+| `_dd.format_version` | 固定为 `2` |
+
+<Note>
+当前主进程 RUM 事件不带 `env`。`env` 配置只进入尚未上报的 span 包络；渲染进程事件仍保留各自 `flashcatRum.init()` 中的 `env`。
+</Note>
+
+## 渲染进程事件的标识
+
+桥接生效时，主进程**不会**改写渲染进程事件的 `source`。它固定覆盖两处、补两处；如果主进程设置了登录用户，还会替换用户身份：
+
+| 字段 | 主进程的处理 |
+|------|--------------|
+| `session.id` | 覆盖为主进程会话 ID |
+| `application.id` | 覆盖为主进程配置的应用 ID |
+| `container.source` | 补充为 `electron` |
+| `container.view.id` | 补充为主进程当前 view ID |
+| `usr` | 调用过 `setUser()` 时，用主进程的 `id` / `name` / `email` 整体替换渲染进程身份，同时保留 `usr.anonymous_id`；未设置时保持渲染进程原值 |
+
+渲染进程自己的 `source`、`view`、`service` 等属性一律保留。因此两类事件的标识不同：
+
+| 事件来源 | `source` | `container.source` | `view.url` |
+|----------|----------|--------------------|------------|
+| 主进程 | `electron` | 无 | `electron://main-process` |
+| 渲染进程窗口 | `browser` | `electron` | 页面 URL |
+
+<Warning>
+在查看器里筛选时，只用 `source:electron` **只能查到主进程事件**。要选中一个 Electron 应用产生的全部数据，请用 `source:electron OR container.source:electron`。
+</Warning>
+
+<Note>
+桥接未生效时（例如主进程没有执行 `instrument`，或打包产物缺少 SDK / preload 运行时文件），渲染进程会作为独立的 Web 应用直连上报：`source` 仍是 `browser`，但**没有 `container` 字段**，会话也与主进程无关。详见[接入指南](/zh/rum/sdk/electron/sdk-integration#桥接未生效时会怎样)。
+</Note>
+
+## 用户身份
+
+SDK 启动时生成 `usr.anonymous_id` 并写入 `app.getPath('userData')/_dd_anonymous_id`。这个设备标识跨会话、应用重启和登录状态保持不变；登录用户身份由主进程的 `setUser()` 单独管理。
+
+| 状态 | 事件中的 `usr` |
+|------|----------------|
+| 尚未调用 `setUser()` | 只有 `anonymous_id`，不会把它回填到 `id` |
+| 已调用 `setUser({ id, name?, email? })` | 同时带设备 `anonymous_id` 与登录用户的标准字段 |
+| 调用 `clearUser()` 后 | 后续事件移除 `id` / `name` / `email`，`anonymous_id` 不变 |
+
+主进程会按**事件发生时间**查找当时的用户，而不是按上报时间。例如原生崩溃在下一次启动才解析，仍会归到崩溃发生时登录的用户。身份历史保存在 `userData/_dd_user_history`；新进程启动时不会自动恢复上次运行的“当前登录用户”，应用应在确认登录态后再次调用 `setUser()`。
+
+经桥接的普通渲染进程事件遵循主进程身份：主进程设置了用户时整体替换渲染进程的标准身份字段；主进程没有设置时，渲染进程自己通过 `flashcatRum.setUser()` 配置的身份保持不变。会话回放分段由渲染进程直传，不经过这一步；开启回放时，请在登录 / 登出流程中同步调用渲染进程的 `flashcatRum.setUser()` / `flashcatRum.clearUser()`。
+
+API 用法见[高级配置 · 关联登录用户](/zh/rum/sdk/electron/advanced-config#关联登录用户)。
+
+## 会话
+
+主进程负责会话生命周期，会话状态持久化在 `app.getPath('userData')` 下的 `_dd_s` 文件中，应用重启后可以续用未过期的会话。
+
+| 规则 | 值 |
+|------|----|
+| 无活跃过期时间 | 15 分钟 |
+| 会话最大时长 | 4 小时 |
+| 活跃信号 | Electron `webContents` 的 `mouseDown`、`mouseWheel`、`keyDown`、`rawKeyDown` 输入事件 |
+| 过期行为 | 发送一条 `is_active: false` 的最终 view 更新，并删除 `_dd_s` |
+| 续期行为 | 会话过期后再次产生活跃信号时，创建新会话并开启新 view |
+
+<Note>
+续期直接监听 Electron 输入事件，不依赖 Browser SDK、桥接状态或 `trackUserInteractions`。鼠标移动、指针进入/离开窗口和按键释放不会计为活跃信号；这些动作可能在没有用户实际操作时触发，或已经有对应的按下事件。
+
+如果应用长时间只有主进程后台活动而没有上述界面输入，会话会在 15 分钟后过期。过期后的 RUM 事件会被丢弃，直到下一次有效输入创建新会话；后台任务本身不会自动开启新会话。
+</Note>
+
+## 主进程 view
+
+主进程没有页面概念，SDK 为每个主进程实例维护**一个 view**，用于承载主进程事件并计算停留时长。
+
+| 字段 | 说明 |
+|------|------|
+| `view.id` | SDK 生成的唯一 ID |
+| `view.time_spent` | 从 view 创建到当前的时长 |
+| `view.is_active` | view 是否仍活跃；会话过期时置为 `false` |
+| `view.action.count` / `view.error.count` / `view.resource.count` | 该 view 内主进程事件计数（不含渲染进程事件） |
+| `_dd.document_version` | view 更新版本号，每次更新递增 |
+
+view 更新的发送时机：
+
+- view 创建时立即发送一条
+- 主进程产生 `action` / `error` / `resource` 事件时更新计数，更新以 3 秒为窗口做节流
+- 每 5 分钟发送一次保活更新
+- 会话过期时发送最终更新，会话续期时创建新 view
+
+## 错误采集
+
+### Node 运行时错误
+
+SDK 在初始化时注册 `process.on('uncaughtException')` 与 `process.on('unhandledRejection')`。
+
+| 来源 | `error.source` | `error.handling` |
+|------|----------------|------------------|
+| 未捕获异常 / 未处理 Promise 拒绝 | `source` | `unhandled` |
+| `addError()` 手动上报 | `custom` | `handled` |
+
+错误事件包含 `error.id`、`error.message`、`error.stack`、`error.type`（取自 `Error.name`）。抛出的不是 `Error` 实例时，SDK 会把值序列化并加上 `Uncaught` / `Provided` 前缀作为消息，此时没有堆栈。
+
+SDK 会把主进程栈转换成后端解析所用的帧格式（`at <函数> @ <url>:<行>:<列>`），与渲染进程一致，并把应用根以下的帧路径归一化为 `app:///<相对应用根的路径>`：
+
+```
+Error: something went wrong
+  at handleClick @ app:///dist/main.js:97:15
+  at <anonymous> @ process.processTimers (node:internal/timers:541:7)
+```
+
+归一化后的路径与安装位置无关，正是 sourcemap 上传所用的匹配键，因此**主进程栈同样可以反混淆**，见[高级配置 · 上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap)。
+
+<Note>
+Node 自身的内部帧（`node:internal/…`）没有有意义的 URL，会整段落在 URL 位置，显示为 `at <anonymous> @ …`。SDK 保留它们（读起来有价值），后端在反混淆时会跳过这类无法解析的帧。
+</Note>
+
+手动上报可以附带业务上下文：
+
+```ts
+import { addError } from '@flashcatcloud/electron-sdk';
+
+try {
+  await syncWorkspace();
+} catch (error) {
+  addError(error, { context: { component: 'sync', workspaceId } });
+}
+```
+
+### 原生崩溃
+
+SDK 启动时会开启 Electron 的 `crashReporter`（`uploadToServer: false`、`ignoreSystemCrashHandler: true`），崩溃时由 Electron 在 `app.getPath('crashDumps')` 下写出 `.dmp` minidump 文件。
+
+崩溃发生的那一刻进程已经死亡，无法上报。SDK 在**下一次启动**且 `app.whenReady()` 后递归扫描该目录，用内置的 WASM minidump 解析器逐个解析，生成 RUM error 事件，随后删除对应 `.dmp` 文件。
+
+<Note>
+无论解析成功与否，`.dmp` 都会被删除。留在磁盘上的 dump 每次启动都会被重新拾取，一个永远解析不了的 dump 会被无限重试、让崩溃目录无限增长，并且因为每个 dump 都要加载 WASM 解析器而拖慢每次启动。
+</Note>
+
+崩溃事件的字段：
+
+| 字段 | 说明 |
+|------|------|
+| `error.is_crash` | 固定为 `true` |
+| `error.message` | 固定为 `Application crashed` |
+| `error.category` | 固定为 `Exception` |
+| `error.type` / `error.meta.exception_type` | minidump 中的崩溃类型；dump 缺少异常信息时不带该字段 |
+| `error.source_type` | 按操作系统取 `macos`、`windows` 或 `linux` |
+| `error.meta.exception_codes` | 触发崩溃的地址。异常类型没有名字时（例如进程被外部强杀），这往往是唯一可用的线索 |
+| `error.meta.code_type` | CPU 架构 |
+| `error.meta.process` | 应用名称 |
+| `error.stack` | 崩溃线程的调用栈 |
+| `error.threads` | 所有线程的栈，`crashed` 标记崩溃线程；无法确定崩溃线程时所有线程均为 `false` |
+| `error.binary_images` | 加载的模块列表，含 `uuid`（debug identifier）、加载地址区间、架构，并标记系统模块 |
+| `error.fingerprint` | 崩溃点指纹，决定 Error Tracking 的分组粒度：异常类型 + 崩溃线程首个非系统帧的模块名与**模块内偏移**，形如 `SIGSEGV|MyApp|0x12ab3c`。无法确定崩溃线程的 dump 不带该字段 |
+
+<Note>
+部分 minidump 没有异常流——例如进程是被强制终止而非抛出异常。这类 dump 仍会照常上报：线程栈、模块列表和系统信息都在，只是崩溃类型与崩溃线程未知。
+</Note>
+
+<Note>
+**原生崩溃按崩溃点分组。** 所有 minidump 崩溃的 `error.message` 都是同一个常量，若只按消息分组会把所有崩溃挤进一个 Issue，因此 SDK 会带上 `error.fingerprint`。指纹用的是**模块内偏移**而不是指令地址——ASLR 每次启动都会重新映射模块基址，偏移量则在同一个构建的多次运行之间保持稳定。
+
+代价是偏移量会随构建变化：**发布新版本后，同一处崩溃会开出新的 Issue**。这与 Android NDK 的栈顶分组是同一个取舍。
+</Note>
+
+<Note>
+原生崩溃栈以**地址形式**上报。上传 Breakpad 符号文件后，控制台会在你查看崩溃时把地址还原成函数名和行号；没有上传符号时，栈保持原始地址，仍可据此判断崩溃模块与频次。见[高级配置 · 上传原生崩溃符号](/zh/rum/sdk/electron/advanced-config#上传原生崩溃符号)。两个进程的 **JavaScript** 错误栈走的是 sourcemap，与此无关。
+</Note>
+
+### 渲染进程与子进程终止
+
+崩溃只是进程消失的其中一种方式。SDK 同时在 `app` 上监听 `render-process-gone` 与 `child-process-gone`，覆盖不产生 minidump 的那些终止——被系统 OOM killer 杀死、被任务管理器结束、沙箱拆除、启动失败等。监听挂在 `app` 而非单个 `webContents` 上，因此不属于任何 `BrowserWindow` 的渲染进程（`WebContentsView`、`<webview>`）也不会漏掉。
+
+| 字段 | 说明 |
+|------|------|
+| `error.is_crash` | 固定为 `false` |
+| `error.type` | `RenderProcessGone` 或 `ChildProcessGone` |
+| `error.message` | 形如 `Renderer process gone: killed`、`GPU process gone: launch-failed` |
+| `error.category` | 固定为 `Exception` |
+| `error.meta.process` | 渲染进程为 `renderer`；子进程为 Electron 报告的类型，如 `GPU`、`Utility`、`Zygote` |
+| `error.meta.exit_reason` | Electron 给出的终止原因 |
+| `error.meta.exit_code` | 进程退出码 |
+| `error.meta.url` | 渲染进程终止时所显示文档的 URL（子进程无此字段） |
+| `container.view.id` | 渲染进程终止时，关联到它当时的 RUM view |
+
+<Note>
+这类事件**没有堆栈**。主进程无法回溯一个已经消失的进程的调用栈。
+</Note>
+
+<Tip>
+`is_crash` 为 `false` 是有意为之：终止的是子进程，宿主应用本身还活着，而后端会把每条 `is_crash` 错误升级为严重告警。要区分两类事件，用 `error.type` 或 `error.is_crash` 筛选。
+</Tip>
+
+**与原生崩溃的去重**：会产生 minidump 的终止原因（`crashed`、`oom`）在这里被跳过，交给下次启动的崩溃采集上报，避免同一次事故被记两遍。正常退出（`clean-exit`）也不上报。其余原因——包括 `killed`——都会上报：除 macOS 的 `forcefullyCrashRenderer()` 外，`killed` 在各平台通常不写 dump，漏报的代价高于偶发重复。
+
+## 主进程网络请求
+
+`dd-trace` 会自动追踪主进程发起的 HTTP 请求（`http` / `https` 模块、`fetch`、`net.fetch`）。SDK 订阅 `dd-trace` 的导出通道，把其中的 HTTP span 转换为 RUM `resource` 事件。
+
+| 字段 | 说明 |
+|------|------|
+| `resource.type` | 固定为 `native`，用于与渲染进程的 `xhr` / `fetch` 资源区分 |
+| `resource.url` | 请求 URL |
+| `resource.method` | 请求方法，缺省为 `GET` |
+| `resource.status_code` | HTTP 状态码 |
+| `resource.duration` | 请求耗时 |
+| `_dd.trace_id` / `_dd.span_id` | 链路标识 |
+
+SDK 自身上报到 intake（或代理）的请求会被识别并跳过，不会产生循环采集。
+
+<Note>
+`dd-trace` 同时会追踪 IPC 调用和子进程命令执行，但这些 span 需要 APM 链路才能展示。当前版本只有 HTTP span 会转成 RUM resource 事件，其余 span 在本地丢弃，不会上报。
+</Note>
+
+## 渲染进程数据
+
+渲染进程使用 `@flashcatcloud/browser-rum`，采集内容与 Web SDK 完全一致：页面 view、用户操作、`fetch` / XHR / 静态资源、JS 错误、long task 和 Web Vitals（LCP、INP、CLS 等）。字段明细见 [Web SDK 数据收集](/zh/rum/sdk/web/data-collection)。
+
+桥接生效时，这些事件经 IPC 交给主进程统一上报，并额外获得主进程的 `session.id`、`application.id` 与 `container` 字段——具体见[渲染进程事件的标识](#渲染进程事件的标识)。
+
+主进程在转发时还会对渲染进程事件做两处改写，两者都可以关闭：
+
+| 改写 | 作用对象 | 说明 |
+|------|----------|------|
+| 栈路径归一化 | `error` 事件的 `error.stack` 及其 `causes` | 应用根以下的帧路径改写为 `app:///<相对路径>`，便于 sourcemap 匹配。`view.url` 与资源 URL 不改写。见[上传 sourcemap](/zh/rum/sdk/electron/advanced-config#上传-sourcemap) |
+| 绘制指标校正 | `initial_load` 类型 `view` 事件的 FCP / LCP | 预创建的隐藏窗口按其首次可见时刻扣减预热耗时。见[预热窗口的 FCP 与 LCP 校正](/zh/rum/sdk/electron/advanced-config#预热窗口的-fcp-与-lcp-校正) |
+
+<Tip>
+主进程是 Node.js 运行时，没有 DOM 也没有渲染管线，因此**不会**产生 Web Vitals、long task 和用户操作数据。控制台已对主进程合成 view 特判：详情页不再展示性能指标区，不会出现 LCP / FCP 为 0 的误导数值。按页面性能维度分析时，数据来自渲染进程。
+</Tip>
+
+## Operation 监控（预览）
+
+主进程的 `startOperation` / `succeedOperation` / `failOperation` 用于跟踪关键业务流程（登录、结算、文件上传等）的起止，生成 `vital` 事件。服务端按 `name` 和可选的 `operationKey` 关联起止步骤。
+
+当前要求的 `@flashcatcloud/browser-rum` `0.0.7` 不提供同名 Operation API。渲染进程触发的流程需要通过应用自己的 preload / IPC 接口调用主进程 API。
+
+| 字段 | 说明 |
+|------|------|
+| `vital.name` | 操作名称，仅允许字母、数字和 `_` `.` `@` `$` `-` |
+| `vital.description` | 可选描述 |
+| `context` | 可选的自定义属性 |
+
+<Warning>
+该 API 处于预览阶段，签名可能在正式版前调整。
+</Warning>
+
+## SDK 自身遥测
+
+SDK 会上报自身运行时的内部错误，用于定位 SDK 问题。默认采样率为 20%，可通过 `telemetrySampleRate` 调整，设为 `0` 可完全关闭。遥测事件的 `service` 固定为 `electron-sdk`，不会计入你的 RUM 事件量口径。
+
+### dd-trace 自身的遥测（默认关闭）
+
+`dd-trace` 另有一套与 Flashduty RUM 无关的 instrumentation telemetry：它会尝试连本机 `127.0.0.1:8126` 的 Datadog agent；请求失败且环境中恰好存在 `DD_API_KEY` 时，还会直接发往 Datadog。这两种行为都不适合出现在客户的桌面应用里，因此 **SDK 默认将其关闭**。
+
+关闭通过环境变量完成——dd-trace 5.x 只认 `DD_INSTRUMENTATION_TELEMETRY_ENABLED`（别名 `DD_TRACE_TELEMETRY_ENABLED`），传给 `tracer.init()` 的 `telemetry: false` 会被静默忽略。如果你的应用已经显式设置过这两个变量之一（包括显式开启），SDK 会保留你的设置。
+
+## 上报行为
+
+主进程把所有事件按 track 落盘成批后上传：
+
+| 配置 | 值 |
+|------|----|
+| 落盘目录 | `app.getPath('userData')` 下的 `rum/` 子目录 |
+| 单批大小 | `batchSize` 决定：`SMALL` 16 KiB、`MEDIUM` 512 KiB、`LARGE` 4 MiB，默认 `MEDIUM` |
+| 上传间隔 | `uploadFrequency` 决定：`RARE` 30 秒、`NORMAL` 10 秒、`FREQUENT` 5 秒，默认 `NORMAL` |
+| 上报地址 | `POST https://<site>/api/v2/rum` |
+| 请求体 | 换行分隔的 JSON（每行一个事件） |
+| 认证 | 请求头 `DD-API-KEY` 携带 `clientToken` |
+
+事件先写入 `.tmp` 文件，达到批次大小后轮转为 `.log`，再由上传循环发送。**上传成功才删除文件**，因此网络中断或应用被强杀时数据不会丢失，下次启动会继续发送残留批次。
+
+<Warning>
+这条落盘重试的链路**不覆盖会话回放的分段**。开启会话回放后，分段由渲染进程直接上传，走的是浏览器 SDK 的内存重试队列：真断网时会补发，机器在线而上报地址不可达时直接丢弃，队列也不会跨进程重启保留。见[上报地址不可达时回放分段会丢失](/zh/rum/sdk/electron/sdk-integration#上报地址不可达时回放分段会丢失)。
+</Warning>
+
+## 相关页面
+
+<CardGroup cols={3}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/electron/sdk-integration">
+完成主进程与渲染进程的双进程接入。
+</Card>
+
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/electron/advanced-config">
+配置上报批次、代理、手动上报与 sourcemap 上传。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/electron/compatible">
+了解支持范围与当前限制。
+</Card>
+</CardGroup>
