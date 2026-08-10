@@ -1,0 +1,194 @@
+---
+title: "Entity Tree"
+description: "Continuously discover entities from Prometheus metric labels and manage entity alerts with dynamic groups and inherited rules."
+keywords: ["Entity Tree", "entity alerts", "dynamic groups", "rule inheritance", "Prometheus"]
+---
+
+When hosts, containers, instances, or business components scale and change continuously, maintaining monitoring objects and alert rules one by one quickly becomes unreliable. Entity Tree discovers these dynamic resources from Prometheus query results, organizes them into stable entities, and automatically places them into groups based on labels.
+
+You can configure a shared alert rule in a higher-level group and let it apply automatically to matching descendant entities. When an environment or service needs a different threshold, override only the relevant parameters in that group. This reduces duplicate rules while keeping alert policies aligned with changing entities.
+
+The current version focuses on entity alerts. Entity Tree first establishes a consistent, stable entity view, which also provides a common entry point for future metric views and analysis in entity context.
+
+<Frame caption="Entity Tree discovers entities from data sources and inherits alert policies through dynamic groups">
+  <img
+    src="https://static.flashcat.cloud/images/flashmonit/entity-alert-architecture-light-v1.png"
+    alt="Multiple Prometheus data sources discover entities that enter dynamic groups and inherit alert policies"
+  />
+</Frame>
+
+## When to use Entity Tree
+
+Entity Tree works well when:
+
+- Kubernetes pods, cloud hosts, database instances, or other resources are frequently created, removed, or changed
+- Multiple environments or services use the same metric but require different alert thresholds
+- You want labels such as region, environment, cluster, team, or service to define alert scope automatically
+- Multiple Prometheus data sources should reuse the same entity definition and alert policies
+
+If your monitoring objects are fixed and each alert rule maps to one explicit query, standard alert rules are usually more direct.
+
+## How Entity Tree organizes monitoring
+
+| Concept | Purpose | Example |
+| --- | --- | --- |
+| **Entity definition** | Defines which data sources and query discover a type of entity, and which labels identify it consistently | Node, pod, database instance |
+| **Entity** | A specific resource that is discovered continuously. Within one data source, query results with the same identity label values merge into one entity | instance=10.0.0.8:9100 |
+| **Dynamic group** | Uses entity labels to define scope automatically. Group membership updates as entity attributes change | Production, Payment, East China |
+| **Entity alert rule** | Is created in a group and applies automatically to matching descendant entities | High node CPU usage |
+| **Rule override** | Adjusts inherited severity levels, parameters, or consecutive hit counts in a child group | 90% in production and 95% in testing |
+
+<Note>
+The same identity label values in different data sources form separate entities. Switch data sources in the workspace to inspect their entities, rule evaluations, and active alerts independently.
+</Note>
+
+## Prerequisites
+
+Before you begin, make sure:
+
+- Monitors is enabled for the account and an alert engine is deployed
+- At least one Prometheus data source exists
+- Your account has Entity Tree view permission; creating or changing configuration also requires Entity Tree management permission and management access to the relevant entity definition or group
+- The alert engine version meets the requirement shown on the Entity Tree page
+
+<Warning>
+If the alert engine version is incompatible, the page prompts you to upgrade and entity or entity-alert status may be temporarily unavailable. Standard alert rules are not affected.
+</Warning>
+
+## Configure Entity Tree
+
+### 1. Request access
+
+Go to **Monitors > Entity Tree**. If Entity Tree is not enabled for the account, click **Request access**. The page shows the submission time while the request is pending. You can start configuring Entity Tree after approval.
+
+### 2. Create an entity definition
+
+An entity definition describes how Monitors discovers and identifies a type of resource. Click **Create entity definition** and configure:
+
+| Setting | Description |
+| --- | --- |
+| **Name** | A resource category name that is easy to understand, such as “Nodes” or “Database instances” |
+| **Management team** | Members of the selected team can manage the category and all of its groups. If you do not select a team, only the creator and account administrators can manage it |
+| **Data sources (exact match)** | Select data sources by ID. Renaming a data source does not affect the match |
+| **Data sources (name pattern)** | Match data source names with patterns that support *, ?, and character ranges. This can include new data sources that follow the same naming convention |
+| **Discovery PromQL** | Returns an instant vector of entities to discover. Labels in the result become candidate entity attributes |
+| **Identity labels** | One or more stable labels that uniquely identify an entity |
+| **Multi-value labels** | Optional. When multiple results belong to the same entity, non-empty values from these labels merge into a set |
+| **Sync interval** | How often Monitors discovers entities again. The default is 15 seconds |
+| **Missing grace period** | How long Monitors retains an entity after it disappears from a successful discovery result. The minimum is 3,600 seconds |
+
+You can combine exact matching and name patterns. Monitors uses the union of all matched data sources, and you must configure at least one matching method.
+
+For example, this query discovers nodes with an instance label:
+
+~~~promql
+up{job="node"}
+~~~
+
+After entering the query, click **Preview**, then select identity labels from the results. The preview helps you verify:
+
+- Whether every result contains the identity labels
+- Whether ordinary single-value labels conflict for the same identity
+- How multiple results merge by identity
+
+<Tip>
+Choose labels that remain stable and uniquely locate the resource, such as instance, pod_uid, or a database instance ID. Avoid labels that change frequently, such as status, version, or release batch, because the same resource could be identified as a new entity.
+</Tip>
+
+If an entity naturally has multiple values for one attribute, such as a node belonging to several business groups, configure that attribute as a multi-value label. A multi-value label cannot also be an identity label.
+
+### 3. Create dynamic groups
+
+After creating an entity definition, the definition and its group tree appear in the left sidebar. Open the action menu for the target node, select **Create child group**, and define the entity scope with label conditions.
+
+| Operator | Meaning |
+| --- | --- |
+| = | The label value is equal. An empty value matches a missing or empty label |
+| != | The label value is not equal. An empty value matches a label with at least one value |
+| =~ | The label value matches a regular expression |
+| !~ | The label value does not match a regular expression |
+
+All conditions in a group must match. A child group also inherits every condition from its parent groups.
+
+For example, first create a “Production” group with env = prod, then create a “Payment” group below it with service = payment. The second group contains only entities that match both conditions.
+
+<Note>
+An entity can match multiple sibling groups. Give sibling groups clear, non-conflicting responsibilities, and check the final alert scope when you configure different rule overrides.
+</Note>
+
+### 4. Create an entity alert rule
+
+Select the group that should own the rule, open the **Rules** tab, and click **Create rule**.
+
+| Setting | Description |
+| --- | --- |
+| **Rule name** | The alert name. You can use the template variables provided in the UI |
+| **PromQL** | The query that evaluates the alert condition. Parameter placeholders let multiple severities or groups reuse one query |
+| **Severity** | Enable Critical, Warning, and Info independently, then set parameters and consecutive hit counts |
+| **Recovery mode** | Recover when the condition no longer matches, or use a separate recovery PromQL query |
+| **Consecutive recoveries** | How many consecutive recovery evaluations are required |
+| **Advanced settings** | Configure the evaluation schedule, time zone, execution delay, and repeat notifications |
+| **Labels and annotations** | Add routing labels and context. Rule names and annotations support template variables |
+
+The rule is created in the current group and applies automatically to that group and matching descendant entities. The rule list separates **Rules in this group** from **Inherited rules** so you can identify each rule's source.
+
+<Tip>
+Define a reusable threshold parameter in PromQL, then enter different values for Critical, Warning, and Info. This lets one query express multiple alert severities.
+</Tip>
+
+### 5. Override an inherited rule
+
+When a child group needs different thresholds, find the rule under **Inherited rules** and select **Override inherited rule**. You can change:
+
+- Whether a severity inherits, is enabled, or is disabled
+- Parameters and consecutive hit counts for each severity
+- Recovery-query parameters and consecutive recovery counts
+
+The query text, evaluation schedule, recovery mode, and repeat notifications continue to inherit from the parent rule. If those execution settings must differ, create a new rule in the current group.
+
+Before saving, the page shows the final effective configuration and a query preview. Removing the override restores the parent configuration for the current group.
+
+## Inspect entities and alerts
+
+After selecting an entity definition, group, and data source, the workspace provides three tabs:
+
+| Tab | What you can inspect |
+| --- | --- |
+| **Entities** | Entity key, state, labels, matched groups, and last-seen time. Filter by state, entity-key prefix, or labels |
+| **Rules** | Rules in this group, inherited rules, enablement, latest evaluation, and matched entity and alert counts. You can also inspect execution history and error summaries |
+| **Active alerts** | Severity, alert name, entity key, alert dimensions, effective policy group, current value, and trigger time |
+
+Select **View details** for an active alert to inspect its entity source, rule, alert dimensions, labels, and notification status. During troubleshooting, first confirm the data source and current group at the top of the page, then check the rule's source group and effective policy scope.
+
+## Understand missing grace
+
+An entity can temporarily disappear from a successful discovery result because of scrape jitter, a short network outage, or a rolling deployment. During the missing grace period:
+
+- The entity state is **Missing grace**
+- Alert evaluation, recovery evaluation, and repeat notifications pause for that entity
+- If the entity reappears, its existing alert state continues
+- If it remains missing beyond the retention period, related active alerts end
+
+The minimum missing grace period is 3,600 seconds. Set it according to the normal resource replacement cycle and avoid amplifying short-lived jitter with an overly short period.
+
+## Configuration change considerations
+
+The following operations can change entity identity, group scope, or alert lifecycles:
+
+- **Changing identity labels:** The page first previews the identity migration and recovery-query impact. After confirmation, active alerts for old identities end and new identities are discovered
+- **Changing multi-value labels:** Entities are reclassified and related alerts are evaluated again with the new configuration
+- **Changing group conditions or rule overrides:** Effective entity scope or policy can change, so current alerts may end and be evaluated again
+- **Disabling or deleting a rule:** Related active alerts end asynchronously. Re-enabling the rule does not reopen ended alerts
+- **Deleting an entity definition or group:** You must first remove the dependencies shown in the UI. Affected active alerts end asynchronously
+
+<Warning>
+Before changing identity labels, group conditions, or inherited overrides in production, use the preview to confirm the impact and make the change during a low-traffic period.
+</Warning>
+
+## Best practices
+
+- Choose stable identity labels for each entity definition and preview them across multiple data sources before rollout
+- Design groups around stable dimensions such as environment, region, and service instead of temporary organizational layers
+- Place shared rules higher in the tree and override thresholds only where requirements actually differ
+- Create a new rule when the query or schedule must differ instead of adding too many exceptions to an inherited rule
+- Regularly inspect latest evaluations, execution history, and active alerts to catch data-source or alert-engine version issues
