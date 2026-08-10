@@ -29,7 +29,7 @@ keywords: ["RUM", "Electron SDK", "兼容性", "打包工具", "已知限制"]
 | 其他打包工具 | 未提供插件 | 需要你自行保证 instrument 入口先于 `require('electron')` 执行，并把 `dd-trace` 与 SDK 保留为 external |
 
 <Warning>
-主进程被打包时**必须**使用对应插件，否则打包工具的 `require` 提升会破坏 `dd-trace` 的模块挂钩顺序：SDK 仍能初始化并上报主进程数据，但 `BrowserWindow` 的 preload 注入会失效，渲染进程拿不到桥接对象。
+主进程被打包时**必须**使用对应插件。插件负责保证 instrument 入口执行顺序、保留 `dd-trace` 与 SDK 为运行时依赖，并把 SDK 自己的 preload 一起带进产物；缺少任一环节都可能让主进程网络追踪或渲染进程桥接失效。preload 由 Electron SDK 按 `session` 注册，不依赖 `dd-trace` 包装 `BrowserWindow`。
 </Warning>
 
 ## 渲染进程页面加载方式
@@ -52,6 +52,7 @@ keywords: ["RUM", "Electron SDK", "兼容性", "打包工具", "已知限制"]
 | 主进程 view | 支持 | 每个主进程实例一个 view |
 | Node 未捕获异常 / Promise 拒绝 | 支持 | `process.on('uncaughtException' \| 'unhandledRejection')` |
 | 主进程 HTTP 请求 | 支持 | 由 `dd-trace` 追踪 `http`/`https`、`fetch`、`net.fetch`，转成 `resource` |
+| 登录用户身份 | 支持 | 主进程提供 `setUser` / `getUser` / `clearUser`，并把身份附加到主进程及桥接的渲染进程事件 |
 | 原生崩溃采集 | 支持 | Electron `crashReporter` 写 minidump，下次启动解析上报 |
 | 渲染进程 / 子进程终止 | 支持 | 监听 `render-process-gone` / `child-process-gone`，覆盖不产生 dump 的终止 |
 | 原生崩溃符号化 | 支持 | 需上传 Breakpad 符号文件，见[上传原生崩溃符号](/zh/rum/sdk/electron/advanced-config#上传原生崩溃符号) |
@@ -72,7 +73,9 @@ keywords: ["RUM", "Electron SDK", "兼容性", "打包工具", "已知限制"]
 | APM / 分布式追踪 | Flashduty 当前没有 span 上报入口。`dd-trace` 采集的 IPC 调用与子进程命令 span 在本地丢弃，只有 HTTP span 会转成 RUM `resource` 事件 |
 | 日志上报 | 渲染进程通过桥接发来的 log 类型事件当前不会转发到服务端 |
 | 主进程 Web Vitals | 主进程是 Node.js 运行时，没有 DOM 和渲染管线，不会产生 LCP / INP / CLS、long task 和用户操作数据。控制台会对主进程 view 隐藏性能指标区 |
-| 会话续期信号 | 目前只有渲染进程的 `click` action 会续期会话。纯后台运行的主进程会在 15 分钟无交互后进入新会话 |
+| 主进程 RUM 不带 `env` | `env` 当前只写入尚未上报的 span 包络，不会附加到主进程 RUM 事件；渲染进程事件仍保留 `flashcatRum.init()` 中的 `env` |
+| 渲染进程没有 Operation API | 当前要求的 `@flashcatcloud/browser-rum` `0.0.7` 不提供 `startOperation` / `succeedOperation` / `failOperation`。渲染进程触发的流程需通过应用自己的 preload / IPC 调用主进程 API |
+| 会话续期信号 | 只有渲染进程 `webContents` 的 `mouseDown`、`mouseWheel`、`keyDown`、`rawKeyDown` 输入会续期。纯后台活动不会续期；会话过期后的 RUM 事件会被丢弃，直到下一次有效输入创建新会话 |
 | 上报协议固定 HTTPS | 上报地址模板 `https://<site>/api/v2/rum` 中的 `https://` 是写死的。私有化部署若 intake 只提供纯 HTTP，改 `site` 无效，必须走 `proxy`，见[高级配置](/zh/rum/sdk/electron/advanced-config#什么时候必须用-proxy) |
 | 进程终止事件无堆栈 | `render-process-gone` / `child-process-gone` 事件不含调用栈——主进程无法回溯一个已消失进程的栈 |
 | 绘制指标校正只覆盖 `BrowserWindow` | `WebContentsView`、`<webview>` 没有 `show` 事件，SDK 观测不到其可见时刻，绘制指标按原样上报。此外，从未被 `show()` 过的窗口，其 view 的 FCP / LCP 会被丢弃而非上报，见[高级配置 · 预热窗口的 FCP 与 LCP 校正](/zh/rum/sdk/electron/advanced-config#预热窗口的-fcp-与-lcp-校正) |

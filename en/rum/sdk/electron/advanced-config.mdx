@@ -30,7 +30,7 @@ await init({
 | `clientToken` | `string` | Yes | — | Client token |
 | `service` | `string` | Yes | — | Service name; must match the value used when uploading source maps |
 | `site` | `string` | No | `browser.flashcat.cloud` | Reporting site, used directly as the intake host. Self-hosted deployments set their own domain; for a plain-HTTP intake see [When a proxy is required](#when-a-proxy-is-required) |
-| `env` | `string` | No | — | Environment identifier such as `production` or `staging` |
+| `env` | `string` | No | — | Environment identifier such as `production` or `staging`. It currently enters the span envelope, which is not uploaded; main-process RUM events do not carry it. Configure the renderer separately in `flashcatRum.init()` |
 | `version` | `string` | No | — | Application version; must match the value used when uploading source maps |
 | `proxy` | `string` | No | — | Custom reporting endpoint, see [Self-hosted deployments and proxies](#self-hosted-deployments-and-proxies) |
 | `allowedWebViewHosts` | `string[]` | No | `[]` | **Additional** hosts allowed to report through the bridge. A window's own host is always allowed, so configure this only to accept events from third-party pages in a `<webview>` / `BrowserView` |
@@ -179,6 +179,40 @@ import { stopSession } from '@flashcatcloud/electron-sdk';
 stopSession();
 ```
 
+## Identify the signed-in user
+
+Call `setUser()` after sign-in so subsequent main-process events and bridged renderer events carry the same `usr` identity. Call `clearUser()` on sign-out; `getUser()` returns the current identity.
+
+```ts
+import { clearUser, getUser, setUser } from '@flashcatcloud/electron-sdk';
+
+setUser({
+  id: 'user-123',
+  name: 'Alice',
+  email: 'alice@example.com',
+});
+
+console.log(getUser()); // Returns a copy: { id, name, email }
+
+clearUser();
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | Non-empty string written to `usr.id` |
+| `name` | No | String written to `usr.name` |
+| `email` | No | String written to `usr.email` |
+
+The SDK accepts only these three fields. If `id` is missing or either optional field is not a string, it ignores the entire call and prints a warning. When a main-process identity exists, it **replaces** the renderer event's `id` / `name` / `email` as a unit instead of merging fields. `usr.anonymous_id` is always preserved so the same device remains identifiable across sign-in states.
+
+<Warning>
+Main-process `setUser()` covers main-process events and regular RUM events forwarded over the bridge, but it does not rewrite Session Replay segments uploaded directly by the renderer. With replay enabled, call renderer-side `flashcatRum.setUser()` / `flashcatRum.clearUser()` in the same sign-in and sign-out flow.
+</Warning>
+
+<Note>
+`clearUser()` affects subsequent events only; it does not rewrite data already reported. The SDK stores point-in-time identity history as plain text in `app.getPath('userData')/_dd_user_history`, allowing a native crash parsed on the next startup to retain the user who was signed in when it occurred. Protect the `userData` directory according to your local-data and privacy policy.
+</Note>
+
 ## Operation monitoring (preview)
 
 Track critical business workflows with paired start and end calls. The backend correlates them by `name` (and an optional `operationKey`) and emits `vital` events.
@@ -209,7 +243,7 @@ failOperation('upload', 'abandoned', { operationKey: 'cover_photo' });
 | `options.context` | Custom attributes merged into the event `context` |
 | `options.description` | Description written to `vital.description` |
 
-Because correlation happens on the backend, an operation **can start in one process and finish in the other** — for example `startOperation` when the renderer's checkout button is clicked, and `succeedOperation` once the main process has placed the order.
+These APIs are provided by the main-process `@flashcatcloud/electron-sdk` package. The currently required `@flashcatcloud/browser-rum` `0.0.7` does not expose matching Operation APIs. If a workflow starts in a renderer, use your application's own preload / IPC surface to call the main-process API, then call the matching completion method in the main process.
 
 <Warning>
 This API is in preview and its signatures may change before the stable release.
@@ -364,13 +398,16 @@ The built-in normalization treats the application root as the single anchor. Whe
 await init({
   // …
   normalizeStackPath: (absolutePath) => {
+    // The callback receives the raw frame URL before built-in normalization;
+    // normalize Windows separators first.
+    const framePath = absolutePath.replace(/\\/g, '/');
     // …/public/dist/renderer.js → /dist/renderer.js (swallow the intermediate public/ segment)
-    const emitted = /\/public(\/dist\/.+)$/.exec(absolutePath);
+    const emitted = /\/public(\/dist\/.+)$/.exec(framePath);
     if (emitted) {
       return emitted[1];
     }
     // a linked internal package, kept relative to the application root
-    const linked = /(\/node_modules\/@acme\/widgets\/dist\/.+)$/.exec(absolutePath);
+    const linked = /(\/node_modules\/@acme\/widgets\/dist\/.+)$/.exec(framePath);
     return linked ? linked[1] : undefined; // everything else → the built-in app:///
   },
 });
@@ -426,7 +463,7 @@ stack.replace(
 );
 ```
 
-When you do need custom mapping, prefer [`normalizeStackPath`](#custom-path-mapping): it receives an absolute path that is already unified across platforms, and it applies to both processes.
+When you do need custom mapping, prefer [`normalizeStackPath`](#custom-path-mapping), which applies to both processes. The callback receives the **raw frame URL before built-in processing**; it may contain `file://`, percent escapes, or Windows backslashes, so your mapping must handle the path forms your application emits.
 </Warning>
 
 <Note>

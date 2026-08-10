@@ -29,11 +29,11 @@ The first and third items only affect applications with Session Replay enabled; 
 
 ## How it works
 
-The main-process SDK is the **single exit point** for the whole pipeline. It does three things:
+The main-process SDK is the **single exit point** for regular RUM events (Session Replay segments are the exception). It does three things:
 
-1. Uses `dd-trace` to hook `require('electron')`, wrap `BrowserWindow`, and inject a preload script into every renderer process that exposes a global `DatadogEventBridge` object.
+1. Initializes `dd-trace` for main-process network tracing, then has the Electron SDK register its own preload script on every Electron `session`, exposing a global `DatadogEventBridge` object to renderers.
 2. The renderer's `@flashcatcloud/browser-rum` detects that bridge and sends its collected events back to the main process over IPC instead of uploading them itself.
-3. The main process enriches events from both sides — its own events get the full set of common attributes, while renderer events only have `session.id` / `application.id` overridden and `container` added — then buffers them to disk in batches and uploads them to `POST https://<site>/api/v2/rum`.
+3. The main process enriches events from both sides — its own events get the full set of common attributes, while renderer events have `session.id` / `application.id` overridden, `container` added, and their user identity replaced when the main process has one — then buffers them to disk in batches and uploads them to `POST https://<site>/api/v2/rum`.
 
 ```mermaid
 graph TB
@@ -80,7 +80,7 @@ npm install @flashcatcloud/browser-rum@^0.0.7
 
 ### Import the instrument entry point
 
-`@flashcatcloud/electron-sdk/instrument` must run **before any `electron` import**. It initializes `dd-trace`, which has to register its module hooks before `require('electron')` happens. Otherwise `BrowserWindow` preload injection never takes effect and renderer processes never receive the bridge object.
+`@flashcatcloud/electron-sdk/instrument` must run **before any `electron` import**. It installs the `dd-trace` module hooks and has the Electron SDK register its own bridge preload. The wrong order breaks main-process network tracing; after bundling it can also leave the instrument entry point or runtime dependencies out of the package.
 
 ```ts main.ts
 // Must be the first import in the file
@@ -153,7 +153,7 @@ See [Advanced configuration](/en/rum/sdk/electron/advanced-config) for the full 
 
 - Mark `dd-trace` and `@flashcatcloud/electron-sdk` as external so they stay runtime `require`s
 - Prepend the instrument initialization to the very top of the main-process entry chunk (**so you no longer need to write that import by hand**)
-- Copy the `dd-trace` preload script and the externalized dependencies into the build output's `node_modules`, so packaged applications (such as Electron Forge asars) can resolve them at runtime
+- Copy the externalized packages and their runtime dependencies into the build output's `node_modules`. The Electron SDK's own preload ships inside the copied SDK package, so packaged applications such as Electron Forge asars can resolve it at runtime
 
 Pick **one** that matches your build setup.
 
@@ -206,7 +206,7 @@ await esbuild.build({
 </Tabs>
 
 <Tip>
-With ESM output, static imports are evaluated before module code runs, so `dd-trace`'s hooks cannot intercept `import 'electron'`. All three plugins handle this by registering the preload directly through `session.defaultSession.registerPreloadScript()`, which is equivalent. No extra configuration is needed.
+With ESM output, static imports are evaluated before module code runs, so `dd-trace` cannot inject a preload by wrapping `BrowserWindow`. All three plugins use `createRequire()` to run the instrument entry point; instrument then registers the SDK's own preload by Electron `session`, so the bridge does not depend on `BrowserWindow` wrapping. No extra configuration is needed.
 </Tip>
 
 ## Renderer process integration
@@ -220,7 +220,6 @@ flashcatRum.init({
   applicationId: '<YOUR_APPLICATION_ID>',
   clientToken: '<YOUR_CLIENT_TOKEN>',
   service: 'my-electron-app',
-  site: 'browser.flashcat.cloud',
   env: 'production',
   version: '1.0.0',
   sessionSampleRate: 100,
@@ -231,7 +230,7 @@ flashcatRum.init({
 ```
 
 <Tip>
-Keep `applicationId`, `clientToken`, `service`, `env`, and `version` identical to the main-process `init()`. Otherwise the two sides land in different applications or versions and cannot be correlated in a single session.
+Keep `applicationId`, `clientToken`, `service`, `env`, and `version` aligned with the main process. Bridged renderer events adopt the main-process `applicationId` and `session.id`, but preserve the renderer's own `service`, `env`, and `version`; Session Replay also uploads directly with the renderer's credentials. A shared configuration keeps one application from splitting across dimensions.
 </Tip>
 
 ### The bridge needs no configuration
@@ -250,7 +249,7 @@ A window's own page therefore **always matches the allowlist**, and the bridge w
 
 ### What a broken bridge looks like
 
-The bridge fails because of a **missing preload injection**, not because of configuration — usually the main process has not integrated the SDK, or it is bundled without the matching [bundler plugin](#bundler-plugins), so the `instrument` entry point loses its "runs first" position.
+A broken bridge means **the SDK's own preload did not run**. Common causes are a main process that never executes `instrument`, or a bundle built without the matching [bundler plugin](#bundler-plugins), leaving out the instrument entry point, the SDK package, or one of its runtime dependencies. The Electron SDK registers the preload by `session`; it does not depend on `dd-trace` wrapping `BrowserWindow`.
 
 | Behavior | Bridge working | Bridge broken |
 |----------|----------------|---------------|
@@ -258,7 +257,6 @@ The bridge fails because of a **missing preload injection**, not because of conf
 | Upload path | Batched by the main process | Each renderer uploads directly to the intake |
 | Session | Shares the main-process `session.id` | Renderer generates its own session |
 | Offline retry | Buffered to disk under the main process `userData`, resent after restart | Relies on the browser-side in-memory retry queue: covers a genuine outage only, lost when the process exits |
-| User activity | Renderer clicks extend the main-process session | No effect on each other |
 
 <Tip>
 `container.source` is a reliable signal: when renderer events carry it, the preload was injected and the events really did travel through the main process.
@@ -290,6 +288,17 @@ flashcatRum.init({
 });
 ```
 
+The Browser SDK's public `init()` does not accept `site`. SaaS Session Replay uploads to `browser.flashcat.cloud` by default. For a self-hosted deployment, configure `proxy` in the **renderer** so replay segments are forwarded to your intake:
+
+```ts renderer.ts
+flashcatRum.init({
+  // …the rest of the configuration is unchanged
+  proxy: 'https://rum-proxy.example.internal/forward',
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+});
+```
+
 <Note>
 `sessionReplaySampleRate` defaults to `0`, so turning on `sessionReplayDirectUpload` alone records nothing. Set both.
 </Note>
@@ -305,7 +314,7 @@ Once it is on, replay data follows a **different path** from everything else: re
 To record a replay, the renderer does two things that a Content Security Policy blocks by default:
 
 1. Creates a Worker from a `blob:` URL — segments are compressed inside that Worker.
-2. Sends requests straight to the intake — compressed segments go to `POST https://<site>/api/v2/rum`.
+2. Sends requests straight to the Browser SDK's default intake, or to the renderer `proxy` when configured.
 
 Electron applications commonly ship a CSP for security, for example `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'">`. A policy like that blocks both of the above, and **the whole replay pipeline fails silently**.
 
@@ -333,7 +342,7 @@ This has nothing to do with how the page is loaded. Serving the page over `http:
 ">
 ```
 
-Put your actual intake origin in `connect-src`: `https://browser.flashcat.cloud` for SaaS, your own `site` for a self-hosted deployment, or the `proxy` origin if you configured one. If your CSP is not written in a `<meta>` tag but delivered by a server response header or by `session.webRequest.onHeadersReceived` in the main process, apply the same allowances there.
+Put the renderer's actual direct-upload origin in `connect-src`: `https://browser.flashcat.cloud` for SaaS, or the Browser SDK `proxy` origin for a self-hosted deployment. If your CSP is not written in a `<meta>` tag but delivered by a server response header or by `session.webRequest.onHeadersReceived` in the main process, apply the same allowances there.
 
 **How to confirm it is open**: call `flashcatRum.getSessionReplayLink()` in the renderer. A link containing `error-type=replay-not-started` means recording never started; when it is working the call returns a replay URL you can open directly.
 
