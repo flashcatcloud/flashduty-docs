@@ -1,112 +1,91 @@
 ---
 title: "Electron SDK compatibility"
-description: "Review supported Electron versions, operating systems, bundlers, module formats, and current limits for the Electron RUM SDK"
-keywords: ["RUM", "Electron SDK", "compatibility", "bundlers", "known limits"]
+description: "Review the Electron versions, operating systems, bundlers, and current limitations supported by the Electron RUM SDK"
+keywords: ["RUM", "Electron SDK", "compatibility", "bundlers", "known limitations"]
 ---
 
-This page describes the Electron SDK support scope and current limits so you can confirm whether your project meets the requirements before integration.
+Before integration, confirm that your Electron version and build setup are supported.
 
-## Support scope
+## Supported environments
 
 | Item | Support |
 |------|---------|
-| Electron version | 39 and later (`peerDependencies: electron >= 39`) |
+| Electron | Version 39 or later |
 | Operating systems | macOS, Windows, Linux |
-| Main-process package | `@flashcatcloud/electron-sdk` |
-| Renderer package | `@flashcatcloud/browser-rum` (the same package as the Web SDK) |
-| Module formats | Both CommonJS and ESM builds are shipped |
-| RUM data source | Main-process events carry `source: "electron"`; renderer events keep `source: "browser"` with `container.source: "electron"` |
-| Reporting | `POST https://<site>/api/v2/rum` |
+| Main-process SDK | `@flashcatcloud/electron-sdk` |
+| Renderer SDK | `@flashcatcloud/browser-rum` 0.0.7 or later |
+| Module formats | CommonJS, ESM |
+| Regular RUM upload | `POST https://<site>/api/v2/rum`, or a custom forwarding endpoint |
 
 ## Bundlers
 
-| Tool | Support | Notes |
-|------|---------|-------|
-| Vite / electron-vite / Forge + Vite | Plugin provided | `@flashcatcloud/electron-sdk/vite-plugin` |
-| Webpack / Forge + Webpack | Plugin provided | `@flashcatcloud/electron-sdk/webpack-plugin` |
-| esbuild | Plugin provided | `@flashcatcloud/electron-sdk/esbuild-plugin` |
-| No main-process bundling (running `.js` directly) | Supported | Write `import '@flashcatcloud/electron-sdk/instrument'` as the first import |
-| Other bundlers | No plugin | You must guarantee the instrument entry point runs before `require('electron')` and keep `dd-trace` and the SDK external |
+| Build setup | Support | Integration method |
+|-------------|---------|--------------------|
+| Unbundled main process | Supported | Make `@flashcatcloud/electron-sdk/instrument` the first import |
+| Vite / electron-vite / Forge + Vite | Supported | Use `@flashcatcloud/electron-sdk/vite-plugin` |
+| Webpack / Forge + Webpack | Supported | Use `@flashcatcloud/electron-sdk/webpack-plugin` |
+| esbuild | Supported | Use `@flashcatcloud/electron-sdk/esbuild-plugin` |
+| Other bundlers | Requires custom integration | Ensure instrument runs before Electron and keep `dd-trace` plus the Electron SDK as runtime dependencies |
 
-<Warning>
-When the main process is bundled, the matching plugin is **required**. It preserves the instrument entry order, keeps `dd-trace` and the SDK as runtime dependencies, and copies the SDK's own preload into the packaged output; missing any of these steps can break main-process network tracing or the renderer bridge. The Electron SDK registers its preload per `session`; this does not depend on `dd-trace` wrapping `BrowserWindow`.
-</Warning>
+When the main process is bundled, use the matching plugin. The plugin preserves instrumentation order, runtime dependencies, and the bridge preload.
 
 ## Renderer page loading
 
-A window's own host is always on the bridge allowlist, so **every loading method works out of the box** with no configuration.
+The page loaded by the current window does not need a host allowlist entry.
 
-| Loading method | Bridge available | Notes |
-|----------------|------------------|-------|
-| `loadURL('http://localhost:<port>')` | Yes | No configuration needed |
-| `loadURL('https://<host>')` | Yes | No configuration needed |
-| Custom protocol (`protocol.handle()` + `loadURL('app://…')`) | Yes | No configuration needed |
-| `loadFile()` (`file://`) | Yes | `location.hostname` is an empty string, the allowlist becomes `[""]`, and it still self-matches |
-| Third-party pages in `<webview>` / `BrowserView` | Needs configuration | Add the other host to `allowedWebViewHosts`; matching supports subdomain suffixes |
+| Loading method | Support | Notes |
+|----------------|---------|-------|
+| `loadURL('http://localhost:<port>')` | Supported | Suitable for a local development server |
+| `loadURL('https://<host>')` | Supported | The current page is automatically allowed to use the bridge |
+| Custom protocol such as `app://` | Supported | The current page is automatically allowed to use the bridge |
+| `loadFile()` / `file://` | Supported | No additional configuration |
+| Third-party page in `<webview>` / `BrowserView` | Requires configuration | Add the third-party host to `allowedWebViewHosts` |
 
-## Automatic collection
+## Feature support
 
 | Capability | Support | Notes |
 |------------|---------|-------|
-| Main-process session | Supported | Persisted at `userData/_dd_s`, reused after restart |
-| Main-process view | Supported | One view per main-process instance |
-| Node uncaught exceptions / promise rejections | Supported | `process.on('uncaughtException' \| 'unhandledRejection')` |
-| Main-process HTTP requests | Supported | Traced by `dd-trace` for `http`/`https`, `fetch`, and `net.fetch`, converted to `resource` |
-| Signed-in user identity | Supported | The main process exposes `setUser` / `getUser` / `clearUser` and attaches identity to main-process and bridged renderer events |
-| Native crash capture | Supported | Electron `crashReporter` writes minidumps, parsed and uploaded on the next startup |
-| Renderer / child process terminations | Supported | Listens for `render-process-gone` / `child-process-gone`, covering terminations that produce no dump |
-| Native crash symbolication | Supported | Requires uploading Breakpad symbol files, see [Upload native crash symbols](/en/rum/sdk/electron/advanced-config#upload-native-crash-symbols) |
-| Renderer view / action / resource / error / Web Vitals | Supported | Collected by `@flashcatcloud/browser-rum` |
-| Error stack path normalization | Supported | Stacks from both processes are rewritten to `app:///<path relative to the app root>`, so source maps need not be uploaded against installation paths; disable with `normalizeStackPaths: false` |
-| FCP / LCP correction for pre-warmed windows | Supported | Paint metrics of a `BrowserWindow` created hidden are rebased onto its first visible moment; disable with `correctPrewarmedViewTimings: false` |
-| Session Replay | Supported | Recorded and uploaded directly by the renderer; requires `sessionReplayDirectUpload` and a CSP that allows it, see [Session Replay](/en/rum/sdk/electron/sdk-integration#session-replay) |
+| Main-process sessions and view | Supported | The SDK maintains a session and fixed main-process view |
+| Main-process JavaScript errors | Supported | Automatically captures uncaught exceptions and unhandled Promise rejections |
+| Native crashes | Supported | Writes a minidump and reports it on the next application start |
+| Renderer and child process termination | Supported | Captures `render-process-gone` and `child-process-gone` |
+| Main-process network requests | Supported | Captures `http`, `https`, `fetch`, and `net.fetch` |
+| Renderer page experience | Supported | Matches Web SDK view, action, resource, error, and Web Vitals collection |
+| Session Replay | Supported | Requires direct renderer upload and a compatible CSP |
+| JavaScript source maps | Supported | Applies to main-process and renderer errors |
+| Native crash symbolication | Supported | Requires matching Breakpad symbol files |
 
-## Current limits
+## Current limitations
 
-| Limit | Description |
-|-------|-------------|
-| Native crash symbolication needs symbols uploaded | Native crash frames match Breakpad symbol files on the module id. Without an upload they stay as **raw addresses**, and **nothing reports an error or a warning**. Re-upload on every Electron upgrade, and for every platform and architecture you ship — see [Upload native crash symbols](/en/rum/sdk/electron/advanced-config#upload-native-crash-symbols) |
-| Code outside the app root is not normalized | Stack path normalization is anchored on `app.getAppPath()`, so native modules under `app.asar.unpacked` and scripts loaded from outside the application root are reported as they are. Source maps for those files have to be aligned with their real paths |
-| `source` on renderer events | Even with the bridge working, renderer events keep `source: browser` and are attributed through `container.source: electron`. Filter a whole application with `source:electron OR container.source:electron` |
-| Session Replay depends on a permissive CSP | Recording creates a blob Worker in the renderer and connects straight to the intake. If the page CSP does not allow `worker-src blob:` and the intake origin, replay fails **completely silently**: `session.has_replay` stays `0`, no segment arrives, and the only trace is one line in the renderer console. See [CSP requirements for Session Replay](/en/rum/sdk/electron/sdk-integration#csp-requirements-for-session-replay) |
-| Replay segments are dropped when the intake is unreachable | Replay segments are uploaded directly by the renderer and do not use the main process's disk-backed retry. A genuine outage (`navigator.onLine === false`) queues segments in an in-memory retry queue and resends them on recovery; but when the machine is online and the intake is not reachable — a blocked request, a down intake, a DNS or proxy failure — segments are dropped immediately and never resent, and the first segment afterwards carries no full snapshot, so that stretch of the replay renders garbled. The retry queue is not written to disk and does not survive process exit. Main-process events are unaffected. See [Replay segments are dropped when the intake is unreachable](/en/rum/sdk/electron/sdk-integration#replay-segments-are-dropped-when-the-intake-is-unreachable) |
-| APM / distributed tracing | Flashduty has no span intake today. IPC and child-process command spans collected by `dd-trace` are dropped locally; only HTTP spans become RUM `resource` events |
-| Log reporting | Log-type events sent over the bridge from renderers are not forwarded to the backend in this version |
-| Main-process Web Vitals | The main process is a Node.js runtime with no DOM or rendering pipeline, so it produces no LCP / INP / CLS, long task, or user action data. The console hides the performance section for main-process views |
-| Main-process RUM has no `env` | `env` is currently written only into the span envelope that is not uploaded; it is not attached to main-process RUM events. Renderer events keep the `env` from `flashcatRum.init()` |
-| No renderer Operation API | The currently required `@flashcatcloud/browser-rum` `0.0.7` does not expose `startOperation` / `succeedOperation` / `failOperation`. Renderer-triggered workflows must call the main-process API through the application's own preload / IPC surface |
-| Session renewal signal | Only renderer `webContents` input events `mouseDown`, `mouseWheel`, `keyDown`, and `rawKeyDown` renew the session. Background activity does not; RUM events after expiry are discarded until the next valid input creates a new session |
-| Upload scheme fixed to HTTPS | The `https://` in the `https://<site>/api/v2/rum` template is hardcoded. If a self-hosted intake serves plain HTTP only, changing `site` does not help — use `proxy`. See [Advanced configuration](/en/rum/sdk/electron/advanced-config#when-a-proxy-is-required) |
-| No stack on termination events | `render-process-gone` / `child-process-gone` events carry no call stack — the main process cannot unwind a process that is already gone |
-| Paint metric correction covers `BrowserWindow` only | `WebContentsView` and `<webview>` have no `show` event, so the SDK cannot observe when they become visible and their paint metrics are reported as they are. In addition, the FCP / LCP of a view whose window was never `show()`n are discarded rather than reported — see [Advanced configuration · FCP and LCP of pre-warmed windows](/en/rum/sdk/electron/advanced-config#fcp-and-lcp-of-pre-warmed-windows) |
-| Main-process view counters | `view.action.count` and its siblings count main-process events only, not events bridged from renderers |
+| Limitation | Impact |
+|------------|--------|
+| Session Replay bypasses the main process | Configure `sessionReplayDirectUpload`, CSP, and any self-hosted endpoint in the renderer |
+| No full APM pipeline | Only main-process HTTP spans become RUM resources; IPC and child-process spans are not uploaded |
+| Logs are not forwarded | Log events sent through the renderer bridge are not uploaded as RUM data |
+| No main-process Web Vitals | LCP, INP, CLS, long tasks, and user actions come from renderers |
+| Main-process RUM events do not contain `env` | Renderer events retain the `env` set in `flashcatRum.init()` |
+| Operation APIs are main-process only | Renderer workflows must call the main-process APIs through your application's preload / IPC surface |
+| Pre-created-window correction covers only `BrowserWindow` | FCP and LCP from `WebContentsView` and `<webview>` are not corrected |
+| Native crashes require symbols | Crash events are still reported without symbols, but native frames remain raw addresses |
 
-## Symbolication compatibility
-
-| Frame type | Resolution | Files to upload |
-|------------|------------|-----------------|
-| Renderer JavaScript | Source maps restore the original file, function name, and line/column; the SDK normalizes stack paths to `app:///…` by default | `.map` files produced by the build |
-| Main-process JavaScript | Resolved with source maps; the SDK converts main-process stacks into the frame format the backend parses, and normalizes their paths too | `.map` files for the main-process bundle |
-| Native crash frames (C/C++) | Matched against Breakpad symbol files by module id, resolving function name, file and line; resolved when you open the crash, so a later upload still applies | A `.sym` per module, including Electron's official symbol bundle |
-
-See [Advanced configuration · Upload source maps](/en/rum/sdk/electron/advanced-config#upload-source-maps) for the upload procedure.
-
-<Tip>
-The `service` and `version` values used at upload time must exactly match the ones passed to the SDK. Otherwise the console receives error events but cannot map stack frames back to source — and **nothing reports an error**. Note that a renderer event takes its `version` from `flashcatRum.init()` only; the one passed to the main-process `init()` does not apply, see [Advanced configuration · The version must match the renderer process](/en/rum/sdk/electron/advanced-config#the-version-must-match-the-renderer-process). Make source map upload part of your release build.
-</Tip>
+See [Electron SDK troubleshooting](/en/rum/sdk/electron/faq) for symptom-based checks.
 
 ## Related pages
 
-<CardGroup cols={3}>
+<CardGroup cols={2}>
 <Card title="SDK integration" icon="plug" href="/en/rum/sdk/electron/sdk-integration">
-Integrate both the main process and renderer processes.
+Instrument the main and renderer processes.
 </Card>
 
 <Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/electron/advanced-config">
-Configure batching, proxy, manual reporting, and source map upload.
+Configure custom upload endpoints and public APIs.
 </Card>
 
 <Card title="Data collection" icon="database" href="/en/rum/sdk/electron/data-collection">
-See which event types and fields each process contributes.
+Learn what each process collects.
+</Card>
+
+<Card title="Error symbolication" icon="bug" href="/en/rum/sdk/electron/error-symbolication">
+Restore JavaScript and native crash stacks.
 </Card>
 </CardGroup>
