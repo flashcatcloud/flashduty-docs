@@ -136,7 +136,46 @@ up{job="node"}
 在 PromQL 中定义一个可复用的 threshold 参数，然后为 Critical、Warning 和 Info 填写不同的参数值。这样只需维护一条查询，就能表达多个告警级别。
 </Tip>
 
-### 5. 覆盖继承规则
+### 5. 导入告警规则
+
+除了逐条创建，你还可以在分组的 **规则** 标签页点击 **导入规则**，上传 YAML 文件批量导入到当前分组。系统会自动识别三种来源格式：
+
+| 来源格式 | 说明 |
+| --- | --- |
+| **Entity Alert 规则包** | 从其他分组或租户导出的规则包，保留完整规则配置。规则包记录的身份标签必须与目标实体类别一致，否则无法导入 |
+| **Prometheus Rules** | 标准 Prometheus 告警规则文件（`groups` 列表、`rules` 列表或单条规则），导入时按下文的转换规则处理 |
+| **Prometheus Operator** | PrometheusRule CRD（`spec.groups`），转换方式与 Prometheus Rules 相同 |
+
+限制与要求：
+
+- 一次只能上传一个不超过 1 MB 的 `.yaml` 或 `.yml` 文件，单次最多导入 100 条规则
+- 不支持 recording rule（只定义 `record` 的规则会被忽略）；同一条规则不能同时配置 `alert` 和 `record`
+- 规则标签的值不能包含 `{{ }}` 动态模板；PromQL 必须返回瞬时向量，比较表达式不能使用 `bool` 修饰符
+- 从 Prometheus 格式导入时，PromQL 的每条结果都必须包含目标实体的身份标签，否则告警无法关联到实体
+
+上传后系统会先执行 **预检**，逐条展示转换结果和名称冲突，不会立即写入。每条规则会被标记为以下状态之一：
+
+| 预检状态 | 含义 |
+| --- | --- |
+| **可导入** | 校验通过，可以写入 |
+| **创建副本** | 与当前分组已有规则同名，将使用带序号的新名称创建 |
+| **跳过** | 与当前分组已有规则同名，按所选策略保留现有规则 |
+| **已忽略** | recording rule 等不支持的规则，不会导入 |
+| **校验失败** | 缺少 `alert` 或 `expr`、PromQL 不合法等问题，无法导入 |
+
+上传文件后可以选择 **同名规则处理方式**：**跳过同名规则**（默认，保留目标分组中的现有规则）或 **创建副本**（自动使用带序号的新名称），切换后预检会自动重新执行。Entity Alert 规则包采用严格校验，只要存在校验失败的规则就无法提交导入；Prometheus 格式允许略过失败条目，仅导入可导入的规则。
+
+从 Prometheus 格式导入时，系统按以下规则转换，并在预检结果中标注降级项：
+
+- `labels.severity` 映射告警级别：`page`、`p1`、`error`、`critical` 转为 Critical，`info` 转为 Info，其余取值转为 Warning；使用 `{{ }}` 动态取值的 severity 统一按 Warning 转换
+- 未提供 `interval` 时执行周期默认 1 分钟；`for` 折算为连续命中次数，`keep_firing_for` 折算为连续恢复次数
+- 与实体身份标签同名的规则标签会被忽略，避免干扰实体识别
+
+<Warning>
+为避免导入后立即产生告警，所有导入规则都会保持 **停用**，并自动在规则列表中选中。请检查转换结果后，再通过批量启用让规则生效。
+</Warning>
+
+### 6. 覆盖继承规则
 
 如果子分组需要不同阈值，在子分组的 **继承规则** 列表中选择 **覆盖继承规则**。你可以调整：
 
@@ -147,6 +186,69 @@ up{job="node"}
 查询文本、执行周期、恢复方式和重复通知继续继承上级规则。如果这些执行方式也需要不同，请在当前分组新建一条规则。
 
 保存覆盖配置前，页面会展示最终生效配置和查询预览。清除覆盖后，当前分组会恢复使用上级配置。
+
+### 7. 批量管理规则
+
+在本组的 **规则** 标签页勾选本组规则后，可以执行批量操作，单次最多选择 100 条：
+
+- **批量启用 / 批量停用**：确认后统一变更启用状态。批量停用会异步关闭相关活跃告警，重新启用不会恢复已关闭的告警
+- **导出规则**：将选中的规则导出为 Entity Alert 规则包（`entity-alert-rules.yaml`），单次最多导出 100 条。导出的规则包可以在其他分组或租户通过 **导入规则** 重新导入，形成完整的迁移路径
+
+规则列表中的 **启用状态** 开关可以单独启用或停用一条规则；停用前需要确认，相关活跃告警会异步关闭。
+
+<Note>
+勾选、批量启停、导入和导出都需要实体树管理权限和当前分组的管理权限。没有管理权限的规则不能参与批量启停，但仍可随选中规则一起导出。
+</Note>
+
+## 规则名称与注解模板变量
+
+规则名称和注解支持 Go `text/template` 语法。模板在告警引擎侧、每次产生告警事件时渲染，可以引用当次评估的标签、数值和实体上下文。渲染失败时，对应字段会显示 `<error expanding template: ...>`，你可以在规则的执行错误摘要中查看原因。
+
+### 内置变量
+
+| 变量 | 类型 | 说明 |
+| --- | --- | --- |
+| `$labels` | `map[string]string` | 告警标签。用 `$labels.<name>` 或 `index $labels "<name>"` 读取单个标签，标签不存在时返回空字符串 |
+| `$value` | `float64` | 当次评估的告警值 |
+| `.Labels` | `map[string]any` | 与 `$labels` 相同 |
+| `.Value` | `float64` | 与 `$value` 相同 |
+| `.EntityAlert` | `map[string]any` | 实体告警上下文，可用字段见下表 |
+
+### `.EntityAlert` 字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `.EntityAlert.entity_key` | 实体标识 |
+| `.EntityAlert.entity_definition_id` / `.EntityAlert.entity_definition_name` | 实体类别 ID 和名称 |
+| `.EntityAlert.rule_id` | 规则 ID |
+| `.EntityAlert.name` | 渲染后的规则名称，仅注解模板可用，规则名称不能引用自身 |
+| `.EntityAlert.event_kind` | 事件类型：`firing`、`severity_changed`、`repeat`、`recovery` 或 `closed` |
+| `.EntityAlert.value` | 当次评估的告警值，与 `$value` 相同 |
+| `.EntityAlert.promql` | 实际生效的告警 PromQL |
+| `.EntityAlert.recovery_promql` | 实际生效的恢复 PromQL；未配置独立恢复查询时为空 |
+| `.EntityAlert.query_at_ms` | 查询时间，Unix 毫秒时间戳 |
+| `.EntityAlert.policy_scope_group_id` | 实际生效策略所在的分组 ID |
+| `.EntityAlert.account_id` | 租户 ID |
+| `.EntityAlert.data_source_name` / `.EntityAlert.data_source_type` | 数据源名称和类型 |
+| `.EntityAlert.entity_multi_value_fields` | 多值标签的取值集合 |
+
+多值标签在 `.EntityAlert.entity_multi_value_fields` 中以集合形式提供，可配合 `first`、`last`、`has`、`join` 函数读取：
+
+```gotemplate
+{{ join "," (index .EntityAlert.entity_multi_value_fields "biz_group") }}
+```
+
+规则名称示例：
+
+```gotemplate
+节点 {{ $labels.instance }} CPU 使用率 {{ printf "%.1f" $value }}%
+```
+
+注解示例（每个注解字段单独是一段模板）：
+
+```gotemplate
+https://example.com/runbooks/node-cpu?entity={{ .EntityAlert.entity_key }}
+```
 
 ## 查看实体和告警
 
@@ -178,6 +280,7 @@ up{job="node"}
 - **修改身份标签**：页面会先预览身份迁移及恢复查询的影响。确认后，旧身份关联的活跃告警会结束，新身份会重新发现
 - **修改多值标签**：实体会重新分类，相关告警会按新配置重新评估
 - **修改分组条件或规则覆盖**：实体的有效范围或策略可能变化，当前告警可能结束并按新配置重新评估
+- **修改本组规则**：保存前页面会预览本次修改对后代节点覆盖配置的影响，并列出受影响的覆盖数量。如果修改导致部分级别覆盖或参数覆盖失效，对话框会要求你确认后永久清理；清理后的覆盖配置无法恢复
 - **停用或删除规则**：相关活跃告警会异步结束；重新启用不会恢复已经结束的告警
 - **删除实体类别或分组**：必须先清理页面提示的依赖项，受影响的活跃告警会异步结束
 
