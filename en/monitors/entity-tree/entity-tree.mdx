@@ -136,7 +136,46 @@ The rule is created in the current group and applies automatically to that group
 Define a reusable threshold parameter in PromQL, then enter different values for Critical, Warning, and Info. This lets one query express multiple alert severities.
 </Tip>
 
-### 5. Override an inherited rule
+### 5. Import alert rules
+
+Besides creating rules one by one, you can click **Import rules** on a group's **Rules** tab to upload a YAML file and import rules into the current group in bulk. Monitors automatically detects three source formats:
+
+| Source format | Description |
+| --- | --- |
+| **Entity Alert rule bundle** | A bundle exported from another group or account, preserving the full rule configuration. The identity labels recorded in the bundle must match the target entity definition, otherwise the import is rejected |
+| **Prometheus Rules** | A standard Prometheus alert rules file (a `groups` list, a `rules` list, or a single rule), converted during import as described below |
+| **Prometheus Operator** | A PrometheusRule CRD (`spec.groups`), converted the same way as Prometheus Rules |
+
+Limits and requirements:
+
+- Upload one `.yaml` or `.yml` file of at most 1 MB at a time, with at most 100 rules per import
+- Recording rules are not supported (rules that define only `record` are ignored); a rule must not define both `alert` and `record`
+- Rule label values must not contain `{{ }}` dynamic templates; PromQL must return an instant vector, and comparisons must not use the `bool` modifier
+- When importing from Prometheus formats, every PromQL result must contain the target entity's identity labels, otherwise alerts cannot be associated with entities
+
+After the upload, Monitors runs a **precheck** that shows the conversion result and name conflicts for each rule without writing anything. Each rule is marked with one of these statuses:
+
+| Precheck status | Meaning |
+| --- | --- |
+| **Ready to import** | Validation passed; the rule can be written |
+| **Create copy** | A rule with the same name exists in the current group; the rule will be created with a numbered new name |
+| **Skipped** | A rule with the same name exists in the current group and the existing rule is kept per the selected policy |
+| **Ignored** | An unsupported rule, such as a recording rule; it will not be imported |
+| **Validation failed** | Issues such as a missing `alert` or `expr`, or invalid PromQL; the rule cannot be imported |
+
+After uploading a file, you can choose how to handle **rules with duplicate names**: **Skip rules with the same name** (default, keeps the existing rules in the target group) or **Create copy** (automatically uses a numbered new name); switching the policy reruns the precheck. Entity Alert rule bundles are validated strictly: if any rule fails validation, the import cannot be submitted. Prometheus formats allow skipping the failed entries and importing only the rules that are ready.
+
+When importing from Prometheus formats, Monitors converts rules as follows and flags every downgrade in the precheck result:
+
+- `labels.severity` maps to the alert severity: `page`, `p1`, `error`, and `critical` become Critical, `info` becomes Info, and any other value becomes Warning; a severity that uses `{{ }}` dynamic values is converted to Warning
+- Without an `interval`, the evaluation schedule defaults to 1 minute; `for` is converted to consecutive hit counts, and `keep_firing_for` to consecutive recovery counts
+- Rule labels that share a name with an entity identity label are ignored so they do not interfere with entity identification
+
+<Warning>
+To prevent imported rules from alerting immediately, every imported rule stays **disabled** and is automatically selected in the rule list. Review the conversion results, then use batch enable to activate them.
+</Warning>
+
+### 6. Override an inherited rule
 
 When a child group needs different thresholds, find the rule under **Inherited rules** and select **Override inherited rule**. You can change:
 
@@ -147,6 +186,69 @@ When a child group needs different thresholds, find the rule under **Inherited r
 The query text, evaluation schedule, recovery mode, and repeat notifications continue to inherit from the parent rule. If those execution settings must differ, create a new rule in the current group.
 
 Before saving, the page shows the final effective configuration and a query preview. Removing the override restores the parent configuration for the current group.
+
+### 7. Manage rules in bulk
+
+Select rules in this group on the **Rules** tab to run bulk operations. You can select at most 100 rules at a time:
+
+- **Batch enable / batch disable**: Changes the enablement of all selected rules after confirmation. Batch disabling ends related active alerts asynchronously, and re-enabling does not reopen ended alerts
+- **Export rules**: Exports the selected rules as an Entity Alert rule bundle (`entity-alert-rules.yaml`), at most 100 rules per export. You can re-import the bundle into another group or account with **Import rules**, which forms a complete migration path
+
+The **Enablement** switch in the rule list enables or disables a single rule. Disabling requires confirmation, and related active alerts end asynchronously.
+
+<Note>
+Selection, batch enable/disable, import, and export all require Entity Tree management permission and management access to the current group. Rules you cannot manage cannot join batch enable/disable, but they can still be exported with the other selected rules.
+</Note>
+
+## Rule name and annotation template variables
+
+Rule names and annotations support Go `text/template` syntax. Templates are rendered on the alert engine each time an alert event is produced, so they can reference the labels, value, and entity context of that evaluation. If rendering fails, the field shows `<error expanding template: ...>`, and you can find the reason in the rule's execution error summary.
+
+### Built-in variables
+
+| Variable | Type | Description |
+| --- | --- | --- |
+| `$labels` | `map[string]string` | Alert labels. Read a single label with `$labels.<name>` or `index $labels "<name>"`; a missing label returns an empty string |
+| `$value` | `float64` | The alert value of the current evaluation |
+| `.Labels` | `map[string]any` | Same as `$labels` |
+| `.Value` | `float64` | Same as `$value` |
+| `.EntityAlert` | `map[string]any` | Entity alert context; available fields are listed below |
+
+### `.EntityAlert` fields
+
+| Field | Description |
+| --- | --- |
+| `.EntityAlert.entity_key` | The entity key |
+| `.EntityAlert.entity_definition_id` / `.EntityAlert.entity_definition_name` | Entity definition ID and name |
+| `.EntityAlert.rule_id` | Rule ID |
+| `.EntityAlert.name` | The rendered rule name. Available only in annotation templates; a rule name cannot reference itself |
+| `.EntityAlert.event_kind` | Event type: `firing`, `severity_changed`, `repeat`, `recovery`, or `closed` |
+| `.EntityAlert.value` | The alert value of the current evaluation, same as `$value` |
+| `.EntityAlert.promql` | The effective alert PromQL |
+| `.EntityAlert.recovery_promql` | The effective recovery PromQL; empty when no separate recovery query is configured |
+| `.EntityAlert.query_at_ms` | Query time as a Unix timestamp in milliseconds |
+| `.EntityAlert.policy_scope_group_id` | ID of the group whose policy actually applies |
+| `.EntityAlert.account_id` | Account ID |
+| `.EntityAlert.data_source_name` / `.EntityAlert.data_source_type` | Data source name and type |
+| `.EntityAlert.entity_multi_value_fields` | Value sets of multi-value labels |
+
+Multi-value labels are provided as sets under `.EntityAlert.entity_multi_value_fields`. Use the `first`, `last`, `has`, and `join` functions to read them:
+
+```gotemplate
+{{ join "," (index .EntityAlert.entity_multi_value_fields "biz_group") }}
+```
+
+Rule name example:
+
+```gotemplate
+Node {{ $labels.instance }} CPU usage {{ printf "%.1f" $value }}%
+```
+
+Annotation example (each annotation field is its own template):
+
+```gotemplate
+https://example.com/runbooks/node-cpu?entity={{ .EntityAlert.entity_key }}
+```
 
 ## Inspect entities and alerts
 
@@ -178,6 +280,7 @@ The following operations can change entity identity, group scope, or alert lifec
 - **Changing identity labels:** The page first previews the identity migration and recovery-query impact. After confirmation, active alerts for old identities end and new identities are discovered
 - **Changing multi-value labels:** Entities are reclassified and related alerts are evaluated again with the new configuration
 - **Changing group conditions or rule overrides:** Effective entity scope or policy can change, so current alerts may end and be evaluated again
+- **Changing a rule in this group:** Before saving, the page previews the impact on override configurations in descendant nodes and lists how many overrides are affected. If the change invalidates severity or parameter overrides, the dialog asks you to confirm their permanent removal; removed override configurations cannot be recovered
 - **Disabling or deleting a rule:** Related active alerts end asynchronously. Re-enabling the rule does not reopen ended alerts
 - **Deleting an entity definition or group:** You must first remove the dependencies shown in the UI. Affected active alerts end asynchronously
 
