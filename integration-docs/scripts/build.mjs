@@ -268,6 +268,12 @@ function mdxToMarkdown(content) {
   let output = convertAnchorSpans(removeHiddenBlocks(stripFrontmatter(content)));
 
   output = convertDirectiveContainers(convertCallouts(convertCards(convertAccordions(output))))
+    // Counterpart to removeHiddenBlocks: a `{/* console: ... */}` block is an MDX
+    // comment, so the docs site renders nothing, while the console gets its
+    // contents. Use it for text that only makes sense inside the product, such
+    // as a value the console substitutes per deployment. Must run before the
+    // generic comment strip below, which would otherwise discard it.
+    .replace(/{\s*\/\*\s*console:([\s\S]*?)\*\/\s*}/g, '$1')
     .replace(/{\s*\/\*[\s\S]*?\*\/\s*}/g, '')
     .replace(/^\s*import\s+.*$/gm, '')
     .replace(/^\s*export\s+.*$/gm, '')
