@@ -27,7 +27,7 @@ sidebarTitle: Agent
 Delegation does not make you wait: after AI SRE hands a task to a remote agent, the conversation continues immediately, so you can keep working or delegate several tasks at once. When the remote agent finishes, its result appears in the conversation as a new message. Each A2A delegation appears in the conversation stream as a **task card** carrying an `A2A` badge, showing the remote agent name, task intent, run status (initializing / in progress / completed / failed / interrupted), and usage metrics such as tool call count, tokens, and elapsed time. Click the card to view the full delegation trace in the right-hand panel.
 
 <Tip>
-**Instructions are the agent-selection signal.** Before delegating, AI SRE sees a list of available agents where each entry is `name: instructions`. Do not treat this as one line of display copy; use the form's multi-line editor to write prescriptive guidance (for example, "USE THIS FIRST for …" or "prefer-over-X when …") that clearly states **when to prefer this agent, what it excels at, and what it is not suited for**. The more precise the instructions, the better AI SRE can delegate the right task to the right agent.
+**Instructions have two levels and act as the agent-selection signal.** Before delegating, AI SRE sees a list of available agents where each entry is just `name: summary` — the summary comes from a `summary:` line at the top of the instructions (if omitted, the beginning of the body is excerpted automatically). AI SRE uses it to decide **whether and when** to delegate to this agent, so state clearly when to prefer it, what it excels at, and what it is not suited for. The body that follows the summary is not kept in the list — it is delivered to AI SRE in full only the **first time it delegates to this agent**, so you can write it as long and detailed as needed (procedures, hard rules, examples) without slowing down everyday conversations. See "[Writing Instructions](#writing-instructions)" below for the format.
 </Tip>
 
 The A2A agent list and management entry point are on the **Plugins → Agents** page (menu tab labeled **Agents**).
@@ -71,7 +71,7 @@ On the A2A Agents list page, click **Add A2A Agent** and fill in the form:
 | Name | string | — | A2A agent identifier (e.g., `metrics-analyzer`). Required |
 | Scope | Account / Team | — | Scope: **Account** (visible account-wide) or a specific **Team** (visible and editable only to members of that team). Required — see "Scope" below |
 | Execution Environment | Cloud / BYOC Runners (multiple) | All environments | Controls where this A2A agent is available. Select Cloud and one or more visible BYOC Runners; leave empty to make it available everywhere. It does not route delegated calls: an A2A call still runs in the current AI SRE session's environment. For a remote agent available only on a private network, select only the Runner(s) that can reach it |
-| Instructions | string | — | The agent-selection signal shown to AI SRE. It is inserted into AI SRE's system prompt and available-agent list to decide when to call this A2A agent. Required; write prescriptive guidance that explains when to use the agent, its capability boundaries, and when not to use it. Maximum 2,000 characters |
+| Instructions | string | — | The agent-selection signal shown to AI SRE, as **a single document**: an optional `summary:` frontmatter block plus a body. The summary appears in the available-agent list; the body is delivered in full only on first delegation. Required; the whole document is at most 50 KB, and `summary` is at most 1,024 characters and must not contain `<` or `>`. See "[Writing Instructions](#writing-instructions)" below for the format |
 | Card URL | string | — | The Agent Card URL of the remote A2A agent, or just the service origin for agents that follow the default well-known location (for example, `https://agents.example.com`). If the URL includes a path, the platform reads that exact URL; if only an origin is provided, it resolves `/.well-known/agent-card.json` by A2A convention. Required. The platform only validates that the URL is well-formed (scheme is http/https, host is non-empty) — it does not classify hosts or IPs; actual network reachability and egress restrictions depend on the current AI SRE session's execution environment. The Execution Environment field above only limits where this agent is available |
 | Auth Type | enum | `none` | Credential type attached to outbound requests: `none` / `bearer` (Bearer Token) / `api_key` (custom Header + Key) |
 | Streaming | bool | on | Whether to communicate with the remote agent in streaming mode |
@@ -79,13 +79,38 @@ On the A2A Agents list page, click **Add A2A Agent** and fill in the form:
 | Skip TLS certificate verification | bool | off | Shown only when the Card URL uses HTTPS. Enable only when the remote endpoint uses a self-signed certificate inside a controlled network; this skips certificate-chain and hostname verification |
 | Allow OAuth discovery over HTTP | bool | off | Required only when "Per-user OAuth" is selected and the Card URL is a non-local HTTP URL. Use only in controlled test environments; after you enable it, the AI SRE service can fetch OAuth metadata from that host |
 
+### Writing Instructions
+
+Instructions are **a single document** with up to two parts: an optional YAML frontmatter block at the top (a single `summary` field), followed by the body.
+
+```yaml
+---
+summary: One-line summary — AI SRE uses this to decide whether to delegate
+---
+Body: detailed instructions for the agent…
+```
+
+- **The summary drives routing.** Every time AI SRE decides whether to delegate, all it sees is one line in the available-agent list: `name: summary`. That summary is exactly this field's content, so state clearly **when to prefer this agent, what it excels at, and what it is not suited for** — use concrete capability words (product names, verbs, scenarios), not marketing slogans. Overlong summaries get truncated in the list, so front-load the important part.
+- **The body is delivered on demand, not kept in the list.** The body does not occupy AI SRE's context all the time. It is sent to AI SRE in full only the **first time it delegates to this agent** (progressive loading). That means the body can be as long and detailed as you need — procedures, hard rules, examples — without bloating everyday conversations.
+- **Plain text without a `summary` still works.** If the instructions are plain text that doesn't start with `---`, the whole content is treated as the body, and AI SRE automatically excerpts the beginning as the summary (truncated) — this keeps older-style instructions working unchanged. Writing an explicit `summary` is still strongly recommended for more predictable routing.
+- **Hard limits**: the whole document (frontmatter + body) is at most **50 KB**; `summary` is at most **1,024 characters** and must not contain `<` or `>`; the body must be non-empty.
+- If the document starts with `---`, that frontmatter block must be closed with another `---` line, or saving fails.
+
+The instructions used by "[Using the FlashAI Template](#using-the-flashai-template)" below are a working example — see its structure for reference.
+
 ### Using the FlashAI Template
 
 **FlashAI** is the observability analysis product in the Flashcat / 快猫星云 family. It can also be connected as a remote A2A agent for AI SRE. On the A2A Agents page, expand the **Connect FlashAI observability analysis** panel to create an A2A agent from the FlashAI template.
 
 The FlashAI template is not a blanket rule that sends every observability question to FlashAI. It configures FlashAI as the delegation target for **Flashcat / 快猫星云-originated alert and incident investigation**. For alerts or incidents from Flashcat products such as Event Wall / 事件墙, Firemap / 灭火图, and Polaris / 北极星, AI SRE should prefer delegating analysis to FlashAI.
 
-The template prefills multi-line instructions. Its core routing rules are:
+The template prefills an instructions document that opens with a `summary:` line:
+
+```yaml
+summary: Flashcat/快猫星云 observability & ops — Firemap 灭火图, Polaris 北极星/northstar, logs 日志检索/报表, metrics 指标, traces 链路/拓扑, inspections 巡检/拨测, alert rules & dashboards. Call for ANY Flashcat task; MUST dispatch first whenever integration_type is "n9e.alert".
+```
+
+That summary is what shows up in AI SRE's available-agent list, and it's the direct reason FlashAI gets picked first. The body that follows the summary carries the core routing rules:
 
 - Prefer FlashAI when the user is investigating an alert, incident, fault, or alert group that clearly originates from Flashcat / 快猫星云.
 - Event Wall / 事件墙 alert events, incidents, and alert groups are positive routing signals.
@@ -111,7 +136,7 @@ Prepare FlashAI first:
 After FlashAI is prepared, enter the **FlashAI domain** in the panel (for example, `demo.flashcat.cloud`) and click **Use this template**. The page opens the **Add A2A Agent** form and prefills:
 
 - Name: generated from the domain, for example `flashai-demo`
-- Instructions: multi-line delegation guidance for AI SRE, explaining which Flashcat alerts/incidents should prefer FlashAI and which generic observability questions should not.
+- Instructions: a `summary:` line plus a body — the body lists which Flashcat alerts/incidents should prefer FlashAI and which generic observability questions should not.
 - Card URL: generated from the domain:
 
 ```text
@@ -121,7 +146,7 @@ https://demo.flashcat.cloud/api/fc-model/a2a/.well-known/agent-card.json
 The template only prefills common values. You still choose the **Scope** (Account or Team) and configure authentication in the form. A2A agents can be installed multiple times for different scopes, so the FlashAI panel does not disappear just because one FlashAI agent already exists. Agent names must still be unique within the account; if the same FlashAI domain needs to be installed more than once, adjust the name in the form.
 
 <Tip>
-  Do not remove the instructions generated by the FlashAI template unless you have more precise ones. Whether AI SRE proactively calls a remote A2A agent depends mainly on the selection signal provided by the name and instructions; when the instructions are too short or too generic, AI SRE may keep reasoning locally or incorrectly delegate ordinary metrics / logs questions to FlashAI.
+  Do not remove the instructions generated by the FlashAI template, especially the `summary:` line at the top — once registered, FlashAI always appears in the available-agent list, but whether AI SRE actually delegates to it hinges directly on that summary line. When the instructions are too short or too generic, AI SRE may keep reasoning locally or incorrectly delegate ordinary metrics / logs questions to FlashAI.
 </Tip>
 
 ### Auth Modes
