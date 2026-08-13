@@ -154,8 +154,14 @@ flashduty team delete --team-id <id>                 # 删除团队（不可逆�
 - `--team-id`（填写则为更新，否则创建）
 - `--description`（最多 500 字符）
 - `--person-ids`（成员 ID 列表；**会完整替换现有成员名单，更新前请先用 `team info` 确认当前成员**）
-- `--emails`（邀请邮箱列表）
+- `--emails`（按邮箱匹配并加入**已存在**的成员；不匹配任何现有成员的邮箱会被静默忽略，**不会发送邀请**）
+- `--phones`（按手机号匹配并加入已存在的成员；不匹配的号码会被静默忽略，非 E.164 格式的号码按 `--country-code` 解析）
+- `--country-code`（对非 E.164 格式的 `--phones` 号码应用默认国家码）
 - `--ref-id`（外部系统引用 ID）
+
+<Note>
+`team upsert` 的 `--emails` / `--phones` 只匹配并附加**现有成员**，不会发送任何邀请。需要邀请新成员加入组织时，请使用 `flashduty member invite`。
+</Note>
 
 `team delete` 支持通过 `--team-id`、`--team-name` 或 `--ref-id` 指定团队，**操作不可逆**。
 
@@ -249,7 +255,7 @@ flashduty rum application-delete <application-id>         # 删除应用
 | 参数 | 说明 |
 |------|------|
 | `--application-name` | 应用名称，创建时必填，长度 1–40 字符 |
-| `--type` | 应用类型：`browser`、`ios`、`android`、`react-native`、`flutter`、`kotlin-multiplatform`、`roku`、`unity` |
+| `--type` | 应用类型：`browser`、`ios`、`android`、`react-native`、`flutter`、`kotlin-multiplatform`、`roku`、`unity`、`miniprogram`、`harmony`、`electron` |
 | `--team-id` | 归属团队 ID（创建时必填） |
 | `--is-private` | 是否仅允许团队成员访问 |
 | `--no-geo` | 是否禁用地理位置推断 |
@@ -405,7 +411,7 @@ flashduty monit preview-sync [flags]
 
 除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **327 个 API 操作**，CLI 会为这些操作生成对应命令，并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
-- **AI SRE（`safari`）**：a2a-agents、automations、mcp-servers、sessions、skills 等
+- **AI SRE（`safari`）**：a2a-agents、automations、knowledge、mcp-servers、sessions、skills 等
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
@@ -421,6 +427,34 @@ flashduty alert --help           # 查看告警相关的生成命令
 ```
 
 生成命令的时间窗口参数（`--start-time` / `--end-time`）与精选命令一样支持人性化的时间格式：相对时长（`7d`、`24h`，表示从当前往前推）、`+7d`（从当前往后推，即未来时间）、`now`、日期或日期时间（如 `2026-05-01`、`2026-05-01 10:00:00`）、Unix 秒级时间戳。此外，`--since` 和 `--until` 分别是 `--start-time` 和 `--end-time` 的别名，可互换使用；若两种写法同时传入且取值不同，CLI 会报冲突错误。
+
+#### knowledge — AI SRE 知识库
+
+`safari knowledge-*` 命令族管理 AI SRE 的**知识包**（Knowledge Pack）——账户或团队作用域下的版本化文件树（`DUTY.md` 加运行手册、FAQ、服务清单等），会话开始时会被加载进每个 AI SRE 沙箱。知识包的完整功能模型（`DUTY.md` 结构、`@引用`、账户/团队作用域、文件约束）参见 [管理知识](/zh/ai-sre/knowledge)。
+
+```bash
+flashduty safari knowledge-get                                  # 获取当前账户知识包（含文件列表）
+flashduty safari knowledge-pack-list [flags]                    # 列出知识包
+flashduty safari knowledge-pack-ensure --scope <account|team> [--scope-id <team-id>]  # 确保知识包存在（不存在则创建）
+flashduty safari knowledge-pack-update <pack-id> [--scope ...]  # 变更知识包作用域
+flashduty safari knowledge-pack-delete <pack-id>                # 删除知识包（不可逆）
+flashduty safari knowledge-file-list [--pack-id <id>]           # 列出知识包内的文件
+flashduty safari knowledge-file-get --rel-path <path>           # 读取单个知识文件（内容为 Base64 编码）
+flashduty safari knowledge-file-put --rel-path <path> --content-b64 <base64>  # 上传或覆盖知识文件
+flashduty safari knowledge-file-delete --rel-path <path> [--force]  # 删除知识文件
+```
+
+常用参数：
+
+| 参数 | 说明 |
+|------|------|
+| `--pack-id` | 知识包 ID；省略时默认使用调用者账户作用域的知识包 |
+| `--rel-path` | 文件相对知识包根目录的路径（必填，支持子目录，如 `runbooks/api-5xx.md`） |
+| `--scope` | 知识包作用域：`account` 或 `team`（`knowledge-pack-ensure` 必填） |
+| `--scope-id` | 团队 ID；`team` 作用域必填，`account` 作用域忽略 |
+| `--force` | 删除文件时跳过「仍被其他文件引用」检查，引用方改为以警告形式返回 |
+
+`knowledge-file-put` 的 `--content-b64` 必须是合法 UTF-8 文本的 Base64 编码，`--content-type` 省略时按文件扩展名推断。`knowledge-file-delete` 默认在文件仍被其他知识文件引用时阻止删除；加 `--force` 可强制执行，此时引用方会以警告形式返回。
 
 ### 工具命令
 
