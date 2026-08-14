@@ -91,7 +91,7 @@ Hover over a session row to reveal the pin and archive actions. A pinned session
 | Archive / Unarchive | Inline archive button on hover | Archived sessions are hidden from the active list by default; switch to **Archived** in the filter to find them |
 | Rename | Click the chat title to edit in place | Press Enter or click away to confirm; press Esc to cancel; maximum 60 characters |
 
-A new session does not need a manual title: after the first turn completes, the system auto-generates a title from the session's content (`POST /safari/session/generate-name`). Until that finishes, a placeholder title derived from your first message is shown so the sidebar never sticks at "Untitled." You can **rename** the session at any time to override the auto-generated title (title limit: 60 characters).
+A new session does not need a manual title: after the first turn completes, the system auto-generates a title server-side from the session's content and pushes it back through the session stream as a `session.renamed` frame, which updates the sidebar and title in place. Until that finishes, a placeholder title derived from your first message is shown so the sidebar never sticks at "Untitled." You can **rename** the session at any time to override the auto-generated title (title limit: 60 characters).
 
 <Tip>
 Hovering over a session row for a moment shows a tooltip with the full session name, the associated team, and the exact timestamp — useful when the name is truncated and you need to confirm you have the right session.
@@ -164,6 +164,10 @@ The first time a session runs, an **environment initialization** card appears in
 | Resume | Resumed session | The previous sandbox was reused, with its files intact |
 | Reclaim | Rebuilt session | The previous sandbox had been reclaimed, so a new container was created |
 
+<Note>
+Sessions bound to a self-hosted [BYOC Runner](/en/ai-sre/environments#byoc-runner) skip the cloud phases: the init card shows a single phase — **Connecting to the self-hosted runner** (for init, resume, and reclaim alike) — which becomes **Connected to the self-hosted runner** once it succeeds, then collapses into the same result line. If connecting to the self-hosted runner fails, the card shrinks to a single-line error notice (**Failed to connect to the self-hosted runner**, with the specific reason) and offers no cloud phase-history expansion.
+</Note>
+
 <Warning>
 When the previous sandbox was reclaimed after being idle, the card warns: **Previous sandbox was reclaimed after N min idle — saved files were reset**. This means anything previously written to the sandbox filesystem is gone. Persist long-lived outputs by **saving them as an Artifact or to a Knowledge Pack**, rather than relying on transient sandbox files.
 </Warning>
@@ -234,7 +238,7 @@ Hover over a message to reveal action buttons:
 | Fork | Agent reply from a completed turn | Creates a new session from the completed turn that produced that reply, so you can continue down a different investigation path |
 
 <Note>
-Editing a historical message is, under the hood, a **rewind** operation: once submitted, the conversation regenerates from that message onward, and any content after that message is replaced. Confirm before submitting.
+Editing a historical message is, under the hood, a **rewind** operation: once submitted, the conversation regenerates from that message onward, and any content after that message is replaced. Confirm before submitting. If the turn that produced the target message is still running or stopping, the rewind is rejected (`rewind target invocation is still active`) — wait for that turn to settle before submitting.
 </Note>
 
 ### Forking a session
@@ -247,7 +251,7 @@ Forking is useful when you want to try another path from the same investigation 
 You can fork only from a **completed** turn in a top-level session. If the source session is still running, the selected turn has not settled, or the target is a Subagent child session, AI SRE rejects the fork.
 </Note>
 
-If the forked portion of the conversation dispatched any Subagent or A2A tasks, those dispatch chips are copied over to the new session along with their respective child sessions — opening one still shows the execution details, and it never points at an original task you don't have access to. But **copied-over dispatches always show as "Interrupted"** — even if that dispatch completed normally in the original session: the new session has no executor picking up that dispatch, so it can't be continued or replayed. If you need to rerun it, just start a fresh dispatch in the new session.
+If the forked portion of the conversation dispatched any Subagent or A2A tasks, those dispatch chips are copied over to the new session along with their respective child sessions — opening one still shows the execution details, and it never points at an original task you don't have access to. **Dispatches that had already completed or failed in the source session keep their real status** (completed / failed), copied together with their result; only **dispatches still in progress at fork time** show as "Interrupted" — the new session has no executor picking them up, so they cannot continue running. If you need to rerun one, just start a fresh dispatch in the new session.
 
 Forking clears temporary state that only belongs to an in-progress run, such as active-turn caches, pending mount state, frontend state that has not been persisted, and current-turn counters. Persisted history, tool calls, and reusable compaction state are retained; team and environment binding are written to the new session based on your choice in the fork dialog. The forked session has its own context, so later messages, compaction, and run results do not write back to the source session.
 
@@ -271,6 +275,8 @@ The card also has a free-text box to add specifics (optional). On submit, the fe
 ---
 
 As a conversation grows longer, the session context approaches the model's context-window limit. AI SRE automatically compacts older conversation history — summarizing it into a digest while preserving recent content — to free up context space without losing critical information.
+
+Every compaction boundary summary also appends a deterministic **folded-resources manifest**: it lists the resources folded out of context this round and how to get them back — skills re-read via `skill(name)`, MCP server tool definitions re-discovered via `tool_search`, and A2A agent usage notes re-delivered automatically on the next dispatch or message. Post-compaction turns can recover those definitions on demand without keeping them in context.
 
 Compaction is triggered in four ways:
 
