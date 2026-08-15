@@ -19836,16 +19836,140 @@
         }
       }
     },
-    "/monit/query/rows": {
+    "/monit/query/data": {
       "post": {
-        "operationId": "monit-read-query-rows",
-        "summary": "Query data source rows",
-        "description": "Run a synchronous ad-hoc query against a configured data source and get back its raw rows. Used by Flashduty AI SRE and by UI preview. The request is forwarded over WebSocket to monit-edge, which executes the query against the underlying source (Prometheus / Loki / VictoriaLogs / SLS / MySQL / Postgres / Oracle / ClickHouse / Elasticsearch).",
+        "operationId": "monit-read-query-data",
+        "summary": "Query structured data",
+        "description": "Run a synchronous ad-hoc query against a configured data source and return a stable `query_result.v1` result whose natural shape is frames, records, or samples. This public API requires monit-edge v0.65.0 or later.",
         "tags": [
           "Monitors/Diagnostics"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **600 requests/minute**; **10 requests/second** per account |\n| Permissions | Any valid `app_key` (read-only; not gated by a specific permission class) |\n\n## Usage\n\n- The request is forwarded to `monit-edge` over WebSocket; the data source named by `ds_type` + `ds_name` must already exist under the calling account.\n- `account_id` in the body is optional. When supplied it must equal the authenticated account; mismatched values are rejected.\n- Validation failures use the standard error envelope. When `monit-edge` rejects a query, its `{\"error\": {\"code\": ..., \"message\": ...}}` body is preserved and the HTTP status matches the edge error code; an invalid or absent code becomes HTTP 500. Check both the status and the error body.\n- monit-edge enforces a row cap; large result sets come back as `error.message = \"too many rows\"`. Narrow the time range or aggregate at the source.\n- `args` is a polymorphic `string→string` map that is forwarded verbatim. Semantics depend on `ds_type` (SLS requires `sls.project` + `sls.logstore`; Loki / VictoriaLogs raw mode requires a time range via `*.start`/`*.end` or `*.timespan.value`/`*.timespan.unit`; Prometheus and SQL sources ignore it). See the monit-webapi query-api docs for the per-source key list.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **600 requests/minute**; **10 requests/second** per account |\n| Permissions | Any valid `app_key` (read-only; not gated by a specific permission class) |\n| Edge requirement | Supported deployments require **monit-edge v0.65.0 or later** |\n\n## Usage\n\n- Treat **monit-edge v0.65.0** as the minimum supported Edge version for this public API. WebAPI retains migration adapters for older Edge versions: query.v2 results may still preserve frames, records, or samples, while legacy rows can expose only the information they retained. These adapters do not change the support floor; older protocols lack query.v3 cancellation and error-lifecycle semantics, and data already lost by legacy rows cannot be recovered.\n- The public response format is always `query_result.v1` and is independent of the internal Edge query protocol. Dispatch on `result.kind` (`frames`, `records`, or `samples`); do not infer the result shape from `ds_type` or the Edge version.\n- A `frames` result may contain multiple table or time-series frames. Field values are columnar and all fields in one frame have the same length.\n- A `records` result may contain nested JSON and null records. Integer literals outside JavaScript's safe integer range are returned as decimal strings.\n- A `samples` result contains label sets and instant values. A value may be a number or one of the strings `NaN`, `+Inf`, and `-Inf`.\n- The final success response is limited to 8 MiB and query results are limited to 1,000 rows. Narrow the time range, reduce fields, or aggregate at the source when a request exceeds a limit.\n- Query failures use non-2xx HTTP status codes and the standard error envelope. Do not transparently fall back to the deprecated `/monit/query/rows` endpoint.\n- Query execution may take up to 35 seconds across WebAPI forwarding and Edge execution. Configure client timeouts to at least 40 seconds and propagate cancellation when the caller abandons a query.",
+          "href": "/en/api-reference/monitors/diagnostics/monit-read-query-data",
+          "metadata": {
+            "sidebarTitle": "Query structured data"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryDataRequest"
+              },
+              "example": {
+                "ds_type": "prometheus",
+                "ds_name": "prod-prom",
+                "expr": "sum by (job) (rate(http_requests_total[5m]))",
+                "delay_seconds": 0,
+                "args": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/QueryDataResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "format": "query_result.v1",
+                    "result": {
+                      "kind": "samples",
+                      "samples": [
+                        {
+                          "labels": {
+                            "job": "api"
+                          },
+                          "value": 1.25
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "413": {
+            "description": "The request or final response exceeds its size limit.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "499": {
+            "description": "The client canceled the query.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          },
+          "504": {
+            "description": "The query timed out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/monit/query/rows": {
+      "post": {
+        "operationId": "monit-read-query-rows",
+        "summary": "Query data source rows",
+        "description": "Deprecated. Run a synchronous ad-hoc query and return the historical flattened rows shape. Existing consumers should migrate to `/monit/query/data`, which preserves frames, records, and samples without forcing every result into legacy rows.",
+        "deprecated": true,
+        "tags": [
+          "Monitors/Diagnostics"
+        ],
+        "x-mint": {
+          "content": "## Deprecated\n\nUse [`POST /monit/query/data`](/en/api-reference/monitors/diagnostics/monit-read-query-data) for all new integrations. This endpoint remains available only during the migration of existing UI and AI SRE consumers.\n\n## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **600 requests/minute**; **10 requests/second** per account |\n| Permissions | Any valid `app_key` (read-only; not gated by a specific permission class) |\n\n## Usage\n\n- The request is forwarded to `monit-edge` over WebSocket; the data source named by `ds_type` + `ds_name` must already exist under the calling account.\n- `account_id` in the body is optional. When supplied it must equal the authenticated account; mismatched values are rejected.\n- Validation failures use the standard error envelope. When `monit-edge` rejects a query, its `{\"error\": {\"code\": ..., \"message\": ...}}` body is preserved and the HTTP status matches the edge error code; an invalid or absent code becomes HTTP 500. Check both the status and the error body.\n- monit-edge enforces a row cap; large result sets come back as `error.message = \"too many rows\"`. Narrow the time range or aggregate at the source.\n- `args` is a polymorphic `string→string` map that is forwarded verbatim. Semantics depend on `ds_type` (SLS requires `sls.project` + `sls.logstore`; Loki / VictoriaLogs raw mode requires a time range via `*.start`/`*.end` or `*.timespan.value`/`*.timespan.unit`; Prometheus and SQL sources ignore it). See the monit-webapi query-api docs for the per-source key list.",
           "href": "/en/api-reference/monitors/diagnostics/monit-read-query-rows",
           "metadata": {
             "sidebarTitle": "Query data source rows"
@@ -47340,6 +47464,229 @@
           "field_name": {
             "type": "string",
             "description": "Echo of the submitted `field_name`."
+          }
+        }
+      },
+      "QueryDataRequest": {
+        "description": "Request for the stable structured query endpoint. It uses the same query fields as the deprecated rows endpoint.",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/QueryRowsRequest"
+          }
+        ]
+      },
+      "QueryDataResponse": {
+        "type": "object",
+        "description": "Stable, Edge-version-independent structured query response.",
+        "required": [
+          "format",
+          "result"
+        ],
+        "properties": {
+          "format": {
+            "type": "string",
+            "enum": [
+              "query_result.v1"
+            ],
+            "description": "Public result-contract version. It is independent of the internal monit-edge query protocol version."
+          },
+          "result": {
+            "$ref": "#/components/schemas/QueryResult"
+          }
+        }
+      },
+      "QueryResult": {
+        "description": "Exactly one natural result shape, selected by `kind`.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/QueryFramesResult"
+          },
+          {
+            "$ref": "#/components/schemas/QueryRecordsResult"
+          },
+          {
+            "$ref": "#/components/schemas/QuerySamplesResult"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": {
+            "frames": "#/components/schemas/QueryFramesResult",
+            "records": "#/components/schemas/QueryRecordsResult",
+            "samples": "#/components/schemas/QuerySamplesResult"
+          }
+        }
+      },
+      "QueryFramesResult": {
+        "type": "object",
+        "required": [
+          "kind",
+          "frames"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "frames"
+            ]
+          },
+          "frames": {
+            "type": "array",
+            "description": "Typed table or time-series frames. A response can contain more than one frame.",
+            "items": {
+              "$ref": "#/components/schemas/QueryFrame"
+            }
+          }
+        }
+      },
+      "QueryFrame": {
+        "type": "object",
+        "description": "A typed, columnar table or time-series frame. All fields in one frame have the same number of values. A `time_series` frame contains one time field and one float field; labels belong to the float field.",
+        "required": [
+          "kind",
+          "fields"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "table",
+              "time_series"
+            ]
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueryField"
+            }
+          }
+        }
+      },
+      "QueryField": {
+        "type": "object",
+        "description": "One typed column. `string` fields contain string or null values; `time` fields contain RFC 3339 Nano strings or null; `float` fields contain numbers, null, or the special strings `NaN`, `+Inf`, and `-Inf`.",
+        "required": [
+          "name",
+          "type",
+          "values"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "string",
+              "float",
+              "time"
+            ]
+          },
+          "labels": {
+            "type": "object",
+            "description": "Series labels. Present on the float field of a time-series frame.",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "QueryRecordsResult": {
+        "type": "object",
+        "required": [
+          "kind",
+          "records"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "records"
+            ]
+          },
+          "records": {
+            "type": "array",
+            "description": "Schema-flexible records. Records may have different fields, contain nested JSON, or be null. Integers outside JavaScript's safe range are encoded as decimal strings.",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "QuerySamplesResult": {
+        "type": "object",
+        "required": [
+          "kind",
+          "samples"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "samples"
+            ]
+          },
+          "samples": {
+            "type": "array",
+            "description": "Instant samples with their complete label sets.",
+            "items": {
+              "$ref": "#/components/schemas/QuerySample"
+            }
+          }
+        }
+      },
+      "QuerySample": {
+        "type": "object",
+        "required": [
+          "labels",
+          "value"
+        ],
+        "properties": {
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "value": {
+            "description": "Finite numeric value or a JSON-safe representation of a non-finite float.",
+            "oneOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": [
+                  "NaN",
+                  "+Inf",
+                  "-Inf"
+                ]
+              }
+            ]
           }
         }
       },
