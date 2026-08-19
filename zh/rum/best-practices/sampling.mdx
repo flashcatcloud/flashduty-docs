@@ -307,6 +307,195 @@ RUM.enable(with: rumConfig)
 - **用 `sessionSampleRate: 0` 而不是跳过 `init()`**。跳过初始化会让业务代码里的 `addAction` / `addError` 等调用失效，到处判空很繁琐；传 0 让 SDK 正常初始化为静默状态，代码路径统一。
 - **平台侧数据代表实际采集量**。自定义采样时，平台无法感知您的真实采样比例，看到的会话量即实际采集量，无法按采样率反推全量流量。如需估算全量，请在业务侧基于自己的采样规则换算。
 
+## 最佳实践三：错误全量采集，其余数据按比例保留
+
+一个常见的诉求是「把数据量降到 20%，但异常一条都不能漏」。直接把 `sessionSampleRate` 设成 20 做不到：采样以会话为单位，未命中的会话连错误也不上报（规则 1），异常会同步丢掉八成。正确做法是会话全量采集保证错误不漏，再在 `beforeSend` 里按稳定 key 分桶，只让中签的那部分保留完整数据：
+
+- **错误事件**：全部保留，异常 100%
+- **失败的请求**：全部保留，接口报错 100%（HTTP 5xx 与请求失败是资源事件，不是错误事件）
+- **成功的请求、用户行为、长任务**：只保留中签的 20%，数据量的大头按 20% 收敛
+
+分桶方式二选一，下面两个 Tab 各自是完整可抄的方案，先对照下表选定一种：
+
+| | 按会话分桶 | 按用户分桶 |
+| --- | --- | --- |
+| 前置依赖 | 无，开箱即用 | 业务侧自己持有 key（登录用户 ID 或自维护的匿名 ID） |
+| 数据代表性 | 每条会话重新抽签，长期更能代表整体人群 | **样本固定**，同一批用户的设备、网络与地域特征会固化进指标 |
+| 体验一致性 | 同一用户的不同会话可能落进不同桶 | 同一用户始终一致；放量单调——20% 提到 100% 时原有人群保留，前后数据可比 |
+| 重放对齐 | 手动录制（约 10 行代码） | `init()` 时一行配置，但要求 key 在初始化前可得 |
+
+另外，如果接入了会话重放，还需要一步对齐：原生语义下重放是**已采集会话之上的二次抽样**，而本方案把 `sessionSampleRate` 设成了 100，SDK 会以为每条会话都被完整采集，从而在全部会话上抽回放——其中一部分落在细节分桶之外，表现为「有回放，却没有行为数据」。两个 Tab 里各自给出了对应的对齐做法，不用重放可以跳过。
+
+<Tabs>
+  <Tab title="按会话分桶">
+    数据采样的完整配置：
+
+    ```js
+    // 保留完整数据的会话占比
+    const DETAIL_SAMPLE_RATE = 20;
+
+    // 把分桶 key 稳定映射到 0-99，同一个 key 的所有事件落在同一个桶
+    function bucketOf(key) {
+      let hash = 0;
+      for (let i = 0; i < key.length; i++) {
+        hash = (hash * 31 + key.charCodeAt(i)) | 0;
+      }
+      return Math.abs(hash) % 100;
+    }
+
+    flashcatRum.init({
+      applicationId: "<APPLICATION_ID>",
+      clientToken: "<CLIENT_TOKEN>",
+      sessionSampleRate: 100, // 会话全量采集，保证错误一条不漏
+      trackResources: true,
+      trackUserInteractions: true,
+      trackLongTasks: true,
+      beforeSend: (event) => {
+        const isDetail = bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+
+        // 给每条留下来的事件盖章，标明这条会话是完整现场还是仅错误摘要
+        event.context = {
+          ...event.context,
+          rum_sampling: isDetail ? "full" : "errors_only",
+        };
+
+        // 视图事件无法丢弃，显式放行以免触发 SDK 告警
+        if (event.type === "view") return true;
+
+        // 错误事件永远保留
+        if (event.type === "error") return true;
+
+        // 失败的请求永远保留
+        if (event.type === "resource") {
+          const statusCode = event.resource.status_code;
+          if (statusCode === 0 || statusCode >= 400) return true;
+        }
+
+        // 其余数据只保留中签会话的
+        return isDetail;
+      },
+    });
+    ```
+
+    重放对齐：会话 ID 在 `init()` 之前还不存在，而重放采样率在初始化时就固化了，所以要关掉自动抽签、改用手动录制，初始化完成后自行做第二层抽样。把下面两个选项并入上面的 `init()`，并在 `init()` 之后执行一次判定：
+
+    ```js
+    const REPLAY_SAMPLE_RATE = 10; // 细节会话中再录制多少比例
+
+    flashcatRum.init({
+      sessionSampleRate: 100,
+      sessionReplaySampleRate: 0, // 关掉自动抽签，完全交给下面判定
+      startSessionReplayRecordingManually: true,
+      // ...
+    });
+
+    const context = flashcatRum.getInternalContext();
+    if (context) {
+      const sessionId = context.session_id;
+      const inDetailBucket = bucketOf(sessionId) < DETAIL_SAMPLE_RATE;
+      // 加盐得到一个与细节分桶不相关的第二次抽签
+      const inReplayBucket = bucketOf(`replay:${sessionId}`) < REPLAY_SAMPLE_RATE;
+
+      if (inDetailBucket && inReplayBucket) {
+        // force 让未中签重放的会话也能开始录制
+        flashcatRum.startSessionReplayRecording({ force: true });
+      }
+    }
+    ```
+
+    <Note>
+    手动录制方案有一个已知边界：会话在页面存活期间过期续期后（不活跃 15 分钟或持续 4 小时），新会话是新的 ID、落进新的桶，需要重新判定一次，而 SDK 没有暴露会话续期事件。长时间停留的页面若要严格对齐，需自行轮询 `getInternalContext().session_id` 的变化。
+    </Note>
+  </Tab>
+  <Tab title="按用户分桶">
+    分桶 key 必须来自 `init()` 之前就可得的来源：登录用户 ID，或业务自维护的匿名 ID（自己生成并存入 localStorage）。SDK 虽会把跨会话匿名 ID 回填到 `event.usr.id`（`trackAnonymousUser` 默认开启），但它要等初始化才生成，赶不上初始化时的重放判定——所以 `init()` 和 `beforeSend` 统一使用业务侧的 key，一份配置到底：
+
+    ```js
+    // 保留完整数据的用户占比
+    const DETAIL_SAMPLE_RATE = 20;
+    // 细节用户中再录制多少比例的回放
+    const REPLAY_SAMPLE_RATE = 10;
+
+    // 把分桶 key 稳定映射到 0-99，同一个 key 的所有事件落在同一个桶
+    function bucketOf(key) {
+      let hash = 0;
+      for (let i = 0; i < key.length; i++) {
+        hash = (hash * 31 + key.charCodeAt(i)) | 0;
+      }
+      return Math.abs(hash) % 100;
+    }
+
+    // 业务自行实现：登录用户 ID 优先，否则用自维护的匿名 ID（生成后存入 localStorage）
+    const bucketKey = getCurrentUserId() || getOrCreateAnonId();
+    const inDetailBucket = bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
+
+    flashcatRum.init({
+      applicationId: "<APPLICATION_ID>",
+      clientToken: "<CLIENT_TOKEN>",
+      sessionSampleRate: 100, // 会话全量采集，保证错误一条不漏
+      // 重放对齐：细节用户内再抽 REPLAY_SAMPLE_RATE，其余用户永不录制（不接重放可省略本行）
+      sessionReplaySampleRate: inDetailBucket ? REPLAY_SAMPLE_RATE : 0,
+      trackResources: true,
+      trackUserInteractions: true,
+      trackLongTasks: true,
+      beforeSend: (event) => {
+        // 与 init() 前完全相同的判定，保证两处一致
+        const isDetail = bucketOf(getCurrentUserId() || getOrCreateAnonId()) < DETAIL_SAMPLE_RATE;
+
+        // 给每条留下来的事件盖章，标明这条会话是完整现场还是仅错误摘要
+        event.context = {
+          ...event.context,
+          rum_sampling: isDetail ? "full" : "errors_only",
+        };
+
+        // 视图事件无法丢弃，显式放行以免触发 SDK 告警
+        if (event.type === "view") return true;
+
+        // 错误事件永远保留
+        if (event.type === "error") return true;
+
+        // 失败的请求永远保留
+        if (event.type === "resource") {
+          const statusCode = event.resource.status_code;
+          if (statusCode === 0 || statusCode >= 400) return true;
+        }
+
+        // 其余数据只保留中签用户的
+        return isDetail;
+      },
+    });
+    ```
+
+    由于分桶 key 跨会话不变，重放判定一次对整个用户生命周期都有效，也不存在会话续期后要重新判定的问题。
+  </Tab>
+</Tabs>
+
+两种做法下，回放集合都严格是细节分桶的子集，最终录制比例是 `DETAIL_SAMPLE_RATE × REPLAY_SAMPLE_RATE`——与原生的 `sessionSampleRate: 20` + `sessionReplaySampleRate: 10` 得到 2% 完全一致。
+
+<Tip>
+**务必保留 `rum_sampling` 这类标记。** 未中签的会话时间线天生是残缺的——只有视图、错误与失败请求。没有标记时，您在查看器里看到一条会话「没有任何点击」，无法判断是采样丢了还是用户真的没点。盖上标记后，缺失就有了解释：`errors_only` 的会话本就不含行为数据，而 `full` 的会话缺什么就是真的没发生。排查时先按 `rum_sampling:full` 过滤，就能只看完整现场。`context` 是 `beforeSend` 允许修改的字段，标记与丢弃决策写在同一个函数里，两者不会漂移。
+</Tip>
+
+<Warning>
+**必须按稳定的 key 分桶（会话或用户），不能用 `Math.random()` 逐事件抽签。**
+
+逐事件随机在**统计上是无害的**——抽出来的是一份无偏样本，错误率、P75 这些聚合指标照样准确。问题出在排查单条会话的时候。
+
+设想一条会话依次产生了这些事件：进入商品页 → 点击「立即购买」 → 三个接口请求（其中下单接口返回 500） → 页面抛出异常。逐事件随机抽签后，错误与失败请求因为在白名单里被保留，而那个点击事件恰好没中签被丢掉。于是您在会话里看到的是：**用户进了页面、什么都没做，然后接口失败并报错**。
+
+真正的麻烦不是缺了一条数据，而是**缺失的位置每条会话都不一样，且无法分辨**——您看到会话里没有点击，无法判断是采样丢了，还是用户真的没点。会话从证据变成了不可信的证词。
+
+按稳定 key 分桶后，每条会话只有两种状态：中签的那部分现场完整，其余的明确只有错误与失败请求。两种都不会误导您。理由与[哈希分桶](#为什么用哈希分桶代替随机数)一节相同。
+</Warning>
+
+### 使用前必须知道的三件事
+
+- **数据量不会精确降到 20%**：视图事件是会话骨架，无法丢弃，仍按 100% 上报。实际收敛比例取决于资源与行为事件在您数据中的占比。
+- **绝对量指标需要换算**：平台上会话数仍是 100%，但只有约 20% 的会话带完整数据。错误率、P75 这类比率与分位数指标不受影响（随机样本仍代表整体），但「资源请求总数」「点击次数」这类绝对量需要按 `1 / 20%` 换算。
+- **会话重放要单独对齐一次**：本方案把 `sessionSampleRate` 设成了 100，SDK 就以为每条会话都被完整采集，于是在全部会话里抽回放。少了对应 Tab 里的对齐那一步，回放会落到分桶之外的会话上——录像有了，可那条会话里根本没有行为数据。
+
+和「只上报错误」那种配置的区别：那种做法是把非错误数据**整体关掉**，适合只关心错误、不做性能分析的场景；本方案**保留两成完整现场**，适合既要异常不漏、又要保留性能与行为分析能力的场景。
+
 ## 各端支持情况
 
 | 平台 | 采样率生效时机 | 让新采样率立即生效 |
@@ -329,5 +518,48 @@ RUM.enable(with: rumConfig)
 </Accordion>
 
 <Accordion title="能不能只上报错误，不上报其他数据？">
-采样以会话为单位（规则 1），无法做到「未采样会话只上报错误」。替代方案：用业务自定义采样，把「上次出过错的用户」列为必采人群，定向提高错误现场的捕获率。
+严格意义上的「只上报错误」做不到——视图（view）事件是会话的骨架，无法关闭。但可以做到非常接近，思路是两个相互独立的开关叠加使用：
+
+- **采样率控制「哪些会话被采集」**：以会话为单位，未命中的会话连错误也不上报（规则 1）。所以不能靠调低采样率来省量，那会同步丢掉错误。
+- **事件开关控制「每个会话采集哪些事件」**：`trackResources`、`trackLongTasks`、`trackUserInteractions`、`trackWebVitals` 与采样无关，对每一个被采集的会话都生效。
+
+因此「尽量只看错误」的正确配置是：把 `sessionSampleRate` 开到 100 保证错误不漏，再用事件开关把非错误数据压下去。资源事件通常是数据量的大头，收敛它的收益最明显。
+
+<Warning>
+**不要直接设置 `trackResources: false`。** 浏览器端的 HTTP 5xx 和请求失败**不是**错误事件，而是带 `status_code` 的资源事件——RUM 的错误事件只来自 JS 运行时异常、`console.error`、浏览器 Report API 和手动 `addError`。关闭资源采集会让接口报错在平台上完全消失，而这往往正是您最想看的那类「错误」。
+</Warning>
+
+推荐的做法是保留资源采集，用 `beforeSend` 只丢弃成功的请求：
+
+```js
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 100, // 全量采集会话，保证错误不漏
+  trackResources: true, // 必须保持开启，否则接口报错不可见
+  trackLongTasks: false,
+  trackUserInteractions: false,
+  trackWebVitals: false,
+  beforeSend: (event) => {
+    // 资源事件只保留失败的请求，成功的直接丢弃，不占用数据量
+    if (event.type === "resource") {
+      const statusCode = event.resource.status_code;
+      return statusCode === 0 || statusCode >= 400;
+    }
+    return true;
+  },
+});
+```
+
+使用前请了解这套配置的三个代价：
+
+- **视图事件仍会上报**：每个页面至少一条，指标或事件计数变化时会节流更新，会话活跃期间每 5 分钟还有一次保活更新。这是无法消除的底噪，`beforeSend` 也无法丢弃视图事件。
+- **错误现场只剩堆栈**：关闭 `trackUserInteractions` 后，您无法知道用户点了什么才触发的错误，排查效率会明显下降。
+- **链路追踪请求不受资源开关影响**：命中 `allowedTracingUrls` 的请求即使关闭资源采集也仍会上报（标记为不索引，不计入数据量），因此流量并不会归零。
+
+如果您的目标是「错误优先，但仍要保留现场」，请改用[最佳实践三](#最佳实践三错误全量采集其余数据按比例保留)：错误与失败请求全量保留，其余数据按比例收敛，既压住数据量又留得下排查现场。
+</Accordion>
+
+<Accordion title="想把数据量降到 20%，但异常要全部上报，怎么配？">
+直接把 `sessionSampleRate` 设成 20 做不到——未命中的会话连错误也不上报（规则 1）。正确做法是会话全量采集保证错误不漏，再按会话或用户分桶，只让一部分会话保留完整数据。完整方案见[最佳实践三](#最佳实践三错误全量采集其余数据按比例保留)。
 </Accordion>

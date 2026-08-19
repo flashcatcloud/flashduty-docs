@@ -307,6 +307,199 @@ The base rule uses `hash(userId) % 100` instead of `Math.random()`, which brings
 - **Use `sessionSampleRate: 0` instead of skipping `init()`.** Skipping initialization breaks `addAction` / `addError` calls scattered through your code, forcing null checks everywhere; passing 0 initializes the SDK into a silent state with a unified code path.
 - **Platform-side data reflects what was actually collected.** With custom sampling, the platform cannot know your true sampling ratio; the session volume you see is the collected volume, and cannot be extrapolated to total traffic. If you need full-traffic estimates, compute them on your side based on your own sampling rules.
 
+## Best practice 3: full error capture with proportional sampling for the rest
+
+A common requirement is "cut data volume to 20%, but never miss an error". Setting `sessionSampleRate` to 20 will not do it: sampling works per session, and a session that loses the draw reports nothing at all — errors included (rule 1). You would lose roughly four fifths of your errors along with the volume. The correct shape is to collect every session so no error is lost, then bucket on a stable key inside `beforeSend` so only the winning share keeps full data:
+
+- **Error events**: always kept — 100% of errors
+- **Failed requests**: always kept — 100% of API failures (HTTP 5xx and request failures are resource events, not error events)
+- **Successful requests, user actions, long tasks**: kept only for the winning 20% — the bulk of your volume converges to 20%
+
+Pick one bucketing style — each tab below is a complete, copy-pasteable recipe. Choose with this table first:
+
+| | Session bucketing | User bucketing |
+| --- | --- | --- |
+| Prerequisites | None, works out of the box | Your code holds the key (signed-in user ID or a self-maintained anonymous ID) |
+| Representativeness | Every session redraws, so over time it represents the whole population better | **Fixed sample** — the same cohort's device, network and geography traits get baked into your metrics |
+| Experience consistency | The same user may land in different buckets across sessions | A given user is always consistent; scaling up is monotonic — raising 20% to 100% keeps the original cohort, so before/after data stays comparable |
+| Replay alignment | Manual recording (~10 lines) | One line at `init()`, but the key must be available before initialization |
+
+One more thing if you use Session Replay: it needs an alignment step. Natively, replay is a **second-stage sample on top of collected sessions** — but this recipe sets `sessionSampleRate` to 100, so the SDK believes every session is collected in full and draws replay across all of them; some land outside the detail bucket and show up as "has a replay, but no behavior data". Each tab gives the matching fix — skip it if you do not use replay.
+
+<Tabs>
+  <Tab title="Session bucketing">
+    The complete data-sampling configuration:
+
+    ```js
+    // Share of sessions that keep full data
+    const DETAIL_SAMPLE_RATE = 20;
+
+    // Map a bucket key stably onto 0-99 so every event with the same key lands in the same bucket
+    function bucketOf(key) {
+      let hash = 0;
+      for (let i = 0; i < key.length; i++) {
+        hash = (hash * 31 + key.charCodeAt(i)) | 0;
+      }
+      return Math.abs(hash) % 100;
+    }
+
+    flashcatRum.init({
+      applicationId: "<APPLICATION_ID>",
+      clientToken: "<CLIENT_TOKEN>",
+      sessionSampleRate: 100, // Collect every session so no error is dropped
+      trackResources: true,
+      trackUserInteractions: true,
+      trackLongTasks: true,
+      beforeSend: (event) => {
+        const isDetail = bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+
+        // Stamp every surviving event so the session declares whether it is a full
+        // picture or an errors-only summary
+        event.context = {
+          ...event.context,
+          rum_sampling: isDetail ? "full" : "errors_only",
+        };
+
+        // View events cannot be dismissed; let them through explicitly to avoid an SDK warning
+        if (event.type === "view") return true;
+
+        // Always keep error events
+        if (event.type === "error") return true;
+
+        // Always keep failed requests
+        if (event.type === "resource") {
+          const statusCode = event.resource.status_code;
+          if (statusCode === 0 || statusCode >= 400) return true;
+        }
+
+        // Everything else is kept only for sessions that win the draw
+        return isDetail;
+      },
+    });
+    ```
+
+    Replay alignment: the session ID does not exist yet at `init()`, and the replay rate is frozen at initialization, so turn the automatic draw off, switch to manual recording, and perform the second draw yourself once initialization completes. Merge the two options below into the `init()` above and run the decision once after `init()`:
+
+    ```js
+    const REPLAY_SAMPLE_RATE = 10; // share of detail sessions that get recorded
+
+    flashcatRum.init({
+      sessionSampleRate: 100,
+      sessionReplaySampleRate: 0, // turn the automatic draw off entirely
+      startSessionReplayRecordingManually: true,
+      // ...
+    });
+
+    const context = flashcatRum.getInternalContext();
+    if (context) {
+      const sessionId = context.session_id;
+      const inDetailBucket = bucketOf(sessionId) < DETAIL_SAMPLE_RATE;
+      // Salt the key to get a second draw uncorrelated with the detail bucket
+      const inReplayBucket = bucketOf(`replay:${sessionId}`) < REPLAY_SAMPLE_RATE;
+
+      if (inDetailBucket && inReplayBucket) {
+        // force lets a session that lost the replay draw start recording anyway
+        flashcatRum.startSessionReplayRecording({ force: true });
+      }
+    }
+    ```
+
+    <Note>
+    The manual approach has one known boundary: when a session expires and renews while the page stays open (15 minutes of inactivity or 4 hours total), the new session has a new ID and falls into a new bucket, and the SDK exposes no session-renewal event. Pages with very long dwell times need to poll `getInternalContext().session_id` for changes to stay strictly aligned.
+    </Note>
+  </Tab>
+  <Tab title="User bucketing">
+    The bucket key must come from a source available before `init()`: a signed-in user ID, or an anonymous ID you maintain yourself (generate one and store it in localStorage). The SDK does backfill a cross-session anonymous ID into `event.usr.id` (`trackAnonymousUser` is enabled by default), but it only comes into being during initialization — too late for the replay decision — so both `init()` and `beforeSend` use a key your own code holds, in one self-contained configuration:
+
+    ```js
+    // Share of users that keep full data
+    const DETAIL_SAMPLE_RATE = 20;
+    // Share of detail users that get recorded
+    const REPLAY_SAMPLE_RATE = 10;
+
+    // Map a bucket key stably onto 0-99 so every event with the same key lands in the same bucket
+    function bucketOf(key) {
+      let hash = 0;
+      for (let i = 0; i < key.length; i++) {
+        hash = (hash * 31 + key.charCodeAt(i)) | 0;
+      }
+      return Math.abs(hash) % 100;
+    }
+
+    // Implemented by your code: signed-in user ID first, otherwise your own
+    // anonymous ID (generated once and stored in localStorage)
+    const bucketKey = getCurrentUserId() || getOrCreateAnonId();
+    const inDetailBucket = bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
+
+    flashcatRum.init({
+      applicationId: "<APPLICATION_ID>",
+      clientToken: "<CLIENT_TOKEN>",
+      sessionSampleRate: 100, // Collect every session so no error is dropped
+      // Replay alignment: draw REPLAY_SAMPLE_RATE within detail users, never
+      // record the rest (omit this line if you do not use Session Replay)
+      sessionReplaySampleRate: inDetailBucket ? REPLAY_SAMPLE_RATE : 0,
+      trackResources: true,
+      trackUserInteractions: true,
+      trackLongTasks: true,
+      beforeSend: (event) => {
+        // The exact same decision as before init(), so the two cannot drift
+        const isDetail = bucketOf(getCurrentUserId() || getOrCreateAnonId()) < DETAIL_SAMPLE_RATE;
+
+        // Stamp every surviving event so the session declares whether it is a full
+        // picture or an errors-only summary
+        event.context = {
+          ...event.context,
+          rum_sampling: isDetail ? "full" : "errors_only",
+        };
+
+        // View events cannot be dismissed; let them through explicitly to avoid an SDK warning
+        if (event.type === "view") return true;
+
+        // Always keep error events
+        if (event.type === "error") return true;
+
+        // Always keep failed requests
+        if (event.type === "resource") {
+          const statusCode = event.resource.status_code;
+          if (statusCode === 0 || statusCode >= 400) return true;
+        }
+
+        // Everything else is kept only for users that win the draw
+        return isDetail;
+      },
+    });
+    ```
+
+    Because the bucket key is stable across sessions, one replay decision holds for the user's entire lifetime, and there is nothing to re-decide when a session renews.
+  </Tab>
+</Tabs>
+
+With either approach the replay set is strictly a subset of the detail bucket, and the final recording share is `DETAIL_SAMPLE_RATE × REPLAY_SAMPLE_RATE` — exactly what native `sessionSampleRate: 20` plus `sessionReplaySampleRate: 10` yields at 2%.
+
+<Tip>
+**Keep a marker such as `rum_sampling`.** Unsampled sessions have an inherently incomplete timeline — only views, errors and failed requests. Without a marker, a session that shows no clicks at all leaves you unable to tell whether sampling dropped them or the user genuinely never clicked. With the marker, the gaps are explained: an `errors_only` session was never meant to carry behavior data, while anything missing from a `full` session really did not happen. Filter on `rum_sampling:full` when you need complete timelines. `context` is a field `beforeSend` is allowed to modify, so the marker and the drop decision live in the same function and cannot drift apart.
+</Tip>
+
+<Warning>
+**Bucket on a stable key (session or user) — do not draw per event with `Math.random()`.**
+
+Drawing per event is **statistically harmless**: what you keep is an unbiased sample, and aggregates such as error rate and P75 remain accurate. The damage shows up when you investigate a single session.
+
+Picture a session that produces these events in order: land on a product page, click "Buy now", fire three API requests (one of which returns 500), then throw an exception. With a per-event draw, the error and the failed request survive because they are allow-listed, while the click happens to lose its draw and is dropped. What you see in the session is: **the user opened the page, did nothing, and then a request failed and the page threw**.
+
+The real problem is not the one missing event — it is that **the gaps fall in different places in every session, and you cannot tell them apart**. Seeing no click in a session, you cannot know whether sampling dropped it or the user genuinely never clicked. The session stops being evidence and becomes unreliable testimony.
+
+Bucketing on a stable key leaves only two states: sampled sessions carry the full picture, and the rest carry errors and failed requests only. Neither state misleads you. The reasoning is the same as in [hash bucketing](#why-hash-bucketing-instead-of-random-numbers).
+</Warning>
+
+### Three things to know before adopting this
+
+- **Volume will not land exactly on 20%.** View events are the skeleton of a session and cannot be dismissed, so they still report at 100%. How far volume actually falls depends on the share of resource and action events in your data.
+- **Absolute counts need to be scaled.** The platform still shows 100% of sessions, but only about 20% carry full data. Ratios and percentiles such as error rate and P75 are unaffected (a random sample still represents the whole), but absolute counts such as total resource requests or total clicks must be scaled by `1 / 20%`.
+- **Session Replay needs one explicit alignment step.** This recipe sets `sessionSampleRate` to 100, so the SDK assumes every session is collected in full and draws replay across all of them. Skip the alignment step in the matching tab above and replay lands on sessions outside the bucket — you get the recording, but the session behind it holds no behavior data.
+
+How this differs from the "report only errors" configuration: that one **turns non-error data off entirely**, which suits teams that only care about errors and do no performance analysis; this one **keeps one fifth of the full picture**, which suits teams that want no missed errors while retaining performance and behavior analysis.
+
 ## Platform support
 
 | Platform | When the sampling rate takes effect | Applying a new rate immediately |
@@ -329,5 +522,48 @@ Sampling is an independent probabilistic draw, not a quota (rule 3). The more tr
 </Accordion>
 
 <Accordion title="Can I report only errors and nothing else?">
-Sampling operates on whole sessions (rule 1), so "unsampled sessions report only errors" is not possible. Alternative: use business-defined custom sampling and treat "users who hit an error last time" as an always-sample cohort, raising your capture rate for error evidence.
+Strictly reporting only errors is not possible — view events are the backbone of a session and cannot be turned off. But you can get very close, by combining two independent controls:
+
+- **The sampling rate decides which sessions are collected.** It operates on whole sessions, and an unsampled session reports nothing at all, errors included (rule 1). So lowering the sampling rate is not a way to save volume — it drops your errors along with everything else.
+- **The event switches decide which events each collected session reports.** `trackResources`, `trackLongTasks`, `trackUserInteractions` and `trackWebVitals` are independent of sampling and apply to every session that is collected.
+
+So the right configuration for "show me errors and as little else as possible" is: set `sessionSampleRate` to 100 so no error is missed, then use the event switches to suppress non-error data. Resource events are usually the bulk of the volume, so trimming them pays off the most.
+
+<Warning>
+**Do not simply set `trackResources: false`.** In the browser, HTTP 5xx responses and failed requests are **not** error events — they are resource events carrying a `status_code`. RUM error events come only from JavaScript runtime exceptions, `console.error`, the browser Report API and manual `addError` calls. Turning resource collection off makes API failures disappear from the platform entirely, and those are often exactly the "errors" you care about most.
+</Warning>
+
+Keep resource collection on instead, and use `beforeSend` to discard only the successful requests:
+
+```js
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 100, // Collect every session so no error is missed
+  trackResources: true, // Must stay on, otherwise API failures are invisible
+  trackLongTasks: false,
+  trackUserInteractions: false,
+  trackWebVitals: false,
+  beforeSend: (event) => {
+    // Keep only failed requests; successful ones are discarded and cost nothing
+    if (event.type === "resource") {
+      const statusCode = event.resource.status_code;
+      return statusCode === 0 || statusCode >= 400;
+    }
+    return true;
+  },
+});
+```
+
+Understand the three costs before adopting this setup:
+
+- **View events are still reported.** At least one per page, plus throttled updates whenever metrics or event counts change, plus a keep-alive update every 5 minutes while the session is active. This baseline cannot be removed, and `beforeSend` cannot discard view events either.
+- **Error evidence is reduced to a stack trace.** With `trackUserInteractions` off, you no longer know what the user clicked before the error, which makes investigation noticeably harder.
+- **Traced requests are not affected by the resource switch.** Requests matching `allowedTracingUrls` are still reported even with resource collection off (flagged as not indexed, so they do not count toward volume), so traffic does not drop to zero.
+
+If your goal is "errors first, but keep the evidence", use [best practice 3](#best-practice-3-full-error-capture-with-proportional-sampling-for-the-rest) instead: errors and failed requests are kept in full while everything else converges proportionally, holding volume down without losing the evidence you need.
+</Accordion>
+
+<Accordion title="I want to cut data volume to 20% but still capture every error — how do I configure that?">
+Setting `sessionSampleRate` to 20 will not do it — a session that loses the draw reports nothing, errors included (rule 1). Collect every session so no error is lost, then bucket by session or user so only a share of them keep full data. The full recipe is in [best practice 3](#best-practice-3-full-error-capture-with-proportional-sampling-for-the-rest).
 </Accordion>

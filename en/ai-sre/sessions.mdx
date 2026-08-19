@@ -69,14 +69,16 @@ The chat page header provides share controls, shown only when you have manage pe
 |---|---|
 | Who can share | Members with manage permission on the session — the creator of a personal session, or the creator / account owner / admin / team members of a team session |
 | Who can open it | Members who hold the link and are signed in to the **same account**; the link does not work across accounts or for anonymous visitors |
-| What link holders see | The session opens in **read-only** mode with a "This is a read-only shared session" notice: they can inspect the full context (messages, tool calls, artifacts), but the composer is replaced by the notice — they cannot continue the conversation or modify the original session |
+| What link holders see | The session opens in **read-only** mode with a "This is a read-only shared session" notice: they can inspect the full context (messages, tool calls, artifacts), and can also open a Subagent dispatch chip to view the child session's execution details (also read-only); but the composer is replaced by the notice — they cannot continue the conversation or modify the original session |
 | How to keep working | Link holders can click **Fork into a new session** to derive their own session and continue from there |
 | How to revoke | Once sharing is enabled, a **Remove share** button appears in the header; clicking it invalidates the link immediately (a "Share removed" toast appears). Re-enabling sharing later generates a new link — the old link is not restored |
 
 Sharing mainly changes the visibility of **personal sessions**: a team session is already readable by any member of the same account who has the session ID (see the table above), whereas a personal session is visible only to its creator by default — a share link is the only way for other members of the account to open it.
 
 <Note>
-Incognito sessions and Subagent sessions cannot be shared.
+Incognito sessions cannot be shared.
+
+Subagent / A2A child sessions can't have sharing enabled on their own either — sharing can only be enabled on the **root session**. But once you share the root session, link holders can open a Subagent dispatch chip in the read-only view and view the corresponding child session's execution details, also read-only; child sessions are view-only and don't offer **Fork into a new session**. Revoking the root session's share also invalidates access to its child sessions.
 </Note>
 
 ### Per-Session Actions
@@ -89,7 +91,7 @@ Hover over a session row to reveal the pin and archive actions. A pinned session
 | Archive / Unarchive | Inline archive button on hover | Archived sessions are hidden from the active list by default; switch to **Archived** in the filter to find them |
 | Rename | Click the chat title to edit in place | Press Enter or click away to confirm; press Esc to cancel; maximum 60 characters |
 
-A new session does not need a manual title: after the first turn completes, the system auto-generates a title from the session's content (`POST /safari/session/generate-name`). Until that finishes, a placeholder title derived from your first message is shown so the sidebar never sticks at "Untitled." You can **rename** the session at any time to override the auto-generated title (title limit: 60 characters).
+A new session does not need a manual title: after the first turn completes, the system auto-generates a title server-side from the session's content and pushes it back through the session stream as a `session.renamed` frame, which updates the sidebar and title in place. Until that finishes, a placeholder title derived from your first message is shown so the sidebar never sticks at "Untitled." You can **rename** the session at any time to override the auto-generated title (title limit: 60 characters).
 
 <Tip>
 Hovering over a session row for a moment shows a tooltip with the full session name, the associated team, and the exact timestamp — useful when the name is truncated and you need to confirm you have the right session.
@@ -113,14 +115,27 @@ Opening a session clears its unread dot.
 
 Type a message in the input box at the bottom and press Enter to send. The input box supports Markdown and slash commands (type `/` to open the command menu) to trigger built-in skills and commands.
 
+When the console publishes a new version, a **version update notice** appears above the input box: "A new version of the console has been published. Refresh the page to continue." Click **Refresh** to reload the page and use the new version; clicking the close button hides the notice, and it will not repeat for the same version (the notice only appears in the full web console, not in embedded mode or on-premises deployments).
+
 ### Attachments and Context References
 
 <AccordionGroup>
   <Accordion title="Upload attachments" icon="paperclip">
-    Click the plus button at the lower left of the input box to choose files, or paste images directly. Supported formats include images, PDFs, text / Markdown / CSV, and Office documents (Word / Excel / PowerPoint), up to **20 MB** per file. A single message can carry at most **9 attachments**, and the total size of all attachments in one message cannot exceed **50 MB**; exceeding either limit shows a corresponding message. Screenshots can be pasted directly into the chat.
+    Click the plus button at the lower left of the input box to choose files, or paste images directly. Supported formats include images, PDFs, text / Markdown / CSV / HTML, and Office documents (Word / Excel / PowerPoint), up to **20 MB** per file. HTML files are read as plain text and rendered in the sandbox — any scripts inside them are not executed. A single message can carry at most **9 attachments**, and the total size of all attachments in one message cannot exceed **50 MB**; both limits are validated client-side as soon as you pick the files, and exceeding either shows a corresponding message — at this point the attachments are only staged locally (pending chips) and uploaded together when the message is sent. Screenshots can be pasted directly into the chat.
+
+    Extensions not listed above — such as code and config files like `.go`, `.py`, `.yaml` — are also accepted as plain text, as long as the entire file content is valid UTF-8. Empty files are the exception and are still rejected.
+
+    Besides individual files, you can **upload a whole folder**: choose **Upload folder** from the plus menu to pick a local folder, or drag a folder straight into the input area. Folders are handled as follows:
+
+    - **File count limit**: a single folder may contain at most **50 files**; a folder over the limit is rejected outright ("This folder exceeds the 50-file limit; please choose a smaller folder") instead of keeping only the first 50. `node_modules` directories and files / directories starting with `.` are silently ignored and don't count toward the limit.
+    - **Per-file validation**: every file in the folder is still checked against the single-file rules (20 MB per file, 50 MB total, type validation). Files that fail are skipped, and after you pick a folder the input area shows a "Skipped N files" list naming each file and its skip reason (over 20 MB / over the 50 MB attachment total / not a text file / unsupported file type).
+    - **Attachment counting**: the whole folder counts as **1 attachment** in a message, toward the same 9-attachment limit.
+    - **Directory structure preserved**: the relative path of every file in the folder (including the top-level folder name) is preserved and staged into the sandbox. The agent sees a path-sorted file listing (an envelope with the file count and total size) rather than the file contents inlined into context; it reads individual files on demand with the read / bash / grep tools inside the sandbox.
+
+    **Inline truncation of large files**: attachments reach the agent as extracted text. When the extracted text exceeds **64 KB**, only the first **32 KB** is inlined (cut at a valid UTF-8 boundary), and the attachment envelope carries a pointer to the full file staged in the sandbox (like `~/.flashduty/attachments/...`) — if the full content matters, ask the agent to read the file from the sandbox with the read / bash tools; nothing is lost. In addition, PDFs larger than **3 MB** are no longer passed natively to the model; they fall back to text extraction under the same truncation rule.
   </Accordion>
   <Accordion title="Context references" icon="link">
-    When you enter AI SRE from an incident, alert, monitor rule, or host page, the related object is embedded into the input box as a **reference capsule** — a small inline tag indicating the kind of object referenced — an incident, alert event, alert, monitor rule, host, or on-call analytics — that travels with the message so the agent can start its analysis from that object directly. Click the capsule to open the referenced object in a new tab, or click its close button to remove the reference before sending. A single message can carry multiple references. Besides objects carried in automatically from a related page, you can also type `@` directly in any session's input box to trigger an incident search dropdown (supporting fuzzy keyword search and a list of recent incidents); selecting one inserts the same kind of reference capsule — a standalone entry point available at any time.
+    When you enter AI SRE from an incident, alert, monitor rule, monitor target, or service topology page, the related object is embedded into the input box as a **reference capsule** — a small inline tag indicating the kind of object referenced — an incident, alert event, alert, monitor rule, host, monitor target, service topology, or on-call analytics — that travels with the message so the agent can start its analysis from that object directly. Click the capsule to open the referenced object in a new tab, or click its close button to remove the reference before sending. A single message can carry multiple references. Besides objects carried in automatically from a related page, you can also type `@` directly in any session's input box to trigger an incident search dropdown (supporting fuzzy keyword search and a list of recent incidents); selecting one inserts the same kind of reference capsule — a standalone entry point available at any time.
   </Accordion>
   <Accordion title="Knowledge and skills" icon="book">
     When a session starts, the knowledge packs and skills for the bound team are loaded automatically. See <a href="/en/ai-sre/knowledge">Knowledges</a> and <a href="/en/ai-sre/skills">Skills</a> for details.
@@ -150,6 +165,10 @@ The first time a session runs, an **environment initialization** card appears in
 | Init | Initialized session | A brand-new cloud container was created for the session |
 | Resume | Resumed session | The previous sandbox was reused, with its files intact |
 | Reclaim | Rebuilt session | The previous sandbox had been reclaimed, so a new container was created |
+
+<Note>
+Sessions bound to a self-hosted [BYOC Runner](/en/ai-sre/environments#byoc-runner) skip the cloud phases: the init card shows a single phase — **Connecting to the self-hosted runner** (for init, resume, and reclaim alike) — which becomes **Connected to the self-hosted runner** once it succeeds, then collapses into the same result line. If connecting to the self-hosted runner fails, the card shrinks to a single-line error notice (**Failed to connect to the self-hosted runner**, with the specific reason) and offers no cloud phase-history expansion.
+</Note>
 
 <Warning>
 When the previous sandbox was reclaimed after being idle, the card warns: **Previous sandbox was reclaimed after N min idle — saved files were reset**. This means anything previously written to the sandbox filesystem is gone. Persist long-lived outputs by **saving them as an Artifact or to a Knowledge Pack**, rather than relying on transient sandbox files.
@@ -221,7 +240,7 @@ Hover over a message to reveal action buttons:
 | Fork | Agent reply from a completed turn | Creates a new session from the completed turn that produced that reply, so you can continue down a different investigation path |
 
 <Note>
-Editing a historical message is, under the hood, a **rewind** operation: once submitted, the conversation regenerates from that message onward, and any content after that message is replaced. Confirm before submitting.
+Editing a historical message is, under the hood, a **rewind** operation: once submitted, the conversation regenerates from that message onward, and any content after that message is replaced. Confirm before submitting. If the turn that produced the target message is still running or stopping, the rewind is rejected (`rewind target invocation is still active`) — wait for that turn to settle before submitting.
 </Note>
 
 ### Forking a session
@@ -233,6 +252,8 @@ Forking is useful when you want to try another path from the same investigation 
 <Note>
 You can fork only from a **completed** turn in a top-level session. If the source session is still running, the selected turn has not settled, or the target is a Subagent child session, AI SRE rejects the fork.
 </Note>
+
+If the forked portion of the conversation dispatched any Subagent or A2A tasks, those dispatch chips are copied over to the new session along with their respective child sessions — opening one still shows the execution details, and it never points at an original task you don't have access to. **Dispatches that had already completed or failed in the source session keep their real status** (completed / failed), copied together with their result; only **dispatches still in progress at fork time** show as "Interrupted" — the new session has no executor picking them up, so they cannot continue running. If you need to rerun one, just start a fresh dispatch in the new session.
 
 Forking clears temporary state that only belongs to an in-progress run, such as active-turn caches, pending mount state, frontend state that has not been persisted, and current-turn counters. Persisted history, tool calls, and reusable compaction state are retained; team and environment binding are written to the new session based on your choice in the fork dialog. The forked session has its own context, so later messages, compaction, and run results do not write back to the source session.
 
@@ -257,13 +278,18 @@ The card also has a free-text box to add specifics (optional). On submit, the fe
 
 As a conversation grows longer, the session context approaches the model's context-window limit. AI SRE automatically compacts older conversation history — summarizing it into a digest while preserving recent content — to free up context space without losing critical information.
 
-Compaction is triggered in three ways:
+Every compaction boundary summary also appends a deterministic **folded-resources manifest**: it lists the resources folded out of context this round and how to get them back — skills re-read via `skill(name)`, MCP server tool definitions re-discovered via `tool_search`, and A2A agent usage notes re-delivered automatically on the next dispatch or message. Post-compaction turns can recover those definitions on demand without keeping them in context.
+
+Compaction is triggered in four ways:
 
 | Trigger | Timing |
 |---|---|
 | Automatic (before a turn) | Before a turn starts, when context usage exceeds the threshold |
 | Automatic (mid-turn) | During a turn, if context continues to grow and crosses the threshold again |
+| Automatic (event count) | Once the conversation reaches about **500 events**, even if token usage is still below the threshold |
 | Manual | You explicitly trigger compaction with the `/compact` command |
+
+The **event-count trigger** is a safety net: in a session made of many short turns, the token estimate can stay below the threshold for a long time while the number of events (messages, tool calls, and so on) keeps growing. Compaction fires once the count reaches about 500, so the history window cannot freeze against the model's per-load row cap. If you see compaction happen while the Context percentage is well below the threshold, this is why.
 
 ### What You Will See
 

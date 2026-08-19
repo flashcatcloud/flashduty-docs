@@ -50,7 +50,7 @@ A Kubernetes App connects an in-cluster agent to AI SRE. After installation, AI 
     Go to **Plugins → Apps → Kubernetes Apps** and click **Create Kubernetes App**. Enter a cluster name and choose its scope: **Shared** is available to all sessions in the account; **Team** is available to that team's sessions and to personal sessions of its members. Cluster names must be unique within a scope.
   </Step>
   <Step title="Set namespace access">
-    Choose **All namespaces** or **Specific namespaces**. All namespaces applies one permission level to current and future namespaces. With specific namespaces, set **Read-only** or **Read + limited modifications** for each namespace. Leaving the specific-namespace list empty allows the agent to read only basic cluster metadata.
+    Choose **All namespaces** or **Specific namespaces**. All namespaces applies one permission level to current and future namespaces. With specific namespaces, set **Read-only**, **Read + limited modifications**, or **Full access** for each namespace. Leaving the specific-namespace list empty allows the agent to read only basic cluster metadata. **Full access** is the highest level within the namespace: on a specific namespace it applies only inside that namespace (cluster metadata stays read-only), while **All namespaces + Full access** grants `cluster-admin` via a `ClusterRoleBinding`, including cluster-scoped resources and cluster RBAC (available only with All namespaces). See [Permission details](#permission-details) below for what each level can do; open **View Kubernetes RBAC details** in the form for the complete RBAC rules.
   </Step>
   <Step title="Run the installation command">
     Save the App, copy the generated installation command, and run it in the target cluster. Installation commands expire; reopen the installation setup or view the manifest to generate a new command without rotating the token.
@@ -58,12 +58,38 @@ A Kubernetes App connects an in-cluster agent to AI SRE. After installation, AI 
 </Steps>
 
 <Warning>
-After changing namespace access or permissions, run the installation command again so the in-cluster RBAC is updated. Before choosing **Read + limited modifications**, confirm that AI SRE is allowed to perform those actions in the namespace.
+After changing namespace access or permissions, run the installation command again so the in-cluster RBAC is updated. Before choosing **Read + limited modifications**, confirm that AI SRE is allowed to perform those actions in the namespace. **Full access** is a high-risk option: on a specific namespace it lets this App read, create, modify, and delete every resource in that namespace; **All namespaces + Full access** escalates to cluster administrator access (`cluster-admin`), so choose it with care.
 </Warning>
+
+### Permission details
+
+The following boundaries apply to all levels:
+
+- Every level can read cluster information, nodes, Pods, events, logs, and non-sensitive resources such as ConfigMaps
+- No level supports entering a container (exec), Attach, port forwarding, or watch and real-time log following (`-f`). This is a limitation of the access method, not of the permission level
+
+Operations that differ between levels:
+
+| Operation | Read-only | Read + limited modifications | Full access |
+| --- | --- | --- | --- |
+| Read Secrets | No | No | Yes |
+| Evict Pods (to restart workloads) | No | Yes | Yes |
+| Scale Deployments and StatefulSets | No | Yes | Yes |
+| Adjust HPA replica bounds | No | Yes | Yes |
+| Roll back workloads | No | No (AI SRE computes the target revision and gives you the complete command to run) | Yes |
+| Modify workload configuration (image, startup command, env vars, etc.) | No | No | Yes |
+| Modify ConfigMaps and Secrets | No | No | Yes |
+| Create or delete resources | No | No | Yes |
+| Modify RBAC within the namespace | No | No | Yes |
+| Operate cluster-scoped resources and cluster RBAC | No | No | All namespaces only |
+
+- **Read-only**: read access within the authorized namespaces is bound directly to Kubernetes' built-in `view` role — FlashDuty no longer maintains its own resource list. It covers Pods, logs, workloads, events, ConfigMaps, and similar resources, but never Secrets; CRDs that cluster components mark as view-readable are included as well. It also grants read-only access to cluster-level nodes, namespaces, persistentvolumes, storageclasses, and ingressclasses.
+- **Read + limited modifications**: on top of read-only, this level may evict Pods (`pods/eviction`), scale Deployments and StatefulSets (`deployments/scale`, `statefulsets/scale`), and adjust HPA replica bounds (`horizontalpodautoscalers`). These rules can only change how many replicas a workload runs and rebuild Pods from the same configuration — they cannot change any Pod's image, startup command, environment variables, identity, or mounts. As a result, `kubectl rollout restart` and `kubectl rollout undo` are both denied (in Kubernetes both are patches to the workload); restart a workload by evicting its Pods one at a time. For rollbacks, AI SRE derives the target revision from the ReplicaSet history and gives you the complete `kubectl rollout undo --to-revision=N` command to run in your cluster.
+- **Full access**: can read Secrets, modify ConfigMaps and Secrets, modify workload configurations, create or delete resources, and modify RBAC within the namespace; **All namespaces + Full access** additionally grants `cluster-admin` via a `ClusterRoleBinding`, covering cluster-scoped resources and cluster RBAC.
 
 ### Edit and revoke
 
-You can edit the cluster name, scope, and namespace access from the Kubernetes App list. Revoking immediately invalidates the connection and token, but it does not remove the in-cluster agent or RBAC automatically. Run the uninstall command shown by the console in the target cluster. It removes only resources for this Kubernetes App and preserves the shared `flashduty` namespace.
+You can edit the cluster name, scope, and namespace access from the Kubernetes App list. Changing the scope to **Shared** carries the same gate as creating a Shared App: only the account owner or admins can do it — a regular member is denied even for their own team's App and can only move an App to teams they belong to. Revoking immediately invalidates the connection and token, but it does not remove the in-cluster agent or RBAC automatically. Run the uninstall command shown by the console in the target cluster. It removes only resources for this Kubernetes App and preserves the shared `flashduty` namespace.
 
 ## The GitHub App
 

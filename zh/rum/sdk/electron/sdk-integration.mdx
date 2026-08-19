@@ -1,0 +1,217 @@
+---
+title: "Electron SDK 接入指南"
+description: "在 Electron 应用中接入 Flashduty RUM，采集主进程和渲染进程的性能、错误与用户操作数据"
+keywords: ["RUM", "Electron SDK", "桌面应用监控", "主进程", "渲染进程"]
+---
+
+Electron 应用包含主进程和渲染进程。完成两侧接入后，你可以在同一条 RUM 会话中查看桌面应用的运行状态和页面体验。
+
+| 进程 | SDK | 主要采集内容 |
+|------|-----|--------------|
+| 主进程 | `@flashcatcloud/electron-sdk` | 会话、主进程错误、原生崩溃、主进程网络请求 |
+| 渲染进程 | `@flashcatcloud/browser-rum` | 页面访问、用户操作、前端资源、JavaScript 错误、Web Vitals |
+
+普通渲染进程事件会自动转发到主进程，由主进程统一上报。你不需要编写额外的 IPC 转发代码。
+
+## 前提条件
+
+接入前，请确认：
+
+- Electron 版本为 39 或更高
+- 已在 Flashduty 控制台的 [RUM 应用管理](https://console.flashcat.cloud/rum/apps) 页面创建 Electron 应用，并获取 **Application ID** 和 **Client Token**
+- 应用运行环境可以访问 `https://browser.flashcat.cloud/api/v2/rum`；私有化部署请准备自己的上报地址
+
+## 接入步骤
+
+<Steps>
+<Step title="安装 SDK">
+在项目中安装主进程 SDK 和 Browser SDK：
+
+```bash
+npm install @flashcatcloud/electron-sdk @flashcatcloud/browser-rum@^0.0.7
+```
+
+`@flashcatcloud/browser-rum` 需要使用 0.0.7 或更高版本，才能在 Electron 中启用会话回放。
+</Step>
+
+<Step title="配置主进程入口">
+Electron SDK 需要在 Electron 模块加载前完成插桩。请根据主进程是否打包选择一种配置方式。
+
+<Tabs>
+<Tab title="主进程不打包">
+将 `instrument` 放在主进程入口的第一条 import：
+
+```ts main.ts
+import '@flashcatcloud/electron-sdk/instrument';
+
+import { app, BrowserWindow } from 'electron';
+```
+
+如果项目使用 import 排序规则，请确保该 import 不会被移动到 `electron` 之后。
+</Tab>
+
+<Tab title="Vite">
+在主进程的 Vite 配置中添加插件。electron-vite 项目应添加到 `main` 配置，而不是 `renderer` 配置。
+
+```ts vite.config.ts
+import { defineConfig } from 'vite';
+import { datadogVitePlugin } from '@flashcatcloud/electron-sdk/vite-plugin';
+
+export default defineConfig({
+  plugins: [datadogVitePlugin()],
+});
+```
+</Tab>
+
+<Tab title="Webpack">
+在主进程的 Webpack 配置中添加插件：
+
+```js webpack.main.config.js
+const { DatadogWebpackPlugin } = require('@flashcatcloud/electron-sdk/webpack-plugin');
+
+module.exports = {
+  plugins: [new DatadogWebpackPlugin()],
+};
+```
+</Tab>
+
+<Tab title="esbuild">
+在主进程构建中添加插件：
+
+```ts build.ts
+import * as esbuild from 'esbuild';
+import { datadogEsbuildPlugin } from '@flashcatcloud/electron-sdk/esbuild-plugin';
+
+await esbuild.build({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  platform: 'node',
+  outfile: 'dist/main.js',
+  plugins: [datadogEsbuildPlugin()],
+});
+```
+</Tab>
+</Tabs>
+
+使用打包插件时，无需再手动引入 `@flashcatcloud/electron-sdk/instrument`。插件会处理执行顺序和运行时依赖。
+</Step>
+
+<Step title="初始化主进程 SDK">
+在 `app.whenReady()` 之后、创建第一个 `BrowserWindow` 之前调用 `init()`：
+
+```ts main.ts
+import { app, BrowserWindow } from 'electron';
+import { init } from '@flashcatcloud/electron-sdk';
+
+void app.whenReady().then(async () => {
+  const initialized = await init({
+    applicationId: '<YOUR_APPLICATION_ID>',
+    clientToken: '<YOUR_CLIENT_TOKEN>',
+    service: 'my-electron-app',
+    env: 'production',
+    version: app.getVersion(),
+  });
+
+  if (!initialized) {
+    console.error('[Flashduty RUM] SDK initialization failed');
+  }
+
+  createWindow();
+});
+
+function createWindow(): void {
+  const window = new BrowserWindow();
+  void window.loadFile('index.html');
+}
+```
+
+`applicationId`、`clientToken` 和 `service` 为必填项。SaaS 用户无需配置 `site`。初始化失败不会阻止应用继续启动；SDK 会在主进程控制台输出具体原因。
+</Step>
+
+<Step title="初始化渲染进程 SDK">
+在渲染进程入口按 Web SDK 的方式初始化：
+
+```ts renderer.ts
+import { flashcatRum } from '@flashcatcloud/browser-rum';
+
+flashcatRum.init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  env: 'production',
+  version: '1.0.0',
+  sessionSampleRate: 100,
+  trackResources: true,
+  trackLongTasks: true,
+  trackUserInteractions: true,
+});
+```
+
+建议让两个进程使用相同的 `applicationId`、`clientToken`、`service`、`env` 和 `version`，避免同一个应用的数据被拆到不同维度。
+
+主进程配置正确后，SDK 会自动注入 preload 并建立桥接。你不需要修改应用自己的 preload，也不需要编写 `ipcRenderer` / `ipcMain` 转发代码。`allowedWebViewHosts` 仅用于采集 `<webview>` 或 `BrowserView` 中加载的第三方页面。
+</Step>
+
+<Step title="验证接入">
+启动应用并完成一次页面访问、点击和网络请求，然后在 RUM 查看器中检查数据：
+
+1. 使用 `source:electron OR container.source:electron` 筛选应用产生的全部 Electron 事件
+2. 确认能看到主进程事件，其 `view.url` 为 `electron://main-process`
+3. 确认能看到渲染进程的 `view`、`action`、`resource` 或 `error` 事件
+4. 检查渲染进程事件是否带有 `container.source: electron`
+
+默认每 10 秒上报一批数据，请等待片刻后再刷新。
+
+<Check>
+同一条会话中同时出现主进程和渲染进程事件，且渲染进程事件带有 `container.source: electron`，表示双进程接入成功。
+</Check>
+</Step>
+</Steps>
+
+## 开启会话回放（可选）
+
+会话回放由渲染进程录制并直接上传。请在渲染进程配置中同时设置采样率和直传开关：
+
+```ts renderer.ts
+flashcatRum.init({
+  // 其余配置同上
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+  defaultPrivacyLevel: 'mask',
+});
+```
+
+回放录制需要创建 blob Worker，并从渲染进程连接上报地址。如果页面配置了 Content Security Policy（CSP），请允许 `worker-src blob:` 和实际使用的上报地址：
+
+```html
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  worker-src 'self' blob:;
+  connect-src 'self' https://browser.flashcat.cloud;
+">
+```
+
+私有化部署开启回放时，还需要为渲染进程单独配置 `proxy`。配置方式见[高级配置 · 自定义上报地址](/zh/rum/sdk/electron/advanced-config#自定义上报地址)。
+
+如果没有采集到回放，请参阅 [Electron SDK 问题排查](/zh/rum/sdk/electron/faq#为什么没有会话回放)。
+
+## 下一步
+
+<CardGroup cols={2}>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/electron/advanced-config">
+配置自定义上报地址、批次、用户身份和手动上报 API。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/electron/data-collection">
+了解主进程与渲染进程分别采集哪些数据。
+</Card>
+
+<Card title="错误还原" icon="bug" href="/zh/rum/sdk/electron/error-symbolication">
+上传 JavaScript sourcemap 和原生崩溃符号。
+</Card>
+
+<Card title="问题排查" icon="circle-question" href="/zh/rum/sdk/electron/faq">
+排查桥接、会话回放和错误还原问题。
+</Card>
+</CardGroup>

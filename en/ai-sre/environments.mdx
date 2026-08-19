@@ -254,7 +254,19 @@ After the Runner starts, it continuously sends heartbeats. List statuses mean:
 |---|---|
 | Pending | The Environment exists, but the Runner has never connected. |
 | Online | The Runner is currently connected, heartbeat is healthy, and it can accept work. |
+| Degraded | The Runner is still connected and its heartbeat is healthy, but its executor can't keep up — tasks are queuing up or taking too long to return. **You can keep using it, but responses will be slower**. |
 | Offline | The Runner connected before, but its heartbeat is currently lost. |
+
+`degraded` is computed **in real time** and isn't persisted: it's re-evaluated from current signals on every read, so it never needs to be manually cleared. It's driven by two kinds of signal —
+
+- newer Runner versions report their own executor health probe and backlog count in the heartbeat, and degraded is judged directly from those;
+- older Runner versions that don't report these metrics use a fallback rule instead: **3 consecutive** task timeouts against the same Environment mark it degraded (only timeouts longer than 20 seconds count, so a caller's own short timeout isn't misjudged).
+
+Recovery is automatic too: for newer Runner versions, the status returns to `Online` as soon as the heartbeat is healthy again (probe passes and no backlog); for older Runner versions, any single successful task resets the counter, or it recovers automatically after 30 minutes of sustained quiet.
+
+<Tip>
+When you see `Degraded`, first check CPU, memory, and disk load on the Runner's host, and whether a long-running task is monopolizing the executor. It doesn't block the session, but staying in this state for a while means that host can't keep up with its current task volume.
+</Tip>
 
 The backend compares Runner versions during heartbeats. When a newer version is available, the Runner receives an upgrade notification and downloads, verifies, and replaces itself. Re-running the install command also upgrades manually.
 
@@ -370,6 +382,15 @@ permission:
 Command permission is currently configured only through this file — there is no console UI for it yet.
 </Note>
 
+### File-system boundary
+
+Permission configuration governs **commands**; the agent's **file read/write tools** follow their own path semantics, matching `bash`:
+
+- **Relative paths** are confined to the workspace root with symlink-escape protection — through a relative path the agent can only read and write files inside the workspace.
+- **Absolute paths** are passed through to the host filesystem by design, matching `bash`.
+
+So the real file-access boundary is the **OS user** the Runner runs as, plus the deployment isolation (the systemd user and directory protections, or Docker mounts and container boundary) — not the permission configuration file.
+
 ## Selecting an environment in a session
 
 ---
@@ -380,7 +401,7 @@ The environment selector at the bottom of the chat input decides where a new ses
 |---|---|
 | **Auto** | The default for new sessions. Uses an online Runner the current member can use; otherwise falls back to the cloud Sandbox. |
 | **Cloud Sandbox · Default** | Forces the system-managed cloud Sandbox and ignores self-hosted Runners. |
-| **Self-hosted Environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected. |
+| **Self-hosted Environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected; Runners in **Degraded** status **remain selectable**, and selecting one shows a "Degraded — you can continue, but responses may be slower" notice. |
 
 <Warning>
 Environment selection is locked once per session: the Environment determined when the session sends its first message is recorded and reused for all later turns. Changing the selector afterward does not change that session. To switch environments, start a new session.
@@ -401,8 +422,8 @@ Each BYOC Environment has account-level or team-level scope:
 
 Edit permissions follow the unified rule:
 
-1. Account owners and account admins can edit any Environment.
-2. Team members can edit team-scoped Environments for their team.
+1. Team-scoped Environments can be acted on only by members of that team — organization admins must join the team first.
+2. Account-scoped Environments (shared scope) can be acted on only by organization admins.
 3. There is no "creator extra permission"; you do not need to be the creator if the rules above allow the edit.
 
 <Note>

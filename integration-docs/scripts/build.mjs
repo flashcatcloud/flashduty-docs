@@ -31,8 +31,14 @@ function getFrontmatterAttr(content, name) {
   return (match?.[1] || match?.[2] || match?.[3] || '').trim();
 }
 
+// The leading `^[ \t]*` matters when the block is indented inside a list item:
+// without it the indentation survives as a stray whitespace-only line, which
+// turns the surrounding tight list loose. Blocks at column zero are unaffected.
 function removeHiddenBlocks(content) {
-  return content.replace(/<div\b(?=[^>]*\bclass(?:Name)?=["'][^"']*\bhide\b[^"']*["'])[^>]*>[\s\S]*?<\/div>/g, '\n');
+  return content.replace(
+    /^[ \t]*<div\b(?=[^>]*\bclass(?:Name)?=["'][^"']*\bhide\b[^"']*["'])[^>]*>[\s\S]*?<\/div>/gm,
+    '\n',
+  );
 }
 
 function convertAnchorSpans(content) {
@@ -268,6 +274,14 @@ function mdxToMarkdown(content) {
   let output = convertAnchorSpans(removeHiddenBlocks(stripFrontmatter(content)));
 
   output = convertDirectiveContainers(convertCallouts(convertCards(convertAccordions(output))))
+    // Counterpart to removeHiddenBlocks: a `{/* console: ... */}` block is an MDX
+    // comment, so the docs site renders nothing, while the console gets its
+    // contents. Use it for text that only makes sense inside the product, such
+    // as a value the console substitutes per deployment. The opening and closing
+    // lines are consumed whole so the captured lines land at the same
+    // indentation they were written at, with no blank line on either side.
+    // Must run before the generic comment strip below, which would discard it.
+    .replace(/^[ \t]*{[ \t]*\/\*[ \t]*console:[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*\*\/[ \t]*}[ \t]*(\r?\n)/gm, '$1$2')
     .replace(/{\s*\/\*[\s\S]*?\*\/\s*}/g, '')
     .replace(/^\s*import\s+.*$/gm, '')
     .replace(/^\s*export\s+.*$/gm, '')

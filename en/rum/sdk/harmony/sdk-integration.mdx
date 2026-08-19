@@ -7,7 +7,7 @@ keywords: ["RUM", "HarmonyOS SDK", "ArkTS", "user monitoring"]
 The HarmonyOS SDK provides RUM, Trace, and Crash capabilities through ArkTS HAR modules. After initialization, the SDK reports views, user actions, network requests, errors, and crashes to Flashduty RUM, with `source: "harmony"` identifying the data source.
 
 <Info>
-The current SDK module version is `0.2.0`. The examples use `@flashcatcloud/core`, `@flashcatcloud/rum`, `@flashcatcloud/trace`, and `@flashcatcloud/crash`.
+The current SDK module version is `0.4.0`. The examples use `@flashcatcloud/core`, `@flashcatcloud/rum`, `@flashcatcloud/trace`, and `@flashcatcloud/crash`. Applications using axios also need `@flashcatcloud/axios`.
 </Info>
 
 ## Prerequisites
@@ -26,10 +26,12 @@ Add the Flashduty modules you need to the application module's `oh-package.json5
 ```json5 oh-package.json5
 {
   dependencies: {
-    "@flashcatcloud/core": "0.2.0",
-    "@flashcatcloud/rum": "0.2.0",
-    "@flashcatcloud/trace": "0.2.0",
-    "@flashcatcloud/crash": "0.2.0"
+    "@flashcatcloud/core": "0.4.0",
+    "@flashcatcloud/rum": "0.4.0",
+    "@flashcatcloud/trace": "0.4.0",
+    "@flashcatcloud/crash": "0.4.0",
+    // Only needed when the application uses @ohos/axios
+    "@flashcatcloud/axios": "0.4.0"
   }
 }
 ```
@@ -160,7 +162,18 @@ monitor.stopAction(RumActionType.SCROLL, 'product_feed');
 
 ## Track network requests and Trace
 
-The HarmonyOS SDK supports two network integration paths.
+The HarmonyOS SDK offers an integration path per network library. **All of them only produce resource events when RUM is configured with `setTrackNetworkRequests(true)`, which is disabled by default.**
+
+| Network library in use | Integration |
+|---|---|
+| `rcp` from `@kit.RemoteCommunicationKit` | Add `FlashcatTrace.interceptor()` |
+| `@kit.NetworkKit` | Use `FlashcatHttp.request()` instead |
+| `@ohos/axios` | Call `trackAxios(instance)` |
+| Anything else | Wire it up with `FlashcatTrace.startTracedResource()` |
+
+<Note>
+The SDK does not automatically hook `http.createHttp()` from `@kit.NetworkKit`. Requests you send with it directly are not collected — use the integration for your library from the table above.
+</Note>
 
 ### rcp interceptor
 
@@ -191,16 +204,49 @@ const response = await FlashcatHttp.request('https://api.example.com/orders', {
 });
 ```
 
-<Note>
-`traceparent` and `tracestate` are injected only when tracking consent is `TrackingConsent.GRANTED`. `FlashcatHttp` also honors `setFirstPartyHosts()`; when no first-party host is configured, it injects into all hosts. If a request already has `traceparent`, the SDK does not overwrite the existing Trace context.
-</Note>
+### axios
 
-For other network stacks, use `FlashcatTrace.getHeaders()` to get `traceparent` and `tracestate` headers for manual injection.
+`@ohos/axios` has its own network adapter and travels neither path above. Install `@flashcatcloud/axios` and call `trackAxios()` once per axios instance.
 
 ```ts
-const headers = FlashcatTrace.getHeaders();
-// Merge headers into your custom network request
+import axios from '@ohos/axios';
+import { trackAxios } from '@flashcatcloud/axios';
+
+const apiClient = axios.create({ baseURL: 'https://api.example.com' });
+trackAxios(apiClient);
 ```
+
+Put it wherever you already create the instance — usually the file that wires up auth tokens and shared error handling.
+
+<Warning>
+Interceptors are registered **per instance**: the default `axios` export and anything from `axios.create()` do not share them. Call this once for each instance you want reported, and exactly once — calling it twice reports every request twice.
+</Warning>
+
+### Other network stacks
+
+For a custom client or a library not covered above, use `FlashcatTrace.startTracedResource()`. It registers the resource and returns the headers to send; consent and first-party gating, the sampling decision and id encoding all happen inside the SDK.
+
+```ts
+import { FlashcatTrace, TracedResource } from '@flashcatcloud/trace';
+
+const traced: TracedResource = FlashcatTrace.startTracedResource(url, 'GET');
+// merge traced.headers into the request, then send it
+try {
+  const response = await send(url, traced.headers);
+  FlashcatTrace.stopTracedResource(traced.key, response.status, response.size);
+} catch (e) {
+  // A response — even a 404 — belongs to stopTracedResource, which keeps it a
+  // resource carrying that status. Only a request that never got a response
+  // goes here.
+  FlashcatTrace.failTracedResource(traced.key, `${e}`);
+}
+```
+
+Pass the **full url**: a relative path has no host to match, so the first-party check skips injection and the resource is reported without one. Pair every `startTracedResource` with a `stopTracedResource` or `failTracedResource`, including on the failure path, or the resource never closes.
+
+<Note>
+`traceparent` and `tracestate` are injected only when tracking consent is `TrackingConsent.GRANTED`, and only into hosts matching `setFirstPartyHosts()`; when no first-party host is configured, they go to all hosts. If a request already carries a `traceparent`, the SDK does not overwrite the existing Trace context. This applies to all four integrations.
+</Note>
 
 ## Identify users
 

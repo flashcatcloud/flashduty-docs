@@ -85,49 +85,90 @@ The SDK employs the following strategies to optimize network usage:
 
 ## Performance Optimization Recommendations
 
-If you have specific performance requirements, consider the following optimization measures:
+If you have specific performance requirements, consider the following measures:
 
 <Steps>
-<Step title="Adjust Sampling Rate">
-Reduce the number of collected events by configuring the sampling rate:
+<Step title="Adjust the sample rate">
+Reduce the number of collected events by configuring the sample rate:
 
 ```swift
 RUM.enable(
     with: RUM.Configuration(
         applicationID: "<RUM_APPLICATION_ID>",
-        sessionSampleRate: 80 // Sample 80% of sessions
+        sessionSampleRate: 80 // sample 80% of sessions
     )
 )
 ```
 </Step>
 
-<Step title="Enable Features on Demand">
-Only enable necessary tracking features:
+<Step title="Enable only the features you need">
+Turn off the automatic tracking you do not analyze:
 
 ```swift
 RUM.enable(
     with: RUM.Configuration(
         applicationID: "<RUM_APPLICATION_ID>",
-        uiKitViewsPredicate: nil, // Disable automatic view tracking
-        uiKitActionsPredicate: nil // Disable automatic action tracking
+        uiKitViewsPredicate: nil,      // disable automatic view tracking
+        uiKitActionsPredicate: nil,    // disable automatic action tracking (nil by default)
+        trackFrustrations: false,      // disable frustration signals (enabled by default)
+        trackBackgroundEvents: false,  // disable background events (false by default)
+        longTaskThreshold: nil,        // disable long task tracking (default 0.1 s)
+        vitalsUpdateFrequency: nil,    // stop collecting vitals (default .average, every 500 ms)
+        telemetrySampleRate: 0         // disable the SDK's internal telemetry (default 20%)
     )
 )
 ```
+
+<Warning>
+This step trades data coverage for load, so weigh each option against what you actually analyze. Disabling action tracking drops automatic action events to zero, and the frustration signals that depend on them (rage/dead/error tap) disappear with them. View, resource and error events are unaffected, and manual instrumentation still works.
+
+`telemetrySampleRate: 0` disables the SDK's own operational telemetry. It does not affect any RUM data, so you can set it safely.
+</Warning>
+
+<Note>
+In Swift, long task tracking is disabled with `longTaskThreshold: nil`. The Objective-C bridge cannot pass `nil`, so you have to write `rumConfiguration.longTaskThreshold = 0`. That does disable the feature, but RUM logs a `cannot be less than 0s` error on every start. This is expected and can be ignored.
+</Note>
 </Step>
 
-<Step title="Disable Background Event Tracking">
-If you don't need to track background events:
-
-```swift
-RUM.enable(
-    with: RUM.Configuration(
-        applicationID: "<RUM_APPLICATION_ID>",
-        trackBackgroundEvents: false
-    )
-)
-```
+<Step title="Tune the upload cadence">
+Adjust the upload interval, batch window and per-cycle batch limit to reduce contention between SDK uploads and your own requests, without losing any events. See the next section.
 </Step>
 </Steps>
+
+## Reducing the Impact of Uploads on Your Own Requests
+
+If your app makes latency-sensitive requests of its own (sign-in, checkout, key provisioning) over a narrow uplink, SDK uploads can compete with them for the uplink. The symptom is a higher tail (P95) on your own request latency that comes and goes.
+
+Three core settings change how uploads are distributed over time — fewer uploads, spread further apart:
+
+```swift
+Datadog.initialize(
+    with: Datadog.Configuration(
+        clientToken: "<CLIENT_TOKEN>",
+        env: "<ENV_NAME>",
+        batchSize: .large,             // batch window: default .medium 10 s -> .large 35 s
+        uploadFrequency: .rare,        // upload interval: default .average 2 s -> .rare 5 s
+        batchProcessingLevel: .low     // batches per cycle: default .medium 20 -> .low 5
+    ),
+    trackingConsent: .granted
+)
+```
+
+| Setting | Default | Suggested | Effect |
+|---------|---------|-----------|--------|
+| `uploadFrequency` | `.average` (2 s) | `.rare` (5 s) | Lengthens the interval between upload cycles, lowering the chance of colliding with your requests |
+| `batchSize` | `.medium` (10 s) | `.large` (35 s) | Batches collect for longer, so there are fewer requests; larger batches also compress better, so uplink bytes drop slightly |
+| `batchProcessingLevel` | `.medium` (20 batches) | `.low` (5 batches) | Caps how many batches one upload cycle ships back-to-back, so a backlog cannot saturate the uplink at once |
+
+<Tip>
+These three settings only change *when* uploads happen. They drop no events and remove no dimension from your dashboards, so if you do not want to sacrifice data, tune only these. The iOS SDK always compresses upload requests with deflate, so there is nothing to configure there.
+</Tip>
+
+<Note>
+The iOS, Android, HarmonyOS and Flutter SDKs use the same names and values for these three settings, so tuning advice transfers between platforms unchanged. The one difference is that iOS `.low` is 5 batches per cycle, while Android and HarmonyOS use 1 — same direction, smaller reduction.
+</Note>
+
+If the event volume itself is high, an EventMapper can drop specific noisy events (return `nil` from the mapper). That is less invasive than changing your instrumentation — see [Advanced configuration](/en/rum/sdk/ios/advanced-config).
 
 ## Offline Data Storage
 

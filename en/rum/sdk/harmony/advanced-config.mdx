@@ -13,14 +13,19 @@ Create core configuration with `ConfigurationBuilder` and pass it to `Flashcat.i
 ```ts
 import {
   ConfigurationBuilder,
-  FlashcatSite
+  FlashcatSite,
+  UploadFrequency,
+  BatchSize,
+  BatchProcessingLevel
 } from '@flashcatcloud/core';
 
 const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
   .setService('shopping-app')
   .setVariant('default')
   .useSite(FlashcatSite.CN)
-  .setBatchUploadFrequencyMs(5000)
+  .setUploadFrequency(UploadFrequency.AVERAGE)
+  .setBatchSize(BatchSize.MEDIUM)
+  .setBatchProcessingLevel(BatchProcessingLevel.MEDIUM)
   .build();
 ```
 
@@ -31,12 +36,55 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setVariant(variant)` | string | `""` | Build variant name |
 | `useSite(site)` | `FlashcatSite` | `FlashcatSite.CN` | Intake site; production uses `https://browser.flashcat.cloud` |
 | `setCustomEndpoint(endpoint)` | string | `""` | Overrides the intake host, usually for local proxying or private forwarding; the SDK still appends `/api/v2/rum` |
-| `setBatchUploadFrequencyMs(frequencyMs)` | number | `5000` | Foreground batch upload cadence in milliseconds |
+| `setUploadFrequency(frequency)` | `UploadFrequency` | `UploadFrequency.AVERAGE` | Interval between upload cycles: `FREQUENT` 500 ms / `AVERAGE` 2 s / `RARE` 5 s |
+| `setBatchSize(size)` | `BatchSize` | `BatchSize.MEDIUM` | How long one batch collects events before it is rolled: `SMALL` 3 s / `MEDIUM` 10 s / `LARGE` 35 s. Larger batches mean fewer requests and a better compression ratio, at the cost of delivery latency |
+| `setBatchProcessingLevel(level)` | `BatchProcessingLevel` | `BatchProcessingLevel.MEDIUM` | Maximum batches sent back-to-back in one upload cycle: `LOW` 1 / `MEDIUM` 20 / `HIGH` 100. Use `LOW` when the app has latency-sensitive requests of its own on a narrow uplink |
 | `setVerbose(enabled)` | boolean | `false` | Emits SDK internal HiLog entries with the `Flashcat` tag |
+
+<Note>
+These three settings share their names and values with the Android, iOS and Flutter SDKs, so tuning advice transfers between platforms unchanged.
+
+Since SDK 0.5.0, `setBatchUploadFrequencyMs(5000)` is replaced by `setUploadFrequency(UploadFrequency.RARE)`. Two defaults changed at the same time, both to match the other platforms: the upload interval went from 5 s to 2 s, and the batch window from 5 s to 10 s.
+</Note>
 
 <Note>
 `Flashcat.initialize()` initializes a given instance name only once. A duplicate call returns the existing instance and does not re-register feature modules.
 </Note>
+
+### Reducing the impact of uploads on your own requests
+
+If the app makes latency-sensitive requests of its own (sign-in, checkout, key provisioning) over a narrow uplink, SDK uploads can compete with them for the uplink. The symptom is a higher tail (P95) on your own request latency that comes and goes.
+
+Lower all three settings together to change how uploads are distributed over time — fewer uploads, spread further apart:
+
+```ts
+const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+  .useSite(FlashcatSite.CN)
+  .setUploadFrequency(UploadFrequency.RARE)          // upload interval: default AVERAGE 2 s -> RARE 5 s
+  .setBatchSize(BatchSize.LARGE)                     // batch window: default MEDIUM 10 s -> LARGE 35 s
+  .setBatchProcessingLevel(BatchProcessingLevel.LOW) // batches per cycle: default MEDIUM 20 -> LOW 1
+  .build();
+```
+
+<Tip>
+These three settings only change *when* uploads happen. They drop no events and remove no dimension from your dashboards, so if you do not want to sacrifice data, tune only these. `BatchSize.LARGE` has an extra benefit: larger batches compress better, so uplink bytes drop slightly.
+</Tip>
+
+<Note>
+Tuning advice transfers between platforms unchanged, because these three settings share names and values with the Android, iOS and Flutter SDKs. The one difference is that iOS `batchProcessingLevel = .low` is 5 batches per cycle, while HarmonyOS and Android use 1 — same direction, smaller reduction. See [Android SDK performance impact](/en/rum/sdk/android/performance-impact) and [iOS SDK performance impact](/en/rum/sdk/ios/performance-impact).
+</Note>
+
+Several things that need to be turned off on other platforms cost nothing on HarmonyOS, and are neither configurable nor necessary:
+
+| Capability | Other platforms | HarmonyOS SDK |
+|------------|-----------------|---------------|
+| Vitals collection | Android / iOS collect every 500 ms by default | Not collected |
+| Long task tracking | Enabled by default on Android / iOS | Never emits `long_task` events |
+| SDK internal telemetry | Sampled at 20% by default on Android / iOS | No internal telemetry is reported |
+| User interaction tracking | Enabled by default on Android / iOS, must be turned off explicitly | `setTrackUserInteractions` is `false` by default |
+| Upload compression | Web must enable it explicitly | Bodies over 512 characters are compressed automatically, not configurable |
+
+If the event volume itself is high, use [event mapping](#event-mapping-and-redaction) with `setEventMapper` to drop specific noisy events (return `null` to drop). That is less invasive than changing your instrumentation.
 
 ## Tracking consent
 
@@ -53,6 +101,20 @@ To comply with privacy regulations such as GDPR and CCPA, the SDK requires a tra
 <Info>
 When initialized with `TrackingConsent.PENDING`, the SDK writes events to a separate local buffer and sends nothing until consent changes to `GRANTED` — at which point the buffered data is migrated and uploaded automatically. Changing to `NOT_GRANTED` clears the buffer instead.
 </Info>
+
+### The application owns the consent state
+
+**Every launch uses the value you pass to `Flashcat.initialize`.** The SDK never overrides it with a previously stored state — the same contract as the Android and iOS SDKs. Your application is responsible for storing the user's choice and passing it back at every initialization.
+
+<Warning>
+If your application initializes the SDK with a hard-coded value (for example `GRANTED`) on every launch, collection resumes after a restart even for a user who revoked consent. Call `setTrackingConsent` at the moment the user makes a choice, persist that choice yourself, and pass it to `initialize` on the next launch.
+</Warning>
+
+The consent state is also persisted locally, but it serves **exactly one purpose**: the `WorkSchedulerExtensionAbility` used for background upload runs in a separate process with no user in front of it and no access to the application's decision, so it reads the main process's last recorded state. See [Background and deferred upload](#background-and-deferred-upload).
+
+When consent is revoked (changed to `NOT_GRANTED`), the SDK clears the unsent pre-consent buffer *and* **deletes batches already written to disk but not yet uploaded**. On 0.2.0 and earlier only the buffer was cleared, so collected batches were still sent once consent came back.
+
+Starting in `0.3.2`, revoking consent also deletes the local view snapshot used for [crash attribution](/en/rum/sdk/harmony/data-collection#crash-attribution). That snapshot is a whole view event — user id, name, email, and any custom context — so it is just as personal as a collected batch.
 
 ### Setting and changing consent
 
@@ -101,8 +163,13 @@ FlashcatRum.enable(
 | `setTrackUserInteractions(enabled)` | boolean | `false` | Controls whether `FlashcatRum.trackTap()` records tap actions |
 | `setTrackNavigation(enabled)` | boolean | `false` | Controls whether `FlashcatRum.startViewTracking()` registers the ArkUI `routerPageUpdate` observer |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | Controls whether network lifecycle events published by Trace become RUM resources |
+| `setTrackErrors(enabled)` | boolean | `true` | Controls **automatic** capture of uncaught errors and unhandled Promise rejections |
 | `setTrackFrustrations(enabled)` | boolean | `false` | Reserved toggle; the current version does not generate frustration events |
 | `setEventMapper(mapper)` | function | `null` | Modifies or drops view, action, error, and resource events before disk write |
+
+<Note>
+`setTrackErrors(false)` disables **automatic** error capture only. Crash reporting is unaffected: with the crash module enabled, uncaught exceptions still follow `JsCrashPolicy` — they are persisted, counted, and replayed as `is_crash` errors into the session that crashed. Manual `addError` calls are the application's explicit intent and are also still delivered. Use `setEventMapper()` if you need to filter those too.
+</Note>
 
 ### Event mapping and redaction
 
@@ -153,7 +220,25 @@ const monitor = GlobalRumMonitor.get();
 monitor.addAttribute('tenant', 'acme');
 monitor.addError('checkout failed', RumErrorSource.CUSTOM);
 monitor.removeAttribute('tenant');
+
+// Read a snapshot of the current global attributes
+const attrs = monitor.getAttributes();
+
+// Remove every global attribute at once, for example on sign-out
+monitor.clearAttributes();
 ```
+
+| Method | Description |
+|--------|-------------|
+| `addAttribute(key, value)` | Adds or overwrites one global attribute |
+| `removeAttribute(key)` | Removes the named global attribute |
+| `getAttributes()` | Returns a snapshot of the current global attributes |
+| `clearAttributes()` | Removes all global attributes |
+| `stopSession()` | Ends the current session immediately. The active view is closed with its final `time_spent`; the next event starts a fresh session and restarts that view inside it |
+
+<Note>
+On sign-out, call `clearAttributes()` to drop the previous user's business attributes and then `stopSession()`, so two users' behavior never lands in the same session.
+</Note>
 
 Set user information through the core instance. `id`, `name`, and `email` are written to the `usr` object on subsequent events.
 
@@ -295,7 +380,7 @@ Enable RUM and Crash early after `Flashcat.initialize()`. JS crash policy delive
 
 ## Background and deferred upload
 
-By default, the SDK uploads on the foreground cadence configured by `setBatchUploadFrequencyMs()` and triggers `flush()` when the application backgrounds. If you want HarmonyOS WorkScheduler to wake the app for uploads, register deferred upload work.
+By default, the SDK uploads on the foreground cadence configured by `setUploadFrequency()` and triggers `flush()` when the application backgrounds. If you want HarmonyOS WorkScheduler to wake the app for uploads, register deferred upload work.
 
 ```ts
 const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
@@ -311,9 +396,29 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setUploadOnWifiOnly(enabled)` | `false` | Restricts deferred upload work to Wi-Fi |
 | `setDeferredUploadRequiresCharging(enabled)` | `true` | Restricts deferred upload work to charging state |
 
-<Note>
-The SDK registers the WorkScheduler task. When your `WorkSchedulerExtensionAbility` wakes, call `Flashcat.flushAndWait()` to perform a bounded batch drain.
-</Note>
+The SDK registers the WorkScheduler task. The task is persisted (`isPersisted`, surviving reboots) and repeats on a 2-hour cycle.
+
+### Initializing inside the extension process
+
+A `WorkSchedulerExtensionAbility` runs in a **separate process** and does not share the main process's SDK instance. When it wakes, initialize with `initializeForDeferredUpload` before calling `flushAndWait()`:
+
+```ts MyUploadExtensionAbility.ets
+import { Flashcat } from '@flashcatcloud/core';
+
+async onWorkStart(workInfo: workScheduler.WorkInfo): Promise<void> {
+  Flashcat.initializeForDeferredUpload(this.context, buildConfig());
+  await Flashcat.flushAndWait();
+}
+```
+
+`initializeForDeferredUpload` differs from `initialize` in two important ways:
+
+- **It takes no consent argument.** The extension has no user in front of it, so it acts only on the main process's last persisted decision. If nothing is persisted (the main application never initialized) or the stored decision is `NOT_GRANTED`, it reads, migrates, and uploads nothing.
+- **It is read-only.** It never writes back consent, device identity, or work registrations. HarmonyOS Preferences are per-process whole-file caches, so a write from the extension could clobber a revocation happening concurrently in the main process.
+
+<Warning>
+Do not call `Flashcat.initialize()` inside the extension process. It would overwrite the persisted consent state with the literal you pass, which can resume uploads after the user revoked consent. `setTrackingConsent` is also ignored in the extension process and logs an error.
+</Warning>
 
 ## Upload HarmonyOS crash symbols
 
@@ -329,7 +434,7 @@ The plugin uploads two artifact types:
 The plugin ships as an npm package (on **npm**, not ohpm); install it as a build-time dev dependency in your project's root `package.json`, not in `oh-package.json5`:
 
 ```bash
-npm install -D @flashcatcloud/hvigor-plugin
+npm install -D @flashcatcloud/hvigor-plugin@^0.1.3
 ```
 
 Then register the plugin in the module's `hvigorfile.ts`:
@@ -342,7 +447,6 @@ export default {
   system: hapTasks,
   plugins: [
     flashcatSymbolUploadPlugin({
-      endpoint: 'https://browser.flashcat.cloud',
       apiKey: process.env.FLASHCAT_API_KEY ?? '',
       service: 'shopping-app',
       version: '1.0.0',
@@ -353,7 +457,7 @@ export default {
 ```
 
 <Note>
-`flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, default `0.1.0`). Neither is normally required.
+On SaaS, omit `endpoint` — **hvigor-plugin ≥ 0.1.3** defaults to `https://ci.flashcat.cloud` (**not** the RUM ingest host `browser.flashcat.cloud`). For a private deployment set `FLASHCAT_SOURCEMAP_INTAKE_URL` (scheme + host, no path; also requires ≥ 0.1.3), or pass `endpoint: 'https://rum.example.com'`. Plugin 0.1.2 does not honour `FLASHCAT_SOURCEMAP_INTAKE_URL` — set `endpoint` explicitly, or use the legacy `FLASHCAT_ENDPOINT` env var (deprecated in 0.1.3 but still honoured). `flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, which defaults to the plugin's own version). Neither is normally required.
 </Note>
 
 Run the upload task after a release build:
