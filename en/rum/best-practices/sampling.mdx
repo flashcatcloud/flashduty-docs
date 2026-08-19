@@ -420,10 +420,31 @@ flashcatRum.init({
 ```
 
 <Warning>
-**Bucket by session ID — do not use `Math.random()`.** Otherwise events within one session are half kept and half dropped, and investigations show a broken picture: a click with no matching request behind it. The reasoning is the same as in [hash bucketing](#why-hash-bucketing-instead-of-random-numbers).
+**Bucket by session ID — do not draw per event with `Math.random()`.**
+
+Drawing per event is **statistically harmless**: what you keep is an unbiased sample, and aggregates such as error rate and P75 remain accurate. The damage shows up when you investigate a single session.
+
+Picture a session that produces these events in order: land on a product page, click "Buy now", fire three API requests (one of which returns 500), then throw an exception. With a per-event draw, the error and the failed request survive because they are allow-listed, while the click happens to lose its draw and is dropped. What you see in the session is: **the user opened the page, did nothing, and then a request failed and the page threw**.
+
+The real problem is not the one missing event — it is that **the gaps fall in different places in every session, and you cannot tell them apart**. Seeing no click in a session, you cannot know whether sampling dropped it or the user genuinely never clicked. The session stops being evidence and becomes unreliable testimony.
+
+Bucketing by session ID leaves only two states: sampled sessions carry the full picture, and the rest carry errors and failed requests only. Neither state misleads you. The reasoning is the same as in [hash bucketing](#why-hash-bucketing-instead-of-random-numbers).
 </Warning>
 
-Three trade-offs to understand before you adopt this:
+**Bucketing by user (optional)**
+
+If you want a single user's experience to stay consistent over time — and genuine monotonicity when you scale up, so that raising the rate from 20% to 100% keeps the original cohort in the set and leaves before/after data comparable — switch the bucket key from the session to the user, falling back in order:
+
+```js
+const bucketKey = event.usr?.id || event.usr?.anonymous_id || event.session.id;
+return bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
+```
+
+`usr.id` is only present once your code calls `setUser()`. `usr.anonymous_id` is a cross-session anonymous identifier maintained by the SDK, governed by `trackAnonymousUser` and **enabled by default**, so signed-out users bucket just as stably.
+
+The cost is a **fixed sample**: you are always observing the same cohort, and their device, network and geography characteristics get baked into your metrics. Session bucketing redraws for every session and represents the whole population better over time. Choose by purpose — bucket by user to track how one cohort changes over time, bucket by session to read the overall population level.
+
+**Three trade-offs to understand:**
 
 - **Volume will not land exactly on 20%.** View events are the skeleton of a session and cannot be dismissed, so they still report at 100%. How far volume actually falls depends on the share of resource and action events in your data.
 - **Absolute counts need to be scaled.** The platform still shows 100% of sessions, but only about 20% carry full data. Ratios and percentiles such as error rate and P75 are unaffected (a random sample still represents the whole), but absolute counts such as total resource requests or total clicks must be scaled by `1 / 20%`.
