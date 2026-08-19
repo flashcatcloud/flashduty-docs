@@ -129,6 +129,54 @@ flashcatRum.startSessionReplayRecording();
 </Step>
 </Steps>
 
+## 降低上传对业务请求的影响
+
+如果页面自身有延迟敏感的网络请求，并且运行在上行带宽较窄的网络上，可以从两个方向降低 SDK 上传占用的上行带宽。
+
+<Note>
+Android、iOS、HarmonyOS、Flutter SDK 提供的 `uploadFrequency` / `batchSize` / `batchProcessingLevel` 三个上传节奏参数，**Web SDK 没有对应配置，也不需要**：Web SDK 没有后台上传线程和落盘批次，批次只在主线程内存队列中累积，攒满后整批一次性发出，不存在"上传周期"的概念。上传由浏览器调度、异步执行，对业务请求的争抢远小于移动端的后台线程模型，通常无需额外干预。
+</Note>
+
+### 开启上报压缩
+
+Web 是唯一需要显式开启上报压缩的平台（移动端 SDK 默认强制压缩）。开启后 SDK 在 Web Worker 中压缩 intake 请求，不阻塞主线程：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  site: "rum-server.flashcat.cloud",
+  compressIntakeRequests: true,  // 默认 false；开启后用 Web Worker 压缩上报请求
+});
+```
+
+### 减少上报的事件量
+
+批次的发送时机由固定阈值决定（累积满 30 秒、满 50 条、满 16 KB，以及页面隐藏或卸载时立即发送），阈值本身不可配置，因此降低上行占用的办法是减少事件数量：
+
+| 手段 | 配置 | 代价 |
+|------|------|------|
+| 降低会话采样率 | `sessionSampleRate` | 按比例丢失整段会话的全部数据 |
+| 关闭用户交互追踪 | `trackUserInteractions: false`（默认 `true`） | 自动 action 事件清零，挫折信号一并消失；手动打点不受影响 |
+| 关闭长任务追踪 | `trackLongTasks: false`（默认 `true`） | 失去长任务数据 |
+| 关闭 SDK 内部遥测 | `telemetrySampleRate: 0`（默认 `20`） | 无——关闭的是 SDK 自身的运行遥测，不影响任何 RUM 业务数据 |
+| 丢弃指定噪音事件 | `beforeSend` 返回 `false` | 仅丢弃命中的事件；view 事件不可丢弃 |
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  site: "rum-server.flashcat.cloud",
+  telemetrySampleRate: 0,
+  beforeSend: (event) => {
+    if (event.type === "resource" && event.resource.url.includes("/heartbeat")) {
+      return false;  // 丢弃该事件
+    }
+    return true;
+  },
+});
+```
+
 ## 离线缓存与上报
 
 SDK 将事件先写入本地缓冲，由后台批处理按节奏批量上报（带退避重试），并在页面卸载（`visibilitychange` / `beforeunload`）时通过 `sendBeacon` 兜底发送，降低数据丢失。上报失败按重试策略退避，不会无限占用网络。
