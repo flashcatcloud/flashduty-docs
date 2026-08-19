@@ -370,3 +370,64 @@ Understand the three costs before adopting this setup:
 
 If your goal is "errors first, but keep the evidence", business-defined custom sampling is the better fit: treat "users who hit an error last time" as an always-sample cohort, trading full session data for a higher error capture rate.
 </Accordion>
+
+<Accordion title="I want to cut data volume to 20% but still capture every error — how do I configure that?">
+Setting `sessionSampleRate` to 20 will not do it: sampling works per session, and a session that loses the draw reports nothing at all — errors included (rule 1). You would lose roughly four fifths of your errors along with the volume.
+
+The correct shape is to **split "which sessions are collected" from "which data each session keeps"**: collect every session so no error is lost, then bucket sessions inside `beforeSend` so only 20% of them keep full data.
+
+- **Error events**: always kept — 100% of errors
+- **Failed requests**: always kept — 100% of API failures (HTTP 5xx and request failures are resource events, not error events)
+- **Successful requests, user actions, long tasks**: kept only for the 20% of sessions that win the draw — the bulk of your volume converges to 20%
+
+```js
+// Share of sessions that keep full data
+const DETAIL_SAMPLE_RATE = 20;
+
+// Map a session ID stably onto 0-99 so every event in one session lands in the same bucket
+function bucketOf(sessionId) {
+  let hash = 0;
+  for (let i = 0; i < sessionId.length; i++) {
+    hash = (hash * 31 + sessionId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 100;
+}
+
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 100, // Collect every session so no error is dropped
+  trackResources: true,
+  trackUserInteractions: true,
+  trackLongTasks: true,
+  beforeSend: (event) => {
+    // View events cannot be dismissed; let them through explicitly to avoid an SDK warning
+    if (event.type === "view") return true;
+
+    // Always keep error events
+    if (event.type === "error") return true;
+
+    // Always keep failed requests
+    if (event.type === "resource") {
+      const statusCode = event.resource.status_code;
+      if (statusCode === 0 || statusCode >= 400) return true;
+    }
+
+    // Everything else is kept only for sessions that win the draw
+    return bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+  },
+});
+```
+
+<Warning>
+**Bucket by session ID — do not use `Math.random()`.** Otherwise events within one session are half kept and half dropped, and investigations show a broken picture: a click with no matching request behind it. The reasoning is the same as in [hash bucketing](#why-hash-bucketing-instead-of-random-numbers).
+</Warning>
+
+Three trade-offs to understand before you adopt this:
+
+- **Volume will not land exactly on 20%.** View events are the skeleton of a session and cannot be dismissed, so they still report at 100%. How far volume actually falls depends on the share of resource and action events in your data.
+- **Absolute counts need to be scaled.** The platform still shows 100% of sessions, but only about 20% carry full data. Ratios and percentiles such as error rate and P75 are unaffected (a random sample still represents the whole), but absolute counts such as total resource requests or total clicks must be scaled by `1 / 20%`.
+- **Session Replay is a separate, independent draw.** `sessionReplaySampleRate` is not aligned with the bucket above, so the two are not guaranteed to land on the same sessions. If you need replay and full data present together, make the decision once in your own code (see [business-defined custom sampling](#best-practice-2-business-defined-custom-sampling)).
+
+How this differs from the previous question: that one **turns non-error data off entirely**, which suits teams that only care about errors; this one **keeps one fifth of the full picture**, which suits teams that want no missed errors while retaining performance and behavior analysis.
+</Accordion>

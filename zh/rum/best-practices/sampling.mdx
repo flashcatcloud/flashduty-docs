@@ -370,3 +370,64 @@ flashcatRum.init({
 
 如果您的目标是「错误优先，但仍要保留现场」，更推荐业务自定义采样：把「上次出过错的用户」列为必采人群，用整会话的完整数据换更高的错误捕获率。
 </Accordion>
+
+<Accordion title="想把数据量降到 20%，但异常要全部上报，怎么配？">
+直接把 `sessionSampleRate` 设成 20 做不到：采样以会话为单位，未命中的会话连错误也不上报（规则 1），异常会同步丢掉八成。
+
+正确的形态是**把「哪些会话被采集」和「每个会话保留哪些数据」拆成两层**：会话全量采集保证错误不漏，再在 `beforeSend` 里按会话分桶，只让其中 20% 的会话保留完整数据。
+
+- **错误事件**：全部保留，异常 100%
+- **失败的请求**：全部保留，接口报错 100%（HTTP 5xx 与请求失败是资源事件，不是错误事件）
+- **成功的请求、用户行为、长任务**：只保留中签的 20% 会话，数据量的大头按 20% 收敛
+
+```js
+// 保留完整数据的会话占比
+const DETAIL_SAMPLE_RATE = 20;
+
+// 把会话 ID 稳定映射到 0-99，同一条会话内所有事件落在同一个桶
+function bucketOf(sessionId) {
+  let hash = 0;
+  for (let i = 0; i < sessionId.length; i++) {
+    hash = (hash * 31 + sessionId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 100;
+}
+
+flashcatRum.init({
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 100, // 会话全量采集，保证错误一条不漏
+  trackResources: true,
+  trackUserInteractions: true,
+  trackLongTasks: true,
+  beforeSend: (event) => {
+    // 视图事件无法丢弃，显式放行以免触发 SDK 告警
+    if (event.type === "view") return true;
+
+    // 错误事件永远保留
+    if (event.type === "error") return true;
+
+    // 失败的请求永远保留
+    if (event.type === "resource") {
+      const statusCode = event.resource.status_code;
+      if (statusCode === 0 || statusCode >= 400) return true;
+    }
+
+    // 其余数据只保留中签会话的
+    return bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+  },
+});
+```
+
+<Warning>
+**必须按会话 ID 分桶，不能用 `Math.random()`。** 否则同一条会话里的事件会一半保留一半丢弃，排查时会看到「有点击却没有对应请求」的割裂现场。理由与[哈希分桶](#为什么用哈希分桶代替随机数)一节相同。
+</Warning>
+
+使用前请了解三个代价：
+
+- **数据量不会精确降到 20%**：视图事件是会话骨架，无法丢弃，仍按 100% 上报。实际收敛比例取决于资源与行为事件在您数据中的占比。
+- **绝对量指标需要换算**：平台上会话数仍是 100%，但只有约 20% 的会话带完整数据。错误率、P75 这类比率与分位数指标不受影响（随机样本仍代表整体），但「资源请求总数」「点击次数」这类绝对量需要按 `1 / 20%` 换算。
+- **会话重放是另一次独立抽签**：`sessionReplaySampleRate` 不会自动对齐到这里的分桶，两者不保证落在同一批会话上。如需回放与完整数据同时在场，请在业务侧统一判定（见[业务自定义采样](#最佳实践二业务自定义采样)）。
+
+与上一个问题的区别：上一个是把非错误数据**整体关掉**，适合只关心错误的场景；这里是**保留两成完整现场**，适合既要异常不漏、又要保留性能与行为分析能力的场景。
+</Accordion>
