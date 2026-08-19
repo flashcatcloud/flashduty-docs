@@ -401,6 +401,14 @@ flashcatRum.init({
   trackUserInteractions: true,
   trackLongTasks: true,
   beforeSend: (event) => {
+    const isDetail = bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+
+    // 给每条留下来的事件盖章，标明这条会话是完整现场还是仅错误摘要
+    event.context = {
+      ...event.context,
+      rum_sampling: isDetail ? "full" : "errors_only",
+    };
+
     // 视图事件无法丢弃，显式放行以免触发 SDK 告警
     if (event.type === "view") return true;
 
@@ -414,10 +422,14 @@ flashcatRum.init({
     }
 
     // 其余数据只保留中签会话的
-    return bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+    return isDetail;
   },
 });
 ```
+
+<Tip>
+**务必保留 `rum_sampling` 这类标记。** 未中签的会话时间线天生是残缺的——只有视图、错误与失败请求。没有标记时，您在查看器里看到一条会话「没有任何点击」，无法判断是采样丢了还是用户真的没点。盖上标记后，缺失就有了解释：`errors_only` 的会话本就不含行为数据，而 `full` 的会话缺什么就是真的没发生。排查时先按 `rum_sampling:full` 过滤，就能只看完整现场。`context` 是 `beforeSend` 允许修改的字段，标记与丢弃决策写在同一个函数里，两者不会漂移。
+</Tip>
 
 <Warning>
 **必须按会话 ID 分桶，不能用 `Math.random()` 逐事件抽签。**
@@ -444,11 +456,48 @@ return bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
 
 代价是**样本固定**：您长期观察的始终是同一批用户，他们的设备、网络与地域特征会固化进指标。按会话分桶则每条会话重新抽签，长期更能代表整体人群。按用途选择即可——看**同一批用户的纵向变化**用用户分桶，看**整体人群的横向水位**用会话分桶。
 
+**让会话重放与分桶对齐**
+
+默认情况下 `sessionReplaySampleRate` 是在会话创建时独立抽的一次签，不会落在上面的分桶里——于是可能出现「有回放的会话反而没有行为数据」。要让两者严格一致，把重放也交给同一个判定。
+
+按用户分桶时最简单，重放采样率直接用同一个布尔值：
+
+```js
+const inDetailBucket = bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
+
+flashcatRum.init({
+  sessionSampleRate: 100,
+  sessionReplaySampleRate: inDetailBucket ? 100 : 0, // 与 beforeSend 用同一个判定
+  // ...
+});
+```
+
+按会话分桶时，会话 ID 在 `init()` 之前还不存在，而重放采样率在初始化时就固化了，因此要改用手动录制：
+
+```js
+flashcatRum.init({
+  sessionSampleRate: 100,
+  sessionReplaySampleRate: 0, // 关掉自动抽签
+  startSessionReplayRecordingManually: true,
+  // ...
+});
+
+const context = flashcatRum.getInternalContext();
+if (context && bucketOf(context.session_id) < DETAIL_SAMPLE_RATE) {
+  // force 让未中签重放的会话也能开始录制
+  flashcatRum.startSessionReplayRecording({ force: true });
+}
+```
+
+<Note>
+手动录制方案有一个已知边界：会话在页面存活期间过期续期后（不活跃 15 分钟或持续 4 小时），新会话是新的 ID、落进新的桶，需要重新判定一次，而 SDK 没有暴露会话续期事件。长时间停留的页面若要严格对齐，需自行轮询 `getInternalContext().session_id` 的变化。按用户分桶不受此影响，是更省心的选择。
+</Note>
+
 **使用前请了解三个代价：**
 
 - **数据量不会精确降到 20%**：视图事件是会话骨架，无法丢弃，仍按 100% 上报。实际收敛比例取决于资源与行为事件在您数据中的占比。
 - **绝对量指标需要换算**：平台上会话数仍是 100%，但只有约 20% 的会话带完整数据。错误率、P75 这类比率与分位数指标不受影响（随机样本仍代表整体），但「资源请求总数」「点击次数」这类绝对量需要按 `1 / 20%` 换算。
-- **会话重放是另一次独立抽签**：`sessionReplaySampleRate` 不会自动对齐到这里的分桶，两者不保证落在同一批会话上。如需回放与完整数据同时在场，请在业务侧统一判定（见[业务自定义采样](#最佳实践二业务自定义采样)）。
+- **会话重放默认不对齐**：`sessionReplaySampleRate` 是独立的一次抽签，不开启上面的对齐方案时，有回放的会话未必有完整行为数据。
 
 与上一个问题的区别：上一个是把非错误数据**整体关掉**，适合只关心错误的场景；这里是**保留两成完整现场**，适合既要异常不漏、又要保留性能与行为分析能力的场景。
 </Accordion>

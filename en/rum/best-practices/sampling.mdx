@@ -401,6 +401,15 @@ flashcatRum.init({
   trackUserInteractions: true,
   trackLongTasks: true,
   beforeSend: (event) => {
+    const isDetail = bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+
+    // Stamp every surviving event so the session declares whether it is a full
+    // picture or an errors-only summary
+    event.context = {
+      ...event.context,
+      rum_sampling: isDetail ? "full" : "errors_only",
+    };
+
     // View events cannot be dismissed; let them through explicitly to avoid an SDK warning
     if (event.type === "view") return true;
 
@@ -414,10 +423,14 @@ flashcatRum.init({
     }
 
     // Everything else is kept only for sessions that win the draw
-    return bucketOf(event.session.id) < DETAIL_SAMPLE_RATE;
+    return isDetail;
   },
 });
 ```
+
+<Tip>
+**Keep a marker such as `rum_sampling`.** Unsampled sessions have an inherently incomplete timeline — only views, errors and failed requests. Without a marker, a session that shows no clicks at all leaves you unable to tell whether sampling dropped them or the user genuinely never clicked. With the marker, the gaps are explained: an `errors_only` session was never meant to carry behavior data, while anything missing from a `full` session really did not happen. Filter on `rum_sampling:full` when you need complete timelines. `context` is a field `beforeSend` is allowed to modify, so the marker and the drop decision live in the same function and cannot drift apart.
+</Tip>
 
 <Warning>
 **Bucket by session ID — do not draw per event with `Math.random()`.**
@@ -444,11 +457,48 @@ return bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
 
 The cost is a **fixed sample**: you are always observing the same cohort, and their device, network and geography characteristics get baked into your metrics. Session bucketing redraws for every session and represents the whole population better over time. Choose by purpose — bucket by user to track how one cohort changes over time, bucket by session to read the overall population level.
 
+**Aligning Session Replay with the bucket**
+
+By default `sessionReplaySampleRate` is an independent draw made when the session is created, so it does not follow the bucket above — you can end up with sessions that have a replay but no behavior data. To keep the two strictly in step, drive replay from the same decision.
+
+With user bucketing this is trivial — feed the same boolean to the replay rate:
+
+```js
+const inDetailBucket = bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
+
+flashcatRum.init({
+  sessionSampleRate: 100,
+  sessionReplaySampleRate: inDetailBucket ? 100 : 0, // same decision as beforeSend
+  // ...
+});
+```
+
+With session bucketing the session ID does not exist yet at `init()`, and the replay rate is frozen at initialization, so switch to manual recording:
+
+```js
+flashcatRum.init({
+  sessionSampleRate: 100,
+  sessionReplaySampleRate: 0, // turn the automatic draw off
+  startSessionReplayRecordingManually: true,
+  // ...
+});
+
+const context = flashcatRum.getInternalContext();
+if (context && bucketOf(context.session_id) < DETAIL_SAMPLE_RATE) {
+  // force lets a session that lost the replay draw start recording anyway
+  flashcatRum.startSessionReplayRecording({ force: true });
+}
+```
+
+<Note>
+The manual approach has one known boundary: when a session expires and renews while the page stays open (15 minutes of inactivity or 4 hours total), the new session has a new ID and falls into a new bucket, and the SDK exposes no session-renewal event. Pages with very long dwell times need to poll `getInternalContext().session_id` for changes to stay strictly aligned. User bucketing is unaffected and is the simpler choice.
+</Note>
+
 **Three trade-offs to understand:**
 
 - **Volume will not land exactly on 20%.** View events are the skeleton of a session and cannot be dismissed, so they still report at 100%. How far volume actually falls depends on the share of resource and action events in your data.
 - **Absolute counts need to be scaled.** The platform still shows 100% of sessions, but only about 20% carry full data. Ratios and percentiles such as error rate and P75 are unaffected (a random sample still represents the whole), but absolute counts such as total resource requests or total clicks must be scaled by `1 / 20%`.
-- **Session Replay is a separate, independent draw.** `sessionReplaySampleRate` is not aligned with the bucket above, so the two are not guaranteed to land on the same sessions. If you need replay and full data present together, make the decision once in your own code (see [business-defined custom sampling](#best-practice-2-business-defined-custom-sampling)).
+- **Session Replay is not aligned by default.** `sessionReplaySampleRate` is an independent draw; without the alignment above, a session with a replay may still lack full behavior data.
 
 How this differs from the previous question: that one **turns non-error data off entirely**, which suits teams that only care about errors; this one **keeps one fifth of the full picture**, which suits teams that want no missed errors while retaining performance and behavior analysis.
 </Accordion>
