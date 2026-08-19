@@ -99,34 +99,75 @@ The SDK employs the following strategies to optimize network usage:
 
 ## Performance Optimization Recommendations
 
-If you have specific performance requirements, consider the following optimization measures:
+If you have specific performance requirements, consider the following measures:
 
 <Steps>
-<Step title="Adjust Sampling Rate">
-Reduce the number of collected events by configuring the sampling rate:
+<Step title="Adjust the sample rate">
+Reduce the number of collected events by configuring the sample rate:
 
 ```kotlin
 val rumConfig = RumConfiguration.Builder(applicationId)
-    .setSessionSampleRate(80f) // Sample 80% of sessions
+    .setSessionSampleRate(80f) // sample 80% of sessions
     .build()
 ```
 </Step>
 
-<Step title="Enable Features on Demand">
-Only enable necessary tracking features:
+<Step title="Enable only the features you need">
+Turn off the automatic tracking you do not analyze:
 
 ```kotlin
 val rumConfig = RumConfiguration.Builder(applicationId)
-    .trackUserInteractions(false) // Disable user interaction tracking
-    .trackLongTasks(false) // Disable long task tracking
+    .disableUserInteractionTracking()                     // stop auto-collecting tap/scroll/swipe
+    .trackLongTasks(0)                                    // a threshold <= 0 disables long task tracking (default 100 ms)
+    .trackFrustrations(false)                             // disable frustration signals (enabled by default)
+    .setVitalsUpdateFrequency(VitalsUpdateFrequency.RARE) // collect vitals less often (default AVERAGE, every 500 ms; NEVER turns it off)
+    .setTelemetrySampleRate(0f)                           // disable the SDK's internal telemetry (default 20%)
     .build()
 ```
+
+<Warning>
+This step trades data coverage for load, so weigh each option against what you actually analyze. Disabling interaction tracking drops automatic action events to zero, and the frustration signals that depend on them (rage/dead/error tap) disappear with them. View, resource, error and long task events are unaffected, and manual `RumMonitor.addAction` instrumentation still works. Action events are important context for diagnosing errors, so turn them off only in load-sensitive scenarios.
+
+`setTelemetrySampleRate(0f)` disables the SDK's own operational telemetry. It does not affect any RUM data, so you can set it safely.
+</Warning>
 </Step>
 
-<Step title="Configure Upload Strategy">
-Adjust batch upload size and frequency to optimize network usage based on your application's needs.
+<Step title="Tune the upload cadence">
+Adjust the upload interval, batch window and per-cycle batch limit to reduce contention between SDK uploads and your own requests, without losing any events. See the next section.
 </Step>
 </Steps>
+
+## Reducing the Impact of Uploads on Your Own Requests
+
+If your app makes latency-sensitive requests of its own (sign-in, checkout, key provisioning) over a narrow uplink, SDK uploads can compete with them for the uplink. The symptom is a higher tail (P95) on your own request latency that comes and goes.
+
+Three core settings change how uploads are distributed over time — fewer uploads, spread further apart:
+
+```kotlin
+val coreConfig = Configuration.Builder(clientToken, env, variant)
+    .setUploadFrequency(UploadFrequency.RARE)          // upload interval: default AVERAGE 2 s -> RARE 5 s
+    .setBatchSize(BatchSize.LARGE)                     // batch window: default MEDIUM 10 s -> LARGE 35 s
+    .setBatchProcessingLevel(BatchProcessingLevel.LOW) // batches per cycle: default MEDIUM 20 -> LOW 1
+    .build()
+```
+
+| Setting | Default | Suggested | Effect |
+|---------|---------|-----------|--------|
+| `setUploadFrequency` | `AVERAGE` (2 s) | `RARE` (5 s) | Lengthens the interval between upload cycles, lowering the chance of colliding with your requests |
+| `setBatchSize` | `MEDIUM` (10 s) | `LARGE` (35 s) | Batches collect for longer, so there are fewer requests; larger batches also gzip better, so uplink bytes drop slightly |
+| `setBatchProcessingLevel` | `MEDIUM` (20 batches) | `LOW` (1 batch) | Caps how many batches one upload cycle ships back-to-back, so a backlog cannot saturate the uplink at once |
+
+<Tip>
+These three settings only change *when* uploads happen. They drop no events and remove no dimension from your dashboards, so if you do not want to sacrifice data, tune only these.
+</Tip>
+
+<Note>
+The Android, iOS, HarmonyOS and Flutter SDKs use the same names and values for these three settings, so tuning advice transfers between platforms unchanged. The one difference is that iOS `batchProcessingLevel = .low` is 5 batches per cycle, while Android and HarmonyOS use 1 — same direction, smaller reduction.
+
+The Web SDK has no background upload thread and no on-disk batches, so it has no concept of an upload cycle and offers none of these three settings. See [Web SDK performance impact](/en/rum/sdk/web/performance-impact).
+</Note>
+
+If the event volume itself is high, an EventMapper can drop specific noisy events (return `null` from the mapper). That is less invasive than changing your instrumentation — see [Advanced configuration](/en/rum/sdk/android/advanced-config).
 
 ## Offline Data Storage
 

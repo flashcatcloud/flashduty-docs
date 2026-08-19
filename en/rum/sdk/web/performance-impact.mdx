@@ -133,6 +133,54 @@ Load via CDN with `async` to avoid blocking the critical rendering path.
 </Step>
 </Steps>
 
+## Reducing the Impact of Uploads on Your Own Requests
+
+If the page makes latency-sensitive requests of its own over a narrow uplink, there are two ways to reduce the uplink bandwidth the SDK consumes.
+
+<Note>
+The `uploadFrequency` / `batchSize` / `batchProcessingLevel` settings offered by the Android, iOS, HarmonyOS and Flutter SDKs **have no Web equivalent, and none is needed**: the Web SDK has no background upload thread and no on-disk batches. Batches accumulate in an in-memory queue on the main thread and the whole batch is sent at once when a threshold is reached, so there is no concept of an upload cycle. Uploads are scheduled by the browser and run asynchronously, so they contend with your requests far less than the background-thread model on mobile. Usually no intervention is needed.
+</Note>
+
+### Enable Intake Compression
+
+Web is the only platform where upload compression must be turned on explicitly (the mobile SDKs always compress). Once enabled, the SDK compresses intake requests in a Web Worker, off the main thread:
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  site: "rum-server.flashcat.cloud",
+  compressIntakeRequests: true,  // false by default; compresses intake requests in a Web Worker
+});
+```
+
+### Send Fewer Events
+
+A batch is flushed on fixed thresholds — 30 seconds accumulated, 50 messages, 16 KB, and immediately when the page is hidden or unloaded. Those thresholds are not configurable, so the way to reduce uplink usage is to produce fewer events:
+
+| Approach | Setting | Cost |
+|----------|---------|------|
+| Lower the session sample rate | `sessionSampleRate` | Loses every event of the dropped sessions |
+| Disable interaction tracking | `trackUserInteractions: false` (default `true`) | Automatic action events drop to zero and frustration signals go with them; manual instrumentation is unaffected |
+| Disable long task tracking | `trackLongTasks: false` (default `true`) | Loses long task data |
+| Disable internal telemetry | `telemetrySampleRate: 0` (default `20`) | None — this is the SDK's own operational telemetry, not RUM data |
+| Drop specific noisy events | `beforeSend` returning `false` | Only the matched events are dropped; view events cannot be dropped |
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  site: "rum-server.flashcat.cloud",
+  telemetrySampleRate: 0,
+  beforeSend: (event) => {
+    if (event.type === "resource" && event.resource.url.includes("/heartbeat")) {
+      return false;  // drop this event
+    }
+    return true;
+  },
+});
+```
+
 ## Offline Caching and Reporting
 
 The SDK first writes events to a local buffer, and a background batch processor reports them in batches at a steady cadence (with backoff retries). On page unload (`visibilitychange` / `beforeunload`), it falls back to `sendBeacon` to reduce data loss. Failed reports back off according to the retry strategy and never occupy the network indefinitely.

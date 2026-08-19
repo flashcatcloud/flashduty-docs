@@ -107,26 +107,69 @@ RUM.enable(
 RUM.enable(
     with: RUM.Configuration(
         applicationID: "<RUM_APPLICATION_ID>",
-        uiKitViewsPredicate: nil, // 禁用自动视图追踪
-        uiKitActionsPredicate: nil // 禁用自动操作追踪
+        uiKitViewsPredicate: nil,      // 关闭自动视图追踪
+        uiKitActionsPredicate: nil,    // 关闭自动操作追踪（默认即为 nil）
+        trackFrustrations: false,      // 关闭挫折信号分析（默认开启）
+        trackBackgroundEvents: false,  // 关闭后台事件追踪（默认即为 false）
+        longTaskThreshold: nil,        // 关闭长任务追踪（默认 0.1 秒）
+        vitalsUpdateFrequency: nil,    // 关闭 vitals 采集（默认每 500 毫秒）
+        telemetrySampleRate: 0         // 关闭 SDK 内部遥测（默认 20%）
     )
 )
 ```
+
+<Warning>
+这一步是拿数据维度换负载，请按实际分析需求取舍。关闭操作追踪后，自动 action 事件清零，依赖 action 的挫折信号（rage/dead/error tap）一并消失；view、resource、error 事件不受影响，手动打点也不受影响。
+
+`telemetrySampleRate: 0` 关闭的是 SDK 自身的运行遥测，不影响任何 RUM 业务数据，可以放心设置。
+</Warning>
+
+<Note>
+关闭长任务追踪在 Swift 中用 `longTaskThreshold: nil`。Objective-C 侧该属性经桥接无法传 `nil`，只能写 `rumConfiguration.longTaskThreshold = 0`——功能上确实关闭了，但每次 RUM 启动会打印一条 `cannot be less than 0s` 的错误日志，属已知现象，可以忽略。
+</Note>
 </Step>
 
-<Step title="禁用后台事件追踪">
-如果不需要追踪后台事件：
-
-```swift
-RUM.enable(
-    with: RUM.Configuration(
-        applicationID: "<RUM_APPLICATION_ID>",
-        trackBackgroundEvents: false
-    )
-)
-```
+<Step title="配置上传节奏">
+调整上传周期、批次时长和单周期批次上限，降低 SDK 上传与业务请求争抢网络的概率，且不损失任何事件。详见下一节。
 </Step>
 </Steps>
+
+## 降低上传对业务请求的影响
+
+如果应用自身有延迟敏感的网络请求（如登录、下单、密钥申请），并且运行在上行带宽较窄的网络上，SDK 的上传可能与业务请求争抢上行链路，表现为业务请求耗时的长尾（P95）升高，且时好时坏。
+
+这种情况下调整以下三个核心参数，改变的是上传的时间分布——上传次数更少、单次更分散：
+
+```swift
+Datadog.initialize(
+    with: Datadog.Configuration(
+        clientToken: "<CLIENT_TOKEN>",
+        env: "<ENV_NAME>",
+        batchSize: .large,             // 批次收集时长：默认 .medium 10 秒 → .large 35 秒
+        uploadFrequency: .rare,        // 上传周期间隔：默认 .average 2 秒 → .rare 5 秒
+        batchProcessingLevel: .low     // 单周期连发批次上限：默认 .medium 20 → .low 5
+    ),
+    trackingConsent: .granted
+)
+```
+
+| 参数 | 默认值 | 建议值 | 作用 |
+|------|--------|--------|------|
+| `uploadFrequency` | `.average`（2 秒） | `.rare`（5 秒） | 拉长上传周期的间隔，降低与业务请求撞车的概率 |
+| `batchSize` | `.medium`（10 秒） | `.large`（35 秒） | 批次收集更久、请求次数更少；批次越大压缩率越好，上行字节数还会略降 |
+| `batchProcessingLevel` | `.medium`（20 批次） | `.low`（5 批次） | 限制一个上传周期最多连续发送的批次数，避免积压时一次性占满上行 |
+
+<Tip>
+这三个参数只改变上传时机，不减少任何事件，也不影响看板上的任何数据维度——如果不希望牺牲数据，只调它们即可。iOS SDK 的上传请求默认强制使用 deflate 压缩，无需额外配置。
+</Tip>
+
+<Note>
+这三个参数在 iOS、Android、HarmonyOS、Flutter SDK 中同名同值，调优结论可以跨平台直接套用。唯一差异是 iOS 的 `.low` 为 5 批次/周期，Android 与 HarmonyOS 为 1，方向一致、降幅略小。
+
+Web SDK 没有后台上传线程与落盘批次，不存在"上传周期"的概念，因此无需也无法配置这三项，详见 [Web SDK 性能影响](/zh/rum/sdk/web/performance-impact)。
+</Note>
+
+如果事件量本身偏大，还可以用 EventMapper 丢弃指定的噪音事件（映射函数返回 `nil` 即丢弃），侵入性小于改业务打点代码，用法见 [高级配置](/zh/rum/sdk/ios/advanced-config)。
 
 ## 离线数据存储
 
