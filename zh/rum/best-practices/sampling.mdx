@@ -458,34 +458,47 @@ return bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
 
 **让会话重放与分桶对齐**
 
-默认情况下 `sessionReplaySampleRate` 是在会话创建时独立抽的一次签，不会落在上面的分桶里——于是可能出现「有回放的会话反而没有行为数据」。要让两者严格一致，把重放也交给同一个判定。
+原生语义下两者本来就是对齐的：会话重放是**已采集会话之上的二次抽样**，只有先通过 `sessionSampleRate` 的会话才会再抽一次决定录不录，所以有回放的会话必然有完整数据。
 
-按用户分桶时最简单，重放采样率直接用同一个布尔值：
+本方案会打破这个前提。因为真正的采样被挪到了 `beforeSend`，而 SDK 看到的 `sessionSampleRate` 是 100——它认为每一条会话都被完整采集，于是在**全部**会话上抽取回放，其中一部分落在细节分桶之外，表现为「有回放，却没有行为数据」。
+
+修复的办法是把分桶结果也告诉重放，让它退回原本的二次抽样语义。按用户分桶时直接用同一个判定：
 
 ```js
+const REPLAY_SAMPLE_RATE = 10; // 细节会话中再录制多少比例
 const inDetailBucket = bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
 
 flashcatRum.init({
   sessionSampleRate: 100,
-  sessionReplaySampleRate: inDetailBucket ? 100 : 0, // 与 beforeSend 用同一个判定
+  // 细节会话内再抽 REPLAY_SAMPLE_RATE，其余会话永不录制
+  sessionReplaySampleRate: inDetailBucket ? REPLAY_SAMPLE_RATE : 0,
   // ...
 });
 ```
 
-按会话分桶时，会话 ID 在 `init()` 之前还不存在，而重放采样率在初始化时就固化了，因此要改用手动录制：
+这样回放集合严格是细节会话的子集，最终录制比例是 `DETAIL_SAMPLE_RATE × REPLAY_SAMPLE_RATE`，与原生的 `sessionSampleRate: 20` + `sessionReplaySampleRate: 10` 得到 2% 完全一致。
+
+按会话分桶时，会话 ID 在 `init()` 之前还不存在，而重放采样率在初始化时就固化了，因此要改用手动录制，并自行完成第二层抽样：
 
 ```js
 flashcatRum.init({
   sessionSampleRate: 100,
-  sessionReplaySampleRate: 0, // 关掉自动抽签
+  sessionReplaySampleRate: 0, // 关掉自动抽签，完全交给下面判定
   startSessionReplayRecordingManually: true,
   // ...
 });
 
 const context = flashcatRum.getInternalContext();
-if (context && bucketOf(context.session_id) < DETAIL_SAMPLE_RATE) {
-  // force 让未中签重放的会话也能开始录制
-  flashcatRum.startSessionReplayRecording({ force: true });
+if (context) {
+  const sessionId = context.session_id;
+  const inDetailBucket = bucketOf(sessionId) < DETAIL_SAMPLE_RATE;
+  // 加盐得到一个与细节分桶不相关的第二次抽签
+  const inReplayBucket = bucketOf(`replay:${sessionId}`) < REPLAY_SAMPLE_RATE;
+
+  if (inDetailBucket && inReplayBucket) {
+    // force 让未中签重放的会话也能开始录制
+    flashcatRum.startSessionReplayRecording({ force: true });
+  }
 }
 ```
 
@@ -497,7 +510,7 @@ if (context && bucketOf(context.session_id) < DETAIL_SAMPLE_RATE) {
 
 - **数据量不会精确降到 20%**：视图事件是会话骨架，无法丢弃，仍按 100% 上报。实际收敛比例取决于资源与行为事件在您数据中的占比。
 - **绝对量指标需要换算**：平台上会话数仍是 100%，但只有约 20% 的会话带完整数据。错误率、P75 这类比率与分位数指标不受影响（随机样本仍代表整体），但「资源请求总数」「点击次数」这类绝对量需要按 `1 / 20%` 换算。
-- **会话重放默认不对齐**：`sessionReplaySampleRate` 是独立的一次抽签，不开启上面的对齐方案时，有回放的会话未必有完整行为数据。
+- **会话重放需要显式对齐**：`sessionSampleRate` 被设成 100 之后，SDK 会在全部会话上抽取回放，不按上面的做法把分桶结果传给它，有回放的会话未必有完整行为数据。
 
 与上一个问题的区别：上一个是把非错误数据**整体关掉**，适合只关心错误的场景；这里是**保留两成完整现场**，适合既要异常不漏、又要保留性能与行为分析能力的场景。
 </Accordion>

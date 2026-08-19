@@ -459,34 +459,47 @@ The cost is a **fixed sample**: you are always observing the same cohort, and th
 
 **Aligning Session Replay with the bucket**
 
-By default `sessionReplaySampleRate` is an independent draw made when the session is created, so it does not follow the bucket above — you can end up with sessions that have a replay but no behavior data. To keep the two strictly in step, drive replay from the same decision.
+Natively the two are already aligned: Session Replay is a **second-stage sample on top of collected sessions** — only a session that first passes `sessionSampleRate` draws again for replay — so a session with a replay always has complete data behind it.
 
-With user bucketing this is trivial — feed the same boolean to the replay rate:
+This recipe breaks that premise. The real sampling now lives in `beforeSend`, while the SDK sees `sessionSampleRate: 100` and believes every session is collected in full. It therefore draws replay across **all** sessions, and some of those land outside the detail bucket, showing up as "has a replay, but no behavior data".
+
+The fix is to tell replay about the bucket too, restoring the second-stage semantics. With user bucketing, feed it the same decision:
 
 ```js
+const REPLAY_SAMPLE_RATE = 10; // share of detail sessions that get recorded
 const inDetailBucket = bucketOf(bucketKey) < DETAIL_SAMPLE_RATE;
 
 flashcatRum.init({
   sessionSampleRate: 100,
-  sessionReplaySampleRate: inDetailBucket ? 100 : 0, // same decision as beforeSend
+  // Draw REPLAY_SAMPLE_RATE within detail sessions; never record the rest
+  sessionReplaySampleRate: inDetailBucket ? REPLAY_SAMPLE_RATE : 0,
   // ...
 });
 ```
 
-With session bucketing the session ID does not exist yet at `init()`, and the replay rate is frozen at initialization, so switch to manual recording:
+The replay set is then strictly a subset of detail sessions, and the final recording share is `DETAIL_SAMPLE_RATE × REPLAY_SAMPLE_RATE` — exactly what native `sessionSampleRate: 20` plus `sessionReplaySampleRate: 10` yields at 2%.
+
+With session bucketing the session ID does not exist yet at `init()`, and the replay rate is frozen at initialization, so switch to manual recording and perform the second draw yourself:
 
 ```js
 flashcatRum.init({
   sessionSampleRate: 100,
-  sessionReplaySampleRate: 0, // turn the automatic draw off
+  sessionReplaySampleRate: 0, // turn the automatic draw off entirely
   startSessionReplayRecordingManually: true,
   // ...
 });
 
 const context = flashcatRum.getInternalContext();
-if (context && bucketOf(context.session_id) < DETAIL_SAMPLE_RATE) {
-  // force lets a session that lost the replay draw start recording anyway
-  flashcatRum.startSessionReplayRecording({ force: true });
+if (context) {
+  const sessionId = context.session_id;
+  const inDetailBucket = bucketOf(sessionId) < DETAIL_SAMPLE_RATE;
+  // Salt the key to get a second draw uncorrelated with the detail bucket
+  const inReplayBucket = bucketOf(`replay:${sessionId}`) < REPLAY_SAMPLE_RATE;
+
+  if (inDetailBucket && inReplayBucket) {
+    // force lets a session that lost the replay draw start recording anyway
+    flashcatRum.startSessionReplayRecording({ force: true });
+  }
 }
 ```
 
@@ -498,7 +511,7 @@ The manual approach has one known boundary: when a session expires and renews wh
 
 - **Volume will not land exactly on 20%.** View events are the skeleton of a session and cannot be dismissed, so they still report at 100%. How far volume actually falls depends on the share of resource and action events in your data.
 - **Absolute counts need to be scaled.** The platform still shows 100% of sessions, but only about 20% carry full data. Ratios and percentiles such as error rate and P75 are unaffected (a random sample still represents the whole), but absolute counts such as total resource requests or total clicks must be scaled by `1 / 20%`.
-- **Session Replay is not aligned by default.** `sessionReplaySampleRate` is an independent draw; without the alignment above, a session with a replay may still lack full behavior data.
+- **Session Replay needs explicit alignment.** Once `sessionSampleRate` is set to 100 the SDK draws replay across all sessions; without passing the bucket to it as shown above, a session with a replay may still lack full behavior data.
 
 How this differs from the previous question: that one **turns non-error data off entirely**, which suits teams that only care about errors; this one **keeps one fifth of the full picture**, which suits teams that want no missed errors while retaining performance and behavior analysis.
 </Accordion>
