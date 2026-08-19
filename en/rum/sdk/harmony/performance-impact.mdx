@@ -1,0 +1,137 @@
+---
+title: "HarmonyOS SDK performance impact"
+description: "Learn about the performance impact of the Flashduty HarmonyOS RUM SDK on CPU, memory, launch time, package size, and network usage, along with optimization recommendations."
+keywords: ["HarmonyOS SDK", "performance impact", "RUM", "performance optimization", "memory usage", "CPU"]
+---
+
+## Overview
+
+When integrating any SDK into a HarmonyOS application, understanding its performance impact is crucial for maintaining a good user experience. The Flashduty RUM SDK is designed with performance in mind: it is implemented in pure ArkTS, split into independent feature modules, and enforces explicit limits on every resource it uses.
+
+<Check>
+The SDK persists and uploads events asynchronously and in batches, and never blocks the UI thread with synchronous work.
+</Check>
+
+## Performance benchmark
+
+The HarmonyOS SDK uses a modular design. All five modules are pure ArkTS with no native libraries, so there is no multi-ABI size amplification. Measured HAR package sizes:
+
+| Module | HAR package size | Description |
+| --- | --- | --- |
+| `@flashcatcloud/core` | ~42 KB | Core: initialization, batching, upload |
+| `@flashcatcloud/rum` | ~44 KB | RUM core functionality (view/action/resource/error) |
+| `@flashcatcloud/trace` | ~16 KB | Distributed tracing and network request tracking |
+| `@flashcatcloud/crash` | ~27 KB | Crash and hang collection |
+| `@flashcatcloud/axios` | ~9 KB | `@ohos/axios` request tracking |
+
+By integration scope:
+
+| Integration scope | Total HAR package size |
+| --- | --- |
+| Base RUM (`core` + `rum`) | ~86 KB |
+| All five modules | ~137 KB |
+
+<Note>
+The data above was measured on the HAR artifacts of HarmonyOS SDK 0.5.1 as published on OHPM. HAR is a compressed archive format, so the actual increase in your app package also depends on compilation and obfuscation settings.
+
+Runtime overhead (CPU, memory, launch time) depends heavily on device performance, event volume, and SDK configuration. The sections below explain where each kind of overhead comes from and how it is bounded.
+</Note>
+
+### Performance impact details
+
+<AccordionGroup>
+<Accordion title="CPU usage" icon="microchip">
+The SDK's CPU impact primarily comes from:
+
+- Event assembly and persistence
+- Data batching and compression
+- Network request reporting
+
+All of the above run asynchronously and in batches, and never block the UI thread with synchronous work.
+
+In addition, several kinds of background overhead that are common on other platforms are inherently zero in the HarmonyOS SDK:
+
+- No vitals polling (no periodic sampling task)
+- No long task detection
+- No internal SDK telemetry reporting
+- Native crashes and hangs are collected by replaying the system's `hiAppEvent` records on the next launch, so there is no extra monitoring overhead at runtime
+</Accordion>
+
+<Accordion title="Memory usage" icon="memory">
+The SDK stages events pending persistence in a bounded memory buffer. When the buffer is full, the oldest data is evicted first, so memory usage does not grow indefinitely over time.
+</Accordion>
+
+<Accordion title="Launch time" icon="rocket">
+The SDK initialization process is optimized, with launch time impact controlled to milliseconds.
+
+<Tip>
+It is recommended to initialize the SDK as early as possible in `AbilityStage.onCreate` to capture the complete application startup process.
+</Tip>
+</Accordion>
+
+<Accordion title="Package size" icon="box">
+The SDK uses a modular design, allowing you to include only the necessary feature modules — skip `@flashcatcloud/crash` if you do not need crash collection, and skip `@flashcatcloud/axios` if you do not use `@ohos/axios`. See the measured size table above for each module.
+</Accordion>
+
+<Accordion title="Network usage" icon="wifi">
+The SDK employs the following strategies to optimize network usage:
+
+- **Batch reporting**: Events are persisted to disk first and sent in batches to reduce the number of network requests
+- **Data compression**: Upload bodies of 512 characters or more are automatically compressed with zlib (deflate), typically 5–10x smaller
+- **Tunable upload cadence**: The upload interval, batch window, and per-cycle batch limit are all configurable; see [Performance optimization recommendations](#performance-optimization-recommendations)
+</Accordion>
+</AccordionGroup>
+
+## Performance optimization recommendations
+
+If you have specific performance requirements, consider the following measures:
+
+<Steps>
+<Step title="Adjust the sample rate">
+Reduce the number of collected events by configuring the sample rate:
+
+```ts
+import { RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
+  .setSessionSampleRate(80) // sample 80% of sessions
+  .build();
+```
+</Step>
+
+<Step title="Integrate only the features you need">
+Install and enable only the necessary feature modules. Unlike other platforms, the HarmonyOS SDK's defaults are already conservative:
+
+- Interaction tracking (`setTrackUserInteractions`) is off by default, so there is no automatic action collection overhead unless you enable it
+- Vitals collection, long task detection, and internal SDK telemetry do not exist in the HarmonyOS SDK, so there is nothing to turn off
+</Step>
+
+<Step title="Tune the upload cadence">
+If your app makes latency-sensitive requests of its own, adjust the upload interval (`setUploadFrequency`), batch window (`setBatchSize`), and per-cycle batch limit (`setBatchProcessingLevel`) to reduce contention between SDK uploads and your own requests, without losing any events. These three settings use the same names and values as the Android SDK. See [Advanced configuration: Reducing the impact of uploads on your own requests](/en/rum/sdk/harmony/advanced-config#reducing-the-impact-of-uploads-on-your-own-requests).
+</Step>
+</Steps>
+
+## Offline data storage
+
+When the device is offline, the SDK stores data locally and uploads it once connectivity is restored. Storage space usage is strictly limited:
+
+<Check>
+- Each feature module has a 4 MB disk cache quota; when exceeded, the oldest data is evicted first
+- Each batch file is capped at 512 KB
+- Data is retained for at most 23 hours, then cleaned up automatically
+- Cached data will not affect device storage space
+</Check>
+
+## Related documentation
+
+<CardGroup cols={2}>
+<Card title="SDK integration guide" icon="plug" href="/en/rum/sdk/harmony/sdk-integration">
+  Learn how to integrate the SDK
+</Card>
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/harmony/advanced-config">
+  Learn about SDK advanced configuration options
+</Card>
+<Card title="Data collection" icon="database" href="/en/rum/sdk/harmony/data-collection">
+  Learn what data the SDK collects
+</Card>
+</CardGroup>
