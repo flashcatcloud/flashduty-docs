@@ -73,11 +73,11 @@ A2A Agent 的列表与管理入口在 **插件 → Agents** 页面（菜单标�
 | 执行环境 | 云端环境 / BYOC Runner（可多选） | 所有环境 | 决定该 A2A Agent 在哪些执行环境中可用。可以选择云端环境和一个或多个当前可见的 BYOC Runner；不选择时默认在所有环境可用。它不指定委派调用路由：A2A 调用仍在当前 AI SRE 会话自身的执行环境中运行。若远端 Agent 只在某个内网可访问，请只选择能访问它的 Runner |
 | 调用说明 | string | — | 面向 AI SRE 的 Agent 选择信号，是**一份文档**：可选的 `summary:` frontmatter + 正文。简介（`summary`）进入「可用 Agent 清单」，正文在首次委派时才完整送达。必填；整份文档最多 50 KB，`summary` 最多 1,024 个字符且不能包含 `<` `>`。写法见下文「[调用说明的写法](#调用说明的写法)」 |
 | Card URL | string | — | 远端 A2A Agent 的 Agent Card 地址，或仅填写遵循默认 well-known 规则的服务根地址（如 `https://agents.example.com`）。如果 URL 已带路径，平台会按该地址原样读取；如果只填服务根地址，平台按 A2A 约定查找 `/.well-known/agent-card.json`。必填。平台只校验 URL 格式合法（scheme 为 http/https、host 非空），不做主机或 IP 分类；实际的网络可达性与出站限制取决于发起委派的 AI SRE 会话所在执行环境，上面的执行环境字段只限制该 Agent 在哪些环境中可用。远端 Agent 需实现 A2A Protocol 1.0，见下文「[协议版本与 Agent Card 要求](#协议版本与-agent-card-要求)」 |
-| 认证类型 | enum | `none` | 出站请求附带的凭证类型：`none`（无）/ `bearer`（Bearer Token）/ `api_key`（自定义 Header + Key） |
+| 服务授权 | enum | `none` | AI SRE 作为**服务**访问远端 Agent 时使用的身份（字段 `auth_type`）：`none`（无）/ `bearer`（Bearer Token）/ `api_key`（自定义 Header + Key）。表单中标记为**推荐**。详见下文「[授权模式](#授权模式)」 |
 | 流式传输 | bool | 开 | 是否以流式方式与远端交互 |
-| 用户级认证模式 | enum | `shared` | 见下表「认证模式」 |
+| 成员授权 | enum | `shared`（无） | 每位成员各自持有的身份（字段 `auth_mode`）：`shared`（无）/ `per_user_secret`（密钥（Header））/ `per_user_oauth`（OAuth 2.1）。详见下文「[授权模式](#授权模式)」 |
 | 跳过 TLS 证书校验 | bool | 关 | 仅当 Card URL 为 HTTPS 时显示。只在远端使用自签证书且网络受控时开启；开启后会跳过证书链和主机名校验 |
-| 允许通过 HTTP 获取 OAuth 配置（仅限测试环境） | bool | 关 | 仅当选择「每用户 OAuth」且 Card URL 是非本地 HTTP 地址时需要确认。只用于受控测试环境；开启后 AI SRE 服务端会访问该主机的 OAuth metadata |
+| 允许通过 HTTP 获取 OAuth 配置（仅限测试环境） | bool | 关 | 仅当**成员授权**选择「OAuth 2.1」且 Card URL 是非本地 HTTP 地址时需要确认。只用于受控测试环境；开启后 AI SRE 服务端会访问该主机的 OAuth metadata |
 
 ### 协议版本与 Agent Card 要求
 
@@ -191,28 +191,56 @@ https://demo.flashcat.cloud/api/fc-model/a2a/.well-known/agent-card.json
   不建议删除 FlashAI 模板生成的调用说明，尤其是开头的 `summary:` 简介——注册后 FlashAI 一定会出现在「可用 Agent 清单」里，但 AI SRE 是否把任务派给它，直接依据就是这行简介。说明过短或过于泛化时，AI SRE 可能继续在本地推理，或把普通 metrics / logs 问题错误委派给 FlashAI。
 </Tip>
 
-### 认证模式
+### 授权模式
 
-A2A Agent 支持三种凭证供给方式，决定不同用户调用同一个远端 Agent 时如何提供凭证：
+A2A Agent 的身份由两条**互相独立**的轴决定，两条轴可以同时配置：
+
+- **服务授权**（`auth_type`）：AI SRE 作为一个服务去访问远端 Agent 时使用的身份，账户内共用一份。可选 `none`（无）、`bearer`（Bearer Token）、`api_key`（自定义 Header + Key）。表单中标记为**推荐**——配置一次即可覆盖全部场景。
+- **成员授权**（`auth_mode`）：每位成员各自持有的身份。可选 `shared`（无）、`per_user_secret`（密钥（Header））、`per_user_oauth`（OAuth 2.1）。
+
+<Note>
+这两条轴不是三选一。您可以只配服务授权、只配成员授权，也可以两者都配。两者都配时，由下面的「身份使用顺序」决定每个场景实际用哪一个。
+</Note>
+
+#### 身份使用顺序
+
+| 场景 | 使用的身份 |
+| --- | --- |
+| 个人会话（控制台、IM 单聊、个人范围自动化） | 优先使用**成员授权** |
+| IM 群聊 / 团队范围会话 | 使用**服务授权** |
+| 自动化（Automations） | 跟随会话范围：个人范围用成员授权，团队范围用服务授权 |
+
+表单底部的「身份使用顺序」面板会随两个下拉框的选择实时给出结论：
+
+- **只配了服务授权**：所有场景都使用服务授权。
+- **只配了成员授权**：IM 群聊会逐轮使用发言成员的个人授权。如果远端系统不接受同一会话内多人轮流的身份（会因身份校验失败而拒绝），请补配服务授权。
+- **两条轴都为「无」**：调用不携带任何身份。保存时会弹出确认框「该 Agent 将不携带身份调用，确认保存？」。远端需要认证时，推荐配置服务授权。
+
+<Warning>
+服务授权意味着账户内任何团队范围会话与 IM 群聊都能以这个服务身份调用远端系统。若该系统涉及成员个人数据或高危写操作，建议同时启用成员授权。
+</Warning>
+
+#### 成员授权的两种形式
 
 <AccordionGroup>
-  <Accordion title="共享（shared，默认）" icon="users">
-    所有用户共用同一组凭证，凭证在「认证类型」中配置（Bearer Token 或 API Key）。适合团队共享同一个远端账号的场景。
+  <Accordion title="密钥（Header）（per_user_secret）" icon="key">
+    每位成员在首次调用时单独提供自己的密钥，密钥加密存储在账户级别。选择此模式需在「密钥 Schema」中填写 **Header 名称**（必填，凭证注入到哪个 HTTP header）与**帮助链接**（可选，指向「如何获取该密钥」的文档），供首次调用时引导成员填写。成员在 A2A Agent 列表的「成员授权」列各自填写并管理自己的密钥。
   </Accordion>
-  <Accordion title="每用户密钥（per_user_secret）" icon="key">
-    每个用户在首次调用时单独提供自己的密钥，密钥加密存储在账户级别。需在「密钥 Schema」中配置 Header 名称（必填）、占位符与帮助链接（可选），供首次调用时引导用户填写。
-  </Accordion>
-  <Accordion title="每用户 OAuth（per_user_oauth）" icon="shield-halved">
-    用户通过 OAuth 2.1 流程各自授权；首次调用该 A2A Agent 时自动弹出授权窗口，完成后凭证按用户隔离保存。授权前需在凭证对话框选择**执行环境**：可选云端 Sandbox 或在线的 BYOC Runner，不能使用「自动」。OAuth 请求从所选环境发起；远端 OAuth 服务仅在内网可达时，请选择能够访问它的 BYOC Runner。
+  <Accordion title="OAuth 2.1（per_user_oauth）" icon="shield-halved">
+    成员通过 OAuth 2.1 流程各自授权；首次调用该 A2A Agent 时自动弹出授权窗口，完成后凭证按成员隔离保存。授权前需在凭证对话框选择**执行环境**：可选云端 Sandbox 或在线的 BYOC Runner，不能使用「自动」。OAuth 请求从所选环境发起；远端 OAuth 服务仅在内网可达时，请选择能够访问它的 BYOC Runner。
   </Accordion>
 </AccordionGroup>
+
+<Note>
+OAuth 2.1 只出现在**成员授权**这条轴上。服务授权是账户内共用的一份静态凭证，只提供 Bearer Token 与 API Key 两种形式。
+</Note>
 
 <Note>
 出于安全考虑，已保存的敏感字段（如 `token`、`api_key`、`client_secret`）在读取时会被**掩码**返回。编辑时若把敏感字段留空，表示「保留当前值」而非「清空」——只有当您显式修改它时才会覆盖已存储的凭证。
 </Note>
 
 <Warning>
-每用户 OAuth 的发现地址优先使用 HTTPS。只有在受控测试环境中，才为非本地 HTTP Card URL 勾选「允许通过 HTTP 获取 OAuth 配置（仅限测试环境）」。如果 HTTPS 端点使用自签证书，也只应在可信网络内临时开启「跳过 TLS 证书校验」。
+成员授权（OAuth 2.1）的发现地址优先使用 HTTPS。只有在受控测试环境中，才为非本地 HTTP Card URL 勾选「允许通过 HTTP 获取 OAuth 配置（仅限测试环境）」。如果 HTTPS 端点使用自签证书，也只应在可信网络内临时开启「跳过 TLS 证书校验」。
 </Warning>
 
 ## 入站：让外部 Agent 调用 AI SRE
@@ -261,7 +289,7 @@ A2A Agent 的完整生命周期可在 **插件 → Agents** 页面管理。
     用列表中的开关切换 A2A Agent 的启用状态。仅**已启用**的 Agent 会进入 AI SRE 的可用清单、可被委派任务；禁用后立即对委派不可见。
   </Accordion>
   <Accordion title="检视 / 编辑" icon="pen-to-square">
-    点击列表中的任意一行打开表单，可查看与编辑名称、调用说明、范围、Card URL、认证配置、流式与认证模式。无编辑权限时表单显示为**只读**。
+    点击列表中的任意一行打开表单，可查看与编辑名称、调用说明、范围、Card URL、服务授权、成员授权与流式设置。无编辑权限时表单显示为**只读**。
   </Accordion>
   <Accordion title="删除" icon="trash">
     从当前范围移除一个 A2A Agent。**委派给它的活跃会话将会失败。** 删除有确认提示。
