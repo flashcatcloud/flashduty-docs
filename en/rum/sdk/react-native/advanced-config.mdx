@@ -1,0 +1,181 @@
+---
+title: "React Native SDK advanced configuration"
+description: "Configure sampling, tracking consent, event filtering, distributed tracing, WebView tracking, and source map upload for the React Native RUM SDK"
+keywords: ["RUM", "React Native SDK", "advanced configuration", "sampling", "tracking consent", "source map"]
+---
+
+This page covers the advanced options of the React Native SDK. All options are set as properties on a `DdSdkReactNativeConfiguration` instance before calling `DdSdkReactNative.initialize(config)`.
+
+## Sampling
+
+```typescript
+config.sessionSamplingRate = 100;        // Session sampling rate (percent), default 100
+config.resourceTracingSamplingRate = 20; // Distributed tracing sampling rate on resources, default 20
+config.telemetrySampleRate = 20;         // SDK internal telemetry sampling rate, default 20
+```
+
+## Tracking consent
+
+`TrackingConsent` controls whether data is collected and reported, for compliance requirements such as GDPR:
+
+| Value | Behavior |
+|------|------|
+| `TrackingConsent.GRANTED` | Collect and report |
+| `TrackingConsent.NOT_GRANTED` | Do not collect |
+| `TrackingConsent.PENDING` | Buffer first, then report or discard once the user decides |
+
+```typescript
+// Passed as the 7th constructor argument at initialization
+const config = new DdSdkReactNativeConfiguration(
+  '<CLIENT_TOKEN>', 'production', '<APPLICATION_ID>',
+  true, true, true,
+  TrackingConsent.PENDING,
+);
+
+// Update after the user grants consent
+DdSdkReactNative.setTrackingConsent(TrackingConsent.GRANTED);
+```
+
+## Event filtering and scrubbing
+
+Event mappers run before an event is reported. Return `null` to drop the event, or return a modified event. Use them to scrub sensitive fields or remove noise.
+
+```typescript
+config.errorEventMapper = (event) => {
+  // For example, scrub tokens from the error message; return null to drop the event
+  event.message = event.message.replace(/token=[^&\s]+/g, 'token=***');
+  return event;
+};
+config.resourceEventMapper = (event) => event; // statusCode, kind, size, and context can be modified
+config.actionEventMapper = (event) => event;
+config.logEventMapper = (event) => event;
+```
+
+## Distributed tracing
+
+For hosts matched by `firstPartyHosts` (including subdomains), the SDK injects trace headers into XHR / fetch requests so that frontend RUM and backend APM traces are correlated. By default both the W3C `traceparent` and Datadog-format headers are injected; you can choose `propagatorTypes` per host.
+
+```typescript
+import { PropagatorType } from '@flashcatcloud/mobile-react-native';
+
+config.firstPartyHosts = [
+  { match: 'api.example.com', propagatorTypes: [PropagatorType.TRACECONTEXT] },
+];
+config.resourceTracingSamplingRate = 100;
+```
+
+## Custom intake endpoints
+
+For on-premises deployments, override the RUM, Logs, and Trace intake endpoints separately through `customEndpoints`:
+
+```typescript
+config.customEndpoints = {
+  rum: 'https://your-ingest.example.com/api/v2/rum',
+  logs: 'https://your-ingest.example.com/api/v2/logs',
+  trace: 'https://your-ingest.example.com/api/v2/spans',
+};
+```
+
+<Warning>
+Each value is the final intake URL, not a base address containing only the scheme and host. `rum` must include `/api/v2/rum`; if the deployment sits under a path prefix, keep that prefix as well, for example `https://example.com/flashduty/api/v2/rum`. The public cloud needs no setting; keep `config.site = 'CN'`.
+</Warning>
+
+## WebView tracking
+
+If your application embeds WebViews, replace `react-native-webview` with the `WebView` exported by `@flashcatcloud/mobile-react-native-webview` to associate the Browser RUM events inside the WebView with the current native RUM session.
+
+```bash
+npm install @flashcatcloud/mobile-react-native-webview
+```
+
+```tsx
+import { WebView } from '@flashcatcloud/mobile-react-native-webview';
+
+<WebView
+  source={{ uri: 'https://myapp.example' }}
+  allowedHosts={['myapp.example']}
+/>
+```
+
+`allowedHosts` is the list of hosts allowed to be associated; subdomains are matched. The page loaded in the WebView must already integrate the <a href="/en/rum/sdk/web/sdk-integration">Flashduty Browser SDK</a>. The component is fully compatible with the props of `react-native-webview`.
+
+## Source map upload
+
+JS stack traces from release builds are minified; upload source maps so the console can resolve them to source files and line numbers. The server matches source maps by **service + version + bundle file name**, so the service and version used at upload time must match what the SDK reports.
+
+<Note>
+The version reported by the SDK defaults to the application version (Android `versionName`, iOS `CFBundleShortVersionString`) and can be overridden with `config.version`; if you override it, use the same value at upload time. The Metro debug ID plugin is not required.
+</Note>
+
+<Tabs>
+<Tab title="Android">
+Apply the Gradle script shipped with the package in `android/app/build.gradle`. It hooks into the release bundling task and calls the FlashCat CLI to upload the source map right after the bundle is built.
+
+```groovy android/app/build.gradle
+// Keep in sync with the serviceName used at SDK initialization; defaults to applicationId when unset
+project.ext.flashcat = [serviceName: "com.example.shopping"]
+
+apply from: "../../node_modules/@flashcatcloud/mobile-react-native/flashcat-sourcemaps.gradle"
+```
+
+Provide an API key with source map upload permission through an environment variable at build time:
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> ./gradlew assembleRelease
+```
+
+Upload behavior (from `0.1.1`):
+
+| Scenario | Behavior |
+|------|------|
+| `FLASHCAT_API_KEY` not set | Prints a warning and skips the upload; the release build still succeeds |
+| Upload fails (network, invalid key, and so on) | Prints a warning; the build result is unaffected |
+| `FLASHCAT_SOURCEMAPS_DRY_RUN=true` | Generates the source map only, without uploading |
+
+<Warning>
+In `0.1.0`, a missing `FLASHCAT_API_KEY` fails `assembleRelease` entirely and the APK stays on the previous version. Upgrade to `0.1.1` or later.
+</Warning>
+</Tab>
+<Tab title="iOS">
+First make the release build produce a source map: in the **Bundle React Native code and images** build phase in Xcode, set `SOURCEMAP_FILE` before `react-native-xcode.sh` runs.
+
+```bash
+export SOURCEMAP_FILE="$DERIVED_FILE_DIR/main.jsbundle.map"
+```
+
+Then upload the bundle and source map with the FlashCat CLI. `--release-version` corresponds to `CFBundleShortVersionString` and `--build-version` to `CFBundleVersion`.
+
+```bash
+# Requires @flashcatcloud/flashcat-cli ≥ 0.4.0
+FLASHCAT_API_KEY=<API_KEY> npx @flashcatcloud/flashcat-cli sourcemaps upload-react-native \
+  --platform ios --service com.example.shopping \
+  --release-version <VERSION> --build-version <BUILD_NUMBER> \
+  --bundle main.jsbundle --sourcemap main.jsbundle.map
+```
+</Tab>
+</Tabs>
+
+<Note>
+Every JS code change produces a new bundle, so **source map upload must be part of every release build**; otherwise stack traces for that version stay minified. Native crash stacks are reported by the native SDK and are symbolicated the same way as with the <a href="/en/rum/sdk/android/advanced-config">Android</a> / <a href="/en/rum/sdk/ios/advanced-config">iOS</a> SDKs.
+</Note>
+
+## Other options
+
+| Option | Default | Description |
+|------|--------|------|
+| `serviceName` | Platform default | **Strongly recommended.** When unset, Android uses `applicationId` and iOS the bundle identifier, splitting the app into two services |
+| `nativeCrashReportEnabled` | false | Whether to collect native crashes |
+| `version` / `versionSuffix` | App version | Override the reported version / append a suffix; must match the version used for source map upload |
+| `verbosity` | undefined | SDK internal log level (`SdkVerbosity.DEBUG` / `INFO` / `WARN` / `ERROR`); use it when troubleshooting the integration |
+| `trackBackgroundEvents` | false | Whether to collect events while no view is active; enabling it increases the session count |
+| `vitalsUpdateFrequency` | `VitalsUpdateFrequency.AVERAGE` | Collection frequency of native mobile vitals; set to `NEVER` to disable |
+| `nativeLongTaskThresholdMs` | 200 | Native main-thread long task threshold in milliseconds; `0` or `false` disables it |
+| `longTaskThresholdMs` | 0 (disabled) | JS-thread long task threshold in milliseconds; set 100 to 5000 to enable |
+| `trackFrustrations` | true | Whether to derive frustration signals (such as error taps) from user actions |
+| `actionNameAttribute` | undefined | Which component prop to use as the name of automatically collected actions (for example `testID`); `dd-action-name` takes precedence |
+| `useAccessibilityLabel` | true | Whether to use `accessibilityLabel` as the action name |
+| `trackNonFatalAnrs` | Platform default | Whether to collect non-fatal ANRs; disabled by default on Android 30+, enabled on Android 29 and below |
+| `appHangThreshold` | undefined | iOS App Hang threshold in seconds; unset means disabled |
+| `trackWatchdogTerminations` | false | Whether to collect iOS watchdog terminations |
+| `uploadFrequency` / `batchSize` / `batchProcessingLevel` | `AVERAGE` / `MEDIUM` / `MEDIUM` | Upload frequency, batch size, and batches per upload cycle; trade off freshness against battery |
+| `proxyConfig` | undefined | Report through an HTTP / SOCKS proxy |

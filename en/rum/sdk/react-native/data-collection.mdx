@@ -1,0 +1,129 @@
+---
+title: "React Native SDK data collection"
+description: "Learn about the event types, performance metrics, collection boundaries, and reporting behavior of the React Native RUM SDK"
+keywords: ["RUM", "React Native SDK", "data collection", "view", "action", "resource", "error"]
+---
+
+This page describes what the React Native SDK collects, what is **outside its collection scope**, and how to control the scope. All events are written with `source: "react-native"`.
+
+## Event types
+
+| Event | Trigger | Description |
+|------|----------|------|
+| view | Recorded automatically by the navigation tracking package, or `DdRum.startView` / `stopView` | One screen visit; records the time spent, the number of actions / resources / errors inside it, and the performance metrics during the view |
+| action | `trackInteractions` collects `onPress` taps automatically, or `DdRum.addAction` | User interaction (tap / scroll / swipe / custom); can carry frustration signals |
+| resource | `trackResources` intercepts JS `XMLHttpRequest` / `fetch`, or `DdRum.startResource` / `stopResource` | One network request; records URL, method, status code, and duration |
+| error | Automatic (unhandled JS exception / native crash) or `DdRum.addError` | Errors and crashes, with type, message, and stack trace |
+| long task | Native main thread enabled by default (`nativeLongTaskThresholdMs`); JS thread requires `longTaskThresholdMs` | Thread blocking beyond the threshold |
+
+## Automatically collected context
+
+Every event carries the following context (collected by the native layer):
+
+- **Application**: `service`, `version`, `env`, and `application.id`
+- **Device**: device model, OS and version, screen size
+- **Session**: `session.id`, sampled by `sessionSamplingRate`
+- **Connectivity**: network type (when available)
+- **User**: `usr.id` / `usr.name` / `usr.email` set through `DdSdkReactNative.setUser`
+- **Global attributes**: custom fields set through `DdSdkReactNative.setAttributes`
+
+## Network request collection boundary
+
+Resource collection has a single entry point: the `XMLHttpRequest` proxy in the JavaScript layer (`fetch` in React Native is implemented on top of it).
+
+| Request origin | Collected | Recorded type |
+|----------|----------|----------|
+| `fetch` / `XMLHttpRequest` / axios and similar in application code | Yes | `xhr` |
+| Binary content such as images downloaded with `fetch` | Yes | `xhr` (not distinguished by Content-Type) |
+| Resources loaded by the native networking stack, such as `<Image source={{ uri }}>` | **No** | — |
+| Requests issued by native modules / third-party native SDKs themselves | **No** | — |
+
+<Note>
+As a result, the resource data of a React Native application contains API requests only, with no images, fonts, scripts, or other static resources. The console **does not show static-resource panels** for React Native applications. This is by design, following the collection boundary, and does not mean data is missing.
+</Note>
+
+## Performance data
+
+The console shows a Performance page for React Native applications. Native vitals are collected by the wrapped Android / iOS SDKs, and the JS-thread frame rate is collected additionally by the React Native SDK:
+
+| Metric | Android | iOS | Description |
+|------|---------|-----|------|
+| App launch time | Not yet | Cold / warm launch | Android does not report launch time yet; the corresponding console card shows "No data" |
+| Refresh rate | Supported | Supported | Rendering frame rate of the native UI thread |
+| **JS-thread frame rate** | Supported | Supported | React Native-specific; reflects whether application JS code is janky; shown on the console's Performance page |
+| CPU | Supported | Supported | CPU usage during the view |
+| Memory | Supported | Supported | Memory usage during the view |
+| Slow / frozen frames | Supported | Supported | Number of slow and frozen frames during the view |
+| ANR | Supported | — | Application not responding; whether non-fatal ANRs are collected by default depends on the Android version and can be overridden with `trackNonFatalAnrs` |
+| App Hang | — | Supported | Main-thread hang; requires `appHangThreshold`, disabled by default |
+
+The collection frequency of native vitals is controlled by `vitalsUpdateFrequency`, default `VitalsUpdateFrequency.AVERAGE`; set it to `NEVER` to disable.
+
+## Logs
+
+`DdLogs.debug` / `info` / `warn` / `error` send log events, which are not RUM events. Currently **only Android actually sends them**; iOS is a no-op.
+
+## Manual instrumentation
+
+Besides automatic collection, you can record events and attributes manually.
+
+```typescript
+import { DdRum, DdSdkReactNative, ErrorSource, RumActionType } from '@flashcatcloud/mobile-react-native';
+
+// Manage views manually
+DdRum.startView('checkout', 'Checkout');
+DdRum.stopView('checkout');
+
+// Record an action manually
+DdRum.addAction(RumActionType.TAP, 'pay_button');
+
+// Record a network request manually
+DdRum.startResource('req-1', 'GET', 'https://api.example.com/orders');
+DdRum.stopResource('req-1', 200, 'xhr');
+
+// Report an error manually
+DdRum.addError('payment failed', ErrorSource.SOURCE, stack);
+
+// Attach global attributes (written to all subsequent events)
+DdSdkReactNative.setAttributes({ tenant: 'acme' });
+
+// Add a custom timing to the current view
+DdRum.addTiming('first_order_rendered');
+```
+
+## Sampling and controls
+
+| Option | Default | Description |
+|------|--------|------|
+| `sessionSamplingRate` | 100 | Session sampling rate (percent); sessions not sampled produce no RUM data |
+| `resourceTracingSamplingRate` | 20 | Distributed tracing sampling rate on resources |
+| `telemetrySampleRate` | 20 | SDK internal telemetry sampling rate |
+| `trackInteractions` / `trackResources` / `trackErrors` | Constructor arguments, default false | Whether to collect actions / network requests / JS errors automatically |
+| `nativeCrashReportEnabled` | false | Whether to collect native crashes |
+| `trackFrustrations` | true | Whether to derive frustration signals from user actions |
+| `trackBackgroundEvents` | false | Whether to collect events while no view is active |
+| `vitalsUpdateFrequency` | `AVERAGE` | Collection frequency of native vitals; `NEVER` disables |
+| `nativeLongTaskThresholdMs` | 200 | Native main-thread long task threshold; `0` / `false` disables |
+| `longTaskThresholdMs` | 0 (disabled) | JS-thread long task threshold |
+| `trackNonFatalAnrs` | Platform default | Whether to collect non-fatal ANRs |
+| `appHangThreshold` | undefined | iOS App Hang threshold in seconds; unset means disabled |
+
+## Data scrubbing
+
+Event mappers let you modify or drop data before it is reported, for scrubbing or noise filtering. See <a href="/en/rum/sdk/react-native/advanced-config">Advanced configuration</a>.
+
+```typescript
+config.errorEventMapper = (event) => {
+  // Return null to drop the event, or return a modified event
+  if (event.message.includes('token=')) {
+    return null;
+  }
+  return event;
+};
+```
+
+## Reporting behavior
+
+- The SDK buffers events in the native layer and uploads them in batches according to `uploadFrequency`, `batchSize`, and `batchProcessingLevel`
+- When the network is unavailable, events are persisted locally and retried once connectivity returns
+- The default intake endpoint is `https://browser.flashcat.cloud/api/v2/rum`; on-premises deployments can set the full RUM intake URL through `customEndpoints.rum` (it must include `/api/v2/rum` and keep the deployment's path prefix)
