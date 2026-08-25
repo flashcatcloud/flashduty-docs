@@ -1,0 +1,221 @@
+---
+title: "React Native SDK integration"
+description: "Integrate Flashduty RUM SDK into React Native applications to collect views, actions, network requests, errors, and crashes"
+keywords: ["RUM", "React Native SDK", "user monitoring", "mobile monitoring", "JavaScript"]
+---
+
+The React Native SDK wraps the native iOS / Android SDKs and provides RUM capabilities through `@flashcatcloud/mobile-react-native`. After initialization, the SDK reports the application's views, user actions, network requests, errors, and crashes to Flashduty RUM, with `source: "react-native"` identifying the data source.
+
+<Info>
+The current SDK version is `0.1.x` and supports the **iOS and Android** platforms (React Native Web is not supported). JavaScript class names begin with `Dd*` (such as `DdSdkReactNative`, `DdSdkReactNativeConfiguration`, and `DdRum`). Session Replay is not supported; Logs only work on Android and are a no-op on iOS.
+</Info>
+
+## Prerequisites
+
+Before integrating the SDK, complete these steps:
+
+- Create a RUM application of type **React Native** in the Flashduty console, then obtain the **Application ID** and **Client Token**
+- Make sure your application can reach `https://browser.flashcat.cloud/api/v2/rum`
+- React Native `>= 0.63.4 < 1.0` (the new architecture is verified on 0.76); iOS deployment target ≥ 12.0, Android `minSdkVersion` ≥ 21
+- Make sure your build machine can reach Maven Central and the CocoaPods trunk: the SDK's native dependencies, `cloud.flashcat:dd-sdk-android-*` (Android) and the `Flashcat*` pods (iOS), are resolved automatically at build time
+- Initialize the SDK as early as possible in the application entry (`index.js` / `App.tsx`)
+
+## Install the SDK
+
+Install the core package, plus the view-tracking package that matches your navigation library. Native modules are linked through autolinking; iOS additionally needs `pod install`.
+
+```bash
+npm install @flashcatcloud/mobile-react-native
+
+# View tracking: pick the package that matches your navigation library
+npm install @flashcatcloud/mobile-react-navigation          # react-navigation
+npm install @flashcatcloud/mobile-react-native-navigation   # react-native-navigation (Wix)
+
+# iOS
+cd ios && pod install
+```
+
+<Warning>
+Use `0.1.1` or later. In `0.1.0`, the Android source map upload script fails the release build when `FLASHCAT_API_KEY` is missing; from `0.1.1` the upload is non-blocking and a missing key only prints a warning and skips the upload. See Source map upload in <a href="/en/rum/sdk/react-native/advanced-config">Advanced configuration</a>.
+</Warning>
+
+## Initialize the SDK
+
+Initialize as early as possible in the application entry, and only once. The three boolean constructor arguments control automatic collection of user actions, network requests, and JS errors respectively.
+
+```typescript App.tsx
+import {
+  DdSdkReactNative,
+  DdSdkReactNativeConfiguration,
+  TrackingConsent,
+} from '@flashcatcloud/mobile-react-native';
+
+const config = new DdSdkReactNativeConfiguration(
+  '<CLIENT_TOKEN>',
+  'production',
+  '<APPLICATION_ID>',
+  true, // Track user interactions (taps)
+  true, // Track XHR / fetch resources
+  true, // Track JS errors
+  TrackingConsent.GRANTED,
+);
+config.site = 'CN';
+config.serviceName = 'com.example.shopping'; // Required: keeps Android and iOS under one service
+config.nativeCrashReportEnabled = true; // Collect native Android / iOS crashes
+config.sessionSamplingRate = 100;
+
+DdSdkReactNative.initialize(config);
+```
+
+<Warning>
+**`serviceName` must be set explicitly.** Without it, Android defaults to the `applicationId` and iOS to the bundle identifier, so one application is split into two services in the console: the same error appears once per service in the issue list, and filters and source map matching are separated as well.
+</Warning>
+
+<Warning>
+Do not use server-side secrets in client code. `clientToken` is only used for client-side RUM data reporting, and `applicationId` is used to attribute RUM application data.
+</Warning>
+
+For on-premises deployments, point each data type at your own intake endpoint through `customEndpoints`:
+
+```typescript
+config.customEndpoints = {
+  rum: 'https://your-ingest.example.com/api/v2/rum',
+  logs: 'https://your-ingest.example.com/api/v2/logs',
+};
+```
+
+## Collect page views
+
+The SDK does not detect routes on its own; wire up view tracking for the navigation library you use.
+
+<Tabs>
+<Tab title="react-navigation">
+Start tracking once the navigation container is ready; every route change is recorded as a RUM view.
+
+```tsx
+import { NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
+import { DdRumReactNavigationTracking } from '@flashcatcloud/mobile-react-navigation';
+
+function App() {
+  const navigationRef = useNavigationContainerRef();
+  return (
+    <NavigationContainer
+      ref={navigationRef}
+      onReady={() => {
+        DdRumReactNavigationTracking.startTrackingViews(navigationRef.current);
+      }}
+    >
+      {/* your screens */}
+    </NavigationContainer>
+  );
+}
+```
+
+Only one `NavigationContainer` can be tracked at a time; call `DdRumReactNavigationTracking.stopTrackingViews()` before switching containers.
+</Tab>
+<Tab title="react-native-navigation (Wix)">
+Call once at application startup:
+
+```typescript
+import { DdRumReactNativeNavigationTracking } from '@flashcatcloud/mobile-react-native-navigation';
+
+DdRumReactNativeNavigationTracking.startTracking();
+```
+</Tab>
+<Tab title="Manual">
+If you use neither library, start and stop views manually:
+
+```typescript
+import { DdRum } from '@flashcatcloud/mobile-react-native';
+
+DdRum.startView('checkout', 'Checkout');
+// ...
+DdRum.stopView('checkout');
+```
+</Tab>
+</Tabs>
+
+## Collect user actions
+
+With `trackInteractions` set to `true` at initialization, the SDK records taps on components that have an `onPress` prop as actions. The component's `accessibilityLabel` is used as the action name by default; you can also set it with the `dd-action-name` prop:
+
+```tsx
+<TouchableOpacity dd-action-name="Checkout" onPress={handleCheckout}>
+  <Text>Checkout</Text>
+</TouchableOpacity>
+```
+
+You can also record an action manually:
+
+```typescript
+import { DdRum, RumActionType } from '@flashcatcloud/mobile-react-native';
+
+DdRum.addAction(RumActionType.TAP, 'Checkout');
+```
+
+## Collect network requests
+
+With `trackResources` set to `true` at initialization, the SDK intercepts `XMLHttpRequest` and `fetch` in the JavaScript layer and records each request as a RUM resource (URL, method, status code, duration).
+
+<Note>
+The SDK only sees **requests issued from JavaScript**. Resources loaded by the native networking stack, such as `<Image>`, are not collected, and every collected request is recorded with the `xhr` type. For that reason the console does not show static-resource panels for React Native applications; this is a collection boundary, not missing data. See <a href="/en/rum/sdk/react-native/data-collection">Data collection</a>.
+</Note>
+
+To correlate frontend requests with backend traces, configure `firstPartyHosts`; the SDK injects trace headers for matching hosts. See <a href="/en/rum/sdk/react-native/advanced-config">Advanced configuration</a>.
+
+## Associate user information
+
+After sign-in, set the current user. The SDK writes the user fields into the `usr` object of subsequent RUM events. Always pass `id`: iOS ignores calls without an `id`.
+
+```typescript
+DdSdkReactNative.setUser({
+  id: 'user-1001',
+  name: 'Alice',
+  email: 'alice@example.com',
+});
+```
+
+## Report errors
+
+With `trackErrors` set to `true` at initialization, the SDK automatically collects unhandled JS exceptions; with `nativeCrashReportEnabled` set to `true` it also collects native Android / iOS crashes. You can also report caught exceptions manually:
+
+```typescript
+import { DdRum, ErrorSource } from '@flashcatcloud/mobile-react-native';
+
+try {
+  // ... your code ...
+} catch (error) {
+  DdRum.addError('Payment failed', ErrorSource.SOURCE, (error as Error).stack ?? '');
+}
+```
+
+<Note>
+JS stack traces from release builds are minified; upload source maps so they resolve to source files and line numbers. Android can upload automatically from the Gradle build, and iOS uploads through the FlashCat CLI. Every release produces a new bundle, so the matching source map must be uploaded again.
+
+**Native crashes are a separate track**: they need the iOS dSYM and, when code shrinking is enabled, the Android mapping file. Both are covered in <a href="/en/rum/sdk/react-native/advanced-config">Advanced configuration</a>.
+</Note>
+
+## Verify the integration
+
+After integrating, verify as follows:
+
+1. Temporarily set `config.verbosity = SdkVerbosity.DEBUG` at initialization and watch the SDK's reporting behavior in the Metro / Xcode / logcat output
+2. Run the application and trigger screen changes, taps, network requests, or a manual error
+3. In your Flashduty RUM application, filter on `source:react-native` and confirm that view, action, resource, or error events appear
+4. Confirm in the console that Android and iOS data land under the same `service`
+
+## Next steps
+
+<CardGroup cols={3}>
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/react-native/advanced-config">
+Configure sampling, tracking consent, event filtering, tracing, and source map upload.
+</Card>
+
+<Card title="Compatibility" icon="shield-check" href="/en/rum/sdk/react-native/compatible">
+Learn about supported platforms, React Native versions, companion packages, and current limitations.
+</Card>
+
+<Card title="Data collection" icon="database" href="/en/rum/sdk/react-native/data-collection">
+See the event types, performance metrics, and collection boundaries of automatic and manual collection.
+</Card>
+</CardGroup>

@@ -1,0 +1,221 @@
+---
+title: "React Native SDK 接入"
+description: "在 React Native 应用中接入 Flashduty RUM SDK，采集视图、操作、网络、错误和崩溃数据"
+keywords: ["RUM", "React Native SDK", "用户监控", "移动端监控", "JavaScript"]
+---
+
+React Native SDK 基于原生 iOS / Android SDK 封装，通过 `@flashcatcloud/mobile-react-native` 提供 RUM 能力。初始化后，SDK 会把应用中的视图、用户操作、网络请求、错误和崩溃事件上报到 Flashduty RUM，并使用 `source: "react-native"` 标识数据来源。
+
+<Info>
+当前 SDK 版本为 `0.1.x`，支持 **iOS 和 Android** 平台（不支持 React Native Web）。JavaScript 类名以 `Dd*` 开头（如 `DdSdkReactNative`、`DdSdkReactNativeConfiguration`、`DdRum`）。暂不支持 Session Replay；Logs 仅 Android 端生效，iOS 端为空操作。
+</Info>
+
+## 前提条件
+
+接入前，请先完成以下准备：
+
+- 在 Flashduty 控制台创建一个类型为 **React Native** 的 RUM 应用，并获取 **Application ID** 和 **Client Token**
+- 确认应用可以访问 `https://browser.flashcat.cloud/api/v2/rum`
+- React Native `>= 0.63.4 < 1.0`（新架构已在 0.76 上验证）；iOS 部署目标 ≥ 12.0，Android `minSdkVersion` ≥ 21
+- 构建机可以访问 Maven Central 与 CocoaPods trunk：SDK 的原生依赖 `cloud.flashcat:dd-sdk-android-*`（Android）和 `Flashcat*` pods（iOS）会在构建时自动解析
+- 在应用入口（`index.js` / `App.tsx`）尽早完成 SDK 初始化
+
+## 安装 SDK
+
+安装核心包，并按你使用的导航库安装对应的视图采集包。原生模块通过 autolinking 自动接入，iOS 端还需要执行 `pod install`。
+
+```bash
+npm install @flashcatcloud/mobile-react-native
+
+# 视图采集：按导航库二选一
+npm install @flashcatcloud/mobile-react-navigation          # react-navigation
+npm install @flashcatcloud/mobile-react-native-navigation   # react-native-navigation (Wix)
+
+# iOS
+cd ios && pod install
+```
+
+<Warning>
+请使用 `0.1.1` 或更高版本。`0.1.0` 的 Android source map 上传脚本会在缺少 `FLASHCAT_API_KEY` 时让 release 构建直接失败；`0.1.1` 起上传改为非阻塞，缺少 key 只打印警告并跳过上传。详见 <a href="/zh/rum/sdk/react-native/advanced-config">高级配置</a> 中的 Source map 上传。
+</Warning>
+
+## 初始化 SDK
+
+在应用入口尽早初始化，且只初始化一次。构造函数的三个布尔参数依次控制自动采集用户操作、网络请求和 JS 错误。
+
+```typescript App.tsx
+import {
+  DdSdkReactNative,
+  DdSdkReactNativeConfiguration,
+  TrackingConsent,
+} from '@flashcatcloud/mobile-react-native';
+
+const config = new DdSdkReactNativeConfiguration(
+  '<CLIENT_TOKEN>',
+  'production',
+  '<APPLICATION_ID>',
+  true, // 自动采集用户操作（tap）
+  true, // 自动采集 XHR / fetch 网络请求
+  true, // 自动采集 JS 错误
+  TrackingConsent.GRANTED,
+);
+config.site = 'CN';
+config.serviceName = 'com.example.shopping'; // 必填：让 Android 与 iOS 归入同一个服务
+config.nativeCrashReportEnabled = true; // 采集原生 Android / iOS 崩溃
+config.sessionSamplingRate = 100;
+
+DdSdkReactNative.initialize(config);
+```
+
+<Warning>
+**`serviceName` 必须显式设置。** 不设置时，Android 端默认取 `applicationId`，iOS 端默认取 bundle identifier，同一个应用会在控制台被拆成两个 service：同一错误在问题列表里各出现一次，筛选和 source map 匹配也会分开。
+</Warning>
+
+<Warning>
+请不要在客户端代码中使用服务端密钥。`clientToken` 只用于客户端 RUM 数据上报，`applicationId` 用于归属 RUM 应用数据。
+</Warning>
+
+私有化部署时，通过 `customEndpoints` 把各类数据指向你自己的上报地址：
+
+```typescript
+config.customEndpoints = {
+  rum: 'https://your-ingest.example.com/api/v2/rum',
+  logs: 'https://your-ingest.example.com/api/v2/logs',
+};
+```
+
+## 采集页面视图
+
+SDK 不会自动识别路由，需要按你使用的导航库接入视图采集。
+
+<Tabs>
+<Tab title="react-navigation">
+在导航容器就绪后开启采集，每次路由切换都会记录为一个 RUM 视图。
+
+```tsx
+import { NavigationContainer, useNavigationContainerRef } from '@react-navigation/native';
+import { DdRumReactNavigationTracking } from '@flashcatcloud/mobile-react-navigation';
+
+function App() {
+  const navigationRef = useNavigationContainerRef();
+  return (
+    <NavigationContainer
+      ref={navigationRef}
+      onReady={() => {
+        DdRumReactNavigationTracking.startTrackingViews(navigationRef.current);
+      }}
+    >
+      {/* 你的页面 */}
+    </NavigationContainer>
+  );
+}
+```
+
+同一时间只能跟踪一个 `NavigationContainer`；切换容器前先调用 `DdRumReactNavigationTracking.stopTrackingViews()`。
+</Tab>
+<Tab title="react-native-navigation (Wix)">
+在应用启动时调用一次即可：
+
+```typescript
+import { DdRumReactNativeNavigationTracking } from '@flashcatcloud/mobile-react-native-navigation';
+
+DdRumReactNativeNavigationTracking.startTracking();
+```
+</Tab>
+<Tab title="手动管理">
+没有使用上述导航库时，可以手动开始和结束视图：
+
+```typescript
+import { DdRum } from '@flashcatcloud/mobile-react-native';
+
+DdRum.startView('checkout', 'Checkout');
+// ...
+DdRum.stopView('checkout');
+```
+</Tab>
+</Tabs>
+
+## 采集用户操作
+
+初始化时 `trackInteractions` 为 `true`，SDK 会自动把带 `onPress` 的组件点击记录为 action。默认使用组件的 `accessibilityLabel` 作为操作名；也可以通过 `dd-action-name` 属性指定：
+
+```tsx
+<TouchableOpacity dd-action-name="Checkout" onPress={handleCheckout}>
+  <Text>去结算</Text>
+</TouchableOpacity>
+```
+
+你也可以手动记录一次操作：
+
+```typescript
+import { DdRum, RumActionType } from '@flashcatcloud/mobile-react-native';
+
+DdRum.addAction(RumActionType.TAP, 'Checkout');
+```
+
+## 采集网络请求
+
+初始化时 `trackResources` 为 `true`，SDK 会拦截 JS 层的 `XMLHttpRequest` 与 `fetch`，把每次请求记录为 RUM resource（URL、方法、状态码、耗时）。
+
+<Note>
+SDK 只能看到 **经过 JavaScript 发出的请求**。`<Image>` 等由原生网络栈加载的资源不会被采集，所有采集到的请求也一律记为 `xhr` 类型。因此控制台对 React Native 应用不展示「静态资源」相关面板，这是采集边界，不是数据缺失。详见 <a href="/zh/rum/sdk/react-native/data-collection">数据收集</a>。
+</Note>
+
+如需把前端请求与后端链路关联，请配置 `firstPartyHosts`，SDK 会对命中的域名注入追踪头。详见 <a href="/zh/rum/sdk/react-native/advanced-config">高级配置</a>。
+
+## 关联用户信息
+
+登录后设置当前用户，SDK 会把用户字段写入后续 RUM 事件的 `usr` 对象。请务必传入 `id`：iOS 端会忽略没有 `id` 的调用。
+
+```typescript
+DdSdkReactNative.setUser({
+  id: 'user-1001',
+  name: 'Alice',
+  email: 'alice@example.com',
+});
+```
+
+## 上报错误
+
+初始化时 `trackErrors` 为 `true`，SDK 会自动采集未处理的 JS 异常；`nativeCrashReportEnabled` 为 `true` 时还会采集原生 Android / iOS 崩溃。你也可以手动上报捕获到的异常：
+
+```typescript
+import { DdRum, ErrorSource } from '@flashcatcloud/mobile-react-native';
+
+try {
+  // ... 业务逻辑 ...
+} catch (error) {
+  DdRum.addError('Payment failed', ErrorSource.SOURCE, (error as Error).stack ?? '');
+}
+```
+
+<Note>
+release 包的 JS 堆栈是压缩过的，需要上传 source map 才能还原到源码文件与行号。Android 可在 Gradle 构建中自动上传，iOS 通过 FlashCat CLI 上传；每次发布都会生成新的 bundle，需要重新上传对应的 source map。
+
+**原生崩溃是另一套**：需要上传 iOS 的 dSYM 与（开启混淆时）Android 的 mapping 文件。两者详见 <a href="/zh/rum/sdk/react-native/advanced-config">高级配置</a>。
+</Note>
+
+## 验证接入
+
+完成接入后，可以按以下方式验证：
+
+1. 在初始化时临时设置 `config.verbosity = SdkVerbosity.DEBUG`，通过 Metro / Xcode / logcat 日志查看 SDK 上报行为
+2. 运行应用并触发页面切换、点击、网络请求或手动错误
+3. 在 Flashduty RUM 应用中筛选 `source:react-native`，确认出现 view、action、resource 或 error 事件
+4. 在控制台确认 Android 与 iOS 的数据都落在同一个 `service` 下
+
+## 下一步
+
+<CardGroup cols={3}>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/react-native/advanced-config">
+配置采样率、隐私同意、事件过滤、追踪和 source map 上传。
+</Card>
+
+<Card title="兼容性" icon="shield-check" href="/zh/rum/sdk/react-native/compatible">
+了解支持的平台、React Native 版本、伴生包和当前限制。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/react-native/data-collection">
+查看 SDK 自动和手动采集的事件类型、性能指标与采集边界。
+</Card>
+</CardGroup>

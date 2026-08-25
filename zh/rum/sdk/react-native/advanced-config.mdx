@@ -1,0 +1,249 @@
+---
+title: "React Native SDK 高级配置"
+description: "配置 React Native RUM SDK 的采样率、隐私同意、事件过滤、分布式追踪、WebView 追踪、source map 上传和原生崩溃符号化"
+keywords: ["RUM", "React Native SDK", "高级配置", "采样", "隐私同意", "source map", "原生崩溃", "符号化", "dSYM", "mapping"]
+---
+
+本文介绍 React Native SDK 的进阶配置项。所有配置都通过 `DdSdkReactNativeConfiguration` 实例的属性设置，在 `DdSdkReactNative.initialize(config)` 之前完成。
+
+## 采样率
+
+```typescript
+config.sessionSamplingRate = 100;        // 会话采样率（百分比），默认 100
+config.resourceTracingSamplingRate = 20; // resource 上分布式追踪的采样率，默认 20
+config.telemetrySampleRate = 20;         // SDK 自身遥测采样率，默认 20
+```
+
+## 隐私同意
+
+`TrackingConsent` 控制是否采集与上报数据，适配 GDPR 等合规要求：
+
+| 取值 | 行为 |
+|------|------|
+| `TrackingConsent.GRANTED` | 采集并上报 |
+| `TrackingConsent.NOT_GRANTED` | 不采集 |
+| `TrackingConsent.PENDING` | 先缓存，待用户授权后决定上报或丢弃 |
+
+```typescript
+// 初始化时作为构造函数的第 7 个参数传入
+const config = new DdSdkReactNativeConfiguration(
+  '<CLIENT_TOKEN>', 'production', '<APPLICATION_ID>',
+  true, true, true,
+  TrackingConsent.PENDING,
+);
+
+// 用户授权后更新
+DdSdkReactNative.setTrackingConsent(TrackingConsent.GRANTED);
+```
+
+## 事件过滤与脱敏
+
+事件映射器在事件上报前执行，返回 `null` 丢弃事件，或修改后返回。可用于脱敏敏感字段、去除噪声。
+
+```typescript
+config.errorEventMapper = (event) => {
+  // 例如脱敏错误消息中的 token；返回 null 则丢弃该事件
+  event.message = event.message.replace(/token=[^&\s]+/g, 'token=***');
+  return event;
+};
+config.resourceEventMapper = (event) => event; // 可修改 statusCode、kind、size、context
+config.actionEventMapper = (event) => event;
+config.logEventMapper = (event) => event;
+```
+
+## 分布式追踪
+
+对 `firstPartyHosts` 命中的域名（含子域名），SDK 会在 XHR / fetch 请求上注入追踪头，实现前端 RUM 与后端 APM 的链路关联。默认同时注入 W3C `traceparent` 与 Datadog 格式头；可以按域名指定 `propagatorTypes`。
+
+```typescript
+import { PropagatorType } from '@flashcatcloud/mobile-react-native';
+
+config.firstPartyHosts = [
+  { match: 'api.example.com', propagatorTypes: [PropagatorType.TRACECONTEXT] },
+];
+config.resourceTracingSamplingRate = 100;
+```
+
+## 自定义上报地址
+
+私有化部署时，通过 `customEndpoints` 分别覆盖 RUM、Logs 的上报地址：
+
+```typescript
+config.customEndpoints = {
+  rum: 'https://your-ingest.example.com/api/v2/rum',
+  logs: 'https://your-ingest.example.com/api/v2/logs',
+};
+```
+
+<Warning>
+每个地址都是最终的 intake URL，不是仅包含协议和域名的基础地址。`rum` 必须包含 `/api/v2/rum`；如果部署在路径前缀下，还需要保留该前缀，例如 `https://example.com/flashduty/api/v2/rum`。公有云无需设置，保持 `config.site = 'CN'` 即可。
+</Warning>
+
+## WebView 追踪
+
+应用内嵌 WebView 时，用 `@flashcatcloud/mobile-react-native-webview` 导出的 `WebView` 替换 `react-native-webview`，即可把 WebView 中的 Browser RUM 事件关联到当前原生 RUM 会话。
+
+```bash
+npm install @flashcatcloud/mobile-react-native-webview
+```
+
+```tsx
+import { WebView } from '@flashcatcloud/mobile-react-native-webview';
+
+<WebView
+  source={{ uri: 'https://myapp.example' }}
+  allowedHosts={['myapp.example']}
+/>
+```
+
+`allowedHosts` 是允许关联的主机名列表，会匹配其子域名。WebView 加载的页面必须已经接入 <a href="/zh/rum/sdk/web/sdk-integration">Flashduty Browser SDK</a>。该组件完整兼容 `react-native-webview` 的属性。
+
+## Source map 上传
+
+release 包的 JS 堆栈是压缩过的，需要上传 source map 才能在控制台还原到源码文件与行号。服务端按 **service + 版本号 + bundle 文件名** 匹配 source map，因此上传时使用的 service 与版本必须和 SDK 上报的一致。
+
+<Note>
+SDK 上报的版本号默认取应用的版本（Android `versionName`、iOS `CFBundleShortVersionString`），也可以通过 `config.version` 覆盖；覆盖后上传时必须使用同一个值。Metro 的 debug ID 插件不是必需的。
+</Note>
+
+<Tabs>
+<Tab title="Android">
+在 `android/app/build.gradle` 中引入随包下发的 Gradle 脚本。它会挂在 release 打包任务之后，bundle 生成后自动调用 FlashCat CLI 上传 source map。
+
+```groovy android/app/build.gradle
+// 与 SDK 初始化时的 serviceName 保持一致；不设置时默认使用 applicationId
+project.ext.flashcat = [serviceName: "com.example.shopping"]
+
+apply from: "../../node_modules/@flashcatcloud/mobile-react-native/flashcat-sourcemaps.gradle"
+```
+
+构建时通过环境变量提供有 source map 上传权限的 API key：
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> ./gradlew assembleRelease
+```
+
+上传行为（`0.1.1` 起）：
+
+| 场景 | 行为 |
+|------|------|
+| 未设置 `FLASHCAT_API_KEY` | 打印警告并跳过上传，release 构建照常成功 |
+| 上传失败（网络、key 无效等） | 打印警告，不影响构建结果 |
+| `FLASHCAT_SOURCEMAPS_DRY_RUN=true` | 只生成 source map，不上传 |
+
+<Warning>
+`0.1.0` 在缺少 `FLASHCAT_API_KEY` 时会让 `assembleRelease` 整体失败，APK 停留在旧版本。请升级到 `0.1.1` 或更高版本。
+</Warning>
+</Tab>
+<Tab title="iOS">
+先让 release 构建产出 source map：在 Xcode 的 **Bundle React Native code and images** 构建阶段脚本中，于 `react-native-xcode.sh` 之前设置 `SOURCEMAP_FILE`。
+
+```bash
+export SOURCEMAP_FILE="$DERIVED_FILE_DIR/main.jsbundle.map"
+```
+
+然后用 FlashCat CLI 上传 bundle 与 source map。`--release-version` 对应 `CFBundleShortVersionString`，`--build-version` 对应 `CFBundleVersion`。
+
+```bash
+# 需要 @flashcatcloud/flashcat-cli ≥ 0.4.0
+FLASHCAT_API_KEY=<API_KEY> npx @flashcatcloud/flashcat-cli sourcemaps upload-react-native \
+  --platform ios --service com.example.shopping \
+  --release-version <VERSION> --build-version <BUILD_NUMBER> \
+  --bundle main.jsbundle --sourcemap main.jsbundle.map
+```
+</Tab>
+</Tabs>
+
+<Warning>
+上传的 bundle 文件名必须与 app **运行时实际加载**的文件名一致（默认 Android 为 `index.android.bundle`、iOS 为 `main.jsbundle`）。符号化按文件名匹配堆栈帧：如果在 CI 里通过 `--bundle-output` 把产物改名后再上传，线上堆栈里的文件名与之对不上，source map 将永远不会命中。iOS 与 Android 即使 bundle 同名也会按平台分开存储，互不覆盖。
+</Warning>
+
+<Note>
+每次改动 JS 代码都会生成新的 bundle，**source map 上传必须纳入每一次发布构建**，否则该版本的堆栈会保持压缩状态。原生崩溃走另一套符号文件，见下一节。
+</Note>
+
+## 原生崩溃符号化
+
+RN 应用的崩溃分两类，用的符号文件也是两套：JS 异常靠 source map（上一节）；**原生崩溃由底层的 Android / iOS SDK 采集，靠 mapping 文件与 dSYM 还原**。
+
+### 前提：开启原生崩溃采集
+
+`nativeCrashReportEnabled` **默认为 `false`**。不开启时，原生崩溃既不会上报也不会有任何提示——控制台里看不到任何记录，和"没发生过"完全一样。
+
+构造函数的第 4~6 个位置参数是 `trackInteractions` / `trackResources` / `trackErrors`，**不是**这个开关，必须单独赋值：
+
+```typescript
+const config = new DdSdkReactNativeConfiguration(
+  '<CLIENT_TOKEN>',
+  '<ENV>',
+  '<APPLICATION_ID>',
+  true, // trackInteractions
+  true, // trackResources
+  true, // trackErrors
+);
+config.nativeCrashReportEnabled = true; // 原生崩溃采集，默认关闭
+```
+
+### 需要上传什么
+
+| 崩溃来源 | 符号文件 | 什么时候必须传 |
+|------|------|------|
+| Android JVM（Java / Kotlin） | mapping 文件 | 仅当开启了代码混淆 |
+| Android NDK（C / C++） | NDK 符号文件 | 应用或依赖含原生代码时 |
+| iOS Native（Swift / Objective-C） | dSYM | 总是需要 |
+
+<Tabs>
+<Tab title="Android">
+RN 模板默认**不开启**混淆（`enableProguardInReleaseBuilds = false`），此时 release 包的 Java 堆栈本身就是可读的类名与方法名，不上传 mapping 也能定位。
+
+一旦在 `android/app/build.gradle` 中开启混淆，堆栈会变成 `MainActivity.o0(SourceFile:5)` 这样的短名，必须上传 mapping 文件才能还原。上传方式与 <a href="/zh/rum/sdk/android/sdk-integration">Android SDK</a> 完全一致——引入 Flashcat Android Gradle 插件，随 release 构建自动上传：
+
+```groovy android/app/build.gradle
+plugins {
+    id("cloud.flashcat.android-gradle-plugin") version "1.2.0"
+}
+```
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> ./gradlew assembleRelease
+```
+
+含 NDK 原生代码时，同一插件会一并上传 NDK 符号文件。详见 <a href="/zh/rum/error-tracking/source-mapping">源码映射</a>。
+</Tab>
+<Tab title="iOS">
+iOS 原生崩溃的堆栈是内存地址，**不上传 dSYM 就只能看到地址，没有函数名、文件名和行号**。
+
+Release 配置默认会生成 dSYM（构建设置 `DEBUG_INFORMATION_FORMAT = dwarf-with-dsym`）；若被改过，需要改回才有 dSYM 产物。用 FlashCat CLI 上传：
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> npx @flashcatcloud/flashcat-cli dsyms upload ./MyApp.app.dSYM
+```
+
+dSYM 与崩溃事件按二进制的 **UUID** 关联，每次 release 构建都会生成新的 UUID，因此**每次发布都要重新上传**。详见 <a href="/zh/rum/error-tracking/source-mapping">源码映射</a>。
+</Tab>
+</Tabs>
+
+<Warning>
+**双端要各传各的符号文件。** 符号文件按 service 匹配，而不设置 `serviceName` 时 Android 取 `applicationId`、iOS 取 bundle identifier——同一个 App 在控制台是两个 service，Android 的 mapping 不会用于 iOS 的崩溃，反之亦然。建议显式设置 `serviceName` 让双端一致，并在两端的发布流程里各自上传。
+</Warning>
+
+## 其他配置
+
+| 配置 | 默认值 | 说明 |
+|------|--------|------|
+| `serviceName` | 平台默认值 | **建议必填**。不设置时 Android 取 `applicationId`、iOS 取 bundle identifier，双端会拆成两个 service |
+| `nativeCrashReportEnabled` | false | 是否采集原生崩溃 |
+| `version` / `versionSuffix` | 应用版本 | 覆盖上报的版本号 / 追加后缀；需与 source map 上传时的版本一致 |
+| `verbosity` | undefined | SDK 内部日志级别（`SdkVerbosity.DEBUG` / `INFO` / `WARN` / `ERROR`），排查接入问题时使用 |
+| `trackBackgroundEvents` | false | 是否采集没有活跃视图时的事件；开启会增加会话数 |
+| `vitalsUpdateFrequency` | `VitalsUpdateFrequency.AVERAGE` | 原生移动端性能指标的采集频率；设为 `NEVER` 关闭 |
+| `nativeLongTaskThresholdMs` | 200 | 原生主线程 long task 判定阈值（毫秒）；`0` 或 `false` 关闭 |
+| `longTaskThresholdMs` | 0（关闭） | JS 线程 long task 判定阈值（毫秒）；设为 100 ~ 5000 开启 |
+| `trackFrustrations` | true | 是否从用户操作生成 frustration 信号（如 error tap） |
+| `actionNameAttribute` | undefined | 用哪个组件属性作为自动采集操作的名称（如 `testID`）；`dd-action-name` 优先级更高 |
+| `useAccessibilityLabel` | true | 是否用 `accessibilityLabel` 作为操作名 |
+| `trackNonFatalAnrs` | 平台默认 | 是否采集非致命 ANR；Android 30+ 默认关闭，Android 29 及以下默认开启 |
+| `appHangThreshold` | undefined | iOS App Hang 的判定阈值（秒）；不设置表示关闭 |
+| `trackWatchdogTerminations` | false | 是否采集 iOS watchdog 终止 |
+| `uploadFrequency` / `batchSize` / `batchProcessingLevel` | `AVERAGE` / `MEDIUM` / `MEDIUM` | 上报频率、批量大小与每轮上报的批次数，权衡实时性与耗电 |
+| `proxyConfig` | undefined | 通过 HTTP / SOCKS 代理上报 |
