@@ -1,7 +1,7 @@
 ---
 title: "React Native SDK 高级配置"
-description: "配置 React Native RUM SDK 的采样率、隐私同意、事件过滤、分布式追踪、WebView 追踪和 source map 上传"
-keywords: ["RUM", "React Native SDK", "高级配置", "采样", "隐私同意", "source map"]
+description: "配置 React Native RUM SDK 的采样率、隐私同意、事件过滤、分布式追踪、WebView 追踪、source map 上传和原生崩溃符号化"
+keywords: ["RUM", "React Native SDK", "高级配置", "采样", "隐私同意", "source map", "原生崩溃", "符号化", "dSYM", "mapping"]
 ---
 
 本文介绍 React Native SDK 的进阶配置项。所有配置都通过 `DdSdkReactNativeConfiguration` 实例的属性设置，在 `DdSdkReactNative.initialize(config)` 之前完成。
@@ -156,8 +156,73 @@ FLASHCAT_API_KEY=<API_KEY> npx @flashcatcloud/flashcat-cli sourcemaps upload-rea
 </Tabs>
 
 <Note>
-每次改动 JS 代码都会生成新的 bundle，**source map 上传必须纳入每一次发布构建**，否则该版本的堆栈会保持压缩状态。原生崩溃的堆栈由原生 SDK 上报，符号化方式与 <a href="/zh/rum/sdk/android/advanced-config">Android</a> / <a href="/zh/rum/sdk/ios/advanced-config">iOS</a> SDK 相同。
+每次改动 JS 代码都会生成新的 bundle，**source map 上传必须纳入每一次发布构建**，否则该版本的堆栈会保持压缩状态。原生崩溃走另一套符号文件，见下一节。
 </Note>
+
+## 原生崩溃符号化
+
+RN 应用的崩溃分两类，用的符号文件也是两套：JS 异常靠 source map（上一节）；**原生崩溃由底层的 Android / iOS SDK 采集，靠 mapping 文件与 dSYM 还原**。
+
+### 前提：开启原生崩溃采集
+
+`nativeCrashReportEnabled` **默认为 `false`**。不开启时，原生崩溃既不会上报也不会有任何提示——控制台里看不到任何记录，和"没发生过"完全一样。
+
+构造函数的第 4~6 个位置参数是 `trackInteractions` / `trackResources` / `trackErrors`，**不是**这个开关，必须单独赋值：
+
+```typescript
+const config = new DdSdkReactNativeConfiguration(
+  '<CLIENT_TOKEN>',
+  '<ENV>',
+  '<APPLICATION_ID>',
+  true, // trackInteractions
+  true, // trackResources
+  true, // trackErrors
+);
+config.nativeCrashReportEnabled = true; // 原生崩溃采集，默认关闭
+```
+
+### 需要上传什么
+
+| 崩溃来源 | 符号文件 | 什么时候必须传 |
+|------|------|------|
+| Android JVM（Java / Kotlin） | mapping 文件 | 仅当开启了代码混淆 |
+| Android NDK（C / C++） | NDK 符号文件 | 应用或依赖含原生代码时 |
+| iOS Native（Swift / Objective-C） | dSYM | 总是需要 |
+
+<Tabs>
+<Tab title="Android">
+RN 模板默认**不开启**混淆（`enableProguardInReleaseBuilds = false`），此时 release 包的 Java 堆栈本身就是可读的类名与方法名，不上传 mapping 也能定位。
+
+一旦在 `android/app/build.gradle` 中开启混淆，堆栈会变成 `MainActivity.o0(SourceFile:5)` 这样的短名，必须上传 mapping 文件才能还原。上传方式与 <a href="/zh/rum/sdk/android/sdk-integration">Android SDK</a> 完全一致——引入 Flashcat Android Gradle 插件，随 release 构建自动上传：
+
+```groovy android/app/build.gradle
+plugins {
+    id("cloud.flashcat.android-gradle-plugin") version "1.2.0"
+}
+```
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> ./gradlew assembleRelease
+```
+
+含 NDK 原生代码时，同一插件会一并上传 NDK 符号文件。详见 <a href="/zh/rum/error-tracking/source-mapping">源码映射</a>。
+</Tab>
+<Tab title="iOS">
+iOS 原生崩溃的堆栈是内存地址，**不上传 dSYM 就只能看到地址，没有函数名、文件名和行号**。
+
+Release 配置默认会生成 dSYM（构建设置 `DEBUG_INFORMATION_FORMAT = dwarf-with-dsym`）；若被改过，需要改回才有 dSYM 产物。用 FlashCat CLI 上传：
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> npx @flashcatcloud/flashcat-cli dsyms upload ./MyApp.app.dSYM
+```
+
+dSYM 与崩溃事件按二进制的 **UUID** 关联，每次 release 构建都会生成新的 UUID，因此**每次发布都要重新上传**。详见 <a href="/zh/rum/error-tracking/source-mapping">源码映射</a>。
+</Tab>
+</Tabs>
+
+<Warning>
+**双端要各传各的符号文件。** 符号文件按 service 匹配，而不设置 `serviceName` 时 Android 取 `applicationId`、iOS 取 bundle identifier——同一个 App 在控制台是两个 service，Android 的 mapping 不会用于 iOS 的崩溃，反之亦然。建议显式设置 `serviceName` 让双端一致，并在两端的发布流程里各自上传。
+</Warning>
 
 ## 其他配置
 

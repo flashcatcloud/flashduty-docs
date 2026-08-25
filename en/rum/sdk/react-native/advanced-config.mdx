@@ -1,7 +1,7 @@
 ---
 title: "React Native SDK advanced configuration"
-description: "Configure sampling, tracking consent, event filtering, distributed tracing, WebView tracking, and source map upload for the React Native RUM SDK"
-keywords: ["RUM", "React Native SDK", "advanced configuration", "sampling", "tracking consent", "source map"]
+description: "Configure sampling, tracking consent, event filtering, distributed tracing, WebView tracking, source map upload, and native crash symbolication for the React Native RUM SDK"
+keywords: ["RUM", "React Native SDK", "advanced configuration", "sampling", "tracking consent", "source map", "native crash", "symbolication", "dSYM", "mapping"]
 ---
 
 This page covers the advanced options of the React Native SDK. All options are set as properties on a `DdSdkReactNativeConfiguration` instance before calling `DdSdkReactNative.initialize(config)`.
@@ -156,8 +156,73 @@ FLASHCAT_API_KEY=<API_KEY> npx @flashcatcloud/flashcat-cli sourcemaps upload-rea
 </Tabs>
 
 <Note>
-Every JS code change produces a new bundle, so **source map upload must be part of every release build**; otherwise stack traces for that version stay minified. Native crash stacks are reported by the native SDK and are symbolicated the same way as with the <a href="/en/rum/sdk/android/advanced-config">Android</a> / <a href="/en/rum/sdk/ios/advanced-config">iOS</a> SDKs.
+Every JS code change produces a new bundle, so **source map upload must be part of every release build**; otherwise stack traces for that version stay minified. Native crashes use a separate set of symbol files — see the next section.
 </Note>
+
+## Native crash symbolication
+
+Crashes in a React Native app come in two kinds, and each needs its own symbol files: JavaScript exceptions are resolved with source maps (previous section), while **native crashes are captured by the underlying Android / iOS SDK and are resolved with mapping files and dSYMs**.
+
+### Prerequisite: turn on native crash reporting
+
+`nativeCrashReportEnabled` **defaults to `false`**. While it is off, native crashes are neither reported nor flagged anywhere — the console shows nothing at all, which is indistinguishable from "no crash happened".
+
+The 4th to 6th positional constructor arguments are `trackInteractions` / `trackResources` / `trackErrors` — **not** this flag. Set it explicitly:
+
+```typescript
+const config = new DdSdkReactNativeConfiguration(
+  '<CLIENT_TOKEN>',
+  '<ENV>',
+  '<APPLICATION_ID>',
+  true, // trackInteractions
+  true, // trackResources
+  true, // trackErrors
+);
+config.nativeCrashReportEnabled = true; // native crash reporting, off by default
+```
+
+### What to upload
+
+| Crash source | Symbol file | Required when |
+|------|------|------|
+| Android JVM (Java / Kotlin) | mapping file | Only if code shrinking is enabled |
+| Android NDK (C / C++) | NDK symbol files | The app or a dependency ships native code |
+| iOS native (Swift / Objective-C) | dSYM | Always |
+
+<Tabs>
+<Tab title="Android">
+The React Native template leaves code shrinking **off** (`enableProguardInReleaseBuilds = false`). With it off, Java stack traces in a release build already carry readable class and method names, so no mapping file is needed.
+
+Once you enable shrinking in `android/app/build.gradle`, frames turn into short names such as `MainActivity.o0(SourceFile:5)` and a mapping file becomes required. Upload works exactly as it does for the <a href="/en/rum/sdk/android/sdk-integration">Android SDK</a> — add the Flashcat Android Gradle plugin and it uploads with every release build:
+
+```groovy android/app/build.gradle
+plugins {
+    id("cloud.flashcat.android-gradle-plugin") version "1.2.0"
+}
+```
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> ./gradlew assembleRelease
+```
+
+If the app ships NDK code, the same plugin uploads the NDK symbol files as well. See <a href="/en/rum/error-tracking/source-mapping">Source mapping</a>.
+</Tab>
+<Tab title="iOS">
+iOS native crash frames are memory addresses. **Without a dSYM you see only those addresses** — no function names, file names, or line numbers.
+
+The Release configuration produces a dSYM by default (build setting `DEBUG_INFORMATION_FORMAT = dwarf-with-dsym`); if it has been changed, set it back. Upload with the FlashCat CLI:
+
+```bash
+FLASHCAT_API_KEY=<API_KEY> npx @flashcatcloud/flashcat-cli dsyms upload ./MyApp.app.dSYM
+```
+
+A dSYM is matched to crash events by the binary's **UUID**, and every release build produces a new UUID, so **upload on every release**. See <a href="/en/rum/error-tracking/source-mapping">Source mapping</a>.
+</Tab>
+</Tabs>
+
+<Warning>
+**Upload symbol files for both platforms separately.** Symbol files are matched by service, and without an explicit `serviceName` Android falls back to the `applicationId` while iOS falls back to the bundle identifier — one app becomes two services in the console, and the Android mapping file is never applied to an iOS crash or vice versa. Set `serviceName` explicitly so both platforms agree, and upload from each platform's release pipeline.
+</Warning>
 
 ## Other options
 
