@@ -200,5 +200,4 @@ Translatable companions (do NOT belong in DNT — translate to Chinese):
 
 | English | Chinese |
 |---------|---------|
-| Customize | 自定义 |
 | Artifact / Artifacts | 产物 |
