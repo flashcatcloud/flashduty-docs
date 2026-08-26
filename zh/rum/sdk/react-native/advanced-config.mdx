@@ -4,7 +4,7 @@ description: "配置 React Native RUM SDK 的采样率、隐私同意、事件�
 keywords: ["RUM", "React Native SDK", "高级配置", "采样", "隐私同意", "source map", "原生崩溃", "符号化", "dSYM", "mapping"]
 ---
 
-本文介绍 React Native SDK 的进阶配置项。所有配置都通过 `DdSdkReactNativeConfiguration` 实例的属性设置，在 `DdSdkReactNative.initialize(config)` 之前完成。
+本文介绍 React Native SDK 的进阶配置项。构造函数的 8 个参数都是只读配置，其中第 7、8 个参数分别是容易忽略的 `trackingConsent` 和 `useAccessibilityLabel`；其余进阶配置通过实例属性设置。所有配置都需要在 `DdSdkReactNative.initialize(config)` 之前完成。
 
 ## 采样率
 
@@ -13,6 +13,8 @@ config.sessionSamplingRate = 100;        // 会话采样率（百分比），默
 config.resourceTracingSamplingRate = 20; // resource 上分布式追踪的采样率，默认 20
 config.telemetrySampleRate = 20;         // SDK 自身遥测采样率，默认 20
 ```
+
+三个采样率的取值范围都是 `0` 到 `100`。`0` 表示不采样，`100` 表示全部采样。
 
 ## 隐私同意
 
@@ -30,6 +32,7 @@ const config = new DdSdkReactNativeConfiguration(
   '<CLIENT_TOKEN>', 'production', '<APPLICATION_ID>',
   true, true, true,
   TrackingConsent.PENDING,
+  false, // 第 8 个参数：不使用 accessibilityLabel 作为操作名
 );
 
 // 用户授权后更新
@@ -46,7 +49,11 @@ config.errorEventMapper = (event) => {
   event.message = event.message.replace(/token=[^&\s]+/g, 'token=***');
   return event;
 };
-config.resourceEventMapper = (event) => event; // 可修改 statusCode、kind、size、context
+config.resourceEventMapper = (event) => {
+  // resource 只允许修改 context；返回 null 可丢弃事件
+  event.context = { ...event.context, sanitized: true };
+  return event;
+};
 config.actionEventMapper = (event) => event;
 config.logEventMapper = (event) => event;
 ```
@@ -96,7 +103,41 @@ import { WebView } from '@flashcatcloud/mobile-react-native-webview';
 />
 ```
 
-`allowedHosts` 是允许关联的主机名列表，会匹配其子域名。WebView 加载的页面必须已经接入 <a href="/zh/rum/sdk/web/sdk-integration">Flashduty Browser SDK</a>。该组件完整兼容 `react-native-webview` 的属性。
+`allowedHosts` 是允许关联的主机名列表，会匹配其子域名。WebView 加载的页面必须已经接入 <a href="/zh/rum/sdk/web/sdk-integration">Flashduty Browser SDK</a>。
+
+该组件会透传大多数 `react-native-webview` 属性，但会接管以下属性来注入 RUM 桥接逻辑：
+
+- `nativeConfig`
+- `onMessage`
+- `injectedJavaScript`
+- `injectedJavaScriptBeforeContentLoaded`
+
+你仍可以传入自己的 `onMessage` 和注入脚本：组件会把非 RUM 消息交给你的处理函数，并在包装后执行注入脚本；自定义 `nativeConfig` 会被组件覆盖。设置 `logUserCodeErrors={true}` 可以把注入的用户脚本错误记录为日志，默认 `false`。由于 Logs 当前只在 Android 生效，这类错误不会从 iOS 上报。
+
+```tsx
+<WebView
+  source={{ uri: 'https://myapp.example' }}
+  allowedHosts={['myapp.example']}
+  logUserCodeErrors={true}
+  onMessage={(event) => console.log(event.nativeEvent.data)}
+/>
+```
+
+## 上报代理
+
+`proxyConfig` 支持 HTTP、HTTPS 和 SOCKS 代理。HTTP / HTTPS 代理支持 Basic Authentication；SOCKS 代理不支持用户名和密码，传入后 SDK 会打印警告并忽略认证信息。
+
+```typescript
+import { ProxyConfiguration, ProxyType } from '@flashcatcloud/mobile-react-native';
+
+config.proxyConfig = new ProxyConfiguration(
+  ProxyType.HTTPS,
+  'proxy.example.com',
+  8443,
+  'username',
+  'password',
+);
+```
 
 ## Source map 上传
 
@@ -224,26 +265,32 @@ dSYM 与崩溃事件按二进制的 **UUID** 关联，每次 release 构建都�
 </Tabs>
 
 <Warning>
-**双端要各传各的符号文件。** 符号文件按 service 匹配，而不设置 `serviceName` 时 Android 取 `applicationId`、iOS 取 bundle identifier——同一个 App 在控制台是两个 service，Android 的 mapping 不会用于 iOS 的崩溃，反之亦然。建议显式设置 `serviceName` 让双端一致，并在两端的发布流程里各自上传。
+**双端要各传各的符号文件。** 符号文件按 service 匹配，而不设置 `serviceName` 时 Android 取 `applicationId`、iOS 取 bundle identifier。两个平台标识不同时，同一个 App 在控制台会成为两个 service，Android 的 mapping 不会用于 iOS 的崩溃，反之亦然。建议显式设置 `serviceName` 让双端一致，并在两端的发布流程里各自上传。
 </Warning>
 
 ## 其他配置
 
 | 配置 | 默认值 | 说明 |
 |------|--------|------|
-| `serviceName` | 平台默认值 | **建议必填**。不设置时 Android 取 `applicationId`、iOS 取 bundle identifier，双端会拆成两个 service |
+| `serviceName` | 平台默认值 | **建议设置**。不设置时 Android 取 `applicationId`、iOS 取 bundle identifier；两个标识不同时，双端会拆成两个 service |
 | `nativeCrashReportEnabled` | false | 是否采集原生崩溃 |
-| `version` / `versionSuffix` | 应用版本 | 覆盖上报的版本号 / 追加后缀；需与 source map 上传时的版本一致 |
+| `version` / `versionSuffix` | 应用版本 | 覆盖上报版本 / 追加后缀；仅保留字母、数字和 `_`、`-`、`:`、`.`、`/`，其他字符转为 `_`；SDK 会在后缀前自动加 `-`，结果需与 source map 上传版本一致 |
 | `verbosity` | undefined | SDK 内部日志级别（`SdkVerbosity.DEBUG` / `INFO` / `WARN` / `ERROR`），排查接入问题时使用 |
+| `nativeViewTracking` | false | 对依赖原生视图的自定义导航启用原生页面采集 |
+| `nativeInteractionTracking` | false | 采集原生页面上的用户操作 |
 | `trackBackgroundEvents` | false | 是否采集没有活跃视图时的事件；开启会增加会话数 |
-| `vitalsUpdateFrequency` | `VitalsUpdateFrequency.AVERAGE` | 原生移动端性能指标的采集频率；设为 `NEVER` 关闭 |
-| `nativeLongTaskThresholdMs` | 200 | 原生主线程 long task 判定阈值（毫秒）；`0` 或 `false` 关闭 |
-| `longTaskThresholdMs` | 0（关闭） | JS 线程 long task 判定阈值（毫秒）；设为 100 ~ 5000 开启 |
+| `vitalsUpdateFrequency` | `VitalsUpdateFrequency.AVERAGE` | 原生移动端性能指标采集频率：`FREQUENT`、`AVERAGE`、`RARE` 或 `NEVER` |
+| `nativeLongTaskThresholdMs` | 200 | 原生主线程 long task 阈值（毫秒）；`0` / `false` 关闭，启用值会限制在 100 ~ 5000 |
+| `longTaskThresholdMs` | 0（关闭） | JS 线程 long task 阈值（毫秒）；`0` / `false` 关闭，启用值会限制在 100 ~ 5000 |
 | `trackFrustrations` | true | 是否从用户操作生成 frustration 信号（如 error tap） |
 | `actionNameAttribute` | undefined | 用哪个组件属性作为自动采集操作的名称（如 `testID`）；`dd-action-name` 优先级更高 |
-| `useAccessibilityLabel` | true | 是否用 `accessibilityLabel` 作为操作名 |
+| `useAccessibilityLabel` | true | 是否用 `accessibilityLabel` 作为操作名；只读，作为构造函数第 8 个参数传入 |
+| `bundleLogsWithRum` | true | 是否把 Android 日志与当前 RUM 会话关联；iOS Logs 为空操作 |
 | `trackNonFatalAnrs` | 平台默认 | 是否采集非致命 ANR；Android 30+ 默认关闭，Android 29 及以下默认开启 |
 | `appHangThreshold` | undefined | iOS App Hang 的判定阈值（秒）；不设置表示关闭 |
+| `initialResourceThreshold` | 0.1 秒 | 视图开始后纳入 Time to Network-Settled（TNS）计算的 resource 起始时间窗口 |
 | `trackWatchdogTerminations` | false | 是否采集 iOS watchdog 终止 |
-| `uploadFrequency` / `batchSize` / `batchProcessingLevel` | `AVERAGE` / `MEDIUM` / `MEDIUM` | 上报频率、批量大小与每轮上报的批次数，权衡实时性与耗电 |
-| `proxyConfig` | undefined | 通过 HTTP / SOCKS 代理上报 |
+| `uploadFrequency` | `UploadFrequency.AVERAGE` | 上报频率：`FREQUENT`（约 1 秒）、`AVERAGE`（约 5 秒）或 `RARE`（约 10 秒） |
+| `batchSize` | `BatchSize.MEDIUM` | 单批数据量：`SMALL`、`MEDIUM` 或 `LARGE` |
+| `batchProcessingLevel` | `BatchProcessingLevel.MEDIUM` | 每轮处理批次数：`LOW`（1）、`MEDIUM`（10）或 `HIGH`（100） |
+| `proxyConfig` | undefined | 通过 HTTP、HTTPS 或 SOCKS 代理上报；SOCKS 不支持 Basic Authentication |

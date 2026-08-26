@@ -4,7 +4,7 @@ description: "Configure sampling, tracking consent, event filtering, distributed
 keywords: ["RUM", "React Native SDK", "advanced configuration", "sampling", "tracking consent", "source map", "native crash", "symbolication", "dSYM", "mapping"]
 ---
 
-This page covers the advanced options of the React Native SDK. All options are set as properties on a `DdSdkReactNativeConfiguration` instance before calling `DdSdkReactNative.initialize(config)`.
+This page covers the advanced options of the React Native SDK. All eight constructor arguments are read-only; arguments 7 and 8 are the less obvious `trackingConsent` and `useAccessibilityLabel` options. Set the remaining advanced options as instance properties. Complete all configuration before calling `DdSdkReactNative.initialize(config)`.
 
 ## Sampling
 
@@ -13,6 +13,8 @@ config.sessionSamplingRate = 100;        // Session sampling rate (percent), def
 config.resourceTracingSamplingRate = 20; // Distributed tracing sampling rate on resources, default 20
 config.telemetrySampleRate = 20;         // SDK internal telemetry sampling rate, default 20
 ```
+
+All three sampling rates accept values from `0` to `100`. `0` samples nothing and `100` samples everything.
 
 ## Tracking consent
 
@@ -30,6 +32,7 @@ const config = new DdSdkReactNativeConfiguration(
   '<CLIENT_TOKEN>', 'production', '<APPLICATION_ID>',
   true, true, true,
   TrackingConsent.PENDING,
+  false, // argument 8: do not use accessibilityLabel as the action name
 );
 
 // Update after the user grants consent
@@ -46,7 +49,11 @@ config.errorEventMapper = (event) => {
   event.message = event.message.replace(/token=[^&\s]+/g, 'token=***');
   return event;
 };
-config.resourceEventMapper = (event) => event; // statusCode, kind, size, and context can be modified
+config.resourceEventMapper = (event) => {
+  // Resources only allow context changes; return null to drop the event
+  event.context = { ...event.context, sanitized: true };
+  return event;
+};
 config.actionEventMapper = (event) => event;
 config.logEventMapper = (event) => event;
 ```
@@ -96,7 +103,41 @@ import { WebView } from '@flashcatcloud/mobile-react-native-webview';
 />
 ```
 
-`allowedHosts` is the list of hosts allowed to be associated; subdomains are matched. The page loaded in the WebView must already integrate the <a href="/en/rum/sdk/web/sdk-integration">Flashduty Browser SDK</a>. The component is fully compatible with the props of `react-native-webview`.
+`allowedHosts` is the list of hosts allowed to be associated; subdomains are matched. The page loaded in the WebView must already integrate the <a href="/en/rum/sdk/web/sdk-integration">Flashduty Browser SDK</a>.
+
+The component passes through most `react-native-webview` props, but it controls the following props to inject the RUM bridge:
+
+- `nativeConfig`
+- `onMessage`
+- `injectedJavaScript`
+- `injectedJavaScriptBeforeContentLoaded`
+
+You can still provide your own `onMessage` handler and injected scripts: the component forwards non-RUM messages to your handler and executes the scripts after wrapping them. A custom `nativeConfig` is overwritten. Set `logUserCodeErrors={true}` to record errors from injected user code as logs; it defaults to `false`. Because Logs currently works only on Android, these errors are not reported from iOS.
+
+```tsx
+<WebView
+  source={{ uri: 'https://myapp.example' }}
+  allowedHosts={['myapp.example']}
+  logUserCodeErrors={true}
+  onMessage={(event) => console.log(event.nativeEvent.data)}
+/>
+```
+
+## Reporting through a proxy
+
+`proxyConfig` supports HTTP, HTTPS, and SOCKS proxies. HTTP and HTTPS proxies support Basic Authentication. SOCKS proxies do not support a username or password; the SDK logs a warning and ignores credentials when you provide them.
+
+```typescript
+import { ProxyConfiguration, ProxyType } from '@flashcatcloud/mobile-react-native';
+
+config.proxyConfig = new ProxyConfiguration(
+  ProxyType.HTTPS,
+  'proxy.example.com',
+  8443,
+  'username',
+  'password',
+);
+```
 
 ## Source map upload
 
@@ -224,26 +265,32 @@ A dSYM is matched to crash events by the binary's **UUID**, and every release bu
 </Tabs>
 
 <Warning>
-**Upload symbol files for both platforms separately.** Symbol files are matched by service, and without an explicit `serviceName` Android falls back to the `applicationId` while iOS falls back to the bundle identifier — one app becomes two services in the console, and the Android mapping file is never applied to an iOS crash or vice versa. Set `serviceName` explicitly so both platforms agree, and upload from each platform's release pipeline.
+**Upload symbol files for both platforms separately.** Symbol files are matched by service, and without an explicit `serviceName` Android falls back to the `applicationId` while iOS falls back to the bundle identifier. If those platform identifiers differ, one app becomes two services in the console, and the Android mapping file is never applied to an iOS crash or vice versa. Set `serviceName` explicitly so both platforms agree, and upload from each platform's release pipeline.
 </Warning>
 
 ## Other options
 
 | Option | Default | Description |
 |------|--------|------|
-| `serviceName` | Platform default | **Strongly recommended.** When unset, Android uses `applicationId` and iOS the bundle identifier, splitting the app into two services |
+| `serviceName` | Platform default | **Recommended.** When unset, Android uses `applicationId` and iOS the bundle identifier; the app is split into two services when those identifiers differ |
 | `nativeCrashReportEnabled` | false | Whether to collect native crashes |
-| `version` / `versionSuffix` | App version | Override the reported version / append a suffix; must match the version used for source map upload |
+| `version` / `versionSuffix` | App version | Override the reported version / append a suffix; only letters, numbers, `_`, `-`, `:`, `.`, and `/` are preserved, other characters become `_`, and the SDK adds `-` before the suffix; the result must match the source map upload version |
 | `verbosity` | undefined | SDK internal log level (`SdkVerbosity.DEBUG` / `INFO` / `WARN` / `ERROR`); use it when troubleshooting the integration |
+| `nativeViewTracking` | false | Enable native view tracking for a custom navigation system based on native views |
+| `nativeInteractionTracking` | false | Collect user interactions on native screens |
 | `trackBackgroundEvents` | false | Whether to collect events while no view is active; enabling it increases the session count |
-| `vitalsUpdateFrequency` | `VitalsUpdateFrequency.AVERAGE` | Collection frequency of native mobile vitals; set to `NEVER` to disable |
-| `nativeLongTaskThresholdMs` | 200 | Native main-thread long task threshold in milliseconds; `0` or `false` disables it |
-| `longTaskThresholdMs` | 0 (disabled) | JS-thread long task threshold in milliseconds; set 100 to 5000 to enable |
+| `vitalsUpdateFrequency` | `VitalsUpdateFrequency.AVERAGE` | Native mobile vital frequency: `FREQUENT`, `AVERAGE`, `RARE`, or `NEVER` |
+| `nativeLongTaskThresholdMs` | 200 | Native main-thread long task threshold in milliseconds; `0` / `false` disables it, and enabled values are clamped to 100–5000 |
+| `longTaskThresholdMs` | 0 (disabled) | JS-thread long task threshold in milliseconds; `0` / `false` disables it, and enabled values are clamped to 100–5000 |
 | `trackFrustrations` | true | Whether to derive frustration signals (such as error taps) from user actions |
 | `actionNameAttribute` | undefined | Which component prop to use as the name of automatically collected actions (for example `testID`); `dd-action-name` takes precedence |
-| `useAccessibilityLabel` | true | Whether to use `accessibilityLabel` as the action name |
+| `useAccessibilityLabel` | true | Whether to use `accessibilityLabel` as the action name; read-only constructor argument 8 |
+| `bundleLogsWithRum` | true | Whether to correlate Android logs with the current RUM session; Logs is a no-op on iOS |
 | `trackNonFatalAnrs` | Platform default | Whether to collect non-fatal ANRs; disabled by default on Android 30+, enabled on Android 29 and below |
 | `appHangThreshold` | undefined | iOS App Hang threshold in seconds; unset means disabled |
+| `initialResourceThreshold` | 0.1 seconds | Time window after a view starts in which resources are included in Time to Network-Settled (TNS) |
 | `trackWatchdogTerminations` | false | Whether to collect iOS watchdog terminations |
-| `uploadFrequency` / `batchSize` / `batchProcessingLevel` | `AVERAGE` / `MEDIUM` / `MEDIUM` | Upload frequency, batch size, and batches per upload cycle; trade off freshness against battery |
-| `proxyConfig` | undefined | Report through an HTTP / SOCKS proxy |
+| `uploadFrequency` | `UploadFrequency.AVERAGE` | Upload frequency: `FREQUENT` (about 1 second), `AVERAGE` (about 5 seconds), or `RARE` (about 10 seconds) |
+| `batchSize` | `BatchSize.MEDIUM` | Amount of data per batch: `SMALL`, `MEDIUM`, or `LARGE` |
+| `batchProcessingLevel` | `BatchProcessingLevel.MEDIUM` | Batches processed per upload cycle: `LOW` (1), `MEDIUM` (10), or `HIGH` (100) |
+| `proxyConfig` | undefined | Report through an HTTP, HTTPS, or SOCKS proxy; SOCKS does not support Basic Authentication |
