@@ -13,6 +13,7 @@ Flashduty 支持多平台的符号文件上传与源码映射，帮助开发者�
 - **iOS**：通过 Flashduty CLI 上传 dSYM 符号文件
 - **Flutter**：通过 Flashduty CLI 上传 `--split-debug-info` 生成的 Dart AOT 符号文件（`.symbols`），还原 Android 上混淆后的 Dart 异常堆栈；iOS 原生崩溃与原生 iOS 应用一样走 dSYM
 - **Electron**：通过 Flashduty CLI 上传 Breakpad `.sym` 符号文件，按模块 Debug ID 匹配原生崩溃堆栈；详见 [Electron 错误还原](/zh/rum/sdk/electron/error-symbolication)
+- **React Native**：Android 通过 SDK 自带的 Gradle 脚本在 release 构建时自动上传 JS bundle sourcemap；iOS 通过 [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli)（≥ 0.4.0）上传 `main.jsbundle` 与 `main.jsbundle.map`（`sourcemaps upload-react-native`）。详见下文 [上传 React Native SourceMap](#上传-react-native-sourcemap)
 
 用户可在「应用管理」-「源码管理」菜单查看已上传的符号文件，并通过上传面板生成脚本在本地执行上传操作。
 
@@ -459,14 +460,79 @@ Flutter 应用使用 `--obfuscate` 混淆构建后，Dart 异常堆栈中的符�
 符号文件与崩溃事件通过 build ID 匹配，`service` 与 `release-version` 不参与解析，仅影响控制台列表的归类与筛选。符号文件支持 `arm`、`arm64`、`x64` 架构，由 `.symbols` 文件名自动识别。每次改动 Dart 代码都会生成新的 build ID，因此符号上传必须纳入每一次发布构建。更完整的 Flutter 符号化说明请参阅 [Flutter SDK 高级配置](/zh/rum/sdk/flutter/advanced-config)。
 </Note>
 
+## 上传 React Native SourceMap
+
+React Native 的 JS 错误堆栈通过 sourcemap 还原。与 Flutter 类似，React Native 应用在同一份 JS 代码之上还有 Android/iOS 两端原生层：两端 sourcemap 按平台分开存储，同名的 bundle 不会互相覆盖——服务端按 `react-native` 类型 + 平台（iOS / Android）来匹配，因此 iOS 与 Android 可以使用相同的 bundle 文件名。
+
+在「应用管理」-「源码管理」中选择「React Native」标签页，上传面板会按所选平台生成对应的脚本：
+
+| 字段 | 说明 |
+|------|------|
+| 平台 | `Android` 或 `iOS` |
+| API Key | 上传凭证，对应环境变量 `FLASHCAT_API_KEY` |
+| 服务名 | 需与 SDK 初始化时设置的 `serviceName` 完全一致；不设置时服务端默认取 `applicationId`，与 SDK 上报的 service 对不上会存错归类 |
+| 发布版本 | 仅 iOS：对应 `CFBundleShortVersionString`（如 `1.0.0`），是匹配 key 的一部分，必填；Android 从构建的 `versionName` 读取 |
+| 构建号 | 仅 iOS，可留空：对应 `CFBundleVersion`（如 `42`），映射为 `--build-version` |
+| 自定义上传 Endpoint | 仅私有化部署：自定义上报地址，对应环境变量 `FLASHCAT_SOURCEMAP_INTAKE_URL`，留空表示 Flashcat SaaS |
+
+### Android：构建时自动上传
+
+Android 由 SDK 自带的 Gradle 脚本在 release 构建中完成上传（脚本会调用 flashcat-cli 上传 Metro 刚产出的 bundle）。在 `android/app/build.gradle` 固定服务名并应用脚本：
+
+```groovy
+// android/app/build.gradle
+// 必须与 SDK 初始化时传入的 serviceName 一致；未设置时默认取 applicationId
+project.ext.flashcat = [serviceName: "com.example.shopping"]
+
+apply from: "../../node_modules/@flashcatcloud/mobile-react-native/flashcat-sourcemaps.gradle"
+```
+
+然后带凭证执行 release 构建即可，上传发生在构建过程中：
+
+```bash
+FLASHCAT_API_KEY=your-api-key ./gradlew assembleRelease
+```
+
+<Note>
+上传对象是 `index.android.bundle` 及对应 sourcemap。SDK 的 Metro 配置（Debug ID）也是 `withDatadogMetroConfig` 包装的，详见 [React Native SDK 接入](/zh/rum/sdk/react-native/sdk-integration)。
+</Note>
+
+### iOS：构建后手动上传
+
+iOS 没有构建钩子，需要在 release 构建后手动上传。先让 `react-native-xcode.sh` 产出 sourcemap——它只有在 `SOURCEMAP_FILE` 已设置时才会生成，因此要在 Xcode 构建阶段「Bundle React Native code and images」中、`react-native-xcode.sh` 之前导出：
+
+```bash
+# Xcode > Build Phases > "Bundle React Native code and images"
+# 放在 react-native-xcode.sh 之前
+export SOURCEMAP_FILE="$DERIVED_FILE_DIR/main.jsbundle.map"
+```
+
+再安装 CLI（≥ 0.4.0）并上传 bundle 与 sourcemap：
+
+```bash
+npm i -g @flashcatcloud/flashcat-cli
+
+FLASHCAT_API_KEY=your-api-key npx @flashcatcloud/flashcat-cli sourcemaps upload-react-native \
+  --platform ios --service com.example.shopping \
+  --release-version 1.0.0 --build-version 42 \
+  --bundle main.jsbundle --sourcemap main.jsbundle.map
+```
+
+<Warning>
+- 上传的 bundle 文件名必须与应用运行时加载的名字一致（Android 为 `index.android.bundle`，iOS 为 `main.jsbundle`）。符号化按文件名匹配堆栈帧，CI 中用 `--bundle-output` 重命名过的 bundle 永远不会被匹配到。
+- `--release-version` 必须与上报的版本一致（SDK 的 `config.version` 覆盖或默认值），否则匹配不到。
+- 服务名如果写错，上传文件会归入错误的 service，问题列表与符号表两边都对不上。
+- 更完整的 React Native 接入说明（含 `@flashcatcloud/mobile-react-native` 包版本要求与私有化部署）请参阅 [React Native SDK 高级配置](/zh/rum/sdk/react-native/advanced-config)。
+</Warning>
+
 ## 符号文件管理
 
 在 Flashduty 平台上，符号文件的管理通过「应用管理」-「源码管理」菜单完成：
 
 | 功能 | 说明 |
 |------|------|
-| 查看已上传的符号文件 | 列出所有已上传的文件（SourceMap、小程序 SourceMap、ProGuard mapping 文件、dSYM、NDK 原生符号文件、Flutter 符号文件、Electron Breakpad 符号文件），包括路径、服务名、版本号、大小和上传时间。Android 标签页同时展示 ProGuard mapping 文件和 NDK 原生符号文件，NDK 行会显示 build_id、arch 和 lib_name 列；Electron 标签页每个原生模块一行，展示模块（lib_name）、Debug ID（build_id）、架构（arch）、服务、版本和大小列，并支持按 Debug ID 搜索 |
-| 按平台筛选 | 在 Web、iOS、Android、微信小程序、HarmonyOS、Flutter 和 Electron 标签页之间切换，查看不同平台的符号文件 |
+| 查看已上传的符号文件 | 列出所有已上传的文件（SourceMap、小程序 SourceMap、ProGuard mapping 文件、dSYM、NDK 原生符号文件、Flutter 符号文件、Electron Breakpad 符号文件、React Native bundle sourcemap），包括路径、服务名、版本号、大小和上传时间。Android 标签页同时展示 ProGuard mapping 文件和 NDK 原生符号文件，NDK 行会显示 build_id、arch 和 lib_name 列；Electron 标签页每个原生模块一行，展示模块（lib_name）、Debug ID（build_id）、架构（arch）、服务、版本和大小列，并支持按 Debug ID 搜索 |
+| 按平台筛选 | 在 Web、iOS、Android、微信小程序、HarmonyOS、Flutter、Electron 和 React Native 标签页之间切换，查看不同平台的符号文件 |
 | 版本管理 | 通过 `service` 和 `release-version` 参数为不同版本的应用分别管理 |
 | 小程序维度 | 微信小程序列表会展示符号文件元数据中的 AppID（取自 `metadata.appid`）和分包（取自 `metadata.subpackage`）两列；主包没有分包标识时显示「主包」，AppID 未上传时显示 `-` |
 | 权限控制 | 通过 `API Key` 确保只有授权用户可以上传或管理 |
