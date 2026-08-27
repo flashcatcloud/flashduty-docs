@@ -35,12 +35,14 @@ The result area auto-layouts based on data source and query type:
 
 - **Prometheus**: Split pane — line chart (Graph) on top, raw samples (Raw) below, with a draggable splitter.
 - **Other data sources**: Single result pane showing log view, table view, or samples view depending on the query type.
+- **Matrix view**: When a Prometheus instant query returns a range vector (e.g. `node_cpu_seconds_total[5m]`), the Raw pane switches to a Matrix view: series are collapsible groups (collapsed by default when there are multiple), and each sample point shows its timestamp, value, and the interval since the previous point. Points whose interval deviates from the mode are highlighted in yellow, indicating missing samples or unstable scraping.
 
 ### Graph Features
 
 - **Drag-to-zoom**: Drag-select a time range on the chart to zoom in.
-- **Legend facet filtering**: The legend area supports searching by label value and grouping by metric name. Series beyond the display limit are collapsed; click to expand.
+- **Legend facet filtering**: The legend area supports searching by label value and grouping by metric name. When there are more than 10 series, a search box appears for keyword filtering. Click a legend item to hide or solo its series; hold Ctrl (Cmd on macOS) or Shift while clicking to multi-select. The legend's filter button offers faceted filtering by label key: multiple values within the same key are OR'ed, different keys are AND'ed, a key with nothing checked does not participate in filtering, and all filters can be cleared in one click. Series beyond the display limit are collapsed; click to expand.
 - **Tooltip**: Hover to see values for all series at a given time point. Series beyond the limit are summarized in the tooltip.
+- **Samples view**: Raw samples returned by instant queries can be shown as a table (Table) or raw text (Raw); switching only changes the view and does not re-run the query.
 
 ### Log Time Distribution
 
@@ -48,7 +50,20 @@ When the query type includes logs, a log time distribution chart appears above t
 
 - Time range ≤ 24 hours: auto-loaded.
 - 24 hours – 30 days: requires manual click to load.
-- Beyond 30 days: not supported.
+- Beyond 30 days: not supported; narrow the time range to within 30 days.
+
+The distribution chart is a supplementary view of the main log query: it shares the query and time window with the log body but loads independently — slow or failed loading does not affect the log entries below.
+
+### Log View
+
+Query results from log data sources are shown in a log view with the following interactions:
+
+- **Order toggle**: Newest / oldest; only flips the display order of the current batch, independent of the "Direction" query parameter (which decides which batch of data is fetched).
+- **Wrap toggle**: Controls whether log text wraps; the preference is stored in the browser locally.
+- **Add as column**: After expanding a log entry, a field can be "added as a column", turning the log area into a table view with headers appearing per column.
+- **Field filtering (include / exclude)**: After expanding a log entry, clicking the +/- button next to a field value appends the filter condition to the query expression and re-runs it immediately. Whether the button appears depends on the data source syntax: Loki (appends a label filter; field names must be valid identifiers) and VictoriaLogs (appends a `| filter` pipe; any field name works) are supported; SLS is supported only for search statements (no `|` analysis statements); Tencent Cloud CLS is supported only with Lucene syntax; SQL data sources are not supported. When a field name cannot be safely expressed in that syntax (e.g. contains spaces), the button is not shown.
+- **Copy field**: Field values can be copied with one click.
+- **Count hint**: The result area shows the effective row count applied; when the limit is hit, a "more results available" hint appears.
 
 ## Query Parameters
 
@@ -56,13 +71,21 @@ In addition to the query expression, some data sources support private parameter
 
 | Parameter | Data Sources | Description |
 |-----------|-------------|-------------|
-| Limit | Loki / VictoriaLogs | Caps the number of returned rows |
-| Min step (seconds) | Prometheus | Lower bound for auto step calculation |
-| Direction | Loki / VictoriaLogs | Latest-first or earliest-first |
+| Limit | Loki / VictoriaLogs / SLS / Tencent CLS | Caps the number of returned rows; defaults to 100 |
+| Min step (seconds) | Prometheus | Lower bound of the step for range subqueries; minimum value is 1. Leave empty for no lower bound — the backend computes step from max data points. The control lives in the graph toolbar and only affects resolution, not what is queried |
+| Direction | Loki / VictoriaLogs / SLS / Tencent CLS | Latest-first or earliest-first |
 | Project / Logstore | SLS | Required; used in the request URL |
-| Region / Topic / Syntax | Tencent CLS | Required |
+| Region / Topic / Syntax | Tencent CLS | Required; syntax can be Lucene or CQL, default CQL |
 | PowerSQL | SLS | Enables PowerSQL mode |
 | Time macros | SQL data sources | `$__timeFilter(column)`, `$__timeFrom()`, `$__timeTo()` make the time range take effect |
+
+## Editor Autocomplete
+
+The query editor has autocomplete (metric names, labels, etc.) enabled by default. For Prometheus data sources with extremely high metric cardinality, you can disable autocomplete per data source to avoid hitting the backend for metric/label lists on every keystroke. The preference is stored per data source in the local browser (localStorage) and is not shared via URL.
+
+## Time Range
+
+The workbench offers its own quick time presets: Last 5 minutes, 15 minutes, 30 minutes, 1 hour, 3 hours, 6 hours, 12 hours, 24 hours, 2 days, and 7 days; the default is the last 1 hour. Unless you explicitly pick an absolute range, the relative expression (e.g. `now-1h`) is preserved, so the range moves forward with the current time on refresh or reopen.
 
 ## Query History
 
@@ -70,7 +93,11 @@ Each successful query is automatically saved to query history, which stores only
 
 ## Sharing and URL State
 
-The workbench encodes the current data source, query expression, time range, and query type into URL parameters. Copy the browser address bar to share the current query state — opening the link restores it automatically. If the data source in the link doesn't exist, is disabled, or the user lacks permissions, the page prompts and does not auto-execute.
+The workbench encodes the current data source, query expression, time range, and query type into URL parameters (`schemaVersion` + `state`). Copy the browser address bar to share the current query state — opening the link restores it automatically.
+
+- **Share button**: The "Share" button in the toolbar copies a link whose time range is the absolute window of the last successful query run, not a relative one — recipients see exactly the same slice of data as you. The button is disabled until a query has run successfully.
+- **Link validity**: The URL state carries a schema version. If the link is corrupted, has invalid fields, or an unknown version, the page reports "invalid link" and does not execute the query.
+- If the data source in the link doesn't exist, is disabled, or the user lacks permissions, the page prompts and does not auto-execute.
 
 ## Edge Version Requirements
 

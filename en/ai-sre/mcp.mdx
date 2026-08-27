@@ -80,7 +80,7 @@ Go to **Plugins → MCP**, click **Add Server** in the top-right corner, and fil
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| Name | string | Yes | The server name, used as the identifier when agents call it (e.g., `sqlite-explorer` in `mcp:sqlite-explorer/query`). Must start with a letter; may only contain letters, digits, `-`, and `_`; length 1–255. **Case-insensitive and unique** within an account; cannot duplicate a built-in server name. |
+| Name | string | Yes | The server name, used as the identifier when agents call it (e.g., `sqlite-explorer` in `mcp:sqlite-explorer/query`). Must start with a letter; may only contain letters, digits, `-`, and `_`; length 1–255; it cannot contain `@` (reserved as the separator for team-qualified addresses). Names are **case-insensitive and unique within a scope** (account or one team); **different teams may own servers with the same name**, in which case the session addresses them with the team-qualified form `name@team_id`, and duplicate-name errors state the scope where the clash occurred. Cannot duplicate a built-in server name. |
 | Transport | enum | Yes | How the agent communicates with the server. See "Transport" below. |
 | Scope | Account / Team | Yes | The scope of this MCP server: **Account** (visible account-wide) or a specific **Team** (visible only to members of that team). See "Scope" below. |
 | Execution Environment | Cloud / BYOC Runners (multiple) | No | Controls where this MCP server is available. Select Cloud and one or more visible BYOC Runners; leave empty to make it available everywhere. It does not route calls: an MCP call still runs in the current AI SRE session's environment. For a service available only on a private network, select only the Runner(s) that can reach it. See [Environments (BYOC)](/en/ai-sre/environments). |
@@ -145,6 +145,10 @@ MCP servers support three **authorization modes** that determine how credentials
 For "Member authorization (key)" and "Member authorization (OAuth)", if credentials are missing the agent's tool call is paused and a credential entry or authorization dialog is shown to the current member; execution resumes once credentials are supplied. In service authorization mode, no credentials are requested from members.
 </Note>
 
+<Warning>
+Credential encryption depends on a deployment-level **credential master key** (for self-hosted / BYOC deployments, `credentialMasterKey` in `etc/srv.yml`). If that key is missing or invalid, saving an env/headers map that contains sensitive keys fails with "unable to save credentials: the deployment's credential key is missing or invalid. Contact your administrator" — ask your deployment administrator to check the credential key configuration. In addition, plaintext values carrying the encrypted-marker prefix under any key are rejected on save, and updating an existing server re-encrypts legacy plaintext credentials into ciphertext.
+</Warning>
+
 ### MCP Server Authorization (Settings)
 
 Member authorization credentials — both key and OAuth — are isolated **per member**, so besides the inline "prompted on demand during a conversation" path above, you can also **manage your own authorization** for an MCP server directly **in settings** — both paths write to the **same** per-member credential.
@@ -178,12 +182,16 @@ The MCP list displays each server's **name** (including its AI description), **s
     Toggle the switch in the list. Only **enabled** servers are available to the agent; disabled servers are invisible to agents and cannot be called.
   </Accordion>
   <Accordion title="Edit" icon="pen-to-square">
-    Click the edit button (or click the row) to open the form. You can modify the name, transport, description, endpoint/command, authorization mode, and scope. If you do not have edit permission, the form opens in **read-only** mode with an explanation.
+    Click the edit button (or click the row) to open the form. You can modify the name, transport, description, endpoint/command, authorization mode, and scope. Opening the form is a pure database read and does not connect to the remote server. **After a successful create, or after an edit that changes connectivity-relevant fields (transport, command, arguments, environment variables, URL, headers, timeouts, execution environment, authentication, etc.), the system automatically re-probes the tool list in the background and refreshes the tools cache and AI description** — no manual trigger is needed; changes to metadata only (name, description, scope) do not trigger a re-probe. Manual connectivity verification is done through the "Test" entry. If you do not have edit permission, the form opens in **read-only** mode with an explanation.
   </Accordion>
   <Accordion title="Delete" icon="trash">
     Removes the MCP server from the current scope. **Agents that depend on it will no longer be able to access its tools**, and active sessions currently using it will fail. A confirmation prompt is shown before deletion.
   </Accordion>
 </AccordionGroup>
+
+<Note>
+**Troubleshooting: a server shows as "configured but unreadable"**: if an enabled MCP server reports "configured but unreadable" or is skipped during a session (instead of "not found"), its stored secrets failed to decrypt — usually because the credential master key changed (rotation or misconfiguration) or the data is corrupted. That server is skipped without affecting other servers in the account. To fix it, re-save the server's credentials (edit and submit once), or check the deployment's `credentialMasterKey` configuration.
+</Note>
 
 ### Inspection: Viewing the Tools a Server Exposes
 
@@ -213,6 +221,8 @@ MCP shares the same **two-level scope** model as other resources (Skills, Knowle
 **Create and reassign**: to create a new team-level MCP server, you must belong to the target team; account-level creation is limited to the account owner or admins. **Marketplace installs are the exception**: they are always account-scope, and any account member can install one (no owner/admin permission required). When editing an existing MCP server, the account owner or admins can move it to any team to recover resources left behind by empty teams or departed members; regular members can move it only to teams they belong to. However, **Marketplace-installed MCP servers cannot be reassigned to a team** — their scope is shown as a fixed account value in the edit form. A small number of legacy team-scoped Marketplace rows from earlier versions can still be changed back to account scope (promoted to shared); the reverse is not allowed. **Promoting to shared carries the same gate as account-level creation: only the account owner or admins can do it** — a regular member is denied even for servers belonging to their own team, and the prompt now reads "ask an admin to make it shared" instead of naming the owning team.
 
 **Runtime visibility**: At session start, the agent is offered only **account-level** MCP servers and servers belonging to the **team bound to the current session**. Once the agent reads a team's knowledge during an investigation, that team's MCP servers and Skills are mounted into the session on demand. **The account is the only security boundary at runtime; the team is an ownership and editing tag only.**
+
+**Name uniqueness**: MCP server name uniqueness is per scope — names must be unique (case-insensitively) within the account scope or within one team; two different teams may each own a same-named server. When a team-level server shares its name with another server visible in the same session, its call address is qualified as `name@team_id`.
 
 ## Related Pages
 

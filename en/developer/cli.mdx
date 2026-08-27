@@ -103,6 +103,8 @@ flashduty incident close <id> [<id2>...] # Close (resolve) incidents
 flashduty incident timeline <id>         # View an incident timeline
 flashduty incident alerts <id>           # List alerts associated with an incident
 flashduty incident similar <id>          # Find similar historical incidents
+flashduty incident comment <id> [<id2>...] # Append a comment to incident timelines (up to 100 incidents per call)
+flashduty incident feed <id>             # View incident activity (paginated timeline)
 ```
 
 Common filter flags for `incident list`:
@@ -119,6 +121,21 @@ Common filter flags for `incident list`:
 | `--page` | Page number | `1` |
 
 Time format examples: `5m`, `1h`, `24h`, `168h`, `2026-04-01`, `2026-04-01 10:00:00`, `1712000000`.
+
+`incident comment` appends the same timeline comment to one or more incidents (up to 100 per call). The comment text comes from `--comment-file` (required); a value of `-` reads from stdin, and the content is not shell-parsed — backticks, `$(...)`, and quotes are delivered to the API verbatim. Leading and trailing whitespace is trimmed before sending; after trimming the text must be non-empty and at most 1024 characters — the cap is counted in characters (Unicode code points), not bytes, so multi-byte text such as Chinese is not penalized; use `wc -m`, not `wc -c`, to measure. Add `--mute-reply` so the comment does not trigger Webhook reply behavior. After writing, the CLI re-reads each incident's timeline and confirms an entry exactly matching the sent text exists; if any incident cannot be confirmed, the whole command exits non-zero.
+
+```bash
+flashduty incident comment inc_123 --comment-file ./comment.txt
+printf '%s' 'Rollback started' | flashduty incident comment inc_123 --comment-file -
+```
+
+`incident feed` shows the paginated activity (timeline entries) of a single incident; `--limit` defaults to 20 with a maximum of 100, and `--page` selects the page. Entry `type` values: `a_new` (created), `a_update` (updated by a new event), `a_merge` (merged), `a_comm` (comment), `a_m_silence` / `a_m_inhibit` (masked by a silence / inhibit rule), `a_close` (historical data only; new alerts no longer produce it — the close action is carried at the incident layer).
+
+The assignment target `assigned_to` of `incident create` and `incident assign` (passed via `--data`) supports a `notify` object that overrides the notification channels for this assignment: `personal_channels` specifies the channels (e.g. `voice`, `sms`, `email`), `template_id` specifies the notification template ID (a MongoDB ObjectID), and `follow_preference` controls the channel source — when `false`, `personal_channels` is forced; when `true` or omitted, each responder's personal notification preferences are followed.
+
+```bash
+flashduty incident assign --data '{"incident_id":"inc_123","assigned_to":{"person_ids":[123],"type":"assign","notify":{"follow_preference":false,"personal_channels":["sms"]}}}'
+```
 
 #### Work items and follow-ups (work-item-*)
 
@@ -525,6 +542,8 @@ Common flags:
 | `--delay-seconds` | Shift the query window backward by a few seconds to compensate for ingestion latency |
 | `--data` | Add datasource-specific parameters such as `args` |
 
+In the generated `monit` rule commands (`rule-create` / `rule-update` / `rule-export`, etc.), the no-data check configuration `rule_configs.check_nodata` supports empty-result alerting: when `alert_on_empty_result` (boolean) is enabled, an alert fires when every query returns an empty result; `alert_on_empty_result_severity` sets that alert's severity (case-sensitive; one of `Critical`, `Warning`, `Info`; only takes effect when `alert_on_empty_result` is enabled).
+
 ### monit servicemap — Service topology (Beta)
 
 The `monit servicemap-*` command family accesses the ServiceMap capability; see [Service Map](/en/monitors/targets/servicemap) for the UI workflow.
@@ -539,11 +558,32 @@ flashduty monit servicemap-topology --data '<json>' [flags]  # Query topology (-
 
 `summary` and `topology` take the anchor host via `--data '{"anchor":{...}}'`. Common `topology` flags: `--depth` (traversal depth, 1–3, default 1), `--max-nodes` (default 100, cap 500), `--max-edges` (default 200, cap 1000).
 
+### insight — Incident insight analytics
+
+```bash
+flashduty insight top-alerts [flags]      # Top alert sources grouped by a label dimension (--label check|resource, required)
+flashduty insight incidents [flags]       # List incidents with performance metrics (--limit defaults to 20, max 100; --page for paging)
+flashduty insight incident-export [flags] # Export the filtered incident analytics list as CSV
+```
+
+Both `top-alerts` (`--limit` is the Top K, default 10) and `incidents` support `--since` (default `7d`) / `--until` (default `now`).
+
+`incident-export` writes the filtered incident list as CSV to stdout (redirect to a file to save it). The CSV header and formatted values use the request locale (falling back in turn to the member's, then the account's locale); `--start-time` / `--end-time` are Unix seconds. Additional filter flags: `--channel-ids`, `--incident-ids`, `--severities`, `--team-ids`, `--responder-ids`, `--query`, `--export-fields`, `--time-zone`, and more.
+
+```bash
+flashduty insight incident-export --start-time 1712000000 --end-time 1712604800 > incidents.csv
+```
+
+<Warning>
+The export endpoint returns the CSV in one shot and caps the row count server-side, so an overly wide time window may truncate the results. After writing, `incident-export` cross-checks the total incident count under the same filters as an integrity check: when rows are missing, the partial CSV is still written, stderr prints `rows=N` (the number of data rows actually written), and the command exits non-zero noting how many were written versus expected — narrow the time window and retry in that case.
+</Warning>
+
 ### alert — Alert and alert-event queries
 
 ```bash
 flashduty alert list [flags]        # List alerts (default: last 24h)
 flashduty alert get <alert_id>      # Get full detail of one alert; detail is an alias
+flashduty alert timeline <alert_id> # View an alert's timeline (--limit defaults to 20, max 100; --page for paging)
 flashduty alert-event list [flags]  # List alert events (default: last 1h)
 ```
 
@@ -679,6 +719,8 @@ Showing 2 results (page 1, total 2).
 <Tab title="JSON (--json / --output-format json)">
 Machine-parseable. Except for the commands with default compact fields listed below, it returns the command's full response data; table-column truncation does not apply to JSON. Ideal for scripts and CI/CD pipelines.
 
+**Timestamp field convention**: in structured output (`json` / `jsonl` / `toon`), timestamp fields (such as `created_at`, `updated_at`, `start_time`, `end_time`, `ack_time`, `close_time`, `last_time`, `assigned_at`, etc.) are rendered as RFC3339 strings in the CLI process's **local timezone** — neither the Unix integers on the API wire nor UTC; unset timestamps render as `null` rather than `0`. Treat them as strings when parsing times with `jq`; if you need the raw epoch values, call the API directly.
+
 ```bash
 flashduty incident list --json | jq '.[].title'
 ```
@@ -701,6 +743,8 @@ Table view with no column truncation — useful for copy-paste or wide terminals
 </Tab>
 </Tabs>
 
+With structured output (`json` / `toon`), a list command whose current page is not the last page prints a one-line pagination hint to **stderr** (`note: showing N of M total results (page X); raise --limit or use --page for the rest`), reminding you to raise `--limit` or page with `--page` for the remaining data; stdout stays clean, so piping into `jq` and similar tools is unaffected. Be careful not to mistake a partial result at the default page size for the full set.
+
 ### Field projections for structured output
 
 The following commands support `--fields` with `json` or `toon` output. Supply comma-separated top-level response fields; an unknown field fails immediately, and table output ignores this flag.
@@ -718,7 +762,7 @@ For example, export only an incident ID, title, and progress:
 flashduty incident list --json --fields incident_id,title,progress
 ```
 
-When a list projection (`incident list`, `incident similar`, `alert-event list`) exceeds its limit, the CLI keeps the selected field names, shortens long strings, and marks them with `...`. If non-string fields alone exceed the limit, the command asks you to reduce the fields or result count.
+When a list projection (`incident list`, `incident similar`, `alert-event list`) exceeds its limit, the CLI keeps the selected field names, shortens long strings, and marks them with `...`, while printing a one-line note to **stderr** naming the truncated fields and warning that matching or filtering on those fields will miss results — narrow `--fields` or `--limit` to get untruncated values. If a list still exceeds the limit and cannot be safely shortened, the command fails and names the largest field, asking you to reduce the fields or result count.
 
 `incident detail` behaves differently when its projection overflows: the detail is a single object, and a truncated value is indistinguishable from a genuinely short one, so silently shortening it would hand you wrong data. A projection over 8 KiB therefore fails the command outright, and the error names the largest fields (up to 3, with their byte sizes). Reduce the fields in `--fields`, or omit `--fields` entirely to get the full detail, which is not subject to the projection limit.
 

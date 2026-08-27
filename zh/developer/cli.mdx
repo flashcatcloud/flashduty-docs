@@ -103,6 +103,8 @@ flashduty incident close <id> [<id2>...] # 关闭（解决）故障
 flashduty incident timeline <id>        # 查看故障时间线
 flashduty incident alerts <id>          # 查看故障关联的告警
 flashduty incident similar <id>         # 查找相似的历史故障
+flashduty incident comment <id> [<id2>...] # 为故障时间线追加评论（单次最多 100 个故障）
+flashduty incident feed <id>            # 查看故障动态（分页时间线）
 ```
 
 `incident list` 常用过滤参数：
@@ -119,6 +121,21 @@ flashduty incident similar <id>         # 查找相似的历史故障
 | `--page` | 页码 | `1` |
 
 时间格式示例：`5m`、`1h`、`24h`、`168h`、`2026-04-01`、`2026-04-01 10:00:00`、`1712000000`。
+
+`incident comment` 为一个或多个故障（单次最多 100 个）追加同一条时间线评论。评论文本通过 `--comment-file`（必填）传入，值为 `-` 时从 stdin 读取，内容不经 shell 解析，反引号、`$(...)`、引号均按原样送达 API。发送前会裁剪首尾空白，裁剪后须非空且不超过 1024 个字符——上限按字符数（Unicode 码点）计算而非字节数，中文等多字节文本不会吃亏，请用 `wc -m` 而非 `wc -c` 计量。加 `--mute-reply` 可让该评论不触发 Webhook 回复行为。写入后 CLI 会回读每个故障的时间线，确认存在与发送文本完全一致的条目；只要有任意一个故障无法确认，整个命令即以非零码退出。
+
+```bash
+flashduty incident comment inc_123 --comment-file ./comment.txt
+printf '%s' 'Rollback started' | flashduty incident comment inc_123 --comment-file -
+```
+
+`incident feed` 查看单个故障的分页动态（时间线条目），`--limit` 默认 20、最大 100，`--page` 指定页码。条目 `type` 取值：`a_new`（新增）、`a_update`（被新事件更新）、`a_merge`（被合并）、`a_comm`（评论）、`a_m_silence` / `a_m_inhibit`（被静默 / 抑制规则屏蔽）、`a_close`（仅历史数据，新告警不再产生，关闭动作由故障层承载）。
+
+`incident create` 与 `incident assign` 的分派对象 `assigned_to`（经 `--data` 传入）支持 `notify` 对象覆盖本次分派的通知渠道：`personal_channels` 指定渠道（如 `voice`、`sms`、`email`），`template_id` 指定通知模板 ID（MongoDB ObjectID），`follow_preference` 控制渠道来源——为 `false` 时强制使用 `personal_channels`，为 `true` 或省略时跟随各响应人的个人通知偏好。
+
+```bash
+flashduty incident assign --data '{"incident_id":"inc_123","assigned_to":{"person_ids":[123],"type":"assign","notify":{"follow_preference":false,"personal_channels":["sms"]}}}'
+```
 
 #### 工作项与跟进项（work-item-*）
 
@@ -525,6 +542,8 @@ flashduty monit preview-sync [flags]
 | `--delay-seconds` | 将查询窗口整体向前平移若干秒，用于补偿采集延迟 |
 | `--data` | 可补充 `args` 等数据源特定参数 |
 
+生成的 `monit` 规则命令（`rule-create` / `rule-update` / `rule-export` 等）中，无数据检查配置 `rule_configs.check_nodata` 支持空结果告警：`alert_on_empty_result`（布尔）开启后，当所有查询都返回空结果时触发告警；`alert_on_empty_result_severity` 指定该告警的等级（大小写敏感，取值 `Critical`、`Warning`、`Info`，仅在 `alert_on_empty_result` 开启时生效）。
+
 ### monit servicemap — 服务拓扑（Beta）
 
 `monit servicemap-*` 命令族访问服务拓扑（ServiceMap）能力，页面操作见[服务拓扑](/zh/monitors/targets/servicemap)。
@@ -539,11 +558,32 @@ flashduty monit servicemap-topology --data '<json>' [flags]  # 查询拓扑（--
 
 `summary` 与 `topology` 的锚点主机经 `--data '{"anchor":{...}}'` 传入；`topology` 常用 `--depth`（遍历深度，1–3，默认 1）、`--max-nodes`（默认 100，上限 500）、`--max-edges`（默认 200，上限 1000）。
 
+### insight — 故障洞察分析
+
+```bash
+flashduty insight top-alerts [flags]      # 按标签维度统计 Top 告警来源（--label check|resource，必填）
+flashduty insight incidents [flags]       # 查询带性能指标的故障列表（--limit 默认 20、最大 100，--page 翻页）
+flashduty insight incident-export [flags] # 将筛选后的故障分析列表导出为 CSV
+```
+
+`top-alerts`（`--limit` 为 Top K，默认 10）与 `incidents` 均支持 `--since`（默认 `7d`）/ `--until`（默认 `now`）。
+
+`incident-export` 把筛选后的故障列表以 CSV 写到 stdout（重定向到文件保存）。CSV 表头与格式化值使用请求语言环境（依次回退到成员、账户语言环境）；`--start-time` / `--end-time` 为 Unix 秒，另支持 `--channel-ids`、`--incident-ids`、`--severities`、`--team-ids`、`--responder-ids`、`--query`、`--export-fields`、`--time-zone` 等过滤参数。
+
+```bash
+flashduty insight incident-export --start-time 1712000000 --end-time 1712604800 > incidents.csv
+```
+
+<Warning>
+导出接口一次性返回 CSV 且在服务端限制行数，时间窗口过宽时结果可能被截断。`incident-export` 写出后会用相同过滤条件对照故障列表总数做完整性校验：行数不足时，部分 CSV 仍会写出，stderr 打印 `rows=N`（实际写出的数据行数），命令以非零码退出并注明已写出 / 应得数量——此时请收窄时间窗口后重试。
+</Warning>
+
 ### alert — 告警与告警事件查询
 
 ```bash
 flashduty alert list [flags]        # 列出告警（默认最近 24 小时）
 flashduty alert get <alert_id>      # 查看单条告警详情；detail 是同一命令的别名
+flashduty alert timeline <alert_id> # 查看告警时间线（--limit 默认 20，最大 100；--page 翻页）
 flashduty alert-event list [flags]  # 列出告警事件（默认最近 1 小时）
 ```
 
@@ -679,6 +719,8 @@ Showing 2 results (page 1, total 2).
 <Tab title="JSON（--json / --output-format json）">
 机器可解析。除下方列出的默认紧凑字段命令外，返回命令的完整响应数据；表格列截断不适用于 JSON。适合脚本、CI/CD 流水线消费。
 
+**时间戳字段约定**：结构化输出（`json` / `jsonl` / `toon`）中的时间戳字段（如 `created_at`、`updated_at`、`start_time`、`end_time`、`ack_time`、`close_time`、`last_time`、`assigned_at` 等）渲染为 CLI 进程**本地时区**的 RFC3339 字符串——既不是 API 线上的 Unix 整数，也不是 UTC；未设置的时间戳渲染为 `null` 而非 `0`。用 `jq` 解析时间时请按字符串处理；如需原始 epoch 值，请直接调用 API。
+
 ```bash
 flashduty incident list --json | jq '.[].title'
 ```
@@ -701,6 +743,8 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 </Tab>
 </Tabs>
 
+结构化输出（`json` / `toon`）下，列表命令如果当前页不是最后一页，会在 **stderr** 打印一行分页提示（`note: showing N of M total results (page X); raise --limit or use --page for the rest`），提醒调大 `--limit` 或用 `--page` 翻页获取剩余数据；stdout 保持纯净，管道给 `jq` 等工具不受影响。注意不要把默认页大小返回的部分结果误当作全量。
+
 ### 结构化输出的字段投影
 
 以下命令在 `json` 或 `toon` 输出时支持 `--fields`。用逗号分隔顶层响应字段；未知字段会直接报错，表格输出会忽略此参数。
@@ -718,7 +762,7 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 flashduty incident list --json --fields incident_id,title,progress
 ```
 
-列表投影（`incident list`、`incident similar`、`alert-event list`）超过上限时，CLI 会在保留字段名的前提下截短过长的字符串，并以 `...` 标记；若非字符串字段本身已超过上限，命令会提示减少字段或结果数。
+列表投影（`incident list`、`incident similar`、`alert-event list`）超过上限时，CLI 会在保留字段名的前提下截短过长的字符串，并以 `...` 标记，同时在 **stderr** 打印一行提示，点名被截短的字段并警告：对这些字段做匹配或过滤会漏掉结果——请收窄 `--fields` 或 `--limit` 以获取未截断的值。若列表在无法安全截短的情况下仍超限，命令会报错并点名最大的字段，提示减少字段或结果数。
 
 `incident detail` 的投影超限行为不同：详情是单个对象，截断后的值与本身就很短的真实值无法区分，静默截短会返回错误数据，因此投影超过 8 KiB 时命令直接失败，错误信息会点名最大的字段（最多 3 个，含各自字节数）。此时请减少 `--fields` 中的字段，或直接省略 `--fields` 获取不受投影上限约束的完整详情。
 

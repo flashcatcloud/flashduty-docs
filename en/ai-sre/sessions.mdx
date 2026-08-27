@@ -135,7 +135,9 @@ When the console publishes a new version, a **version update notice** appears ab
     **Inline truncation of large files**: attachments reach the agent as extracted text. When the extracted text exceeds **64 KB**, only the first **32 KB** is inlined (cut at a valid UTF-8 boundary), and the attachment envelope carries a pointer to the full file staged in the sandbox (like `~/.flashduty/attachments/...`) — if the full content matters, ask the agent to read the file from the sandbox with the read / bash tools; nothing is lost. In addition, PDFs larger than **3 MB** are no longer passed natively to the model; they fall back to text extraction under the same truncation rule.
   </Accordion>
   <Accordion title="Context references" icon="link">
-    When you enter AI SRE from an incident, alert, monitor rule, monitor target, or service topology page, the related object is embedded into the input box as a **reference capsule** — a small inline tag indicating the kind of object referenced — an incident, alert event, alert, monitor rule, host, monitor target, service topology, or on-call analytics — that travels with the message so the agent can start its analysis from that object directly. Click the capsule to open the referenced object in a new tab, or click its close button to remove the reference before sending. A single message can carry multiple references. Besides objects carried in automatically from a related page, you can also type `@` directly in any session's input box to trigger an incident search dropdown (supporting fuzzy keyword search and a list of recent incidents); selecting one inserts the same kind of reference capsule — a standalone entry point available at any time.
+    When you enter AI SRE from an incident, alert, monitor rule, monitor target, or service topology page, the related object is embedded into the input box as a **reference capsule** — a small inline tag indicating the kind of object referenced — an incident, alert event, alert, monitor rule, host, monitor target, service topology, on-call analytics, or incident list — that travels with the message so the agent can start its analysis from that object directly. Click the capsule to open the referenced object in a new tab, or click its close button to remove the reference before sending. A single message can carry multiple references. Besides objects carried in automatically from a related page, you can also type `@` directly in any session's input box to trigger an incident search dropdown (supporting fuzzy keyword search and a list of recent incidents); selecting one inserts the same kind of reference capsule — a standalone entry point available at any time.
+
+    **Analyzing multiple incidents at once (incident list)**: select several incidents on the incident list page and click **AI Analysis** — AI SRE opens with the whole selection carried by a single **Incident list (N)** reference capsule, which bundles summary fields for each incident such as its ID, severity, progress, and title (when the selection is large, only skeleton fields are kept and the agent fetches details on demand with its tools). The input box is also pre-filled with a batch-analysis prompt (editable before sending): the agent first judges how the incidents relate to each other (shared root cause, cascading effects, or independent) and groups them, then gives the likely root cause and impact per group, and finally an overall remediation plan with priorities. If all selected incidents belong to the same team, the session opens in that team's scope; otherwise it opens in personal scope.
   </Accordion>
   <Accordion title="Knowledge and skills" icon="book">
     When a session starts, the knowledge packs and skills for the bound team are loaded automatically. See <a href="/en/ai-sre/knowledge">Knowledges</a> and <a href="/en/ai-sre/skills">Skills</a> for details.
@@ -362,6 +364,21 @@ When calling `POST /safari/session/create`, you may include `entry_kind` in the 
 Sessions with `entry_kind=im` support **in-place environment and team switching** — the IM `/env` and `/scope` commands can rebind the session to a different execution environment (a BYOC runner or the cloud sandbox) or team scope without discarding the conversation. Console sessions (`web`) have their environment and team fixed at creation time and do not support in-place switching.
 </Note>
 
+### App identifier (app_name)
+
+`POST /safari/session/create` requires `app_name`, which selects the agent application the session uses. It only accepts a fixed set of values: `ask-ai`, `support`, `support-website`, `support-flashcat`, `ai-sre`, `template-assistant`, `swe`; AI SRE troubleshooting sessions use `ai-sre`. Any value outside this set is rejected with a 400 validation error — previously the field was not validated, and invalid values produced sessions that could never run.
+
+### IM chat type (chat_type)
+
+When creating a session with `entry_kind=im`, you may additionally pass `chat_type` to distinguish an IM group chat from a direct message:
+
+| Value | Description |
+|---|---|
+| `group` | IM group chat |
+| `dm` | IM direct message; an omitted or empty value is treated as `dm` semantics |
+
+`chat_type` is only meaningful with `entry_kind=im`. At creation it freezes the session's persisted surface (`im_group` or `im_dm`), which drives A2A credential identity resolution, and it cannot be changed afterwards.
+
 ## Reply language
 
 ---
@@ -403,6 +420,27 @@ If an error occurs after streaming has already begun, the server cannot switch t
 </Warning>
 
 **Permissions**: the export endpoint uses the same access gate as sending messages (`CanChatSession`), meaning the caller must have message-send permission on the session — read-only access is not sufficient. Personal sessions can be exported only by their creator; team sessions can be exported by same-account members who can access the session.
+
+## Session retention and cleanup
+
+---
+
+Session data has a retention period: a background sweep runs once per hour, and when a session's **last activity time and creation time are both older than the retention window**, the session is judged expired and permanently deleted (hard delete, not recoverable). The window is controlled by the server-side configuration `retention.sessionRetentionDays` (in days); if it is unset or not greater than 0, the sweep is disabled.
+
+When an expired session is deleted, its session-scoped data is cascaded with it, including:
+
+| Data | Description |
+|---|---|
+| Message events | All messages and streaming event records in the session |
+| Tasks | Tasks and task events in the session |
+| Pin and read state | Each member's pin marker and read view for the session |
+| Unpublished presented files | Files the session produced but never published to the artifact library (including their copies in object storage) |
+
+**Artifacts already published to the artifact library are not affected** by session deletion and remain available.
+
+<Note>
+A deleted session can no longer accept messages: sending a message to a deleted session (including one swept for expiry) returns a 404 error "Session has been deleted". If a historical session disappears from the list and nobody deleted it manually, it was most likely cleaned up after exceeding the retention period.
+</Note>
 
 ## Related Pages
 

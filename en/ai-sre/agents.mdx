@@ -68,11 +68,11 @@ On the A2A Agents list page, click **Add A2A Agent** and fill in the form:
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| Name | string | — | A2A agent identifier (e.g., `metrics-analyzer`). Required |
+| Name | string | — | A2A agent identifier (e.g., `metrics-analyzer`). Required. The name must be unique **within its scope (account or team)** — different teams may reuse the same name; it must not contain `@` (reserved as the separator in `name@teamID` disambiguation); it must not collide with a built-in agent name (such as the built-in Subagents `general` and `explore`, or the built-in A2A agent `flashduty-use-guide`) — a name that does would make the agent permanently undispatchable |
 | Scope | Account / Team | — | Scope: **Account** (visible account-wide) or a specific **Team** (visible and editable only to members of that team). Required — see "Scope" below |
 | Execution Environment | Cloud / BYOC Runners (multiple) | All environments | Controls where this A2A agent is available. Select Cloud and one or more visible BYOC Runners; leave empty to make it available everywhere. It does not route delegated calls: an A2A call still runs in the current AI SRE session's environment. For a remote agent available only on a private network, select only the Runner(s) that can reach it |
 | Instructions | string | — | The agent-selection signal shown to AI SRE, as **a single document**: an optional `summary:` frontmatter block plus a body. The summary appears in the available-agent list; the body is delivered in full only on first delegation. Required; the whole document is at most 50 KB, and `summary` is at most 1,024 characters and must not contain `<` or `>`. See "[Writing Instructions](#writing-instructions)" below for the format |
-| Card URL | string | — | The Agent Card URL of the remote A2A agent, or just the service origin for agents that follow the default well-known location (for example, `https://agents.example.com`). If the URL includes a path, the platform reads that exact URL; if only an origin is provided, it resolves `/.well-known/agent-card.json` by A2A convention. Required. The platform only validates that the URL is well-formed (scheme is http/https, host is non-empty) — it does not classify hosts or IPs; actual network reachability and egress restrictions depend on the current AI SRE session's execution environment. The Execution Environment field above only limits where this agent is available. The remote agent must implement A2A Protocol 1.0 — see "[Protocol Version and Agent Card Requirements](#protocol-version-and-agent-card-requirements)" below |
+| Card URL | string | — | The Agent Card URL of the remote A2A agent, or just the service origin for agents that follow the default well-known location (for example, `https://agents.example.com`). If the URL includes a path, the platform reads that exact URL; if only an origin is provided, it resolves `/.well-known/agent-card.json` by A2A convention. Required. The format check only validates that the URL is well-formed (scheme is http/https, host is non-empty) — it does not classify hosts or IPs; actual network reachability and egress restrictions depend on the current AI SRE session's execution environment. The Execution Environment field above only limits where this agent is available. On save, the platform also fetches the Agent Card through the selected execution environment and runs a **compatibility check** (the fetch egresses from that environment, not from the platform's servers, and carries no authentication): if the card cannot be parsed as a valid Agent Card, declares no `supportedInterfaces` (a 0.x card), or has no interface entry with `protocolBinding` of `JSONRPC` / `HTTP+JSON` and a `protocolVersion` with major version 1, the save is rejected with an error asking the provider to upgrade. When no execution environment is available, the endpoint is unreachable, or the response is not 2xx, the check is skipped and the save proceeds. The remote agent must implement A2A Protocol 1.x — see "[Protocol Version and Agent Card Requirements](#protocol-version-and-agent-card-requirements)" below |
 | Service authorization | enum | `none` | The identity AI SRE uses when calling the remote agent **as a service** (field `auth_type`): `none` / `bearer` (Bearer Token) / `api_key` (custom Header + Key). Marked **Recommended** in the form. See "[Authorization Modes](#authorization-modes)" below |
 | Streaming | bool | on | Whether to communicate with the remote agent in streaming mode |
 | Member authorization | enum | `shared` (none) | The identity each member holds individually (field `auth_mode`): `shared` (none) / `per_user_secret` (Secret (Header)) / `per_user_oauth` (OAuth 2.1). See "[Authorization Modes](#authorization-modes)" below |
@@ -81,9 +81,9 @@ On the A2A Agents list page, click **Add A2A Agent** and fill in the form:
 
 ### Protocol Version and Agent Card Requirements
 
-When calling a remote agent as an A2A client, the platform implements **A2A Protocol 1.0** (with the `JSONRPC` or `HTTP+JSON` protocol binding). **Protocol 0.x and other major versions are not supported**: the remote agent's Agent Card must be in the 1.0 format, or delegated calls will fail.
+When calling a remote agent as an A2A client, the platform implements **A2A Protocol 1.x** (with the `JSONRPC` or `HTTP+JSON` protocol binding). **Protocol 0.x and other major versions are not supported**: the remote agent's Agent Card must be in the 1.x format (any major version 1 works — e.g., `1.1` is compatible with a `1.0` client), or the save-time compatibility check will reject it; cards that never passed the check will also fail delegated calls.
 
-A 1.0-format Agent Card declares its endpoints via the `supportedInterfaces` array, where at least one entry must contain `url`, `protocolBinding` (`JSONRPC` or `HTTP+JSON`), and `protocolVersion: "1.0"`. A minimal valid card looks like this:
+A 1.x-format Agent Card declares its endpoints via the `supportedInterfaces` array, where at least one entry must contain `url`, `protocolBinding` (`JSONRPC` or `HTTP+JSON`), and `protocolVersion` (major version 1, e.g. `"1.0"`). A minimal valid card looks like this:
 
 ```json
 {
@@ -114,9 +114,9 @@ A 1.0-format Agent Card declares its endpoints via the `supportedInterfaces` arr
 The `version` field on the card is the **agent's own version number**, not the protocol version. The protocol version is declared by `protocolVersion` in each `supportedInterfaces` entry.
 </Note>
 
-**Migrating from 0.x to 1.0**: if your Agent Card still uses the 0.x format, adjust it as follows before connecting:
+**Migrating from 0.x to 1.x**: if your Agent Card still uses the 0.x format, adjust it as follows before connecting:
 
-| 0.x format | 1.0 format |
+| 0.x format | 1.x format |
 | --- | --- |
 | Top-level `url` + `preferredTransport` + `additionalInterfaces` | `supportedInterfaces` array, each entry with `url` / `protocolBinding` / `protocolVersion` |
 | `authentication` | `securitySchemes` + `security` |
@@ -185,7 +185,7 @@ After FlashAI is prepared, enter the **FlashAI domain** in the panel (for exampl
 https://demo.flashcat.cloud/api/fc-model/a2a/.well-known/agent-card.json
 ```
 
-The template only prefills common values. You still choose the **Scope** (Account or Team) and configure authentication in the form. A2A agents can be installed multiple times for different scopes, so the FlashAI panel does not disappear just because one FlashAI agent already exists. Agent names must still be unique within the account; if the same FlashAI domain needs to be installed more than once, adjust the name in the form.
+The template only prefills common values. You still choose the **Scope** (Account or Team) and configure authentication in the form. A2A agents can be installed multiple times for different scopes, so the FlashAI panel does not disappear just because one FlashAI agent already exists. Agent names must be unique **within their scope (account or team)** — different teams may reuse the same name; if you need to install the same FlashAI domain more than once in the same scope, adjust the name in the form.
 
 <Tip>
   Do not remove the instructions generated by the FlashAI template, especially the `summary:` line at the top — once registered, FlashAI always appears in the available-agent list, but whether AI SRE actually delegates to it hinges directly on that summary line. When the instructions are too short or too generic, AI SRE may keep reasoning locally or incorrectly delegate ordinary metrics / logs questions to FlashAI.
@@ -236,7 +236,7 @@ OAuth 2.1 appears only on the **member authorization** axis. The service authori
 </Note>
 
 <Note>
-For security reasons, saved sensitive fields (such as `token`, `api_key`, and `client_secret`) are returned **masked** when read. When editing, leaving a sensitive field blank means "keep the current value" — not "clear it." The stored credential is only overwritten when you explicitly change it.
+For security reasons, the **service authorization** shared secrets (such as `token` and `api_key`) are **encrypted before being stored**, and saved sensitive fields are returned **masked** when read. When editing, the sensitive-field semantics are: leaving the echoed mask in place = **keep the stored value**; entering new plaintext = overwrite it; **clearing the field (or omitting it) = delete the secret** — note this differs from MCP, where leaving a field blank means "keep the value." Switching the **service authorization** type (e.g., from `bearer` to `api_key`) also discards the secrets stored under the previous type.
 </Note>
 
 <Warning>
@@ -309,6 +309,8 @@ A2A agents share the same **two-level scope** model as other resources (skills, 
 | --- | --- |
 | Account level | Visible to all members in the account |
 | Team level | Visible only to members of that team |
+
+**Name uniqueness**: an agent name must be unique within its scope — an account-level name cannot duplicate an existing account-level agent, and a team-level name cannot duplicate another agent in the same team; different teams may reuse the same name.
 
 **Edit permissions**: team-level agents can be acted on only by members of that team — organization admins must join the team first; account-level agents can be acted on only by the account owner or account admin; there is no creator-retains-rights exception. When you do not have edit permission, the corresponding row in the list is **read-only**.
 
