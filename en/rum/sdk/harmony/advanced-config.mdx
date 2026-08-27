@@ -431,11 +431,27 @@ The plugin uploads two artifact types:
 | ArkTS Sourcemap | `sourceMaps.map`, optional `nameCache.json` | Restores ArkTS / TS files, functions, lines, and columns |
 | Native symbols | Unstripped `.so` files | Resolves C/C++ frames by GNU build-id |
 
-The plugin ships as an npm package (on **npm**, not ohpm); install it as a build-time dev dependency in your project's root `package.json`, not in `oh-package.json5`:
+The plugin ships as an npm package (on **npm**, not ohpm). Declare it in `hvigor/hvigor-config.json5` and let hvigor fetch it from npm:
+
+```json5 hvigor/hvigor-config.json5
+{
+  "modelVersion": "5.0.0",
+  "dependencies": {
+    "@flashcatcloud/hvigor-plugin": "0.1.4"
+  }
+}
+```
+
+You can install it with npm instead. But a HarmonyOS project root has no `package.json`, and `npm install` walks *up* the directory tree looking for one — so it ends up installing into whatever unrelated project it finds in a parent directory (often your home directory). Create one first:
 
 ```bash
-npm install -D @flashcatcloud/hvigor-plugin@^0.1.3
+npm init -y                                  # only if the project root has no package.json
+npm install -D @flashcatcloud/hvigor-plugin
 ```
+
+<Warning>
+Use **0.1.4 or later**. 0.1.3 registered the upload task with dependencies on both `assembleHap` and `assembleHar`; a module has at most one of them, so the build fails outright with `Cannot find hvigor task 'assembleHar' in module 'entry'`.
+</Warning>
 
 Then register the plugin in the module's `hvigorfile.ts`:
 
@@ -449,23 +465,29 @@ export default {
     flashcatSymbolUploadPlugin({
       apiKey: process.env.FLASHCAT_API_KEY ?? '',
       service: 'shopping-app',
-      version: '1.0.0',
-      enabled: process.env.FLASHCAT_UPLOAD === '1'
+      version: '1.0.0'
     })
   ]
 };
 ```
 
 <Note>
-On SaaS, omit `endpoint` — **hvigor-plugin ≥ 0.1.3** defaults to `https://ci.flashcat.cloud` (**not** the RUM ingest host `browser.flashcat.cloud`). For a private deployment set `FLASHCAT_SOURCEMAP_INTAKE_URL` (scheme + host, no path; also requires ≥ 0.1.3), or pass `endpoint: 'https://rum.example.com'`. Plugin 0.1.2 does not honour `FLASHCAT_SOURCEMAP_INTAKE_URL` — set `endpoint` explicitly, or use the legacy `FLASHCAT_ENDPOINT` env var (deprecated in 0.1.3 but still honoured). `flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, which defaults to the plugin's own version). Neither is normally required.
+On SaaS, omit `endpoint` — **hvigor-plugin ≥ 0.1.3** defaults to `https://ci.flashcat.cloud` (**not** the RUM ingest host `browser.flashcat.cloud`). For a private deployment set `FLASHCAT_SOURCEMAP_INTAKE_URL` (scheme + host, no path; also requires ≥ 0.1.3), or pass `endpoint: 'https://rum.example.com'`. Plugin 0.1.2 does not honour `FLASHCAT_SOURCEMAP_INTAKE_URL` — set `endpoint` explicitly, or use the legacy `FLASHCAT_ENDPOINT` env var (deprecated in 0.1.3 but still honoured). `flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, which defaults to the plugin's own version). **From 0.1.4 the build directory follows the product being built** (`-p product=beta` → `build/beta`), so pass `buildDir` only when the artifacts are somewhere else; 0.1.3 and earlier always used `build/default` and silently scanned the wrong directory for any other product.
 </Note>
 
-Run the upload task after a release build:
+After a release build, run the upload task as its own hvigor invocation:
 
 ```bash
-FLASHCAT_UPLOAD=1 FLASHCAT_API_KEY=*** \
-  hvigorw uploadFlashcatSymbols --mode module -p module=entry@default -p product=default
+FLASHCAT_API_KEY=*** \
+  hvigorw uploadFlashcatSymbols --no-daemon \
+  --mode module -p module=entry@default -p product=beta
 ```
+
+<Warning>
+`--no-daemon` is not optional when you configure the plugin from environment variables. hvigor builds through a long-lived daemon process, which **copies the environment once, when it is created**, and afterwards refreshes only a fixed allowlist (`DEVECO_SDK_HOME`, `OHOS_BASE_SDK_HOME`, and two incremental-build flags). A reused daemon therefore hands the plugin the environment of whoever started it — an IDE build, or an earlier command — not the one you just typed.
+
+The failure is silent: `FLASHCAT_API_KEY` reads as unset and the upload is skipped with a single log line, or a stale key ends in a 401 — either way the build still succeeds. Values written directly into `hvigorfile.ts` are not affected.
+</Warning>
 
 The plugin sends `multipart/form-data` to `{endpoint}/sourcemap/upload`:
 
