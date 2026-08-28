@@ -201,3 +201,44 @@ Translatable companions (do NOT belong in DNT — translate to Chinese):
 | English | Chinese |
 |---------|---------|
 | Artifact / Artifacts | 产物 |
+
+## Intentional Variants (per-context wording)
+
+These Chinese terms intentionally map to more than one English wording depending
+on UI context. Every listed variant is correct — do not "unify" them.
+Translators: pick the variant whose context matches.
+
+| Chinese | Variants (context) |
+|---------|--------------------|
+| 全屏 | Enter fullscreen (verb tooltip; pairs with "Exit fullscreen") / Fullscreen (compact label) |
+| 来源 | Referrer (RUM view-referrer tag) / Source (generic origin) |
+| 异常 | Error (metric label) / Issue (RUM Error Tracking entity, Datadog convention) |
+| 状态 | Status (issue/alert status) / State (technical thread-dump state) |
+| 成功 | Succeeded (run-status filter) / OK (compact badge) |
+| 对话 | Chat (singular) / Chats (section header, plural) |
+| 环境 | Environment (field label) / Environments (nav or page title, plural) |
+| 知识库 | Knowledge Pack (singular) / Knowledge Packs (page title, plural) |
+| 产物 | Artifact (singular) / Artifacts (plural) |
+| 文档 | Document (artifact kind) / Documentation (docs link) |
+| 邮件 | Email (channel label, pairs with "SMS") / Email us (CTA, pairs with "Call us") |
+| 我的 | Personal (user menu) / My teams (team selector) |
+| 团队 | Team (singular tag after a team name) / Teams (multi-select or group labels) |
+| 关闭 | Close (button or rule action) / Closed (timeline event) / Dismiss (banner) |
+| 天 | Day (picker label) / days (count unit) / d (compact) |
+| 小时 | Hour (picker label) / hour(s) (form or count) / h (compact) |
+| 条 | items (generic count) / alerts (alert count) |
+| 行动项 | action (field label) / Actions (title) |
+| 计划维护 | schedule maintenance (verb) / scheduled (adjective) |
+| 订阅规则 | singular / plural by count context |
+| 协作空间 | Channel (standalone label) / channels (plural base) |
+
+Plural-pair convention (zh-as-key frontends): a count-bearing Chinese key may
+have English `_one` / `_other` splits (e.g. "Ran {{count}} search" / "Ran
+{{count}} searches"). These pairs are intentional — never merge them into one
+English value. The zh locale needs only the base key (Chinese has no plural
+inflection); do not add `_one` / `_other` entries to zh locale files.
+
+Scope note: the "Incident Status" table above (待处理 → triggered, etc.) applies
+to the incident console only. RUM dashboards follow Datadog-style triage wording
+(For Review / Reviewed / Occurred At) — do not rewrite RUM strings to match that
+table.
