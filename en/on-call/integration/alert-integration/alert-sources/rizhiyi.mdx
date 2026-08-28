@@ -1,0 +1,173 @@
+---
+title: "Logease Alert Integration"
+description: "Push Logease (rizhiyi) alert events to Flashduty through a custom alarm plugin for automated alert noise reduction"
+keywords: ["alert integration", "Logease", "rizhiyi", "log monitoring", "data ingestion"]
+---
+
+<div class="hide">
+
+## In Flashduty
+---
+
+You can obtain an integration push URL through either of these two methods:
+
+### Using Private Integration
+
+Choose this simpler option when you don't need to route alert events to different channels.
+
+<details>
+  <summary>Expand</summary>
+
+  1. Go to the Flashduty console, select **Channel**, and enter a channel's details page
+  2. Select the **Integration** tab, click **Add Integration** to enter the integration page
+  3. Select **Logease** integration and click **Save** to generate a card
+  4. Click the generated card to view the **push URL**, copy it for later use, and you're done
+
+</details>
+
+### Using Shared Integration
+
+Choose this option when you need to route alerts to different channels based on the alert event's payload information.
+
+<details>
+  <summary>Expand</summary>
+
+  1. Go to the Flashduty console, select **Integration Center=>Alert Events** to enter the integration selection page
+  2. Select **Logease** integration:
+        - **Integration Name**: Define a name for this integration
+  3. Configure the default route and select the corresponding channel (after the integration is created, you can go to `Route` to configure more routing rules)
+  4. Click **Save** and copy the newly generated **push URL** for later use
+  5. Done
+
+</details>
+</div>
+
+## In Logease
+---
+
+Logease alerts can be delivered via email, syslog, alert forwarding, or custom alarm plugins. The JSON structure pushed by **alert forwarding** is a fixed Logease format that does not match the event format required by Flashduty. Therefore, use a **custom alarm plugin** (a Python script) to convert alerts into the standard format before pushing them to Flashduty.
+
+<div class="md-block">
+
+**Step 1: Write the alarm plugin script**
+
+Create a Python file (for example, `FlashdutyWebhook.py`) with the following content, and replace `push_url` at the top with your Flashduty integration push URL:
+
+```python
+# -*- coding: utf-8 -*-
+import json
+
+import requests
+
+# Flashduty integration push URL; replace with the push URL of your Logease integration
+push_url = "https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY"
+
+# HTTP forward proxy for hosts without direct Internet access; leave empty if not needed
+proxies = {
+    'http': '',
+    'https': '',
+}
+
+# Mapping from Logease alert levels to Flashduty alert severities
+LEVEL_MAP = {
+    "critical": "Critical",
+    "high": "Critical",
+    "mid": "Warning",
+    "low": "Info",
+    "info": "Info",
+}
+
+META = {
+    "name": "FlashdutyWebhook",
+    "version": 1,
+    "alias": "Flashduty alert push",
+    "configs": []
+}
+
+
+def set_logger(reset_logger):
+    global logger
+    logger = reset_logger
+
+
+def content(params, alert):
+    return alert.get("description", "")
+
+
+def handle(params, alert):
+    level = alert.get("strategy", {}).get("trigger", {}).get("level", "low")
+    if alert.get("is_alert_recovery"):
+        event_status = "Ok"
+    else:
+        event_status = LEVEL_MAP.get(level, "Info")
+    event = {
+        "event_status": event_status,
+        "title_rule": alert.get("name", "Logease alert"),
+        "alert_key": "rizhiyi::" + alert.get("name", ""),
+        "description": alert.get("description", ""),
+        "labels": {
+            "alert_name": alert.get("name", ""),
+            "alert_level": level,
+        },
+    }
+    resp = requests.post(push_url, json=event, timeout=10, proxies=proxies)
+    logger.info("push to flashduty, status: %s, resp: %s", resp.status_code, resp.text)
+
+
+def execute_reply(params, alert):
+    handle(params, alert)
+    return "push to flashduty done"
+```
+
+**Step 2: Upload the plugin**
+
+Go to the Logease **Monitoring** page and upload the script under **Others → Alarm Plugins**.
+
+**Step 3: Reference the plugin in monitoring items**
+
+Edit the monitoring items that need to be connected to Flashduty, select the uploaded plugin under **Add Alarm Method**, and save. Logease also supports Manager plugins (for the platform's own monitoring) and Soar plugins (for playbooks); they are written in the same way as the example above and can be extended as needed.
+
+</div>
+
+<Note>
+The events pushed by the plugin must follow the Flashduty standard alert event format: `event_status` is required (one of `Critical`, `Warning`, `Info`, `Ok`), `title_rule` is the alert title, `alert_key` is used to update or automatically recover alerts, and `labels` carries alert labels. For the full field reference, see [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard-alert).
+</Note>
+
+## Severity Mapping
+---
+
+<div class="md-block">
+
+The mapping from Logease alert levels to Flashduty severities is defined by `LEVEL_MAP` in the plugin script. The example above uses the following mapping, which you can adjust as needed:
+
+| Logease Alert Level | Flashduty | Status |
+| --- | --- | --- |
+| critical | Critical | Critical |
+| high | Critical | Critical |
+| mid | Warning | Warning |
+| low | Info | Info |
+| info | Info | Info |
+| Alert recovery (is_alert_recovery) | Ok | Recovered |
+
+</div>
+
+## FAQ
+---
+
+<details>
+<summary>Why am I not receiving alerts in Flashduty?</summary>
+
+**In Flashduty**
+
+1. Check whether the integration shows a **latest event time**. If not, Flashduty has not received any push; troubleshoot the Logease side first.
+2. If you are using a **shared integration**, confirm that you have configured **routing rules**. Without routing rules, the system rejects new pushes because there is no channel to receive your alerts. In this case, simply configure a routing rule to the target channel.
+
+**In Logease**
+
+1. Check the plugin's runtime logs (stored by default in `/data/rizhiyi/logs/cruxee/plugins`, with the file name matching the name shown at upload) and confirm the script runs without errors and the push request returns successfully.
+2. Make sure the push URL in the script exactly matches the one on the Flashduty integration details page, and `event_status` is one of `Critical`, `Warning`, `Info`, `Ok`; otherwise Flashduty rejects the request.
+3. Make sure the Logease host can access the public domain `api.flashcat.cloud`. If direct access is unavailable, configure an HTTP forward proxy in the script's `proxies` field.
+
+If the issue persists after these steps, please contact us **with the request_id from the push response**.
+
+</details>

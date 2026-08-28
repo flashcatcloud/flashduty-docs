@@ -64,6 +64,8 @@ export const docMap = {
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
   DbPull: `${alertBase}/db-pull.mdx`,
+  Emqx: `${alertBase}/emqx.mdx`,
+  Rizhiyi: `${alertBase}/rizhiyi.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
@@ -92,7 +94,5 @@ export const docMap = {
 export const optionalMissingKeys = [
   // These keys are referenced defensively by fc-saas-web but were not present
   // in the old published knowledge-base package either.
-  'Emqx',
-  'Rizhiyi',
   'Datadog'
 ];

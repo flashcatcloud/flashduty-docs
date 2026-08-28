@@ -1,0 +1,171 @@
+---
+title: "EMQX 告警集成"
+description: "通过 Webhook 将 EMQX 的告警事件推送到 Flashduty，实现告警事件自动化降噪处理"
+keywords: ["告警集成", "EMQX", "MQTT", "监控告警", "数据接入"]
+---
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下2种方式，获取一个集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警事件路由到不同的协作空间，优先选择此方式，更简单。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，进入某个空间的详情页面
+  2. 选择 **集成数据** tab，点击 **添加一个集成**，进入添加集成页面
+  3. 选择 **EMQX** 集成，点击 **保存**，生成卡片。
+  4. 点击生成的卡片，可以查看到 **推送地址**，复制备用，完成。
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据告警事件的 Payload 信息，将告警路由到不同的协作空间，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心=>告警事件**，进入集成选择页面。
+  2. 选择 **EMQX** 集成：
+        - **集成名称**：为当前集成定义一个名称。
+  3. 配置默认路由，并选择对应的协作空间（集成创建后可以前往 `路由` 进行更多路由规则的配置）。
+  4. 点击 **保存** 后，复制当前页面的新生成的 **推送地址** 备用。
+  5. 完成。
+
+  </Accordion>
+</AccordionGroup>
+</div>
+
+## 在 EMQX
+---
+
+EMQX Cloud（托管服务）与自建 EMQX 的接入方式不同，请根据您的部署形态选择。
+
+### EMQX Cloud（托管服务）
+
+EMQX Cloud 内置了 Flashduty 告警集成类型，配置步骤如下：
+
+<div className="md-block">
+
+1. 登录 EMQX Cloud 控制台，进入您的部署，选择 **告警 → 告警集成**（Alerts → Alert Integrations）
+2. 在 Webhook 集成区域点击 **新建**，类型选择 **FlashDuty**
+3. 将 Flashduty 集成的推送地址粘贴到 URL 输入框
+4. 点击 **确认** 保存，然后可以点击 **测试** 发送一条测试告警，验证 Flashduty 是否正常接收
+
+</div>
+
+配置完成后，EMQX Cloud 会在告警产生时以 POST 请求推送告警到推送地址，推送内容携带 `deployment_id`、`level`、`message`、`region` 四个标签。
+
+### 自建 EMQX
+
+自建 EMQX 需要通过规则引擎将系统告警事件转发到推送地址。
+
+<Note>
+规则引擎自 EMQX 5.8.5 起支持 `$events/sys/alarm_activated`（告警激活）和 `$events/sys/alarm_deactivated`（告警解除）两个系统告警事件，请确保您的 EMQX 版本不低于 5.8.5。
+</Note>
+
+<Warning>
+EMQX Dashboard「监控 → 告警」页面提供的 Webhook 快捷配置推送的是 EMQX 原生告警格式，与 Flashduty 要求的事件格式不一致，请按以下步骤通过规则引擎自定义请求体。
+</Warning>
+
+<div className="md-block">
+
+**步骤 1：创建告警触发规则**
+
+1. 登录 EMQX Dashboard，进入 **集成 → 规则**，点击 **新建规则**
+2. 在 SQL 编辑器中输入以下语句，匹配系统告警激活事件：
+
+   ```sql
+   SELECT
+     name,
+     message,
+     node
+   FROM
+     "$events/sys/alarm_activated"
+   ```
+
+3. 在动作区域添加 **HTTP 服务器** 动作：
+   - 连接器 URL 填写 Flashduty 集成的推送地址（需携带 integration_key 参数）
+   - 请求方法选择 `POST`
+   - 请求体填写以下模板，将告警字段转换为 Flashduty 标准告警事件格式：
+
+   ```json
+   {
+     "event_status": "Critical",
+     "alert_key": "emqx::${node}::${name}",
+     "title_rule": "EMQX 告警：${message}",
+     "description": "${message}",
+     "labels": {
+       "alarm_name": "${name}",
+       "node": "${node}"
+     }
+   }
+   ```
+
+   模板中的 `${name}`、`${message}`、`${node}` 会被规则 SQL 输出的字段值替换。
+
+4. 保存规则
+
+**步骤 2：创建告警恢复规则**
+
+按照步骤 1 再创建一条规则，SQL 语句改为匹配告警解除事件：
+
+```sql
+SELECT
+  name,
+  message,
+  node
+FROM
+  "$events/sys/alarm_deactivated"
+```
+
+请求体模板与步骤 1 相同，但 `event_status` 固定填写为 `Ok`，以便告警解除时自动恢复 Flashduty 中对应的告警。
+
+</div>
+
+## 严重程度映射关系
+---
+
+<div className="md-block">
+
+**EMQX Cloud（托管服务）**：EMQX Cloud 自动按以下关系映射告警等级：
+
+| EMQX Cloud 告警等级 | Flashduty | 状态 |
+| --- | --- | --- |
+| Critical | Critical | 严重 |
+| Error / Warning | Warning | 警告 |
+| Info | Info | 提醒 |
+
+**自建 EMQX**：告警等级由规则请求体模板中的 `event_status` 字段决定。上述示例中告警激活推送 `Critical`、告警解除推送 `Ok`，您可以在模板中将激活等级改为 `Warning` 或 `Info`。`event_status` 的合法取值为 `Critical`、`Warning`、`Info`、`Ok`。
+
+</div>
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么在 Flashduty 没有收到告警？">
+
+**在 Flashduty On-call**
+
+1. 查看集成是否展示了 **最新事件时间**？如果没有，代表 Flashduty 没有收到推送，请优先排查 EMQX 侧配置。
+2. 如果您使用的是 **共享集成**，优先确认您是否配置了 **路由规则**。不设置路由规则，系统会直接拒绝新的推送，因为没有协作空间可以承接您的告警。这种情况下，直接配置路由规则到您期望的空间即可。
+
+**在 EMQX**
+
+1. 自建 EMQX：确认规则的请求体模板与上文示例一致，`event_status` 必须是 `Critical`、`Warning`、`Info`、`Ok` 之一，否则 Flashduty 会拒绝该请求。
+2. 在 EMQX Dashboard 的规则详情页查看规则的运行统计，确认动作执行成功、无失败计数。
+3. 确认 EMQX 节点可以访问外网 `api.flashcat.cloud` 域名。
+
+如果以上步骤执行之后，仍然没有查询到问题根因，请 **携带请求响应中的 request_id** 联系我们。
+
+</Accordion>
+</AccordionGroup>

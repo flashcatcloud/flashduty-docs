@@ -1,0 +1,176 @@
+---
+title: "日志易告警集成"
+description: "通过自定义告警插件将日志易告警事件推送到 Flashduty，实现告警事件自动化降噪处理"
+keywords: ["告警集成", "日志易", "日志监控", "监控告警", "数据接入"]
+---
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下2种方式，获取一个集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警事件路由到不同的协作空间，优先选择此方式，更简单。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，进入某个空间的详情页面
+  2. 选择 **集成数据** tab，点击 **添加一个集成**，进入添加集成页面
+  3. 选择 **日志易** 集成，点击 **保存**，生成卡片。
+  4. 点击生成的卡片，可以查看到 **推送地址**，复制备用，完成。
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据告警事件的 Payload 信息，将告警路由到不同的协作空间，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心=>告警事件**，进入集成选择页面。
+  2. 选择 **日志易** 集成：
+        - **集成名称**：为当前集成定义一个名称。
+  3. 配置默认路由，并选择对应的协作空间（集成创建后可以前往 `路由` 进行更多路由规则的配置）。
+  4. 点击 **保存** 后，复制当前页面的新生成的 **推送地址** 备用。
+  5. 完成。
+
+  </Accordion>
+</AccordionGroup>
+</div>
+
+## 在日志易
+---
+
+日志易告警支持邮件、syslog、告警转发和自定义告警插件等通知方式。其中「告警转发」推送的 JSON 结构是日志易的固定格式，与 Flashduty 要求的事件格式不一致，因此请通过 **自定义告警插件**（Python 脚本）将告警转换为标准格式后推送到 Flashduty。
+
+<div className="md-block">
+
+**步骤 1：编写告警插件脚本**
+
+新建一个 Python 文件（如 `FlashdutyWebhook.py`），内容如下，并将脚本开头的 `push_url` 替换为您的 Flashduty 集成推送地址：
+
+```python
+# -*- coding: utf-8 -*-
+import json
+
+import requests
+
+# Flashduty 集成推送地址，替换为控制台上「日志易」集成的推送地址
+push_url = "https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY"
+
+# 前置 HTTP 代理，适用于日志易主机无法直连互联网的场景，不涉及则留空
+proxies = {
+    'http': '',
+    'https': '',
+}
+
+# 日志易告警等级到 Flashduty 告警等级的映射
+LEVEL_MAP = {
+    "critical": "Critical",
+    "high": "Critical",
+    "mid": "Warning",
+    "low": "Info",
+    "info": "Info",
+}
+
+META = {
+    "name": "FlashdutyWebhook",
+    "version": 1,
+    "alias": "Flashduty告警推送",
+    "configs": []
+}
+
+
+def set_logger(reset_logger):
+    global logger
+    logger = reset_logger
+
+
+def content(params, alert):
+    return alert.get("description", "")
+
+
+def handle(params, alert):
+    level = alert.get("strategy", {}).get("trigger", {}).get("level", "low")
+    if alert.get("is_alert_recovery"):
+        event_status = "Ok"
+    else:
+        event_status = LEVEL_MAP.get(level, "Info")
+    event = {
+        "event_status": event_status,
+        "title_rule": alert.get("name", "日志易告警"),
+        "alert_key": "rizhiyi::" + alert.get("name", ""),
+        "description": alert.get("description", ""),
+        "labels": {
+            "alert_name": alert.get("name", ""),
+            "alert_level": level,
+        },
+    }
+    resp = requests.post(push_url, json=event, timeout=10, proxies=proxies)
+    logger.info("push to flashduty, status: %s, resp: %s", resp.status_code, resp.text)
+
+
+def execute_reply(params, alert):
+    handle(params, alert)
+    return "push to flashduty done"
+```
+
+**步骤 2：上传插件**
+
+进入日志易【监控】页面，在【其他】→【告警插件】中上传脚本文件。
+
+**步骤 3：在监控项中引用插件**
+
+编辑需要对接 Flashduty 的监控项，在【添加告警方式】中选择刚上传的插件并保存。日志易还支持平台自身监控（Manager）和剧本（Soar）两类插件，编写方式与上述示例一致，可按需扩展。
+
+</div>
+
+<Note>
+插件推送的事件需遵循 Flashduty 标准告警事件格式：`event_status` 必填（`Critical`、`Warning`、`Info`、`Ok` 之一），`title_rule` 为告警标题，`alert_key` 用于告警的更新与自动恢复，`labels` 为告警标签。完整字段说明请参考 [标准告警事件](/zh/on-call/integration/alert-integration/alert-sources/standard-alert)。
+</Note>
+
+## 严重程度映射关系
+---
+
+<div className="md-block">
+
+日志易到 Flashduty 的告警等级映射由插件脚本中的 `LEVEL_MAP` 决定，上述示例的映射关系如下，您可以按需调整：
+
+| 日志易告警等级 | Flashduty | 状态 |
+| --- | --- | --- |
+| critical | Critical | 严重 |
+| high | Critical | 严重 |
+| mid | Warning | 警告 |
+| low | Info | 提醒 |
+| info | Info | 提醒 |
+| 告警恢复（is_alert_recovery） | Ok | 恢复 |
+
+</div>
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么在 Flashduty 没有收到告警？">
+
+**在 Flashduty On-call**
+
+1. 查看集成是否展示了 **最新事件时间**？如果没有，代表 Flashduty 没有收到推送，请优先排查日志易侧配置。
+2. 如果您使用的是 **共享集成**，优先确认您是否配置了 **路由规则**。不设置路由规则，系统会直接拒绝新的推送，因为没有协作空间可以承接您的告警。这种情况下，直接配置路由规则到您期望的空间即可。
+
+**在日志易**
+
+1. 查看插件运行日志（默认位于 `/data/rizhiyi/logs/cruxee/plugins` 目录，文件名与上传时显示的名称一致），确认脚本执行无报错、推送请求返回成功。
+2. 确认脚本中的推送地址与 Flashduty 集成详情中的地址完全一致，且 `event_status` 取值为 `Critical`、`Warning`、`Info`、`Ok` 之一，否则 Flashduty 会拒绝该请求。
+3. 确认日志易主机可以访问外网 `api.flashcat.cloud` 域名，如无法直连，请在脚本的 `proxies` 中配置 HTTP 正向代理。
+
+如果以上步骤执行之后，仍然没有查询到问题根因，请 **携带请求响应中的 request_id** 联系我们。
+
+</Accordion>
+</AccordionGroup>
