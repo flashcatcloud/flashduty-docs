@@ -1,0 +1,168 @@
+---
+title: "EMQX Alert Integration"
+description: "Push EMQX alert events to Flashduty via Webhook for automated alert noise reduction"
+keywords: ["alert integration", "EMQX", "MQTT", "monitoring alert", "data ingestion"]
+---
+
+<div class="hide">
+
+## In Flashduty
+---
+
+You can obtain an integration push URL through either of these two methods:
+
+### Using Private Integration
+
+Choose this simpler option when you don't need to route alert events to different channels.
+
+<details>
+  <summary>Expand</summary>
+
+  1. Go to the Flashduty console, select **Channel**, and enter a channel's details page
+  2. Select the **Integration** tab, click **Add Integration** to enter the integration page
+  3. Select **EMQX** integration and click **Save** to generate a card
+  4. Click the generated card to view the **push URL**, copy it for later use, and you're done
+
+</details>
+
+### Using Shared Integration
+
+Choose this option when you need to route alerts to different channels based on the alert event's payload information.
+
+<details>
+  <summary>Expand</summary>
+
+  1. Go to the Flashduty console, select **Integration Center=>Alert Events** to enter the integration selection page
+  2. Select **EMQX** integration:
+        - **Integration Name**: Define a name for this integration
+  3. Configure the default route and select the corresponding channel (after the integration is created, you can go to `Route` to configure more routing rules)
+  4. Click **Save** and copy the newly generated **push URL** for later use
+  5. Done
+
+</details>
+</div>
+
+## In EMQX
+---
+
+EMQX Cloud (hosted service) and self-hosted EMQX are integrated differently. Choose the steps that match your deployment.
+
+### EMQX Cloud (Hosted Service)
+
+EMQX Cloud provides a built-in Flashduty alert integration type:
+
+<div class="md-block">
+
+1. Log in to the EMQX Cloud console, enter your deployment, and go to **Alerts → Alert Integrations**
+2. Click **+ New** under Webhook integration and select **FlashDuty** as the type
+3. Paste the Flashduty integration push URL into the URL field
+4. Click **Confirm** to save. You can then click **Test** to send a sample alert and verify that Flashduty receives it
+
+</div>
+
+Once configured, EMQX Cloud pushes alerts to the push URL with POST requests, carrying four labels: `deployment_id`, `level`, `message`, and `region`.
+
+### Self-hosted EMQX
+
+For self-hosted EMQX, forward system alarm events to the push URL through the rule engine.
+
+<Note>
+The rule engine supports the `$events/sys/alarm_activated` and `$events/sys/alarm_deactivated` system alarm events starting from EMQX 5.8.5. Make sure your EMQX version is 5.8.5 or later.
+</Note>
+
+<Warning>
+The quick Webhook setup on the EMQX Dashboard **Monitoring → Alarms** page pushes EMQX's native alarm format, which does not match the event format required by Flashduty. Follow the steps below to customize the request body through the rule engine.
+</Warning>
+
+<div class="md-block">
+
+**Step 1: Create a rule for alarm activation**
+
+1. Log in to the EMQX Dashboard, go to **Integration → Rules**, and click **Create Rule**
+2. Enter the following statement in the SQL editor to match system alarm activation events:
+
+   ```sql
+   SELECT
+     name,
+     message,
+     node
+   FROM
+     "$events/sys/alarm_activated"
+   ```
+
+3. Add an **HTTP Server** action:
+   - Set the connector URL to the Flashduty integration push URL (with the integration_key parameter)
+   - Select `POST` as the request method
+   - Fill in the request body with the following template, which converts alarm fields into the Flashduty standard alert event format:
+
+   ```json
+   {
+     "event_status": "Critical",
+     "alert_key": "emqx::${node}::${name}",
+     "title_rule": "EMQX alarm: ${message}",
+     "description": "${message}",
+     "labels": {
+       "alarm_name": "${name}",
+       "node": "${node}"
+     }
+   }
+   ```
+
+   The `${name}`, `${message}`, and `${node}` variables in the template are replaced with the field values output by the rule SQL.
+
+4. Save the rule
+
+**Step 2: Create a rule for alarm deactivation**
+
+Create another rule following Step 1, with the SQL statement matching alarm deactivation events:
+
+```sql
+SELECT
+  name,
+  message,
+  node
+FROM
+  "$events/sys/alarm_deactivated"
+```
+
+Use the same request body template as Step 1, but set `event_status` to `Ok`, so the corresponding alert in Flashduty is automatically recovered when the alarm is deactivated.
+
+</div>
+
+## Severity Mapping
+---
+
+<div class="md-block">
+
+**EMQX Cloud (hosted service)**: EMQX Cloud automatically maps alert levels as follows:
+
+| EMQX Cloud Alert Level | Flashduty | Status |
+| --- | --- | --- |
+| Critical | Critical | Critical |
+| Error / Warning | Warning | Warning |
+| Info | Info | Info |
+
+**Self-hosted EMQX**: The alert severity is determined by the `event_status` field in the rule's request body template. In the examples above, alarm activation pushes `Critical` and alarm deactivation pushes `Ok`. You can change the activation severity to `Warning` or `Info` in the template. Valid values of `event_status` are `Critical`, `Warning`, `Info`, and `Ok`.
+
+</div>
+
+## FAQ
+---
+
+<details>
+<summary>Why am I not receiving alerts in Flashduty?</summary>
+
+**In Flashduty**
+
+1. Check whether the integration shows a **latest event time**. If not, Flashduty has not received any push; troubleshoot the EMQX side first.
+2. If you are using a **shared integration**, confirm that you have configured **routing rules**. Without routing rules, the system rejects new pushes because there is no channel to receive your alerts. In this case, simply configure a routing rule to the target channel.
+
+**In EMQX**
+
+1. Self-hosted EMQX: Make sure the rule's request body template matches the examples above, and `event_status` is one of `Critical`, `Warning`, `Info`, `Ok`; otherwise Flashduty rejects the request.
+2. On the rule details page of the EMQX Dashboard, check the rule's runtime statistics and confirm the action succeeds without failures.
+3. Make sure the EMQX nodes can access the public domain `api.flashcat.cloud`.
+
+If the issue persists after these steps, please contact us **with the request_id from the push response**.
+
+</details>
