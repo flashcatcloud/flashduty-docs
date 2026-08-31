@@ -1,7 +1,7 @@
 ---
 title: Flashduty Go SDK
 sidebarTitle: Go SDK
-description: "go-flashduty is the official open-source Go SDK for Flashduty — a typed, strictly 1:1 wrapper over the Open API currently covering all 337 API operations across 39 services."
+description: "go-flashduty is the official open-source Go SDK for Flashduty — a typed, strictly 1:1 wrapper over the Open API currently covering all 335 API operations across 38 services."
 keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "client"]
 ---
 
@@ -11,7 +11,7 @@ keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "client"]
 
 `go-flashduty` is the official open-source Go client for Flashduty, covering every REST endpoint of the Flashduty Open API. It follows the same design as [go-github](https://github.com/google/go-github) — service groups, typed requests and responses, a composable transport layer — and stays strictly 1:1 with the OpenAPI spec: each method maps to exactly one HTTP call, returns `(*T, *Response, error)`, and performs no implicit cross-endpoint aggregation or enrichment.
 
-The SDK currently covers **337 API operations** across **39 services**, all generated from the Flashduty OpenAPI spec, covered by unit tests, and end-to-end verified against the live API.
+The SDK currently covers **335 API operations** across **38 services**, all generated from the Flashduty OpenAPI spec, covered by unit tests, and end-to-end verified against the live API.
 
 <Note>
 The SDK is deliberately "thin." Consumer-side logic such as short-ID resolution and cross-endpoint orchestration belongs in the caller (CLI / MCP), not stuffed into the SDK or shoehorned into an endpoint. This keeps the SDK strictly one-to-one with the API — predictable, generatable, and verifiable.
@@ -372,4 +372,70 @@ return sc.Err()
 
 <Note>
 `NewExportScanner` is configured with a per-line buffer large enough to hold the wider event lines in a transcript (such as tool output or LLM calls), free of the default 64KB token limit. On any non-2xx status, the response body is still a regular JSON error envelope — `Export` reads and closes it and returns a typed error (`*ErrorResponse`, or `*RateLimitError` on 429), with the `io.ReadCloser` being `nil`, consistent with the other generated endpoints.
+</Note>
+
+## File upload and download
+
+---
+
+A few endpoints are not JSON request-response: file uploads use `multipart/form-data`, and file downloads (such as CSV exports) return a raw file body. The SDK supports both.
+
+### File upload
+
+Multipart upload endpoints cannot be served by the generated JSON path, so the SDK provides hand-written methods. The file streams through an `io.Reader` and is never buffered in memory:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `AlertEnrichment.MappingDataWriteUpload` | `POST /enrichment/mapping/data/upload` | Bulk-load label mapping data from a CSV file |
+| `Skills.WriteUpload` | `POST /safari/skill/upload` | Upload a skill archive (`.skill` / `.zip` / `.tar.gz` / `.tgz`) to create or replace a skill |
+
+`MappingDataUploadRequest` fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `SchemaID` | string | - | ID of the target mapping schema (required) |
+| `DoNotTruncateFirst` | bool | `false` | By default existing data is truncated before loading; set `true` to append instead |
+| `File` | io.Reader | - | CSV content (required, max 100 MB; the header row must include all of the schema's source/result label names) |
+| `Filename` | string | `"mapping.csv"` | Multipart file name |
+
+`SkillUploadRequest` fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `File` | io.Reader | - | Skill archive content (required, max 100 MB) |
+| `Filename` | string | `"skill.zip"` | Multipart file name |
+| `TeamID` | int64 | `0` | Team scope for the created skill; `0` means account-wide. Ignored when replacing a specific skill via `SkillID` |
+| `Replace` | bool | `false` | Overwrite an existing skill on a name collision; required when `SkillID` is given |
+| `SkillID` | string | - | Target skill to replace (requires `Replace`) |
+
+```go
+f, err := os.Open("mapping.csv")
+if err != nil {
+	return err
+}
+defer f.Close()
+
+resp, err := client.AlertEnrichment.MappingDataWriteUpload(ctx, &flashduty.MappingDataUploadRequest{
+	SchemaID: "665f1a2b3c4d5e6f7a8b9c01",
+	File:     f,
+})
+```
+
+### File download
+
+CSV export endpoints return a raw file body rather than a JSON envelope. These methods return `(*Response, error)`, and the file content is available on `Response.Raw` (`[]byte`):
+
+```go
+resp, err := client.AlertEnrichment.MappingDataReadDownload(ctx, &flashduty.MappingSchemaIDRequest{
+	SchemaID: "665f1a2b3c4d5e6f7a8b9c01",
+})
+if err != nil {
+	return err
+}
+// resp.Raw holds the CSV file content
+os.WriteFile("mapping-download.csv", resp.Raw, 0o644)
+```
+
+<Note>
+`v0.14.3` mistakenly dropped the binary-download methods and generated a no-arg upload method; that version is retracted — use `v0.14.4` or later.
 </Note>

@@ -1,7 +1,7 @@
 ---
 title: Flashduty Go SDK
 sidebarTitle: Go SDK
-description: "go-flashduty 是 Flashduty 官方开源的 Go SDK，与 Open API 严格 1:1 的类型化封装，当前覆盖全部 337 个 API 操作、39 个服务。"
+description: "go-flashduty 是 Flashduty 官方开源的 Go SDK，与 Open API 严格 1:1 的类型化封装，当前覆盖全部 335 个 API 操作、38 个服务。"
 keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "客户端"]
 ---
 
@@ -11,7 +11,7 @@ keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "客户端"]
 
 `go-flashduty` 是 Flashduty 官方开源的 Go 客户端，覆盖 Flashduty Open API 的每一个 REST 接口。它采用与 [go-github](https://github.com/google/go-github) 一致的设计风格——服务分组、类型化请求与响应、可组合传输层——并与 OpenAPI 规范保持严格 1:1：每个方法对应且仅对应一次 HTTP 调用，返回 `(*T, *Response, error)`，不做任何跨接口的隐式聚合或增强。
 
-SDK 当前覆盖 **337 个 API 操作**、**39 个服务**，全部由 Flashduty OpenAPI 规范生成，经单元测试覆盖，并针对线上 API 做过端到端验证。
+SDK 当前覆盖 **335 个 API 操作**、**38 个服务**，全部由 Flashduty OpenAPI 规范生成，经单元测试覆盖，并针对线上 API 做过端到端验证。
 
 <Note>
 SDK 故意保持"薄"。诸如短 ID 解析、跨接口编排等消费侧逻辑应放在调用方（CLI / MCP）中，而不是塞进 SDK 或滥用某个接口。这样 SDK 始终与 API 一一对应,可预测、可生成、可校验。
@@ -372,4 +372,70 @@ return sc.Err()
 
 <Note>
 `NewExportScanner` 配置的单行缓冲区足以容纳转录中较宽的事件行（如 tool 输出、LLM 调用),不受默认 64KB token 上限限制。任何非 2xx 状态下,响应体仍是常规 JSON 错误信封——`Export` 会读取并关闭它,返回类型化错误（`*ErrorResponse`,429 时为 `*RateLimitError`),此时 `io.ReadCloser` 为 `nil`,与其他生成接口行为一致。
+</Note>
+
+## 文件上传与下载
+
+---
+
+少数接口不是 JSON 请求-响应：文件上传走 `multipart/form-data`，文件下载（如 CSV 导出）返回原始文件流。SDK 对这两类接口提供了对应的支持。
+
+### 文件上传
+
+multipart 上传接口无法由生成代码的 JSON 路径承载，SDK 以手写方法提供，文件内容以 `io.Reader` 流式传输，不会整段缓冲进内存：
+
+| 方法 | 接口 | 说明 |
+|------|------|------|
+| `AlertEnrichment.MappingDataWriteUpload` | `POST /enrichment/mapping/data/upload` | 通过 CSV 批量导入标签映射数据 |
+| `Skills.WriteUpload` | `POST /safari/skill/upload` | 上传 Skill 归档（`.skill` / `.zip` / `.tar.gz` / `.tgz`）创建或替换 Skill |
+
+`MappingDataUploadRequest` 字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `SchemaID` | string | - | 目标映射表的 ID（必填） |
+| `DoNotTruncateFirst` | bool | `false` | 默认先清空表内既有数据再导入；置 `true` 则追加 |
+| `File` | io.Reader | - | CSV 内容（必填，最大 100 MB；表头必须包含映射表的全部源/结果标签名） |
+| `Filename` | string | `"mapping.csv"` | multipart 文件名 |
+
+`SkillUploadRequest` 字段：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `File` | io.Reader | - | Skill 归档内容（必填，最大 100 MB） |
+| `Filename` | string | `"skill.zip"` | multipart 文件名 |
+| `TeamID` | int64 | `0` | Skill 归属团队；`0` 表示账户级。通过 `SkillID` 替换指定 Skill 时忽略 |
+| `Replace` | bool | `false` | 名称冲突时覆盖既有 Skill；提供 `SkillID` 时必须为 `true` |
+| `SkillID` | string | - | 指定要替换的 Skill ID（需配合 `Replace`） |
+
+```go
+f, err := os.Open("mapping.csv")
+if err != nil {
+	return err
+}
+defer f.Close()
+
+resp, err := client.AlertEnrichment.MappingDataWriteUpload(ctx, &flashduty.MappingDataUploadRequest{
+	SchemaID: "665f1a2b3c4d5e6f7a8b9c01",
+	File:     f,
+})
+```
+
+### 文件下载
+
+CSV 导出等接口返回的不是 JSON 信封，而是原始文件流。这类方法返回 `(*Response, error)`，文件内容通过 `Response.Raw`（`[]byte`）读取：
+
+```go
+resp, err := client.AlertEnrichment.MappingDataReadDownload(ctx, &flashduty.MappingSchemaIDRequest{
+	SchemaID: "665f1a2b3c4d5e6f7a8b9c01",
+})
+if err != nil {
+	return err
+}
+// resp.Raw 即为 CSV 文件内容
+os.WriteFile("mapping-export.csv", resp.Raw, 0o644)
+```
+
+<Note>
+`v0.14.3` 曾错误地下架了二进制下载方法并生成了无参数的上传方法，该版本已被 retract——请使用 `v0.14.4` 或更高版本。
 </Note>

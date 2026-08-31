@@ -143,7 +143,7 @@ Post-mortem verbs live under the `incident` command group (there is no standalon
 
 ```bash
 flashduty incident post-mortem-init <incident-id> [<id2>...]        # Initialize a report from 1–10 incidents (--template-id required)
-flashduty incident post-mortem-list [flags]                         # List reports (server defaults to published; pass --status drafting for drafts)
+flashduty incident post-mortem-list [flags]                         # List reports (omit --status to return all statuses; --status published|drafting filters by status)
 flashduty incident post-mortem-info <post-mortem-id>                # Get report detail
 flashduty incident post-mortem-title-reset <post-mortem-id>         # Set the title
 flashduty incident post-mortem-content-reset <post-mortem-id>       # Replace the Markdown body (--markdown-file)
@@ -179,6 +179,7 @@ Supports `--channel`, `--since`, `--until`, `--type`, `--limit`, `--page`.
 flashduty member list [flags]       # List members
 flashduty member info-reset [flags] # Update a member's profile
 flashduty member invite [flags]     # Invite new members (up to 20 per call)
+flashduty member role-update <member-id> [flags] # Update a member's roles (--role-ids replaces the full set)
 ```
 
 `member list` supports `--query` (free-text search by name or email), `--role-id`, `--page`, `--limit`, `--orderby`, `--asc`.
@@ -186,6 +187,8 @@ flashduty member invite [flags]     # Invite new members (up to 20 per call)
 `member info-reset` identifies the member by exactly one of `--member-id`, `--member-name`, `--email`, `--phone`, or `--ref-id`; the fields to change go into the required body via `--data '{"updates":{...}}'`. With `--from api`, an updated email or phone is marked verified directly when the account has member invites disabled.
 
 `member invite` takes the member list via `--data '{"members":[...]}'`. When the account has member invites disabled and `--from api` is set, members are created directly in the enabled state with email/phone marked verified — no invitation is sent.
+
+`member role-update` takes the member ID as a positional argument and sets the member's complete role set at once via `--role-ids` (**full replacement, not additive**; get role IDs from `flashduty role list`). Role IDs that do not exist are silently dropped; leaving `--role-ids` empty resets the member to the built-in Viewer role (ID 8).
 
 ### team — Team management
 
@@ -384,6 +387,30 @@ flashduty rum issue-preset-severity-rules-history-list <application-id>    # Cha
 flashduty rum issue-preset-severity-rules-history-revert <application-id> --version <v>  # Revert
 ```
 
+#### Issue export (issue-export)
+
+Export error-tracking issues as CSV for offline analysis or BI tooling. The export is capped at a fixed 100 rows (`--limit`/`--page` do not apply), so redirect the output to a file:
+
+```bash
+flashduty rum issue-export --start-time 1711929600000 --end-time 1714521600000 > issues.csv
+```
+
+Common flags:
+
+| Flag | Description |
+|------|-------------|
+| `--start-time` / `--end-time` | Time-range bounds as Unix epoch milliseconds (both required); `--end-time` must be greater than `--start-time`, and the range is capped at 183 days |
+| `--export-fields` | CSV columns to export, in the given order; repeatable. An empty array uses the default column set. Values: `issue_id`, `issue_url`, `application_name`, `service`, `error_type`, `error_message`, `status`, `severity`, `is_crash`, `error_count`, `session_count`, `first_seen_at`, `first_seen_version`, `last_seen_at`, `last_seen_version`, `versions`, `suspected_cause`, `resolved_at` |
+| `--by-intersection` | When `true`, match by time-range overlap: export issues still active within the window (`last_seen_timestamp` >= `start_time`) even if created before it. Default `false` exports only issues created inside the window |
+| `--statuses` | Filter by triage status: `for_review` (pending triage), `reviewed`, `ignored`, `resolved` |
+| `--suspected-causes` | Filter by suspected cause category: `api.failed_request`, `network.error`, `code.exception`, `code.invalid_object_access`, `code.invalid_argument`, `unknown` |
+| `--console-origin` | Console origin used to build the `issue_url` column, e.g. `https://console.flashcat.cloud`; the service cannot infer it (SaaS, on-premises, and dev releases answer on different origins) |
+| `--time-zone` | IANA time zone used to render timestamps in the CSV; default `Asia/Shanghai` |
+| `--application-ids` / `--team-ids` | Filter by application IDs / team IDs |
+| `--orderby` / `--asc` | Sort field (`created_at`, `updated_at`, `session_count`, `error_count`, `severity`; default `updated_at`) and ascending order (descending by default) |
+| `--error-required` | When `true`, export only issues with at least one associated error event |
+| `--dql` / `--sql` | Advanced filter query; the two are mutually exclusive |
+
 #### Resource info (resource-info)
 
 ```bash
@@ -524,6 +551,21 @@ Common flags:
 | `--delay-seconds` | Shift the query window backward by a few seconds to compensate for ingestion latency |
 | `--data` | Add datasource-specific parameters such as `args` |
 
+#### Alert rule management (rule-create / rule-update)
+
+```bash
+flashduty monit rule-create <folder-id> [flags]   # Create an alert rule under a folder
+flashduty monit rule-update <folder-id> [flags]   # Update an existing alert rule
+```
+
+Both take the folder ID as a positional argument (it must be an existing folder — get IDs from `flashduty monit folder-list`; `0` is rejected with a `folder_not_found` error) and share the same required inputs: `--name` (rule name, unique within the folder), `--cron-pattern` (schedule expression: a 6-field cron with seconds or an `@every 30s` interval descriptor; it must not start with `CRON_TZ=`/`TZ=` — use `--timezone` for the timezone), `--ds-type` (datasource type; allowed values are listed by `flashduty monit rule-dstypes`), and `rule_configs` (check configuration: query list plus trigger/recovery conditions, passed via `--data`). At least one of `--ds-list` (datasource name patterns, wildcards supported) and `--ds-ids` (datasource IDs, which survive datasource renames) must be provided; the two are merged to decide which datasources the rule monitors. `rule-update` additionally requires `--id` to target the rule.
+
+<Warning>
+`rule-update` uses **full-overwrite** semantics: the submitted configuration replaces every field of the existing rule, not just the fields you pass. Read the current configuration first (e.g. `flashduty monit rule-list`), modify it, and submit the whole thing.
+</Warning>
+
+Other common flags: `--enabled` (setting it to `false` makes the server clean up the rule's active alerts), `--channel-ids` (channels to send alerts to), `--delay-seconds` (shift the evaluation window backward to compensate for ingestion latency), `--timezone` (IANA timezone names only, e.g. `Asia/Shanghai`; treated as `Asia/Shanghai` when empty), `--repeat-interval` / `--repeat-total` (notification repeat interval in seconds and max repeat count), `--debug-log-enabled` (the edge emits detailed evaluation logs — useful when a rule does not trigger as expected), `--description` and `--description-type` (`text` or `markdown`). `annotations`, `labels`, and `enabled_times` (active time windows) are passed via `--data`.
+
 ### monit servicemap — Service topology (Beta)
 
 The `monit servicemap-*` command family accesses the ServiceMap capability; see [Service Map](/en/monitors/targets/servicemap) for the UI workflow.
@@ -581,7 +623,7 @@ Common `create` flags:
 
 `update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope is immutable after creation, so `update` exposes no scope flag.
 
-`runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (`schedule`/`debug`/`http_post`), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
+`runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`/`blocked` — `blocked` is a terminal state meaning the run produced output but a connector is waiting on a human authorization), `--trigger-kind` (`schedule`/`debug`/`http_post`), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
 
 <Warning>
 **Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**, which defaults at creation to the caller's member timezone, falling back to the account timezone when the member has none. Pass the user's local time directly — do **not** convert it to UTC. Neither `create` nor `update` has a `--timezone` flag: to pin a different timezone at creation, use the generated command `flashduty safari automation-rule-create --timezone`; a created rule's timezone cannot be changed via `update`.
@@ -589,7 +631,7 @@ Common `create` flags:
 
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **337 API operations**, and the CLI generates corresponding resource-organized commands for 336 of them (`session-read-export` is provided by the hand-written `session export` / `safari session-export` commands). In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **335 API operations**, and the CLI generates corresponding commands for 332 of them; the remaining 3 are served by hand-written commands: the streaming `session-read-export` (provided by `session export` / `safari session-export`) and two multipart file-upload operations (`enrichment mapping-data-upload` and `safari skill-upload`, documented below). A few more hand-written commands provide capabilities outside the spec, such as `automation fire` (authenticated with a trigger token instead of an APP Key). Generated commands are organized into top-level command groups by resource. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
 - **AI SRE (`safari`)**: a2a-agents, automations, knowledge, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
@@ -635,6 +677,24 @@ Common flags:
 | `--force` | On file delete, skip the "still referenced" check; referrers are then returned as warnings |
 
 `knowledge-file-put` requires `--content-b64` to be the Base64 encoding of valid UTF-8 text; `--content-type` is inferred from the file extension when omitted. `knowledge-file-delete` refuses to remove a file still referenced by other pack files unless `--force` is passed, in which case the referrers are returned as warnings.
+
+#### skill-upload — Upload a skill archive
+
+```bash
+flashduty safari skill-upload --file my-skill.zip                        # Upload an archive to create a skill
+flashduty safari skill-upload --file my-skill.zip --replace --team-id 42 # Overwrite the same-named skill and scope it to a team
+```
+
+Accepts `.skill` / `.zip` / `.tar.gz` / `.tgz` archives; `--file -` streams the archive from stdin. By default the upload fails when a skill with the same name already exists; pass `--replace` to overwrite it instead — matched by `--skill-id` when given (`--skill-id` only takes effect together with `--replace` and errors out otherwise), or by skill name. `--team-id` scopes the created skill to a team (`0` or omitted means account-wide). API: `POST /safari/skill/upload`.
+
+#### enrichment mapping-data-upload — Upload mapping data
+
+```bash
+flashduty enrichment mapping-data-upload --schema-id <id> --file rows.csv          # Bulk-load mapping data from a CSV file
+cat rows.csv | flashduty enrichment mapping-data-upload --schema-id <id> --file -  # Stream the CSV from stdin
+```
+
+Bulk-loads data into a mapping schema. `--schema-id` (the target schema's ObjectID) and `--file` are both required; `--file -` reads the CSV from stdin. By default the existing data is **truncated before the new rows load**; pass `--do-not-truncate-first` to append instead. The CSV header row must include all of the schema's source/result label names, and the file may be at most 100 MB. API: `POST /enrichment/mapping/data/upload`.
 
 ### Utility commands
 
@@ -717,7 +777,7 @@ For example, export only an incident ID, title, and progress:
 flashduty incident list --json --fields incident_id,title,progress
 ```
 
-When a list projection (`incident list`, `incident similar`, `alert-event list`) exceeds its limit, the CLI keeps the selected field names, shortens long strings, and marks them with `...`. If non-string fields alone exceed the limit, the command asks you to reduce the fields or result count.
+When a list projection (`incident list`, `incident similar`, `alert-event list`) exceeds its limit, the CLI first reduces the row count: it keeps only the leading rows that fit within the limit, with every field value in those rows left intact, and prints a note to stderr stating how many of the total rows were emitted (stdout is untouched, so piping into `jq` is unaffected). Only when a single row alone exceeds the limit does it shorten that row's long string values: it finds one byte cap that works for every shortenable field, shortens only the field(s) actually responsible for the overflow (typically a long title) and marks them with `...`, leaving shorter fields untouched. Identifier fields ending in `_id` or `_key` (such as `incident_id`) are exempt at every step and always survive byte-intact, so exact matching and follow-up detail lookups keep working. If not even one row fits without touching identifier fields, the command fails with an error naming the largest fields (up to 3, with their byte sizes) — reduce `--limit` or `--fields` in that case.
 
 `incident detail` behaves differently when its projection overflows: the detail is a single object, and a truncated value is indistinguishable from a genuinely short one, so silently shortening it would hand you wrong data. A projection over 8 KiB therefore fails the command outright, and the error names the largest fields (up to 3, with their byte sizes). Reduce the fields in `--fields`, or omit `--fields` entirely to get the full detail, which is not subject to the projection limit.
 

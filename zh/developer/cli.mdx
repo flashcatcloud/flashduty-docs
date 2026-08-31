@@ -143,7 +143,7 @@ flashduty incident work-item-post-mortem-bind [flags]            # 将已转换�
 
 ```bash
 flashduty incident post-mortem-init <incident-id> [<id2>...]        # 用 1–10 个故障初始化复盘（--template-id 必填）
-flashduty incident post-mortem-list [flags]                         # 列出复盘报告（服务端默认只看 published，加 --status drafting 查看草稿）
+flashduty incident post-mortem-list [flags]                         # 列出复盘报告（省略 --status 返回全部状态；--status published|drafting 按状态过滤）
 flashduty incident post-mortem-info <post-mortem-id>                # 查看报告详情
 flashduty incident post-mortem-title-reset <post-mortem-id>         # 设置标题
 flashduty incident post-mortem-content-reset <post-mortem-id>       # 替换正文 Markdown（--markdown-file）
@@ -179,6 +179,7 @@ flashduty change list [flags]    # 列出变更记录（部署、配置变更等
 flashduty member list [flags]       # 列出成员
 flashduty member info-reset [flags] # 更新成员资料
 flashduty member invite [flags]     # 邀请新成员（单次最多 20 人）
+flashduty member role-update <member-id> [flags] # 更新成员角色（--role-ids 全量替换）
 ```
 
 `member list` 支持 `--query`（姓名/邮箱关键字搜索）、`--role-id`、`--page`、`--limit`、`--orderby`、`--asc`。
@@ -186,6 +187,8 @@ flashduty member invite [flags]     # 邀请新成员（单次最多 20 人）
 `member info-reset` 通过 `--member-id`、`--member-name`、`--email`、`--phone` 或 `--ref-id` 之一定位成员，要修改的字段经 `--data '{"updates":{...}}'` 传入（必填）；`--from api` 在账户关闭成员邀请时，可将更新后的邮箱/手机号直接标记为已验证。
 
 `member invite` 的成员列表经 `--data '{"members":[...]}'` 传入；当账户关闭成员邀请且指定 `--from api` 时，成员会直接以启用状态创建（邮箱/手机号标记为已验证），不再发送邀请邮件。
+
+`member role-update` 以位置参数接收成员 ID，通过 `--role-ids` 一次性设置该成员的全部角色（**全量替换，不是追加**；角色 ID 可从 `flashduty role list` 获取）。不存在的角色 ID 会被静默忽略；`--role-ids` 留空时，成员会被重置为内置 Viewer 角色（ID 8）。
 
 ### team — 团队管理
 
@@ -384,6 +387,30 @@ flashduty rum issue-preset-severity-rules-history-list <application-id>    # 修
 flashduty rum issue-preset-severity-rules-history-revert <application-id> --version <v>  # 回滚
 ```
 
+#### 问题导出（issue-export）
+
+将错误追踪问题（issue）导出为 CSV，适合离线分析或导入 BI 工具。导出行数固定上限 100 行（`--limit`/`--page` 对导出无效），建议重定向到文件：
+
+```bash
+flashduty rum issue-export --start-time 1711929600000 --end-time 1714521600000 > issues.csv
+```
+
+常用参数：
+
+| 参数 | 说明 |
+|------|------|
+| `--start-time` / `--end-time` | 时间范围起止，Unix 毫秒时间戳（均必填），`--end-time` 必须大于 `--start-time`，跨度最长 183 天 |
+| `--export-fields` | 要导出的 CSV 列（按给定顺序），可重复；空数组使用默认列集。可选值：`issue_id`、`issue_url`、`application_name`、`service`、`error_type`、`error_message`、`status`、`severity`、`is_crash`、`error_count`、`session_count`、`first_seen_at`、`first_seen_version`、`last_seen_at`、`last_seen_version`、`versions`、`suspected_cause`、`resolved_at` |
+| `--by-intersection` | 设为 `true` 时按时间重叠匹配：导出窗口内仍活跃（`last_seen_timestamp` ≥ `start_time`）的 issue，即使它创建于窗口之前；默认 `false` 只导出窗口内创建的 issue |
+| `--statuses` | 按处理状态过滤：`for_review`（待处理）、`reviewed`、`ignored`、`resolved` |
+| `--suspected-causes` | 按疑似原因类别过滤：`api.failed_request`、`network.error`、`code.exception`、`code.invalid_object_access`、`code.invalid_argument`、`unknown` |
+| `--console-origin` | 控制台地址（如 `https://console.flashcat.cloud`），用于构造 `issue_url` 列；服务端无法自行推断（SaaS、私有部署与开发环境的地址不同） |
+| `--time-zone` | CSV 中时间戳渲染使用的 IANA 时区，默认 `Asia/Shanghai` |
+| `--application-ids` / `--team-ids` | 按应用 ID / 团队 ID 过滤 |
+| `--orderby` / `--asc` | 排序字段（`created_at`、`updated_at`、`session_count`、`error_count`、`severity`，默认 `updated_at`）与是否升序（默认降序） |
+| `--error-required` | 设为 `true` 时只导出至少关联一条错误事件的 issue |
+| `--dql` / `--sql` | 高级过滤查询语句，二者互斥 |
+
 #### 资源信息（resource-info）
 
 ```bash
@@ -524,6 +551,21 @@ flashduty monit preview-sync [flags]
 | `--delay-seconds` | 将查询窗口整体向前平移若干秒，用于补偿采集延迟 |
 | `--data` | 可补充 `args` 等数据源特定参数 |
 
+#### 告警规则管理（rule-create / rule-update）
+
+```bash
+flashduty monit rule-create <folder-id> [flags]   # 在指定文件夹下创建告警规则
+flashduty monit rule-update <folder-id> [flags]   # 更新既有告警规则
+```
+
+两者均以位置参数接收文件夹 ID（必须是已存在的文件夹，可从 `flashduty monit folder-list` 获取；`0` 会被服务端以 `folder_not_found` 拒绝），必填参数相同：`--name`（规则名，同一文件夹内唯一）、`--cron-pattern`（调度表达式：带秒的 6 段 cron 或 `@every 30s` 间隔描述符；不得以 `CRON_TZ=`/`TZ=` 开头，时区请用 `--timezone`）、`--ds-type`（数据源类型，可选值见 `flashduty monit rule-dstypes`）、`rule_configs`（检查配置：查询列表加触发/恢复条件，经 `--data` 传入）。`--ds-list`（数据源名称模式，支持通配符）与 `--ds-ids`（数据源 ID，改名后仍然有效）至少提供一个，两者合并决定规则监控哪些数据源。`rule-update` 另需 `--id` 指定目标规则。
+
+<Warning>
+`rule-update` 是**全量覆盖**语义：提交的配置会替换既有规则的全部字段，而非只改动传入的字段。更新前请先读取现有配置（如 `flashduty monit rule-list`），在其基础上修改后整体提交。
+</Warning>
+
+其他常用参数：`--enabled`（置 `false` 时服务端会清理该规则的活跃告警）、`--channel-ids`（告警发送的协作空间）、`--delay-seconds`（评估窗口整体前移，补偿数据摄入延迟）、`--timezone`（仅接受 IANA 时区名，如 `Asia/Shanghai`；留空按 `Asia/Shanghai` 处理）、`--repeat-interval` / `--repeat-total`（重复通知间隔秒数与次数上限）、`--debug-log-enabled`（边缘端输出详细评估日志，排查规则不触发时有用）、`--description` 与 `--description-type`（`text` 或 `markdown`）。`annotations`、`labels`、`enabled_times`（生效时间窗）经 `--data` 传入。
+
 ### monit servicemap — 服务拓扑（Beta）
 
 `monit servicemap-*` 命令族访问服务拓扑（ServiceMap）能力，页面操作见[服务拓扑](/zh/monitors/targets/servicemap)。
@@ -581,7 +623,7 @@ flashduty automation fire <trigger_id>            # 经 HTTP POST 触发器触�
 
 `update` 可改字段：`--name`、`--prompt`/`--prompt-file`、`--schedule`/`--at`/`--weekday`/`--cron-expr`、`--enable`/`--disable`、`--enable-schedule`/`--disable-schedule`、`--enable-http-post-trigger`/`--disable-http-post-trigger`、`--rotate-http-post-token`、`--environment-kind`/`--environment-id`。个人 / 团队作用域创建后不可变更，`update` 不提供改作用域的参数。
 
-`runs` 支持 `--status`（`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`）、`--trigger-kind`（`schedule`/`debug`/`http_post`）、`--since`/`--until`、`--page`、`--limit`。`fire` 用触发器的 Token 鉴权（`--token`，或环境变量 `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN`），`--text` 传本次运行的上下文，`--data` 传完整 JSON 请求体（内联 JSON 或 `-` 读 stdin）。
+`runs` 支持 `--status`（`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`/`blocked`——`blocked` 为终态，表示已产出输出但某个连接器正等待人工授权）、`--trigger-kind`（`schedule`/`debug`/`http_post`）、`--since`/`--until`、`--page`、`--limit`。`fire` 用触发器的 Token 鉴权（`--token`，或环境变量 `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN`），`--text` 传本次运行的上下文，`--data` 传完整 JSON 请求体（内联 JSON 或 `-` 读 stdin）。
 
 <Warning>
 **时区语义**：`--at` 与 `--cron-expr` 均按**规则时区**的本地挂钟时间理解——规则时区在创建时默认为调用者的成员时区，成员未设置时回退到账户时区。请直接传用户的本地时间，**不要**预先换算成 UTC。CLI 的 `create` / `update` 都没有 `--timezone` 参数：创建时如需固定其它时区，请改用生成命令 `flashduty safari automation-rule-create --timezone`；已创建规则的时区在 `update` 中不可更改。
@@ -589,7 +631,7 @@ flashduty automation fire <trigger_id>            # 经 HTTP POST 触发器触�
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **337 个 API 操作**，CLI 为其中 336 个操作生成对应命令（`session-read-export` 以手工实现的 `session export` / `safari session-export` 命令提供），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **335 个 API 操作**，CLI 为其中 332 个操作生成对应命令；其余 3 个由手工命令提供：流式导出的 `session-read-export`（由 `session export` / `safari session-export` 提供），以及两个 multipart 文件上传操作（`enrichment mapping-data-upload` 与 `safari skill-upload`，见下文）。另有少数手工命令提供 spec 之外的能力，如 `automation fire`（用触发器 Token 而非 APP Key 鉴权）。生成命令按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
 - **AI SRE（`safari`）**：a2a-agents、automations、knowledge、mcp-servers、sessions、skills 等
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
@@ -635,6 +677,24 @@ flashduty safari knowledge-file-delete --rel-path <path> [--force]  # 删除知�
 | `--force` | 删除文件时跳过「仍被其他文件引用」检查，引用方改为以警告形式返回 |
 
 `knowledge-file-put` 的 `--content-b64` 必须是合法 UTF-8 文本的 Base64 编码，`--content-type` 省略时按文件扩展名推断。`knowledge-file-delete` 默认在文件仍被其他知识文件引用时阻止删除；加 `--force` 可强制执行，此时引用方会以警告形式返回。
+
+#### skill-upload — 上传技能归档
+
+```bash
+flashduty safari skill-upload --file my-skill.zip                        # 上传技能归档，创建技能
+flashduty safari skill-upload --file my-skill.zip --replace --team-id 42 # 覆盖同名技能并归属到团队
+```
+
+接受 `.skill` / `.zip` / `.tar.gz` / `.tgz` 归档，`--file -` 从 stdin 流式读取。默认情况下同名技能已存在时上传失败；加 `--replace` 改为覆盖——指定 `--skill-id` 时按 ID 匹配（`--skill-id` 必须与 `--replace` 同用，否则报错），否则按技能名匹配。`--team-id` 指定技能的团队归属（`0` 或不填为账户级）。对应 API：`POST /safari/skill/upload`。
+
+#### enrichment mapping-data-upload — 上传映射数据
+
+```bash
+flashduty enrichment mapping-data-upload --schema-id <id> --file rows.csv          # 上传 CSV 批量导入映射数据
+cat rows.csv | flashduty enrichment mapping-data-upload --schema-id <id> --file -  # 从 stdin 流式上传
+```
+
+向映射模式（mapping schema）批量导入数据。`--schema-id`（目标模式的 ObjectID）与 `--file` 均必填；`--file -` 从 stdin 读取 CSV。默认行为是**先清空既有数据再导入新行**；加 `--do-not-truncate-first` 改为追加。CSV 表头必须包含该模式全部的 source/result 标签名，文件最大 100 MB。对应 API：`POST /enrichment/mapping/data/upload`。
 
 ### 工具命令
 
@@ -717,7 +777,7 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 flashduty incident list --json --fields incident_id,title,progress
 ```
 
-列表投影（`incident list`、`incident similar`、`alert-event list`）超过上限时，CLI 会在保留字段名的前提下截短过长的字符串，并以 `...` 标记；若非字符串字段本身已超过上限，命令会提示减少字段或结果数。
+列表投影（`incident list`、`incident similar`、`alert-event list`）超过上限时，CLI 首先按行数缩减：只保留能放进上限的前 N 行，每一行的所有字段值都完整不截断，并在 stderr 提示实际输出的行数与总行数（管道给 `jq` 等工具时 stdout 不受影响）。仅当单独一行就已超过上限时，才会截短该行内过长的字符串值：找出让所有可截短字段都适用的统一字节上限，只截短真正导致超限的字段（通常是过长的标题）并以 `...` 标记，短于上限的字段原样保留；以 `_id` / `_key` 结尾的标识符字段（如 `incident_id`）在任何一步都不参与截短，始终字节完整，以保证后续精确匹配与详情查询可用。若连一行都无法在不触碰标识符字段的前提下放下，命令会直接报错并点名最大的字段（最多 3 个，含各自字节数），此时请减少 `--limit` 或 `--fields`。
 
 `incident detail` 的投影超限行为不同：详情是单个对象，截断后的值与本身就很短的真实值无法区分，静默截短会返回错误数据，因此投影超过 8 KiB 时命令直接失败，错误信息会点名最大的字段（最多 3 个，含各自字节数）。此时请减少 `--fields` 中的字段，或直接省略 `--fields` 获取不受投影上限约束的完整详情。
 
