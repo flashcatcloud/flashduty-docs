@@ -45,6 +45,7 @@ export const docMap = {
   Guance: `${alertBase}/guance.mdx`,
   Zilliz: `${alertBase}/zilliz.mdx`,
   HuaweiyunAPM: `${alertBase}/huawei-apm.mdx`,
+  HuaweiyunAOM: `${alertBase}/huawei-aom.mdx`,
   ZStack: `${alertBase}/zstack.mdx`,
   Keep: `${alertBase}/keep.mdx`,
   ElastAlert2: `${alertBase}/elastalert2.mdx`,
