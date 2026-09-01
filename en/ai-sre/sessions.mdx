@@ -226,7 +226,66 @@ The preview panel provides **Copy**, **Download**, and **Close** actions.
 Report-type artifacts (such as operational insight reports) can be generated as HTML containing Mermaid diagrams and charts, viewable directly in the rendered view. For operational insight capabilities, see <a href="/en/ai-sre/insight">Operational Insight Reports</a>.
 </Tip>
 
-All published artifacts can also be viewed and managed in one place on the **Artifacts** page in the left navigation (list, search, filter by personal / team scope, rename, download, and delete) — see <a href="/en/ai-sre/artifacts">Artifacts</a>.
+All published artifacts can also be viewed and managed in one place on the **Artifacts** page in the left navigation (list, search, filter by personal / team scope, card / list view toggle, sort by created / modified time, rename, download, and delete) — see <a href="/en/ai-sre/artifacts">Artifacts</a>.
+
+### Status Page Update Drafts
+
+The agent can call the `statuspage_draft` tool to **draft** an announcement for your public status page — a new incident or maintenance event, or an update appended to an existing event. Drafts are saved server-side and rendered in the conversation as a **status page update draft card**; but a draft is **never published automatically**: publishing a status page reaches subscribers immediately and cannot be recalled, so that step is always left to a human — review each item in the status page publish form in the console, then click publish.
+
+#### What's on the draft card
+
+The card reuses the visuals, field order, and component status icons of the console's corresponding cards (IncidentCard / MaintenanceCard), so what reviewers see is exactly what will be published:
+
+| Content | Description |
+|---|---|
+| Title | For a new event, the form's `name` field (backend `title`, up to 255 characters); for an appended update, the title of the event it attaches to — the append-update form has no title field, so this serves as identification only (shows "Untitled status page update" when not provided) |
+| Status / scheduled time | New maintenance shows "Scheduled for 〈start〉 → 〈end〉" (shows "No schedule set" when unset); otherwise the status text — incidents: Investigating / Identified / Monitoring / Resolved; appended maintenance updates: Scheduled / Ongoing / Completed |
+| Body | The `message` field is **fully rendered** as Markdown — this is what customers will read; reviewers must see the whole picture, and it must not appear as plain text |
+| Affected components | One chip per component: component status icon + name (hover shows "name · status") |
+| Target & type | Bottom left shows "Will publish to 〈status page〉" (appended updates show "Update · 〈event title〉"); the right side labels the type: Incident / Maintenance |
+| Warning banner | If the draft message contains Markdown the status page editor doesn't support and that would be **silently dropped** when loaded into the form (headings, code blocks, block quotes, images, strikethrough, inline code), the card lists each one in a warning banner — already detected by the tool at draft time |
+
+#### Card states
+
+| State | Behavior |
+|---|---|
+| Drafting | Skeleton screen, with "Drafting status page update…" at the bottom |
+| Tool error | "Failed to generate draft" + the specific reason; you can ask the AI to try again, or create it manually on the status page |
+| Incomplete draft | "Incomplete draft" + the same hint (the tool returned a result but no usable draft object) |
+| Ready to review | Button is **Review →**: opens the corresponding status page form in the console in a new tab, with the draft content pre-filled (URL convention below) |
+| Published | Button becomes a disabled **Published**; the bottom target becomes a link to the **published change** (`/status-page/{page_id}?menu=incidents\|maintenance&incident\|maintenance={change_id}`), so you can look back at what the draft eventually became |
+| Draft expired / not found | Button becomes a disabled **Draft expired**, with "Draft expired or not found — ask the AI to draft a new one" — treated the same when the console query returns ResourceNotFound or a network error |
+
+Whether it has been published is a fact the card cannot observe on its own (publishing happens in the console, in another tab), so the card queries `GET /status-page/draft/info?draft_id=...` by draft ID, which returns `status: pending | published`. While the draft is still pending, it refreshes every time the window regains focus ("review here, publish there, come back" is the normal path); `published` and "draft not found" are both terminal states, and the result is cached for the lifetime of the current page. Read-only shared sessions don't render the review button, and the draft status query is skipped as well.
+
+#### Handoff URL for review
+
+The draft itself lives server-side (fc-statuspage's draft storage); only the `draft_id` crosses over to the console: the form pulls the body from `/status-page/draft/info` by ID. The URLs combine into four variants by "new / append" × "incident / maintenance":
+
+| Scenario | URL |
+|---|---|
+| New incident | `/status-page/{page_id}?menu=incidents&incident=new&draft={draft_id}` |
+| New maintenance | `/status-page/{page_id}?menu=maintenance&maintenance=new&draft={draft_id}` |
+| Append incident update | `/status-page/{page_id}?menu=incidents&incident={change_id}&action=add-update&draft={draft_id}` |
+| Append maintenance update | `/status-page/{page_id}?menu=maintenance&maintenance={change_id}&action=add-update&draft={draft_id}` |
+
+`action=add-update` makes the detail page auto-expand the append-update form; without it, the route only opens the event itself and the draft is never read. `?draft=` carries only the draft ID — the draft is server-side state, not a chunk of JSON in the URL.
+
+#### Tool specifics
+
+| Field | Description |
+|---|---|
+| `page_id` / `page_name` | Target status page (required) and its display name (used on the card) |
+| `type` | `incident` (incident) / `maintenance` (maintenance) |
+| `change_id` | Omitted = new event; set = append an update to that event. Before drafting, the tool first checks `fduty status-page list` and `fduty status-page change-active-list` — if the target already has an active event, it should append rather than open another one (a second event reads to customers as another separate outage) |
+| `title` / `message` | Title for a new event (≤255 characters) and the body (required, Markdown; the status page editor keeps only bold, italic, links, bulleted / numbered lists, tables, and `---` dividers) |
+| `status` | New incident: `investigating` / `identified` / `monitoring` / `resolved`; new maintenance: omit (whether it advances on schedule is decided by the publish form's toggle); appended maintenance update: `scheduled` / `ongoing` / `completed` |
+| `affected_components` | Affected components (`component_id` + `status`, optionally with display name `name`); incident component status: `operational` / `degraded` / `partial_outage` / `full_outage`, maintenance component status: `operational` / `under_maintenance` |
+| `start_at_seconds` / `end_at_seconds` | Only for a new maintenance: planned window start and end, unix **seconds** (milliseconds and ISO strings are treated as invalid) |
+
+<Note>
+Channel differences: the console (`web`) and automation channels render the card above; IM and API channels don't render cards — instead the agent puts a "[Review & publish](〈the same handoff URL〉)" link at the **start of the reply**, then summarizes the draft points in a sentence or two (IM message truncation doesn't parse Markdown, so the link comes first to be safe). If saving the draft failed (no `review_url`), it falls back to a text summary and points you to the status page in the console to verify manually.
+</Note>
 
 ### Message Actions
 
