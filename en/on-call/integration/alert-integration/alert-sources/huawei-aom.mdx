@@ -1,0 +1,286 @@
+---
+title: "Huawei Cloud AOM alert integration"
+description: "Send Huawei Cloud AOM alerts to Flashduty On-call through SMN notifications or AOM webhook data subscriptions"
+keywords: ["alert integration", "Huawei Cloud AOM", "SMN", "webhook", "data ingestion"]
+---
+
+Huawei Cloud Application Operations Management (AOM) can send triggered and recovered alerts to Flashduty On-call through Simple Message Notification (SMN) or webhook data subscriptions. Both methods use the same AOM integration push URL.
+
+<Info>
+Use **SMN notifications** for most accounts. AOM webhook data subscription is not generally available and should only be used when Huawei Cloud has enabled it for your account.
+</Info>
+
+<div className="hide">
+
+## Create an integration in Flashduty On-call
+
+Use either of the following methods to obtain an integration push URL.
+
+### Use a dedicated integration
+
+Use this method when you do not need to route alerts to different channels.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+    1. In the Flashduty console, select **Channels** and open the target channel.
+    2. Select **Integrations** and click **Add integration**.
+    3. Select **Huawei Cloud AOM** and click **Save**.
+    4. Open the generated integration card and copy the **push URL**.
+  </Accordion>
+</AccordionGroup>
+
+### Use a shared integration
+
+Use this method when you need to route alerts to different channels based on their payload.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+    1. In the Flashduty console, select **Integration Center > Alert events**.
+    2. Select **Huawei Cloud AOM** and enter an integration name.
+    3. Configure the default route and select a channel. You can add more routing rules under **Routes** after creating the integration.
+    4. Click **Save** and copy the generated **push URL**.
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## Prerequisites
+
+- You have created a **Huawei Cloud AOM** integration in Flashduty and obtained its HTTPS push URL.
+- You have created or prepared an AOM alarm rule.
+- To use SMN, your Huawei Cloud account can create topics, subscribe endpoints, and list topics.
+- The alarm rule sends notifications for both **alarm triggered** and **alarm recovered**.
+
+## Method 1: Use SMN
+
+### Create an SMN topic and subscription
+
+<Steps>
+  <Step title="Create an SMN topic">
+    1. Sign in to the Huawei Cloud console and open **Simple Message Notification (SMN)**.
+    2. Select **Topic Management > Topics** and click **Create Topic**.
+    3. Set the topic name to **Flashduty** and save it.
+
+    <Frame>
+      <img src="https://download.flashcat.cloud/flashduty/doc/en/hw/lts-1.png" alt="Create a Flashduty topic in Huawei Cloud SMN" />
+    </Frame>
+  </Step>
+
+  <Step title="Add an HTTPS subscription">
+    1. Open the Flashduty topic and click **Add Subscription**.
+    2. Select **HTTPS** as the protocol.
+    3. Enter the Flashduty AOM integration **push URL** as the endpoint and save the subscription.
+
+    <Frame>
+      <img src="https://download.flashcat.cloud/flashduty/doc/en/hw/lts-3.png" alt="Add the Flashduty HTTPS endpoint to an SMN topic" />
+    </Frame>
+
+    Flashduty verifies the SMN confirmation request and automatically visits the Huawei Cloud confirmation URL. SMN starts sending alerts after the subscription status changes to **Confirmed**.
+  </Step>
+</Steps>
+
+### Configure an AOM message template
+
+In the AOM 2.0 console, go to **Alarm Center > Alarm Notifications > Message Templates**. In some console versions, the path is **Alarms > Alarm Action Rules > Message Templates**.
+
+When creating the template, select **HTTP/HTTPS** as the notification method. Flashduty supports the following content formats:
+
+<Tabs>
+  <Tab title="HTML">
+    HTML templates can be in Chinese or English. Add the report type as the first line so that Flashduty can reliably distinguish triggered and recovered alerts.
+
+    **Chinese template**
+
+    ~~~text
+    上报类型：${clear_type};
+    通知类型：${event_type};
+    事件级别：${event_severity};
+    事件名称：${event_name_alias};
+    发生时间：${starts_at};
+    事件源：$event.metadata.resource_provider;
+    资源类型：$event.metadata.resource_type;
+    资源标识：${resources_new};
+    可能原因：${alarm_probableCause_zh};
+    附加信息：${message};
+    修复建议：${alarm_fix_suggestion_zh};
+    ~~~
+
+    **English template**
+
+    ~~~text
+    Clear Type:${clear_type};
+    Alarm Name:${event_name_alias};
+    Alarm ID:${id};
+    Notification Rule:${action_rule};
+    Occurred:${starts_at};
+    Event Severity:${event_severity};
+    Alarm Info:${alarm_info};
+    Resource Identifier:${resources_new};
+    Suggestion:${alarm_fix_suggestion_zh};
+    ~~~
+
+    <Tip>
+    Put each field on a separate line and keep the trailing semicolon. A resource identifier can span multiple lines. Flashduty parses its key-value pairs into labels.
+    </Tip>
+  </Tab>
+
+  <Tab title="JSON">
+    After selecting **JSON**, keep the default JSON content generated by AOM. Flashduty parses this JSON from the <code>message</code> field in the outer SMN notification.
+
+    The default AOM JSON contains the following core fields. Keep every field marked as required. Flashduty uses optional fields for labels or recovery detection when they have a value.
+
+    | Field | Required | Purpose |
+    | --- | --- | --- |
+    | <code>id</code> | No | AOM event ID; stored as the <code>event_id</code> label when present |
+    | <code>starts_at</code> | Yes | Trigger time as a Unix timestamp in milliseconds |
+    | <code>ends_at</code> | No | A value greater than 0 indicates recovery; a missing, empty, or 0 value falls back to the SMN subject |
+    | <code>metadata.event_name</code> | Yes | Alert name |
+    | <code>metadata.event_severity</code> | Yes | Alert severity |
+    | <code>metadata.event_type</code> | Yes | Event type, usually <code>alarm</code> |
+    | <code>metadata.resource_provider</code> | Yes | Event source, such as <code>AOM</code> or <code>CCE</code> |
+    | <code>metadata.resource_type</code> | Yes | Resource type |
+    | <code>metadata.resource_id</code> | Yes | Resource identifier |
+
+    <Warning>
+    Do not manually add SMN envelope fields such as <code>signature</code>, <code>subject</code>, or <code>topic_urn</code> to the AOM JSON template. SMN generates the outer notification and its signature.
+    </Warning>
+  </Tab>
+</Tabs>
+
+### Create an alarm notification rule
+
+<Steps>
+  <Step title="Associate the SMN topic and message template">
+    1. In the AOM 2.0 console, go to **Alarm Center > Alarm Notifications**.
+    2. Under **Notification Rule Management**, create an alarm notification rule.
+    3. Select the **Flashduty** SMN topic and the AOM message template created earlier.
+  </Step>
+
+  <Step title="Send triggered and recovered notifications">
+    Enable notifications in the AOM alarm rule and make sure that the notification scenarios include both **alarm triggered** and **alarm recovered**.
+  </Step>
+
+  <Step title="Verify the integration">
+    Trigger a test alert and then recover it. In Flashduty, verify that the integration's latest event time has changed and that the alert details contain the expected severity, resource, and recovery status.
+  </Step>
+</Steps>
+
+## Method 2: Use an AOM webhook data subscription
+
+<Warning>
+AOM webhook data subscription is not generally available. If the webhook alarm subscription option is not available in your console, submit a Huawei Cloud service ticket or use SMN instead.
+</Warning>
+
+If Huawei Cloud has enabled this feature for your account, go to **Settings > Global Settings > Data Subscription** in the AOM 2.0 console. Create a webhook alarm subscription and set its destination to the same Flashduty AOM integration push URL.
+
+The webhook request must use the official AOM structured event format:
+
+~~~json
+{
+  "events": [
+    {
+      "id": "4346299651651991683",
+      "starts_at": 1664001830491,
+      "ends_at": 0,
+      "timeout": 300000,
+      "resource_group_id": "project-id",
+      "metadata": {
+        "event_name": "Pod memory OOM",
+        "event_severity": "Major",
+        "event_type": "alarm",
+        "resource_provider": "CCE",
+        "resource_type": "service",
+        "resource_id": "clusterName=production;kind=Pod;namespace=default;name=example;uid=example-uid"
+      },
+      "annotations": {
+        "alarm_probableCause_en_us": "The pod does not have enough memory",
+        "message": "pod was OOM killed",
+        "alarm_fix_suggestion_en_us": "Increase the container memory limit"
+      }
+    }
+  ],
+  "project_id": "project-id"
+}
+~~~
+
+A request can contain up to 100 events. Each structured event must contain a valid <code>id</code>, <code>starts_at</code>, and all six required <code>metadata</code> fields.
+
+## Correlate triggered and recovered alerts
+
+Flashduty detects recovery in the following order:
+
+| Input format | Recovery detection |
+| --- | --- |
+| SMN HTML | Read <code>上报类型</code> or <code>Clear Type</code> first; if the value is missing or unknown, inspect the SMN <code>subject</code> |
+| SMN JSON | <code>ends_at &gt; 0</code> indicates recovery; if it is missing, empty, or 0, inspect the SMN <code>subject</code> |
+| Webhook data subscription | <code>ends_at &gt; 0</code> indicates recovery |
+
+Recognized HTML recovery values include <code>恢复</code>, <code>resolved</code>, <code>recovered</code>, <code>clear</code>, and <code>cleared</code>. Trigger values include <code>触发</code>, <code>triggered</code>, and <code>firing</code>.
+
+<Note>
+If an SMN HTML message does not contain a recognized report type, a subject containing <code>恢复</code>, <code>_resolved</code>, <code>_recovered</code>, or <code>_clear</code> is treated as a recovery.
+</Note>
+
+The following fields must remain the same between a triggered alert and its recovery:
+
+- <code>metadata.event_type</code>
+- <code>metadata.event_name</code>
+- <code>metadata.resource_provider</code>
+- <code>metadata.resource_type</code>
+- <code>metadata.resource_id</code>
+
+Flashduty generates the alert fingerprint from these fields. The <code>id</code> is stored as a label but does not participate in correlation, so triggered and recovered notifications may have different IDs.
+
+If two independent alerts have identical values for all five fields, Flashduty treats them as the same alert. Make sure that <code>metadata.event_name</code> or <code>metadata.resource_id</code> distinguishes alerts that must be handled separately.
+
+## Field and severity mappings
+
+Common AOM fields are converted into Flashduty labels:
+
+| AOM field | Flashduty label |
+| --- | --- |
+| <code>id</code> | <code>event_id</code> |
+| <code>metadata.event_name</code> | <code>event_name</code> and <code>check</code> |
+| <code>metadata.event_severity</code> | <code>event_severity</code> |
+| <code>metadata.resource_provider</code> | <code>resource_provider</code> |
+| <code>metadata.resource_type</code> | <code>resource_type</code> |
+| <code>metadata.resource_id</code> | <code>resource_id</code>, plus labels parsed from its resource key-value pairs |
+| <code>policy.alarm_rule_name</code> | <code>alarm_rule_name</code> |
+| <code>annotations.tms_tags</code> | <code>tms_tags</code> |
+| <code>annotations.generator_url</code> | <code>generator_url</code> |
+| <code>Notification Rule</code> in the English HTML template | <code>notification_rule</code> |
+
+Severity mapping:
+
+| AOM severity | Flashduty severity | Status |
+| --- | --- | --- |
+| Critical, Major, 紧急, or 重要 | Critical | Critical |
+| Minor, Warning, 次要, or 警告 | Warning | Warning |
+| Info or 提示 | Info | Info |
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Why does the SMN subscription remain unconfirmed?">
+    Make sure that the endpoint is the complete HTTPS integration push URL and that its <code>integration_key</code> has not been changed. Flashduty only visits valid Huawei Cloud HTTPS confirmation URLs.
+  </Accordion>
+
+  <Accordion title="Why does a manually replayed SMN request fail signature verification?">
+    The SMN <code>signature</code> is bound to the message body, message ID, <code>subject</code>, topic, timestamp, and message type. Changing any of these fields invalidates the original signature. Send a real test notification through AOM and SMN instead of modifying a historical request.
+  </Accordion>
+
+  <Accordion title="Why did the recovery not close the alert?">
+    Make sure that the alarm rule sends recovery notifications. Add <code>$&#123;clear_type&#125;</code> to an HTML template. For SMN JSON, Flashduty first checks for an <code>ends_at</code> value greater than 0 and falls back to the <code>subject</code> when the value is missing, empty, or 0. A webhook data subscription must provide an <code>ends_at</code> value greater than 0. Also verify that the five correlation fields are identical in the triggered and recovered events.
+  </Accordion>
+
+  <Accordion title="What is the difference between SMN JSON and a webhook data subscription?">
+    SMN JSON is carried in the <code>message</code> field of an SMN notification, whose outer object still contains a signature and subject. A webhook data subscription directly sends an <code>&#123;"events":[...]&#125;</code> object without SMN fields. Do not combine both outer formats in one request.
+  </Accordion>
+</AccordionGroup>
+
+## Huawei Cloud references
+
+- [Creating an AOM alarm notification rule](https://support.huaweicloud.com/intl/en-us/usermanual-aom2/mon_01_0015.html)
+- [Configuring message templates](https://support.huaweicloud.com/intl/en-us/bestpractice-aom2/aom_05_0023.html)
+- [Subscribing to AOM metrics or alarms](https://support.huaweicloud.com/intl/en-us/usermanual-aom2/mon_01_0039.html)
+- [Pushing event data](https://support.huaweicloud.com/intl/en-us/api-aom/PushEvents.html)
