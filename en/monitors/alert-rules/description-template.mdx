@@ -7,7 +7,7 @@ keywords: ["Description templates", "alert rules", "Go Template", "Sprig", "rela
 Use an alert rule **Description** to define the text shown on firing and recovery events. You can reference alert labels, query values, related query results, and safe Sprig functions with Go `text/template`, then render the result as Text or Markdown.
 
 <Warning>
-The template variables, Sprig function names, and behavior where label enrichment runs before `Description` rendering require monit-edge `v0.42.0` or later. On older versions, some variables or functions may be unavailable, and enrichment results may not be available inside Description templates.
+The base template variables, Sprig function names, and behavior where label enrichment runs before `Description` rendering require monit-edge `v0.42.0` or later. Reading query-provided additional information from `$annotations` with `$<query name>.<field name>` keys requires monit-edge `v0.53.0` or later. Upgrade the alert engine before using this capability.
 </Warning>
 
 ## How It Works
@@ -52,7 +52,7 @@ available through the `sprig_` prefix.
 | `$values` | `map[string]float64` | Numeric values used by alert evaluation. Same data as `.Values`. |
 | `$value` | `float64` | Main alert value. Same data as `.Value`. |
 | `$appendLabels` | `map[string]string` | Extra labels configured on the alert rule. |
-| `$annotations` | `map[string]string` | Rule annotations. |
+| `$annotations` | `map[string]string` | Custom rule fields and additional information carried from query results. |
 | `$dsType` | `string` | Data source type. |
 | `$dsName` | `string` | Data source name. |
 | `$dsAddress` | `string` | Data source address without credentials. |
@@ -70,6 +70,32 @@ Alert {{ .RuleName }} fired on {{ $dsName }}. Value: {{ printf "%.2f" $value }}
 Alert {{ .RuleName }} recovered.
 {{- end }}
 ```
+
+### Additional information from query results
+
+When a primary query explicitly selects label fields, its other non-value fields become additional information in `$annotations`. Query-provided information always uses `$<query name>.<field name>` as its key:
+
+```gotemplate
+{{ index $annotations "$A.sample_message" }}
+{{ index $annotations "$B.sample_message" }}
+```
+
+The syntax is the same for one or multiple queries and for Threshold evaluation, Data exists, and No data modes. The `$` prefix is reserved for query fields, so a custom field configured on the rule cannot begin with `$`. See [Query Result Field Mapping](/en/monitors/alert-rules/query-result-fields) for field classification.
+
+## Custom Fields
+
+**Custom fields** configured on the rule are carried into the alert event's `$annotations`. The field **value** itself also supports variables and template rendering:
+
+- **Simple variables**: `${label_name}` forms (e.g., `${service}`) are replaced with the corresponding label value of the alert event at render time. For example, a value of `https://a.com/runbook/${service}` has `${service}` replaced with the alert event's `service` label value.
+- **Go template**: When the value contains `{{`, the whole value is rendered with the same Go template rules as the **Description**, so you can use the built-in variables and functions documented on this page.
+- **title field**: A field named `title` uses its rendered value as the **event title**.
+
+Examples:
+
+| Field Name | Field Value | Rendered Result (assuming `service=payment-api`, `$severity=Critical`) |
+| --- | --- | --- |
+| `runbook` | `https://a.com/runbook/${service}` | `https://a.com/runbook/payment-api` |
+| `title` | `[{{ $severity }}] {{ index $labels "service" }} alert` | `[Critical] payment-api alert` |
 
 ## Root Object Fields
 
@@ -90,7 +116,7 @@ Access root object fields with `.FieldName`.
 | `.AppendLabels` | `map[string]string` | Extra labels configured on the rule. |
 | `.EnrichLabels` | `map[string]string` | Labels returned by the external enrichment endpoint. Enrichment runs before `Description` rendering, so templates can reference these labels. |
 | `.Values` | `map[string]float64` | Numeric values used by alert evaluation. |
-| `.Annotations` | `map[string]string` | Rule annotations. |
+| `.Annotations` | `map[string]string` | Custom rule fields and additional information carried from query results. |
 | `.Relates` | `map[string][]*ResultRow` | Related query result rows. |
 | `.Status` | `string` | `firing` or `recovered`. |
 | `.Severity` | `string` | Alert severity. |

@@ -1,0 +1,209 @@
+---
+title: "Flutter SDK integration"
+description: "Integrate Flashduty RUM SDK into Flutter applications to collect views, actions, network requests, errors, and crashes"
+keywords: ["RUM", "Flutter SDK", "Dart", "user monitoring", "mobile monitoring"]
+---
+
+The Flutter SDK wraps the native iOS / Android SDKs and provides RUM capabilities through `flashcat_flutter_plugin`. After initialization, the SDK reports the application's views, user actions, network requests, errors, and crashes to Flashduty RUM, with `source: "flutter"` identifying the data source.
+
+<Info>
+The current SDK version is `0.1.3` and supports the **iOS and Android** platforms (Flutter Web is not supported). Dart class names begin with `Datadog*` (such as `DatadogSdk` and `DatadogConfiguration`), and the site enum is `FlashcatSite`. Logs, Session Replay, and the dio / gql / grpc interceptor packages are not supported.
+</Info>
+
+## Prerequisites
+
+Before integrating the SDK, complete these steps:
+
+- Create or select a RUM application in the Flashduty console, then obtain the **Application ID** and **Client Token**
+- Make sure your application can reach `https://browser.flashcat.cloud/api/v2/rum`
+- Flutter SDK ≥ 3.27.0, Dart ≥ 3.6.0; iOS deployment target ≥ 12.0, Android `minSdkVersion` ≥ 23
+- Initialize the SDK early in application startup (in `main()`)
+
+## Install the SDK
+
+Add `flashcat_flutter_plugin` to `pubspec.yaml`, then run `flutter pub get`.
+
+```yaml pubspec.yaml
+dependencies:
+  flashcat_flutter_plugin: ^0.1.3
+```
+
+<Warning>
+Use `0.1.3` or later. On earlier versions, `flutter build apk --release` — including the `--obfuscate` build that crash symbolication requires — fails in R8 with `Missing class org.bouncycastle.jsse.BCSSLParameters`. From `0.1.3` the required ProGuard rules ship with the package and no app-side configuration is needed.
+</Warning>
+
+## Initialize the SDK
+
+We recommend initializing in `main()`, before `runApp`. When you start the application with `DatadogSdk.runApp`, the SDK automatically takes over `FlutterError.onError` and `PlatformDispatcher.instance.onError`, so it can collect unhandled exceptions without manual wiring.
+
+```dart main.dart
+import 'package:flutter/widgets.dart';
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+
+Future<void> main() async {
+  final configuration = DatadogConfiguration(
+    clientToken: '<CLIENT_TOKEN>',
+    env: 'production',
+    service: 'com.example.shopping',
+    site: FlashcatSite.cn,
+    nativeCrashReportEnabled: true, // Collect native iOS / Android crashes
+    firstPartyHosts: ['api.example.com'], // Inject distributed trace headers for these hosts
+    rumConfiguration: DatadogRumConfiguration(
+      applicationId: '<APPLICATION_ID>',
+      sessionSamplingRate: 100.0,
+      // customEndpoint: 'https://your-ingest.example.com/api/v2/rum', // On-premises RUM intake URL
+    ),
+  );
+
+  await DatadogSdk.runApp(configuration, TrackingConsent.granted, () async {
+    runApp(const MyApp());
+  });
+}
+```
+
+<Warning>
+Do not use server-side secrets in client code. `clientToken` is only for client-side RUM reporting, and `applicationId` assigns events to the RUM application.
+</Warning>
+
+If you need to control the startup flow yourself, outside of `runApp`, you can also initialize manually, but you must wire up error collection yourself:
+
+```dart
+import 'dart:ui';
+
+WidgetsFlutterBinding.ensureInitialized();
+
+final originalOnError = FlutterError.onError;
+FlutterError.onError = (details) {
+  DatadogSdk.instance.rum?.handleFlutterError(details);
+  originalOnError?.call(details);
+};
+
+final originalPlatformOnError = PlatformDispatcher.instance.onError;
+PlatformDispatcher.instance.onError = (error, stackTrace) {
+  DatadogSdk.instance.rum?.addErrorInfo(
+    error.toString(),
+    RumErrorSource.source,
+    stackTrace: stackTrace,
+  );
+  return originalPlatformOnError?.call(error, stackTrace) ?? false;
+};
+
+await DatadogSdk.instance.initialize(configuration, TrackingConsent.granted);
+```
+
+## Track views
+
+Add a `DatadogNavigationObserver` to your `MaterialApp` (or `CupertinoApp`), and the SDK automatically records the Navigator's route changes as RUM views.
+
+```dart
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+
+MaterialApp(
+  navigatorObservers: [
+    DatadogNavigationObserver(datadogSdk: DatadogSdk.instance),
+  ],
+  home: const HomeScreen(),
+);
+```
+
+<Note>
+The `DatadogNavigationObserver` constructor uses the named parameter `datadogSdk:`. By default it uses the route's `settings.name` as the view name; you can customize the view name or filter routes through the `viewInfoExtractor` callback.
+</Note>
+
+For scenarios that do not use named routes, you can use `DatadogNavigationObserverProvider` together with `DatadogRouteAwareMixin` to manage views manually.
+
+## Track user actions
+
+In the RUM configuration, `trackFrustrations` is enabled by default. After you wrap your application subtree with `RumUserActionDetector`, the SDK automatically recognizes interactions such as taps and generates action events; you can also record actions manually.
+
+```dart
+// Automatically recognize user interactions in the subtree
+RumUserActionDetector(
+  rum: DatadogSdk.instance.rum,
+  child: const MyApp(),
+);
+
+// Manually record one action
+DatadogSdk.instance.rum?.addAction(RumActionType.tap, 'Checkout');
+```
+
+## Track network requests
+
+Automatic network collection is provided by the separate `flashcat_tracking_http_client` package and enabled through the `enableHttpTracking()` extension method on the configuration object. It globally replaces `HttpClient`, records `dart:io` / `http` requests as RUM resources, and injects W3C trace headers for hosts that match `firstPartyHosts`.
+
+```yaml pubspec.yaml
+dependencies:
+  flashcat_tracking_http_client: ^0.1.1
+```
+
+```dart
+import 'package:flashcat_flutter_plugin/flashcat_flutter_plugin.dart';
+import 'package:flashcat_tracking_http_client/flashcat_tracking_http_client.dart';
+
+final configuration = DatadogConfiguration(
+  clientToken: '<CLIENT_TOKEN>',
+  env: 'production',
+  site: FlashcatSite.cn,
+  firstPartyHosts: ['api.example.com'],
+  rumConfiguration: DatadogRumConfiguration(applicationId: '<APPLICATION_ID>'),
+)..enableHttpTracking();
+```
+
+## Identify users
+
+After sign-in, you can set the current user. The SDK writes the user fields to the `usr` object on subsequent RUM events.
+
+```dart
+DatadogSdk.instance.setUserInfo(
+  id: 'user-1001',
+  name: 'Alice',
+  email: 'alice@example.com',
+);
+```
+
+Clear user information when the user signs out:
+
+```dart
+DatadogSdk.instance.setUserInfo();
+```
+
+## Report errors
+
+When you use `DatadogSdk.runApp`, unhandled exceptions are collected automatically. You can also manually report caught exceptions:
+
+```dart
+try {
+  // ... business logic ...
+} catch (e, st) {
+  DatadogSdk.instance.rum?.addError(e, RumErrorSource.source, stackTrace: st);
+}
+```
+
+<Note>
+Crash and error stacks require uploaded symbol files to resolve back to source locations. Flutter symbols, iOS dSYM, and Android mapping files are uploaded through the FlashCat CLI; every code change produces a new build, so a fresh set of symbol files has to be uploaded for it. See <a href="/en/rum/sdk/flutter/advanced-config">Advanced configuration</a>.
+</Note>
+
+## Verify the integration
+
+After integration, verify it with these steps:
+
+1. Temporarily set `DatadogSdk.instance.sdkVerbosity = CoreLoggerLevel.debug` during initialization, and inspect the console logs to observe the SDK's reporting behavior
+2. Run the application and trigger page navigation, taps, network requests, or a manual error
+3. In the Flashduty RUM application, filter for `source:flutter` and confirm that view, action, resource, or error events appear
+4. For network requests, check whether the backend receives the W3C `traceparent`
+
+## Next steps
+
+<CardGroup cols={3}>
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/flutter/advanced-config">
+Configure sampling, tracking consent, event filtering, tracing, and symbol file upload.
+</Card>
+
+<Card title="Compatibility" icon="shield-check" href="/en/rum/sdk/flutter/compatible">
+Review supported platforms, Flutter versions, companion packages, and current limits.
+</Card>
+
+<Card title="Data collection" icon="database" href="/en/rum/sdk/flutter/data-collection">
+Review event types, fields, and upload behavior collected automatically and manually by the SDK.
+</Card>
+</CardGroup>

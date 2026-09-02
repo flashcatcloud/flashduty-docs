@@ -1,0 +1,217 @@
+---
+title: "Electron SDK integration"
+description: "Add Flashduty RUM to an Electron application and collect performance, errors, and user interactions from the main and renderer processes"
+keywords: ["RUM", "Electron SDK", "desktop monitoring", "main process", "renderer process"]
+---
+
+An Electron application has a main process and one or more renderer processes. After you instrument both sides, you can view desktop runtime activity and page experience in the same RUM session.
+
+| Process | SDK | Primary data collected |
+|---------|-----|------------------------|
+| Main process | `@flashcatcloud/electron-sdk` | Sessions, main-process errors, native crashes, and main-process network requests |
+| Renderer process | `@flashcatcloud/browser-rum` | Page views, user actions, frontend resources, JavaScript errors, and Web Vitals |
+
+Regular renderer events are forwarded to the main process and uploaded together with main-process events. You do not need to write custom IPC forwarding code.
+
+## Prerequisites
+
+Before you start, make sure that:
+
+- Your application uses Electron 39 or later.
+- You created or selected an Electron application on the Flashduty [RUM application management](https://console.flashcat.cloud/rum/apps) page and obtained its **Application ID** and **Client Token**.
+- The application can reach `https://browser.flashcat.cloud/api/v2/rum`. For a self-hosted deployment, prepare your own intake endpoint.
+
+## Integration steps
+
+<Steps>
+<Step title="Install the SDKs">
+Install the main-process SDK and Browser SDK in your project:
+
+```bash
+npm install @flashcatcloud/electron-sdk @flashcatcloud/browser-rum@^0.0.7
+```
+
+Use `@flashcatcloud/browser-rum` 0.0.7 or later to enable Session Replay in Electron.
+</Step>
+
+<Step title="Configure the main-process entry point">
+The Electron SDK must start instrumentation before Electron loads. Choose the setup that matches how you build the main process.
+
+<Tabs>
+<Tab title="Unbundled main process">
+Make `instrument` the first import in the main-process entry point:
+
+```ts main.ts
+import '@flashcatcloud/electron-sdk/instrument';
+
+import { app, BrowserWindow } from 'electron';
+```
+
+If your project sorts imports automatically, make sure it does not move this import after `electron`.
+</Tab>
+
+<Tab title="Vite">
+Add the plugin to the main-process Vite configuration. In an electron-vite project, use the `main` configuration, not `renderer`.
+
+```ts vite.config.ts
+import { defineConfig } from 'vite';
+import { datadogVitePlugin } from '@flashcatcloud/electron-sdk/vite-plugin';
+
+export default defineConfig({
+  plugins: [datadogVitePlugin()],
+});
+```
+</Tab>
+
+<Tab title="Webpack">
+Add the plugin to the main-process Webpack configuration:
+
+```js webpack.main.config.js
+const { DatadogWebpackPlugin } = require('@flashcatcloud/electron-sdk/webpack-plugin');
+
+module.exports = {
+  plugins: [new DatadogWebpackPlugin()],
+};
+```
+</Tab>
+
+<Tab title="esbuild">
+Add the plugin to the main-process build:
+
+```ts build.ts
+import * as esbuild from 'esbuild';
+import { datadogEsbuildPlugin } from '@flashcatcloud/electron-sdk/esbuild-plugin';
+
+await esbuild.build({
+  entryPoints: ['src/main.ts'],
+  bundle: true,
+  platform: 'node',
+  outfile: 'dist/main.js',
+  plugins: [datadogEsbuildPlugin()],
+});
+```
+</Tab>
+</Tabs>
+
+When you use a bundler plugin, do not manually import `@flashcatcloud/electron-sdk/instrument`. The plugin handles execution order and runtime dependencies.
+</Step>
+
+<Step title="Initialize the main-process SDK">
+Call `init()` after `app.whenReady()` and before you create the first `BrowserWindow`:
+
+```ts main.ts
+import { app, BrowserWindow } from 'electron';
+import { init } from '@flashcatcloud/electron-sdk';
+
+void app.whenReady().then(async () => {
+  const initialized = await init({
+    applicationId: '<YOUR_APPLICATION_ID>',
+    clientToken: '<YOUR_CLIENT_TOKEN>',
+    service: 'my-electron-app',
+    env: 'production',
+    version: app.getVersion(),
+  });
+
+  if (!initialized) {
+    console.error('[Flashduty RUM] SDK initialization failed');
+  }
+
+  createWindow();
+});
+
+function createWindow(): void {
+  const window = new BrowserWindow();
+  void window.loadFile('index.html');
+}
+```
+
+`applicationId`, `clientToken`, and `service` are required. Flashduty SaaS users do not need to set `site`. Initialization failure does not prevent the application from starting; the SDK logs the specific reason in the main-process console.
+</Step>
+
+<Step title="Initialize the renderer SDK">
+Initialize the Browser SDK in the renderer entry point:
+
+```ts renderer.ts
+import { flashcatRum } from '@flashcatcloud/browser-rum';
+
+flashcatRum.init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  env: 'production',
+  version: '1.0.0',
+  sessionSampleRate: 100,
+  trackResources: true,
+  trackLongTasks: true,
+  trackUserInteractions: true,
+});
+```
+
+Use the same `applicationId`, `clientToken`, `service`, `env`, and `version` in both processes so one application is not split across different dimensions.
+
+After the main process is configured, the SDK injects its preload and establishes the bridge automatically. You do not need to modify your application's preload or write `ipcRenderer` / `ipcMain` forwarding code. Use `allowedWebViewHosts` only for third-party pages loaded in a `<webview>` or `BrowserView`.
+</Step>
+
+<Step title="Verify the integration">
+Start the application, visit a page, click an element, and make a network request. Then verify the data in RUM Explorer:
+
+1. Filter all Electron events with `source:electron OR container.source:electron`.
+2. Confirm that main-process events appear with `view.url: electron://main-process`.
+3. Confirm that renderer `view`, `action`, `resource`, or `error` events appear.
+4. Check that renderer events contain `container.source: electron`.
+
+The default upload interval is 10 seconds. Wait for one upload cycle before refreshing the Explorer.
+
+<Check>
+The integration is working when the same session contains main-process and renderer events, and renderer events include `container.source: electron`.
+</Check>
+</Step>
+</Steps>
+
+## Enable Session Replay (optional)
+
+The renderer records and uploads Session Replay directly. Set both the sample rate and direct-upload option in the renderer configuration:
+
+```ts renderer.ts
+flashcatRum.init({
+  // Other options from the previous example
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+  defaultPrivacyLevel: 'mask',
+});
+```
+
+Replay recording creates a blob Worker and connects to the intake from the renderer. If your page defines a Content Security Policy (CSP), allow `worker-src blob:` and the actual intake origin:
+
+```html
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self';
+  worker-src 'self' blob:;
+  connect-src 'self' https://browser.flashcat.cloud;
+">
+```
+
+For self-hosted Session Replay, configure `proxy` separately in the renderer. See [Advanced configuration · Custom upload endpoints](/en/rum/sdk/electron/advanced-config#custom-upload-endpoints).
+
+If no replay is collected, see [Electron SDK troubleshooting](/en/rum/sdk/electron/faq#why-is-session-replay-missing).
+
+## Next steps
+
+<CardGroup cols={2}>
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/electron/advanced-config">
+Configure custom upload endpoints, batching, user identity, and manual APIs.
+</Card>
+
+<Card title="Data collection" icon="database" href="/en/rum/sdk/electron/data-collection">
+Learn what the main and renderer processes collect.
+</Card>
+
+<Card title="Error symbolication" icon="bug" href="/en/rum/sdk/electron/error-symbolication">
+Upload JavaScript source maps and native crash symbols.
+</Card>
+
+<Card title="Troubleshooting" icon="circle-question" href="/en/rum/sdk/electron/faq">
+Diagnose bridge, Session Replay, and stack symbolication issues.
+</Card>
+</CardGroup>

@@ -7,7 +7,7 @@ keywords: ["RUM", "HarmonyOS SDK", "鸿蒙 SDK", "ArkTS", "用户监控"]
 HarmonyOS SDK 通过 ArkTS HAR 模块提供 RUM、Trace 和 Crash 能力。初始化后，SDK 会把应用中的视图、用户操作、网络请求、错误和崩溃事件上报到 Flashduty RUM，并使用 `source: "harmony"` 标识数据来源。
 
 <Info>
-当前 SDK 模块版本为 `0.1.3`。示例使用 `@flashcatcloud/core`、`@flashcatcloud/rum`、`@flashcatcloud/trace` 和 `@flashcatcloud/crash` 四个模块。
+当前 SDK 模块版本为 `0.4.0`。示例使用 `@flashcatcloud/core`、`@flashcatcloud/rum`、`@flashcatcloud/trace` 和 `@flashcatcloud/crash`。使用 axios 的应用还需要 `@flashcatcloud/axios`。
 </Info>
 
 ## 前提条件
@@ -26,10 +26,12 @@ HarmonyOS SDK 通过 ArkTS HAR 模块提供 RUM、Trace 和 Crash 能力。初�
 ```json5 oh-package.json5
 {
   dependencies: {
-    "@flashcatcloud/core": "0.1.3",
-    "@flashcatcloud/rum": "0.1.3",
-    "@flashcatcloud/trace": "0.1.3",
-    "@flashcatcloud/crash": "0.1.3"
+    "@flashcatcloud/core": "0.4.0",
+    "@flashcatcloud/rum": "0.4.0",
+    "@flashcatcloud/trace": "0.4.0",
+    "@flashcatcloud/crash": "0.4.0",
+    // 仅在应用使用 @ohos/axios 时需要
+    "@flashcatcloud/axios": "0.4.0"
   }
 }
 ```
@@ -160,7 +162,18 @@ monitor.stopAction(RumActionType.SCROLL, 'product_feed');
 
 ## 采集网络请求和 Trace
 
-HarmonyOS SDK 提供两种网络接入方式。
+HarmonyOS SDK 按网络库提供三种接入方式。**它们都只有在 RUM 配置中启用 `setTrackNetworkRequests(true)` 后才会生成 resource 事件，该开关默认关闭。**
+
+| 应用使用的网络库 | 接入方式 |
+|---|---|
+| `@kit.RemoteCommunicationKit` 的 `rcp` | 添加 `FlashcatTrace.interceptor()` |
+| `@kit.NetworkKit` | 改用 `FlashcatHttp.request()` |
+| `@ohos/axios` | 调用 `trackAxios(instance)` |
+| 其他网络栈 | 用 `FlashcatTrace.startTracedResource()` 自行接入 |
+
+<Note>
+SDK 不会自动挂钩 `@kit.NetworkKit` 的 `http.createHttp()`。直接用它发起的请求不会被采集，请改用上表中对应的接入方式。
+</Note>
 
 ### rcp 拦截器
 
@@ -191,16 +204,48 @@ const response = await FlashcatHttp.request('https://api.example.com/orders', {
 });
 ```
 
-<Note>
-`traceparent` 和 `tracestate` 只有在追踪同意状态为 `TrackingConsent.GRANTED` 时才会注入。`FlashcatHttp` 还会按 `setFirstPartyHosts()` 限制注入域名；未配置一方域名时会对所有 host 注入。请求已带有 `traceparent` 时，SDK 不会覆盖已有 Trace 上下文。
-</Note>
+### axios
 
-对于其他网络栈，可以通过 `FlashcatTrace.getHeaders()` 获取包含 `traceparent` 和 `tracestate` 的手动注入请求头。
+`@ohos/axios` 有自己的网络适配层，不经过上面两条路径，需要安装 `@flashcatcloud/axios` 并对每个 axios 实例调用一次 `trackAxios()`。
 
 ```ts
-const headers = FlashcatTrace.getHeaders();
-// 将 headers 合并到你的自定义网络请求中
+import axios from '@ohos/axios';
+import { trackAxios } from '@flashcatcloud/axios';
+
+const apiClient = axios.create({ baseURL: 'https://api.example.com' });
+trackAxios(apiClient);
 ```
+
+放在你已经创建 axios 实例的地方即可，通常是统一封装 token 和错误处理的那个文件。
+
+<Warning>
+拦截器是**按实例**注册的：`axios` 默认导出和 `axios.create()` 创建的实例互不共享。每个需要上报的实例都要调用一次，且**只调一次**——重复调用会导致同一请求上报两次。
+</Warning>
+
+### 其他网络栈
+
+自研网络库或上面未覆盖的三方库，用 `FlashcatTrace.startTracedResource()` 接入。它登记 resource 并返回要注入的请求头，采集同意与一方域名门控、采样判断、id 编码都在 SDK 内部完成。
+
+```ts
+import { FlashcatTrace, TracedResource } from '@flashcatcloud/trace';
+
+const traced: TracedResource = FlashcatTrace.startTracedResource(url, 'GET');
+// 把 traced.headers 合并进请求后再发送
+try {
+  const response = await send(url, traced.headers);
+  FlashcatTrace.stopTracedResource(traced.key, response.status, response.size);
+} catch (e) {
+  // 拿到了响应（哪怕是 404）应传给 stopTracedResource，保留为对应状态码的
+  // resource；只有完全没拿到响应的传输失败才用 failTracedResource。
+  FlashcatTrace.failTracedResource(traced.key, `${e}`);
+}
+```
+
+务必传入**完整 URL**：相对路径解析不出域名，一方域名检查会因此跳过注入，resource 上也会缺少 host。每次 `startTracedResource` 都要配对一次 `stopTracedResource` 或 `failTracedResource`，包括失败路径，否则 resource 不会关闭。
+
+<Note>
+`traceparent` 和 `tracestate` 只有在追踪同意状态为 `TrackingConsent.GRANTED` 时才会注入，并按 `setFirstPartyHosts()` 限制注入域名；未配置一方域名时会对所有 host 注入。请求已带有 `traceparent` 时，SDK 不会覆盖已有 Trace 上下文。以上对四种接入方式一致生效。
+</Note>
 
 ## 关联用户信息
 

@@ -1,0 +1,166 @@
+---
+title: "Query Result Field Mapping"
+description: "Map SQL and raw log query results to value fields, label fields, and additional alert information."
+keywords: ["query results", "value fields", "label fields", "additional information", "threshold expressions", "multiple queries"]
+---
+
+Table-shaped queries for MySQL, PostgreSQL, Oracle, ClickHouse, Elasticsearch, and SLS, as well as **raw log** queries for Loki and VictoriaLogs, return rows with multiple fields. Use **Value fields** and **Label fields** to assign each field a purpose. Any remaining fields are automatically carried with the alert as additional information.
+
+<Warning>
+The complete field-mapping behavior described on this page requires monit-edge `v0.53.0` or later, especially the `$<query name>.<field name>` convention for query-provided additional information. Upgrade the alert engine to `v0.53.0` or later before using these settings.
+</Warning>
+
+## How fields are classified
+
+Suppose query A returns:
+
+| service | error_count | sample_message | latest_at |
+| --- | ---: | --- | --- |
+| checkout | 27 | connection timeout | 2026-07-30 21:00:00 |
+
+Recommended configuration:
+
+| Purpose | Configuration or result | Behavior |
+| --- | --- | --- |
+| Value field | `error_count` | Participates in threshold evaluation and is stored in the alert event. |
+| Label field | `service` | Identifies the alert object. One label set represents one alert instance. |
+| Additional information | `sample_message`, `latest_at` | Is carried with the alert for troubleshooting, but does not affect alert identity. |
+
+<Note>
+Additional information is not a third set of fields that you configure. After you explicitly select label fields, every returned field that is neither a label nor a value automatically becomes additional information.
+</Note>
+
+### Value fields
+
+A value field must contain data that can be converted to a number. **Threshold evaluation** requires at least one value field. Value fields are optional in **Data exists** and **No data** modes.
+
+- A value field name cannot be empty or contain `.`.
+- The same field cannot be both a value field and a label field.
+- Preview the query and use the returned field names. Saving a rule does not query the data source to verify that a returned field exists.
+
+### Label fields
+
+Label fields define alert identity and determine whether results from different queries can be matched. Choose stable dimensions such as service, cluster, host, or instance.
+
+- A label field name cannot be empty, and the same field cannot be added more than once.
+- The same field cannot be both a label field and a value field.
+
+Avoid using these values as labels:
+
+- Timestamps
+- Raw log lines or error messages
+- Trace IDs, request IDs, or other values that change per request
+- Other high-cardinality fields
+
+Frequently changing labels can create a separate alert for every row or prevent multiple queries from matching. Keep these fields as additional information instead.
+
+### When Label fields is empty
+
+For compatibility with existing rules, if Label fields is empty, every returned field except the value fields becomes a label. The query does not produce additional information in this case.
+
+| Label fields setting | Labels | Additional information |
+| --- | --- | --- |
+| Empty | All non-value fields | None |
+| Explicit selection | Selected fields only | Remaining non-value fields |
+
+<Warning>
+Explicitly select label fields for raw log queries. Otherwise, timestamps and raw log content may also become labels and create many unrelated alert instances.
+</Warning>
+
+The SLS-provided `__source__` and `__time__` fields do not automatically become labels when Label fields is empty. If you need either value, assign it an alias in the query and configure the alias as a regular field.
+
+## Referencing values in threshold expressions
+
+The query name is the prefix of its threshold variables. For example, suppose query A has a value field named `error_count`.
+
+### One value field
+
+With one value field, you can use either the fully qualified form or the query variable shortcut:
+
+```text
+Critical: $A.error_count > 20
+Warning: $A > 10
+```
+
+Both forms reference the same value.
+
+### Multiple value fields
+
+If query A has both `error_count` and `latency_ms` as value fields, include the field name:
+
+```text
+Critical: $A.error_count > 20 or $A.latency_ms > 1000
+```
+
+You cannot use `$A > 20` in this case. Every field referenced in the expression must also be configured as a value field for that query. The same rule applies to a custom recovery threshold expression.
+
+### Query names
+
+A query name must begin with an English letter and contain only English letters and numbers, such as `A`, `B2`, or `Latency`. `R` and `__all__` are reserved and cannot be used.
+
+## Matching multiple queries
+
+In **Threshold evaluation** mode, results from queries A and B participate in the same evaluation only when their label names and label values match exactly.
+
+These results match:
+
+| Query | service | cluster | Value field |
+| --- | --- | --- | ---: |
+| A | checkout | prod | `error_count=27` |
+| B | checkout | prod | `latency_ms=1350` |
+
+You can evaluate them together:
+
+```text
+Critical: $A.error_count > 20 and $B.latency_ms > 1000
+```
+
+If query B does not have the `cluster` label, or its `cluster` value differs, the rows are not evaluated together. Make sure that:
+
+1. Each query uses the same label fields and returns the same label values.
+2. One label set identifies only one row in each query. Aggregate the query first if necessary.
+3. Changing values such as error messages and raw log content remain additional information rather than labels.
+
+<Warning>
+When Threshold evaluation has multiple queries, the Critical, Warning, and Info alert expressions collectively must reference every query. Each severity does not need to reference every query—for example, Critical may use A while Warning uses B. Remove any query that is not used by an alert threshold.
+</Warning>
+
+## Using additional information in a description
+
+Query-provided additional information is available through `$annotations` and always uses `$<query name>.<field name>` as its key. The syntax is the same regardless of the number of queries or whether you use Threshold evaluation, Data exists, or No data mode:
+
+```gotemplate
+{{ index $annotations "$A.sample_message" }}
+{{ index $annotations "$B.sample_message" }}
+```
+
+The `$` prefix identifies query-provided fields. A custom field configured on the rule cannot begin with `$`. See [Description Template](/en/monitors/alert-rules/description-template) for more variables and examples.
+
+<Note>
+A No data alert carries the additional information from the last successful result for that alert object. If the query has never returned data, no query-provided additional information is available.
+</Note>
+
+## Query result row limit
+
+All alert rule queries have a hard limit of **1000 rows**, including the evaluation queries for Threshold, Data exists, and No data, as well as recovery queries and related queries. When a query returns more than 1000 rows, the query fails outright (error `too many rows`), this evaluation reports an error, and no alert is produced.
+
+<Warning>
+The limit applies to every data source type (MySQL, PostgreSQL, Oracle, ClickHouse, Elasticsearch, SLS, Loki, VictoriaLogs, Prometheus, etc.). High-cardinality Prometheus queries (more than 1000 series) or SQL queries returning large result sets will start failing and stop producing alerts.
+</Warning>
+
+Aggregate in the data source instead of letting a single rule query return many rows:
+
+- Use `GROUP BY`, aggregation functions, or `LIMIT` to narrow SQL query results
+- Use PromQL aggregation operators (such as `sum`, `max`, `topk`) or narrow the time range
+- Split the query into multiple rules covering different dimension subsets
+
+Each query result row can become one alert instance. Aggregating in the data source both avoids the row limit and prevents an unmanageable flood of alerts.
+
+## Supported queries
+
+This page applies to:
+
+- MySQL, PostgreSQL, Oracle, ClickHouse, Elasticsearch, and SLS queries
+- **Raw log** primary queries for Loki and VictoriaLogs
+
+The **aggregation** modes for Loki and VictoriaLogs return labeled time-series data directly and do not require manual field mapping.

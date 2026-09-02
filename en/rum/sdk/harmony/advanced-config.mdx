@@ -13,14 +13,19 @@ Create core configuration with `ConfigurationBuilder` and pass it to `Flashcat.i
 ```ts
 import {
   ConfigurationBuilder,
-  FlashcatSite
+  FlashcatSite,
+  UploadFrequency,
+  BatchSize,
+  BatchProcessingLevel
 } from '@flashcatcloud/core';
 
 const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
   .setService('shopping-app')
   .setVariant('default')
   .useSite(FlashcatSite.CN)
-  .setBatchUploadFrequencyMs(5000)
+  .setUploadFrequency(UploadFrequency.AVERAGE)
+  .setBatchSize(BatchSize.MEDIUM)
+  .setBatchProcessingLevel(BatchProcessingLevel.MEDIUM)
   .build();
 ```
 
@@ -31,29 +36,101 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setVariant(variant)` | string | `""` | Build variant name |
 | `useSite(site)` | `FlashcatSite` | `FlashcatSite.CN` | Intake site; production uses `https://browser.flashcat.cloud` |
 | `setCustomEndpoint(endpoint)` | string | `""` | Overrides the intake host, usually for local proxying or private forwarding; the SDK still appends `/api/v2/rum` |
-| `setBatchUploadFrequencyMs(frequencyMs)` | number | `5000` | Foreground batch upload cadence in milliseconds |
+| `setUploadFrequency(frequency)` | `UploadFrequency` | `UploadFrequency.AVERAGE` | Interval between upload cycles: `FREQUENT` 500 ms / `AVERAGE` 2 s / `RARE` 5 s |
+| `setBatchSize(size)` | `BatchSize` | `BatchSize.MEDIUM` | How long one batch collects events before it is rolled: `SMALL` 3 s / `MEDIUM` 10 s / `LARGE` 35 s. Larger batches mean fewer requests and a better compression ratio, at the cost of delivery latency |
+| `setBatchProcessingLevel(level)` | `BatchProcessingLevel` | `BatchProcessingLevel.MEDIUM` | Maximum batches sent back-to-back in one upload cycle: `LOW` 1 / `MEDIUM` 20 / `HIGH` 100. Use `LOW` when the app has latency-sensitive requests of its own on a narrow uplink |
 | `setVerbose(enabled)` | boolean | `false` | Emits SDK internal HiLog entries with the `Flashcat` tag |
+
+<Note>
+These three settings share their names and values with the Android, iOS and Flutter SDKs, so tuning advice transfers between platforms unchanged.
+
+Since SDK 0.5.0, `setBatchUploadFrequencyMs(5000)` is replaced by `setUploadFrequency(UploadFrequency.RARE)`. Two defaults changed at the same time, both to match the other platforms: the upload interval went from 5 s to 2 s, and the batch window from 5 s to 10 s.
+</Note>
 
 <Note>
 `Flashcat.initialize()` initializes a given instance name only once. A duplicate call returns the existing instance and does not re-register feature modules.
 </Note>
 
+### Reducing the impact of uploads on your own requests
+
+If the app makes latency-sensitive requests of its own (sign-in, checkout, key provisioning) over a narrow uplink, SDK uploads can compete with them for the uplink. The symptom is a higher tail (P95) on your own request latency that comes and goes.
+
+Lower all three settings together to change how uploads are distributed over time — fewer uploads, spread further apart:
+
+```ts
+const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+  .useSite(FlashcatSite.CN)
+  .setUploadFrequency(UploadFrequency.RARE)          // upload interval: default AVERAGE 2 s -> RARE 5 s
+  .setBatchSize(BatchSize.LARGE)                     // batch window: default MEDIUM 10 s -> LARGE 35 s
+  .setBatchProcessingLevel(BatchProcessingLevel.LOW) // batches per cycle: default MEDIUM 20 -> LOW 1
+  .build();
+```
+
+<Tip>
+These three settings only change *when* uploads happen. They drop no events and remove no dimension from your dashboards, so if you do not want to sacrifice data, tune only these. `BatchSize.LARGE` has an extra benefit: larger batches compress better, so uplink bytes drop slightly.
+</Tip>
+
+<Note>
+Tuning advice transfers between platforms unchanged, because these three settings share names and values with the Android, iOS and Flutter SDKs. The one difference is that iOS `batchProcessingLevel = .low` is 5 batches per cycle, while HarmonyOS and Android use 1 — same direction, smaller reduction. See [Android SDK performance impact](/en/rum/sdk/android/performance-impact) and [iOS SDK performance impact](/en/rum/sdk/ios/performance-impact).
+</Note>
+
+Several things that need to be turned off on other platforms cost nothing on HarmonyOS, and are neither configurable nor necessary:
+
+| Capability | Other platforms | HarmonyOS SDK |
+|------------|-----------------|---------------|
+| Vitals collection | Android / iOS collect every 500 ms by default | Not collected |
+| Long task tracking | Enabled by default on Android / iOS | Never emits `long_task` events |
+| SDK internal telemetry | Sampled at 20% by default on Android / iOS | No internal telemetry is reported |
+| User interaction tracking | Enabled by default on Android / iOS, must be turned off explicitly | `setTrackUserInteractions` is `false` by default |
+| Upload compression | Web must enable it explicitly | Bodies over 512 characters are compressed automatically, not configurable |
+
+If the event volume itself is high, use [event mapping](#event-mapping-and-redaction) with `setEventMapper` to drop specific noisy events (return `null` to drop). That is less invasive than changing your instrumentation.
+
 ## Tracking consent
 
-Pass `TrackingConsent` during initialization. You can also update it at runtime with `Flashcat.setTrackingConsent()`.
+To comply with privacy regulations such as GDPR and CCPA, the SDK requires a tracking consent state at initialization (the third argument of `Flashcat.initialize()`), and lets you change it at any time afterwards.
+
+### Consent states
+
+| State | Behavior | When to use |
+|-------|----------|-------------|
+| `TrackingConsent.GRANTED` | Collects data and sends it to Flashduty | The user has agreed to data collection |
+| `TrackingConsent.NOT_GRANTED` | Collects nothing | The user has declined data collection |
+| `TrackingConsent.PENDING` | Collects data but does not send it | Waiting for the user's decision |
+
+<Info>
+When initialized with `TrackingConsent.PENDING`, the SDK writes events to a separate local buffer and sends nothing until consent changes to `GRANTED` — at which point the buffered data is migrated and uploaded automatically. Changing to `NOT_GRANTED` clears the buffer instead.
+</Info>
+
+### The application owns the consent state
+
+**Every launch uses the value you pass to `Flashcat.initialize`.** The SDK never overrides it with a previously stored state — the same contract as the Android and iOS SDKs. Your application is responsible for storing the user's choice and passing it back at every initialization.
+
+<Warning>
+If your application initializes the SDK with a hard-coded value (for example `GRANTED`) on every launch, collection resumes after a restart even for a user who revoked consent. Call `setTrackingConsent` at the moment the user makes a choice, persist that choice yourself, and pass it to `initialize` on the next launch.
+</Warning>
+
+The consent state is also persisted locally, but it serves **exactly one purpose**: the `WorkSchedulerExtensionAbility` used for background upload runs in a separate process with no user in front of it and no access to the application's decision, so it reads the main process's last recorded state. See [Background and deferred upload](#background-and-deferred-upload).
+
+When consent is revoked (changed to `NOT_GRANTED`), the SDK clears the unsent pre-consent buffer *and* **deletes batches already written to disk but not yet uploaded**. On 0.2.0 and earlier only the buffer was cleared, so collected batches were still sent once consent came back.
+
+Starting in `0.3.2`, revoking consent also deletes the local view snapshot used for [crash attribution](/en/rum/sdk/harmony/data-collection#crash-attribution). That snapshot is a whole view event — user id, name, email, and any custom context — so it is just as personal as a collected batch.
+
+### Setting and changing consent
+
+At initialization:
 
 ```ts
 import { Flashcat, TrackingConsent } from '@flashcatcloud/core';
 
-Flashcat.setTrackingConsent(TrackingConsent.PENDING);
-Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
+Flashcat.initialize(this.context, coreConfig, TrackingConsent.PENDING);
 ```
 
-| State | Behavior |
-|-------|----------|
-| `GRANTED` | Writes to the main upload directory and starts batch uploads |
-| `PENDING` | Writes events to a separate pending buffer; when consent changes to `GRANTED`, the SDK migrates and uploads them |
-| `NOT_GRANTED` | Drops new events, clears the pending buffer, and stops uploads |
+After initialization, via the `setTrackingConsent` API (for example once the user responds to your privacy dialog):
+
+```ts
+Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
+```
 
 <Warning>
 Trace headers also honor tracking consent. The SDK injects correlatable `traceparent` and `tracestate` headers only when consent is `GRANTED`.
@@ -86,8 +163,13 @@ FlashcatRum.enable(
 | `setTrackUserInteractions(enabled)` | boolean | `false` | Controls whether `FlashcatRum.trackTap()` records tap actions |
 | `setTrackNavigation(enabled)` | boolean | `false` | Controls whether `FlashcatRum.startViewTracking()` registers the ArkUI `routerPageUpdate` observer |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | Controls whether network lifecycle events published by Trace become RUM resources |
+| `setTrackErrors(enabled)` | boolean | `true` | Controls **automatic** capture of uncaught errors and unhandled Promise rejections |
 | `setTrackFrustrations(enabled)` | boolean | `false` | Reserved toggle; the current version does not generate frustration events |
 | `setEventMapper(mapper)` | function | `null` | Modifies or drops view, action, error, and resource events before disk write |
+
+<Note>
+`setTrackErrors(false)` disables **automatic** error capture only. Crash reporting is unaffected: with the crash module enabled, uncaught exceptions still follow `JsCrashPolicy` — they are persisted, counted, and replayed as `is_crash` errors into the session that crashed. Manual `addError` calls are the application's explicit intent and are also still delivered. Use `setEventMapper()` if you need to filter those too.
+</Note>
 
 ### Event mapping and redaction
 
@@ -138,7 +220,25 @@ const monitor = GlobalRumMonitor.get();
 monitor.addAttribute('tenant', 'acme');
 monitor.addError('checkout failed', RumErrorSource.CUSTOM);
 monitor.removeAttribute('tenant');
+
+// Read a snapshot of the current global attributes
+const attrs = monitor.getAttributes();
+
+// Remove every global attribute at once, for example on sign-out
+monitor.clearAttributes();
 ```
+
+| Method | Description |
+|--------|-------------|
+| `addAttribute(key, value)` | Adds or overwrites one global attribute |
+| `removeAttribute(key)` | Removes the named global attribute |
+| `getAttributes()` | Returns a snapshot of the current global attributes |
+| `clearAttributes()` | Removes all global attributes |
+| `stopSession()` | Ends the current session immediately. The active view is closed with its final `time_spent`; the next event starts a fresh session and restarts that view inside it |
+
+<Note>
+On sign-out, call `clearAttributes()` to drop the previous user's business attributes and then `stopSession()`, so two users' behavior never lands in the same session.
+</Note>
 
 Set user information through the core instance. `id`, `name`, and `email` are written to the `usr` object on subsequent events.
 
@@ -185,12 +285,18 @@ FlashcatTrace.enable(
 
 ## Crash reporting configuration
 
-The Crash module listens to HarmonyOS `hiAppEvent` for `APP_CRASH` and `APP_FREEZE`. The system replays fault events on the next launch, and the SDK reports them through the RUM error pipeline.
+The Crash module provides two collection paths:
+
+- It listens to HarmonyOS `hiAppEvent` for `APP_CRASH` and `APP_FREEZE`, then reports system-replayed fault events through the RUM error pipeline on a later launch
+- It handles uncaught main-thread ArkTS exceptions live and uses `JsCrashPolicy` to report before the process exits or restarts
+
+The default JS crash policy is `REPORT_THEN_EXIT`.
 
 ```ts
 import {
   FlashcatCrash,
-  CrashConfigurationBuilder
+  CrashConfigurationBuilder,
+  JsCrashPolicy
 } from '@flashcatcloud/crash';
 
 FlashcatCrash.enable(
@@ -198,23 +304,83 @@ FlashcatCrash.enable(
     .setTrackCrashes(true)
     .setTrackAppHangs(true)
     .setSampleRate(100)
+    .setJsCrashPolicy(JsCrashPolicy.REPORT_THEN_EXIT)
     .build()
 );
 ```
 
 | Method | Type | Default | Description |
 |--------|------|---------|-------------|
-| `setTrackCrashes(enabled)` | boolean | `true` | Captures ArkTS / JS and native C/C++ crashes |
-| `setTrackAppHangs(enabled)` | boolean | `true` | Captures `APP_FREEZE`, such as main-thread hangs or watchdog timeouts |
-| `setSampleRate(rate)` | number | `100` | Crash and hang sample rate; the SDK clamps the value to `0` through `100` |
+| `setTrackCrashes(enabled)` | boolean | `true` | Watches `hiAppEvent.APP_CRASH` replays, including ArkTS and native crashes; does not control synchronous JS policy reporting |
+| `setTrackAppHangs(enabled)` | boolean | `true` | Watches `hiAppEvent.APP_FREEZE` replays |
+| `setSampleRate(rate)` | number | `100` | Percentage of `hiAppEvent` crash and hang events to report; clamps values to `0` through `100`; does not sample synchronous JS policy reporting |
+| `setJsCrashPolicy(policy)` | `JsCrashPolicy` | `REPORT_THEN_EXIT` | Sets the behavior for uncaught main-thread ArkTS exceptions |
+| `setCrashLoopThreshold(threshold)` | number | `3` | Blocks the Nth crash in the rolling window from restarting, allowing at most N-1 recovery restarts; treats values below `1` as `1` |
+| `setCrashLoopWindowMs(windowMs)` | number | `60000` | Rolling window for counting recoverable crashes, in milliseconds; treats values below `1` as `1` |
+| `setCrashLoopCooldownMs(cooldownMs)` | number | `300000` | Crash-free duration required to reset persisted history after the guard trips, in milliseconds; treats values below `1` as `1` |
 
 <Warning>
-Enable Crash after `Flashcat.initialize()` and `FlashcatRum.enable()`, and do it early. Crash events are written through the RUM feature. If RUM is not enabled, the Crash module drops received crash replays.
+Starting in `0.2.0`, the default changes from the legacy keep-alive behavior to `REPORT_THEN_EXIT`. Merely initializing an earlier SDK suppressed host application exit after an uncaught ArkTS exception, leaving the application running with undefined business state. The new default synchronously persists the crash and restores platform exit semantics. To restore the old behavior, explicitly set `JsCrashPolicy.OBSERVE_ONLY` and confirm that retaining a damaged process matches your business requirements.
+</Warning>
+
+### `REPORT_THEN_EXIT`
+
+This is the default policy. When an uncaught synchronous or asynchronous main-thread ArkTS exception occurs, the SDK synchronously persists a crash incident, flushes the current RUM writers, and exits the process. The incident is replayed into RUM on the next launch. If the synchronous write fails, the SDK attempts an asynchronous report and still exits.
+
+### `REPORT_AND_RECOVER`
+
+The SDK synchronously persists the crash incident, checks the persisted crash-loop guard, then calls `appRecovery.saveAppState()` and `restartApp()`. The old process exits and a new process starts. The incident replayed on the next launch includes `crash.recovered: true`.
+
+If recovery cannot be enabled, loop history cannot be persisted, the guard trips, the incident cannot be marked as recoverable, or the restart request fails, the SDK degrades to exit behavior.
+
+### `OBSERVE_ONLY`
+
+The SDK reports the exception asynchronously and leaves the current process running. This policy restores the pre-`0.2.0` keep-alive behavior and does not exit or restart the process. The event loop may remain responsive, but the uncaught exception may have left the application in a broken or inconsistent business state.
+
+### Crash-loop protection
+
+Crash-loop protection affects only `REPORT_AND_RECOVER`. With the defaults, the first two crashes in a 60-second rolling window can restart the application. The third crash is reported synchronously but degrades to exit: the Nth crash in the window is blocked from restarting, allowing at most N-1 recovery restarts.
+
+Crash timestamps persist across processes, so restarting the application does not reset the guard. After the guard trips, each blocked crash becomes the newest timestamp. The application must remain crash-free for the full five-minute cooldown before history resets. Setting `setCrashLoopThreshold(1)` disables recovery restarts entirely: every crash is still reported synchronously, but each one exits and is never marked with `crash.recovered`.
+
+### Restore host application state
+
+Automatic restart does not define which page state to restore. The host `UIAbility` must implement `onSaveState`, copy the required state into `wantParam`, and return `ALL_AGREE`:
+
+```ts
+import { AbilityConstant, UIAbility } from '@kit.AbilityKit';
+
+export default class EntryAbility extends UIAbility {
+  onSaveState(
+    _reason: AbilityConstant.StateType,
+    wantParam: Record<string, Object>
+  ): AbilityConstant.OnSaveResult {
+    wantParam['route'] = 'pages/Checkout';
+    wantParam['draftId'] = 'draft-123';
+    return AbilityConstant.OnSaveResult.ALL_AGREE;
+  }
+}
+```
+
+The host application must read these parameters from the recovery `Want` and restore only state that is safe to resume. State restoration requires the host to implement `onSaveState`; the SDK triggers the state save and the restart when a crash occurs.
+
+### Capability boundary
+
+| Failure type | Capture and policy behavior |
+|--------------|-----------------------------|
+| Uncaught synchronous or asynchronous main-thread ArkTS exception | Captured live; the selected `JsCrashPolicy` applies, including synchronous persistence and optional restart |
+| Unhandled Promise rejection | Reported as an ordinary, non-crashing RUM error with `error.source_type: promise`; the process does not exit and crash policies do not apply |
+| TaskPool or Worker throw | Does not reach the error observer, does not terminate the host process, and is not covered by crash policies |
+| Native C/C++ signal crash | Cannot be prevented or restarted by JS crash policies; captured only through `hiAppEvent.APP_CRASH` on a later launch |
+| `APP_FREEZE` | Captured only through `hiAppEvent.APP_FREEZE` on a later launch |
+
+<Warning>
+Enable RUM and Crash early after `Flashcat.initialize()`. JS crash policy delivery does not depend on enable order: Crash pushes the policy to RUM, and RUM also pulls it on start, so enabling either module first activates the policy. Enabling `FlashcatRum.enable()` before `FlashcatCrash.enable()` is still recommended so pending crash incidents from the previous launch replay immediately. Crash events require the RUM pipeline for publication.
 </Warning>
 
 ## Background and deferred upload
 
-By default, the SDK uploads on the foreground cadence configured by `setBatchUploadFrequencyMs()` and triggers `flush()` when the application backgrounds. If you want HarmonyOS WorkScheduler to wake the app for uploads, register deferred upload work.
+By default, the SDK uploads on the foreground cadence configured by `setUploadFrequency()` and triggers `flush()` when the application backgrounds. If you want HarmonyOS WorkScheduler to wake the app for uploads, register deferred upload work.
 
 ```ts
 const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
@@ -230,9 +396,29 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setUploadOnWifiOnly(enabled)` | `false` | Restricts deferred upload work to Wi-Fi |
 | `setDeferredUploadRequiresCharging(enabled)` | `true` | Restricts deferred upload work to charging state |
 
-<Note>
-The SDK registers the WorkScheduler task. When your `WorkSchedulerExtensionAbility` wakes, call `Flashcat.flushAndWait()` to perform a bounded batch drain.
-</Note>
+The SDK registers the WorkScheduler task. The task is persisted (`isPersisted`, surviving reboots) and repeats on a 2-hour cycle.
+
+### Initializing inside the extension process
+
+A `WorkSchedulerExtensionAbility` runs in a **separate process** and does not share the main process's SDK instance. When it wakes, initialize with `initializeForDeferredUpload` before calling `flushAndWait()`:
+
+```ts MyUploadExtensionAbility.ets
+import { Flashcat } from '@flashcatcloud/core';
+
+async onWorkStart(workInfo: workScheduler.WorkInfo): Promise<void> {
+  Flashcat.initializeForDeferredUpload(this.context, buildConfig());
+  await Flashcat.flushAndWait();
+}
+```
+
+`initializeForDeferredUpload` differs from `initialize` in two important ways:
+
+- **It takes no consent argument.** The extension has no user in front of it, so it acts only on the main process's last persisted decision. If nothing is persisted (the main application never initialized) or the stored decision is `NOT_GRANTED`, it reads, migrates, and uploads nothing.
+- **It is read-only.** It never writes back consent, device identity, or work registrations. HarmonyOS Preferences are per-process whole-file caches, so a write from the extension could clobber a revocation happening concurrently in the main process.
+
+<Warning>
+Do not call `Flashcat.initialize()` inside the extension process. It would overwrite the persisted consent state with the literal you pass, which can resume uploads after the user revoked consent. `setTrackingConsent` is also ignored in the extension process and logs an error.
+</Warning>
 
 ## Upload HarmonyOS crash symbols
 
@@ -248,7 +434,7 @@ The plugin uploads two artifact types:
 The plugin ships as an npm package (on **npm**, not ohpm); install it as a build-time dev dependency in your project's root `package.json`, not in `oh-package.json5`:
 
 ```bash
-npm install -D @flashcatcloud/hvigor-plugin
+npm install -D @flashcatcloud/hvigor-plugin@^0.1.3
 ```
 
 Then register the plugin in the module's `hvigorfile.ts`:
@@ -261,7 +447,6 @@ export default {
   system: hapTasks,
   plugins: [
     flashcatSymbolUploadPlugin({
-      endpoint: 'https://browser.flashcat.cloud',
       apiKey: process.env.FLASHCAT_API_KEY ?? '',
       service: 'shopping-app',
       version: '1.0.0',
@@ -272,7 +457,7 @@ export default {
 ```
 
 <Note>
-`flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, default `0.1.0`). Neither is normally required.
+On SaaS, omit `endpoint` — **hvigor-plugin ≥ 0.1.3** defaults to `https://ci.flashcat.cloud` (**not** the RUM ingest host `browser.flashcat.cloud`). For a private deployment set `FLASHCAT_SOURCEMAP_INTAKE_URL` (scheme + host, no path; also requires ≥ 0.1.3), or pass `endpoint: 'https://rum.example.com'`. Plugin 0.1.2 does not honour `FLASHCAT_SOURCEMAP_INTAKE_URL` — set `endpoint` explicitly, or use the legacy `FLASHCAT_ENDPOINT` env var (deprecated in 0.1.3 but still honoured). `flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` (build output directory, default `build/default`) and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, which defaults to the plugin's own version). Neither is normally required.
 </Note>
 
 Run the upload task after a release build:

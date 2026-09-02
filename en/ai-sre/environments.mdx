@@ -6,7 +6,7 @@ sidebarTitle: Environments
 ---
 
 <Info>
-  **Public beta**: AI SRE is in public beta, rolling out gradually to accounts on On-call Pro or higher, at no additional charge during the beta. To get access, submit the [AI SRE beta application form](https://c9xudyniiq.feishu.cn/share/base/form/shrcn0ngCfdoygiaHnAT80BfZiH). Features and the UI may continue to change.
+  **Public beta**: AI SRE is now open to all accounts — no application needed. Sign in to the console and start using it; it's free during the public beta. Features and the UI may continue to evolve.
 </Info>
 
 ## Overview
@@ -169,6 +169,61 @@ The setup guide automatically fills in the real `TOKEN` and `URL`. The examples 
 Both `connect-url` and `install_script_url` are returned by the backend; the frontend does not hardcode them. Private or air-gapped deployments can replace the install-script distribution source with an internal mirror, but the mirror must serve `install.sh`, `releases/latest`, and `releases/download/<version>/...` release assets.
 </Note>
 
+### Connect to a private endpoint with a self-signed certificate
+
+By default, Runner verifies the certificate chain and hostname of its control WebSocket. If a private deployment uses a self-signed certificate, prefer adding its CA to the trust store of the Runner host or container. Disable verification only when you cannot install the CA and the endpoint is inside a trusted private network.
+
+| Configuration | Value | Default | Description |
+|---|---|---|---|
+| Environment variable | `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true` | `false` | Works with systemd, Docker, and other process managers |
+| Command-line flag | `--insecure-skip-tls-verify` | Disabled | Intended for manual runs; command-line flags take precedence over environment variables |
+
+<Tabs>
+  <Tab title="Linux (systemd)">
+    Edit `/etc/flashduty-runner/env` and add the private endpoint and TLS setting:
+
+    ```bash
+    FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws
+    FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true
+    ```
+
+    Restart Runner so it loads the new environment variables:
+
+    ```bash
+    sudo systemctl restart flashduty-runner
+    ```
+  </Tab>
+  <Tab title="Docker">
+    Pass the environment variable when you create the container:
+
+    ```bash
+    docker run -d \
+      --name flashduty-runner \
+      -e FLASHDUTY_RUNNER_TOKEN=<your-token> \
+      -e FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws \
+      -e FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true \
+      -v /var/flashduty/workspace:/workspace \
+      registry.flashcat.cloud/public/flashduty-runner:latest
+    ```
+  </Tab>
+  <Tab title="Manual / macOS">
+    Pass the command-line flag at startup:
+
+    ```bash
+    flashduty-runner run \
+      --token <your-token> \
+      --url wss://private.example.com/safari/environment/ws \
+      --insecure-skip-tls-verify
+    ```
+
+    If the environment variable is already set to `true`, pass `--insecure-skip-tls-verify=false` to explicitly restore certificate verification.
+  </Tab>
+</Tabs>
+
+<Warning>
+When enabled, Runner no longer verifies the certificate chain or hostname of the control WebSocket, so an attacker could impersonate the control endpoint. This setting affects only the Runner-to-AI-SRE control WebSocket. It does not change TLS settings for MCP, A2A, or other HTTPS requests made during task execution. Runner logs an explicit warning at startup when verification is disabled.
+</Warning>
+
 ### Linux service user
 
 Linux (systemd) installs run as an auto-created `flashduty` user by default. That user has no sudo access. The systemd unit enables hardening such as `NoNewPrivileges=true`, `ProtectSystem=strict`, and `PrivateTmp=true`, and only grants write access to the Runner state directory.
@@ -199,7 +254,19 @@ After the Runner starts, it continuously sends heartbeats. List statuses mean:
 |---|---|
 | Pending | The Environment exists, but the Runner has never connected. |
 | Online | The Runner is currently connected, heartbeat is healthy, and it can accept work. |
+| Degraded | The Runner is still connected and its heartbeat is healthy, but its executor can't keep up — tasks are queuing up or taking too long to return. **You can keep using it, but responses will be slower**. |
 | Offline | The Runner connected before, but its heartbeat is currently lost. |
+
+`degraded` is computed **in real time** and isn't persisted: it's re-evaluated from current signals on every read, so it never needs to be manually cleared. It's driven by two kinds of signal —
+
+- newer Runner versions report their own executor health probe and backlog count in the heartbeat, and degraded is judged directly from those;
+- older Runner versions that don't report these metrics use a fallback rule instead: **3 consecutive** task timeouts against the same Environment mark it degraded (only timeouts longer than 20 seconds count, so a caller's own short timeout isn't misjudged).
+
+Recovery is automatic too: for newer Runner versions, the status returns to `Online` as soon as the heartbeat is healthy again (probe passes and no backlog); for older Runner versions, any single successful task resets the counter, or it recovers automatically after 30 minutes of sustained quiet.
+
+<Tip>
+When you see `Degraded`, first check CPU, memory, and disk load on the Runner's host, and whether a long-running task is monopolizing the executor. It doesn't block the session, but staying in this state for a while means that host can't keep up with its current task volume.
+</Tip>
 
 The backend compares Runner versions during heartbeats. When a newer version is available, the Runner receives an upgrade notification and downloads, verifies, and replaces itself. Re-running the install command also upgrades manually.
 
@@ -315,6 +382,15 @@ permission:
 Command permission is currently configured only through this file — there is no console UI for it yet.
 </Note>
 
+### File-system boundary
+
+Permission configuration governs **commands**; the agent's **file read/write tools** follow their own path semantics, matching `bash`:
+
+- **Relative paths** are confined to the workspace root with symlink-escape protection — through a relative path the agent can only read and write files inside the workspace.
+- **Absolute paths** are passed through to the host filesystem by design, matching `bash`.
+
+So the real file-access boundary is the **OS user** the Runner runs as, plus the deployment isolation (the systemd user and directory protections, or Docker mounts and container boundary) — not the permission configuration file.
+
 ## Selecting an environment in a session
 
 ---
@@ -325,7 +401,7 @@ The environment selector at the bottom of the chat input decides where a new ses
 |---|---|
 | **Auto** | The default for new sessions. Uses an online Runner the current member can use; otherwise falls back to the cloud Sandbox. |
 | **Cloud Sandbox · Default** | Forces the system-managed cloud Sandbox and ignores self-hosted Runners. |
-| **Self-hosted Environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected. |
+| **Self-hosted Environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected; Runners in **Degraded** status **remain selectable**, and selecting one shows a "Degraded — you can continue, but responses may be slower" notice. |
 
 <Warning>
 Environment selection is locked once per session: the Environment determined when the session sends its first message is recorded and reused for all later turns. Changing the selector afterward does not change that session. To switch environments, start a new session.
@@ -346,8 +422,8 @@ Each BYOC Environment has account-level or team-level scope:
 
 Edit permissions follow the unified rule:
 
-1. Account owners and account admins can edit any Environment.
-2. Team members can edit team-scoped Environments for their team.
+1. Team-scoped Environments can be acted on only by members of that team — organization admins must join the team first.
+2. Account-scoped Environments (shared scope) can be acted on only by organization admins.
 3. There is no "creator extra permission"; you do not need to be the creator if the rules above allow the edit.
 
 <Note>
@@ -366,6 +442,9 @@ When troubleshooting Runner issues, start with the **Status** and **Last heartbe
 </Accordion>
 <Accordion title="Runner stays Pending" icon="wrench">
   Pending means this Environment has never connected successfully. Confirm that the install command completed, the Token belongs to this Environment, and the `URL` is reachable from the target machine. If you configured permissions, also confirm that the file exists and the YAML parses.
+</Accordion>
+<Accordion title="Logs show certificate signed by unknown authority" icon="shield-xmark">
+  The private endpoint's certificate is not trusted by Runner. Prefer adding the CA that issued the certificate to the trust store of the Runner host or container. If the endpoint uses a self-signed certificate inside a trusted private network, you can instead explicitly enable `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY` as described above. Restart the service for a systemd deployment, recreate the container with the new environment variable for Docker, or restart the process for a manual deployment.
 </Accordion>
 <Accordion title="Session times out or does not respond" icon="server">
   If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment. Restore that Runner, or start a new session and choose Auto or cloud Sandbox. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.

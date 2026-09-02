@@ -7,7 +7,7 @@ keywords: ["Description 模板", "告警规则", "备注描述", "Go Template", 
 Monitors 告警规则的 **备注描述（Description）** 用于定义告警和恢复事件中的说明文本。你可以使用 Go `text/template` 引用告警标签、查询值、关联查询结果和安全的 Sprig 函数，生成 Text 或 Markdown 格式的描述内容。
 
 <Warning>
-本文描述的模板变量、Sprig 函数名和标签增强后再渲染 `Description` 的行为需要 monit-edge `v0.42.0` 或以上版本。低于该版本时，部分变量或函数可能不可用，标签增强结果也可能无法在备注模板中引用。
+本文描述的基础模板变量、Sprig 函数名和标签增强后再渲染 `Description` 的行为需要 monit-edge `v0.42.0` 或以上版本。通过 `$annotations` 读取 `$<查询名称>.<字段名称>` 格式的查询附加信息需要 monit-edge `v0.53.0` 或以上版本；使用该能力前，请先升级告警引擎。
 </Warning>
 
 ## 工作方式
@@ -48,7 +48,7 @@ monit-edge 会使用 Sprig 标准函数名注册安全的 Sprig 函数。同一�
 | `$values` | `map[string]float64` | 告警计算中使用到的数值，与 `.Values` 相同。 |
 | `$value` | `float64` | 主告警值，与 `.Value` 相同。 |
 | `$appendLabels` | `map[string]string` | 规则上配置的附加标签。 |
-| `$annotations` | `map[string]string` | 规则自定义字段。 |
+| `$annotations` | `map[string]string` | 规则自定义字段和查询结果携带的附加信息。 |
 | `$dsType` | `string` | 数据源类型。 |
 | `$dsName` | `string` | 数据源名称。 |
 | `$dsAddress` | `string` | 数据源地址，不包含认证信息。 |
@@ -66,6 +66,32 @@ monit-edge 会使用 Sprig 标准函数名注册安全的 Sprig 函数。同一�
 规则 {{ .RuleName }} 已恢复。
 {{- end }}
 ```
+
+### 查询结果附加信息
+
+如果主查询明确配置了标签字段，其他非值字段会作为附加信息进入 `$annotations`。查询附加信息始终使用 `$<查询名称>.<字段名称>` 作为 key：
+
+```gotemplate
+{{ index $annotations "$A.sample_message" }}
+{{ index $annotations "$B.sample_message" }}
+```
+
+无论只有一个还是多个查询，也无论使用阈值判定、数据存在还是数据缺失模式，写法都相同。`$` 前缀专门用于查询字段，规则中手工配置的自定义字段名称不能以 `$` 开头。字段如何分类，请参见[查询结果字段映射](/zh/monitors/alert-rules/query-result-fields)。
+
+## 自定义字段
+
+规则上配置的**自定义字段**会进入告警事件的 `$annotations`，字段**值**本身也支持变量与模板渲染：
+
+- **简单变量**：支持 `${label_name}` 形式（如 `${service}`），渲染时替换为告警事件中对应标签的值。例如值填写 `https://a.com/runbook/${service}`，`${service}` 会被替换为告警事件的 `service` 标签值。
+- **Go template**：当值中包含 `{{` 时，整个值按与**备注描述**相同的 Go template 规则渲染，可以引用本文档介绍的内置变量与函数。
+- **title 字段**：字段名为 `title` 时，其渲染结果将作为**事件标题**。
+
+示例：
+
+| 字段名 | 字段值 | 渲染结果（假设 `service=payment-api`、`$severity=Critical`） |
+| --- | --- | --- |
+| `runbook` | `https://a.com/runbook/${service}` | `https://a.com/runbook/payment-api` |
+| `title` | `[{{ $severity }}] {{ index $labels "service" }} 告警` | `[Critical] payment-api 告警` |
 
 ## 根对象字段
 
@@ -86,7 +112,7 @@ monit-edge 会使用 Sprig 标准函数名注册安全的 Sprig 函数。同一�
 | `.AppendLabels` | `map[string]string` | 规则上配置的附加标签。 |
 | `.EnrichLabels` | `map[string]string` | 外部标签增强接口返回的标签。标签增强会先于 `Description` 渲染执行，因此模板可以引用这些标签。 |
 | `.Values` | `map[string]float64` | 告警计算中使用到的数值。 |
-| `.Annotations` | `map[string]string` | 规则自定义字段。 |
+| `.Annotations` | `map[string]string` | 规则自定义字段和查询结果携带的附加信息。 |
 | `.Relates` | `map[string][]*ResultRow` | 关联查询结果行。 |
 | `.Status` | `string` | `firing` 或 `recovered`。 |
 | `.Severity` | `string` | 告警级别。 |

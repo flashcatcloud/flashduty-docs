@@ -1,0 +1,237 @@
+---
+title: "Electron error symbolication"
+description: "Upload JavaScript source maps and native crash symbols for an Electron application to restore production stack traces"
+keywords: ["RUM", "Electron", "source maps", "Breakpad", "native crash", "symbolication"]
+---
+
+Electron applications produce JavaScript errors and native crashes. Each stack type uses a different symbolication workflow:
+
+| Error type | Original stack | Upload required |
+|------------|----------------|-----------------|
+| Main-process and renderer JavaScript errors | Minified file name, line, and column | Build-generated source maps |
+| Electron or native module crash | Module name and memory address | Breakpad `.sym` files |
+
+## Symbolicate JavaScript errors
+
+By default, the SDK converts stack frames under the application directory to stable `app:///<relative path>` URLs. The same build produces the same path regardless of where a user installs the application.
+
+For example:
+
+```text
+Error: something went wrong
+  at handleClick @ app:///dist/renderer/index.js:97:15
+```
+
+Use only the URL path when uploading. The directory prefix for this example is `/dist/renderer`.
+
+### 1. Align service and version
+
+Flashduty matches a source map using:
+
+- Event `service`
+- Event `version`
+- Minified file path in the stack frame
+
+Use the same release version in both processes:
+
+```ts main.ts
+await init({
+  // Other options
+  service: 'my-electron-app',
+  version: '1.4.2',
+});
+```
+
+```ts renderer.ts
+flashcatRum.init({
+  // Other options
+  service: 'my-electron-app',
+  version: '1.4.2',
+});
+```
+
+The main-process `version` is not copied to renderer events, so both processes must set it.
+
+### 2. Generate source maps
+
+Enable source maps for main-process and renderer builds:
+
+<CodeGroup>
+```ts Vite
+export default defineConfig({
+  build: { sourcemap: true },
+});
+```
+
+```js Webpack
+module.exports = {
+  mode: 'production',
+  devtool: 'source-map',
+};
+```
+
+```ts esbuild
+await esbuild.build({
+  sourcemap: true,
+});
+```
+</CodeGroup>
+
+### 3. Upload main-process and renderer artifacts
+
+Install the [Flashduty CLI](https://github.com/flashcatcloud/flashcat-cli), then upload source maps for each process separately:
+
+```bash
+npm install --global @flashcatcloud/flashcat-cli
+```
+
+```bash
+# Main-process stack: app:///dist/main/index.js
+flashcat-cli sourcemaps upload ./out/main \
+  --service my-electron-app \
+  --release-version 1.4.2 \
+  --minified-path-prefix /dist/main \
+  --api-key <YOUR_API_KEY>
+
+# Renderer stack: app:///dist/renderer/index.js
+flashcat-cli sourcemaps upload ./out/renderer \
+  --service my-electron-app \
+  --release-version 1.4.2 \
+  --minified-path-prefix /dist/renderer \
+  --api-key <YOUR_API_KEY>
+```
+
+`--minified-path-prefix` must match the directory shown in the stack frame. Do not include `app:///` in the prefix.
+
+<Warning>
+Do not package `.map` files in the distributed application. Exclude them from the release artifact after upload and before creating the installer.
+</Warning>
+
+### Custom path mapping
+
+Most projects can use the default `app:///` paths. Set `normalizeStackPath` only when your build directory cannot be represented relative to the application root:
+
+```ts main.ts
+await init({
+  // Other options
+  normalizeStackPath: (absolutePath) => {
+    const normalized = absolutePath.replace(/\\/g, '/');
+    const match = /\/public(\/dist\/.+)$/.exec(normalized);
+    return match ? match[1] : undefined;
+  },
+});
+```
+
+This callback applies to main-process and bridged renderer stacks. Returning `undefined` lets the SDK apply its default rule.
+
+## Symbolicate native crashes
+
+Native crashes come from Electron `crashReporter` minidumps. Without symbols, the stack contains modules and addresses:
+
+```text
+0  Electron Framework  0x000000010ab12345
+1  libsystem_kernel    0x00007ff81a2b3c4d
+```
+
+After matching Breakpad symbols are uploaded, Flashduty can restore function names, file names, and line numbers.
+
+### 1. Prepare symbol files
+
+Download the symbol bundle from [Electron releases](https://github.com/electron/electron/releases) that exactly matches the Electron **version, operating system, and CPU architecture** you ship:
+
+```text
+electron-v<version>-<platform>-<arch>-symbols.zip
+```
+
+Most frames in a native crash are usually inside Electron modules, so upload the official Electron symbols first.
+
+If the application includes native modules or `.node` plugins, use [dump_syms](https://github.com/mozilla/dump_syms) to generate `.sym` files for them.
+
+### 2. Upload symbols
+
+Place the `.sym` files under one directory, then run:
+
+```bash
+flashcat-cli electron-symbols upload ./breakpad_symbols \
+  --service my-electron-app \
+  --release-version 1.4.2
+```
+
+Use `--dry-run` to preview the files before uploading.
+
+A single Breakpad `.sym` file must not exceed 2 GB; larger uploads are rejected (HTTP 413).
+
+Native symbols match by module ID. `service` and `release-version` label the upload batch for discovery; they do not participate in symbol matching. This differs from JavaScript source maps.
+
+### 3. Publish symbols with each release
+
+Module IDs can change whenever Electron is upgraded or a native module is rebuilt. Upload symbols for every operating system and CPU architecture that you ship.
+
+Missing symbols do not prevent crash reporting. You can receive a crash with address-only frames and upload symbols later; historical crashes are symbolicated when viewed.
+
+### Upload Electron symbols from the console
+
+Besides the CLI, you can upload native symbols from the console. Go to **Application Management → Source Code Management → Electron**. This tab lists uploaded Electron symbols — one row per native module showing Module, Debug ID, Architecture, Service, Version, Size, and upload time. The list supports free-text search by **Debug ID** (the value carried in a crash event's `binary_images`) plus service, version, and build_id filters.
+
+Click **Upload Electron symbols** to open the upload panel. Fill in the parameters below and the panel generates the matching upload command:
+
+| Field | Command equivalent | Description |
+|-------|--------------------|-------------|
+| API Key | `FLASHCAT_API_KEY` | Authenticates the upload request |
+| Symbol directory | positional argument | Directory holding `.sym` files, searched recursively and uploaded one by one, e.g. `./breakpad_symbols` |
+| Service name | `--service` | Only used to categorize rows on this page; keep it consistent with the `service` set at SDK initialization |
+| Release version | `--release-version` | Only used to categorize rows on this page; keep it consistent with the `version` set at SDK initialization |
+| Custom upload endpoint | `FLASHCAT_SOURCEMAP_INTAKE_URL` | Shown only for private deployments. Pre-filled with the endpoint issued by your deployment and overridable (protocol + domain, no path); leave it empty to upload to Flashcat SaaS |
+
+```bash
+FLASHCAT_API_KEY=<YOUR_API_KEY> flashcat-cli electron-symbols upload ./breakpad_symbols \
+  --service my-electron-app \
+  --release-version 1.4.2
+```
+
+The panel also includes an official-symbols download helper: enter the **Electron version** (default `41.1.0`) and pick the **platform / architecture** (`darwin-arm64`, `darwin-x64`, `win32-x64`, `win32-arm64`, `linux-x64`, `linux-arm64`) to get the download URL for the matching official symbols archive plus a one-line "download → unzip → upload" command:
+
+```bash
+curl -fsSL "https://github.com/electron/electron/releases/download/v41.1.0/electron-v41.1.0-darwin-arm64-symbols.zip" -o electron-v41.1.0-symbols.zip && \
+unzip -o electron-v41.1.0-symbols.zip -d ./breakpad_symbols && \
+FLASHCAT_API_KEY=<YOUR_API_KEY> flashcat-cli electron-symbols upload ./breakpad_symbols --service my-electron-app --release-version 1.4.2
+```
+
+Re-upload the official symbols after every Electron upgrade: binaries from a different Electron version carry different Debug IDs, so old symbols never match. If the application includes its own native modules or `.node` plugins, expand **Generate symbols for your own native modules (optional)** and use `dump_syms` to produce `.sym` files in the same directory, for example:
+
+```bash
+dump_syms ./MyApp.app/Contents/MacOS/MyApp > ./breakpad_symbols/MyApp.sym
+```
+
+The panel description links to the Web tab's source-map upload for JavaScript stacks.
+
+The panel also provides a **Copy for AI assistant** entry (an accordion section and a footer button): it copies an English prompt written for coding agents that walks them through symbol upload step by step — reading the Electron version from the project's `package.json`, downloading and extracting the official symbols archive for the target platform and architecture, generating `.sym` files with `dump_syms` when the app has custom native modules or `.node` plugins, and finally uploading with `flashcat-cli electron-symbols upload`. The prompt includes a link to this page and reminds the agent to inject the API key via an environment variable instead of committing it to the repository.
+
+## Verify symbolication
+
+### JavaScript errors
+
+1. Trigger an error with a stable stack in a test build.
+2. Confirm the event `service` and `version` in error details.
+3. Compare the stack frame path with `--minified-path-prefix`.
+4. Confirm that error details show the original file, function, and source location.
+
+### Native crashes
+
+1. Trigger a test crash using the same Electron build as the release.
+2. Restart the application so the SDK can report the minidump.
+3. Confirm that Electron module frames display function names and line numbers.
+
+If upload succeeds but the stack remains unresolved, see [Electron SDK troubleshooting](/en/rum/sdk/electron/faq#why-did-a-source-map-upload-succeed-without-restoring-the-stack).
+
+## Related pages
+
+<CardGroup cols={2}>
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/electron/advanced-config">
+Configure versions, path mapping, and other advanced options.
+</Card>
+
+<Card title="Data collection" icon="database" href="/en/rum/sdk/electron/data-collection">
+Learn how JavaScript errors and native crashes are collected.
+</Card>
+</CardGroup>

@@ -120,6 +120,51 @@ Common filter flags for `incident list`:
 
 Time format examples: `5m`, `1h`, `24h`, `168h`, `2026-04-01`, `2026-04-01 10:00:00`, `1712000000`.
 
+#### Work items and follow-ups (work-item-*)
+
+`incident work-item-*` manages work items anchored to an incident or a post-mortem. `--item-type` distinguishes two kinds: `action` (an action item anchored to an active incident) and `follow_up` (a post-mortem follow-up, which must be bound to a post-mortem ID).
+
+```bash
+flashduty incident work-item-create <incident-id> [flags]        # Create an action item / follow-up
+flashduty incident work-item-list [flags]                        # List work items
+flashduty incident work-item-update <work-item-id> [flags]       # Update title/description/status/priority
+flashduty incident work-item-complete <work-item-id> [flags]     # Mark complete
+flashduty incident work-item-convert <work-item-id> [flags]      # Convert an action item into a follow-up
+flashduty incident work-item-delete <work-item-id> [flags]       # Delete a work item
+flashduty incident work-item-assignees-reset <work-item-id>      # Reset the assignee list
+flashduty incident work-item-post-mortem-bind [flags]            # Bind converted follow-ups to a post-mortem
+```
+
+Key flags for `work-item-create`: `--item-type` (required, `action` or `follow_up`), `--title` (required, up to 512 characters), `--idempotency-key` (required idempotency key, up to 128 characters), `--post-mortem-id` (required for `follow_up`, forbidden for `action`), `--assignee-ids` (initial assignees). Mutating verbs (`update`/`complete`/`convert`/`delete`/`assignees-reset`) require `--version` (optimistic locking — it must match the stored version).
+
+#### Post-mortem reports (post-mortem-*)
+
+Post-mortem verbs live under the `incident` command group (there is no standalone post-mortem group):
+
+```bash
+flashduty incident post-mortem-init <incident-id> [<id2>...]        # Initialize a report from 1–10 incidents (--template-id required)
+flashduty incident post-mortem-list [flags]                         # List reports (server defaults to published; pass --status drafting for drafts)
+flashduty incident post-mortem-info <post-mortem-id>                # Get report detail
+flashduty incident post-mortem-title-reset <post-mortem-id>         # Set the title
+flashduty incident post-mortem-content-reset <post-mortem-id>       # Replace the Markdown body (--markdown-file)
+flashduty incident post-mortem-basics-reset <post-mortem-id>        # Update start/close time, highest severity, responder metadata
+flashduty incident post-mortem-follow-ups-reset <post-mortem-id>    # Set follow-ups (--follow-ups)
+flashduty incident post-mortem-status-reset <post-mortem-id>        # Publish or revert to draft (--status drafting|published)
+flashduty incident post-mortem-delete <post-mortem-id>              # Delete a report (irreversible)
+```
+
+Template verbs: `post-mortem-template-list`, `post-mortem-template-info <template-id>`, `post-mortem-template-upsert` (creates when `--template-id` is omitted; `--team-id` is required when creating), `post-mortem-template-delete <template-id>` (irreversible).
+
+#### Comment types (comment-type-*)
+
+```bash
+flashduty incident comment-type-create [flags]                # Create (--name ≤40 chars, unique within the account; --color #RRGGBB)
+flashduty incident comment-type-list                          # List all comment types
+flashduty incident comment-type-update <comment-type-id>      # Update name/color
+flashduty incident comment-type-delete <comment-type-id>      # Delete
+flashduty incident comment-type-reorder <id> [<id2>...]       # Reorder — pass every comment type ID in the account, in the desired order
+```
+
 ### change — Change records
 
 ```bash
@@ -131,10 +176,16 @@ Supports `--channel`, `--since`, `--until`, `--type`, `--limit`, `--page`.
 ### member — Member queries
 
 ```bash
-flashduty member list [flags]    # List members
+flashduty member list [flags]       # List members
+flashduty member info-reset [flags] # Update a member's profile
+flashduty member invite [flags]     # Invite new members (up to 20 per call)
 ```
 
-Supports `--query` (free-text search by name or email), `--role-id`, `--page`, `--limit`, `--orderby`, `--asc`.
+`member list` supports `--query` (free-text search by name or email), `--role-id`, `--page`, `--limit`, `--orderby`, `--asc`.
+
+`member info-reset` identifies the member by exactly one of `--member-id`, `--member-name`, `--email`, `--phone`, or `--ref-id`; the fields to change go into the required body via `--data '{"updates":{...}}'`. With `--from api`, an updated email or phone is marked verified directly when the account has member invites disabled.
+
+`member invite` takes the member list via `--data '{"members":[...]}'`. When the account has member invites disabled and `--from api` is set, members are created directly in the enabled state with email/phone marked verified — no invitation is sent.
 
 ### team — Team management
 
@@ -147,15 +198,21 @@ flashduty team delete --team-id <id>                 # Delete a team (irreversib
 
 `team list` supports `--query` (team name substring match), `--page`, `--limit`, `--orderby` (`created_at`/`updated_at`/`team_name`), `--asc`, `--person-id` (filter to teams the given member belongs to).
 
-`team info` accepts `--team-id`, `--team-name`, or `--ref-id` to identify the team (exactly one required).
+`team info` accepts `--ref-id`, `--team-name`, or `--team-id` to identify the team (exactly one required). When several are provided, the precedence is `--ref-id` > `--team-name` > `--team-id`.
 
 `team upsert` creates or updates a team:
 - `--team-name` (required, 1–39 characters)
 - `--team-id` (set to update an existing team; omit to create)
 - `--description` (up to 500 characters)
 - `--person-ids` (member ID list; **replaces the entire member list — run `team info` first to see current members before updating**)
-- `--emails` (email addresses to invite as members)
+- `--emails` (add existing members by email; addresses that match no existing member are silently ignored — no invitation is sent)
+- `--phones` (add existing members by phone number; non-matching numbers are silently ignored, and non-E.164 numbers are parsed with `--country-code`)
+- `--country-code` (default country code applied to `--phones` entries that are not in E.164 format)
 - `--ref-id` (external reference ID for HR system integration)
+
+<Note>
+`team upsert`'s `--emails` / `--phones` only match and attach **existing** members — no invitation is ever sent. To invite new members into the organization, use `flashduty member invite`.
+</Note>
 
 `team delete` accepts `--team-id`, `--team-name`, or `--ref-id` to identify the team. **This action is permanent and cannot be undone.**
 
@@ -176,6 +233,21 @@ flashduty channel escalate-rule-list <channel-id>   # List all escalation rules 
 ```
 
 Other escalation rule management commands under the `channel` group: `escalate-rule-create`, `escalate-rule-update`, `escalate-rule-delete` (all require `--channel-id`).
+
+### channel silence/inhibit/drop rules — Noise rule management
+
+Channel-level noise rules are managed through the `channel` command group; see [Noise Reduction](/en/on-call/channel/noise-reduction) for rule semantics and configuration. The three families — `silence-rule-*` (silence), `inhibit-rule-*` (inhibit), `unsubscribe-rule-*` (drop) — share the same shape, each with `list`/`create`/`update`/`enable`/`disable`/`delete` verbs:
+
+```bash
+flashduty channel silence-rule-list <channel-id>                    # List silence rules (channel-id is positional)
+flashduty channel silence-rule-create <channel-id> [flags]          # Create (--rule-name required, 1–39 chars; time window and filters go via --data)
+flashduty channel silence-rule-update --channel-id <id> --rule-id <id>   # Update
+flashduty channel silence-rule-enable --channel-id <id> --rule-id <id>   # Enable
+flashduty channel silence-rule-disable --channel-id <id> --rule-id <id>  # Disable
+flashduty channel silence-rule-delete --channel-id <id> --rule-id <id>   # Delete
+```
+
+`inhibit-rule-*` and `unsubscribe-rule-*` work the same way; `inhibit-rule-create` requires `--equals` (the label keys pairing source and target alerts). Silence and inhibit rules accept `--is-directly-discard` to drop suppressed alerts instead of merging them. Note that `channel-id` is positional on `*-rule-create` and `*-rule-list` but a flag (`--channel-id`) on `*-rule-update`/`delete`/`enable`/`disable`; `--rule-id` is a MongoDB ObjectID string.
 
 ### field — Custom field queries
 
@@ -249,7 +321,7 @@ Core fields for `application-create` / `application-update`:
 | Flag | Description |
 |------|-------------|
 | `--application-name` | Application name; required on create, 1-40 characters |
-| `--type` | Application type: `browser`, `ios`, `android`, `react-native`, `flutter`, `kotlin-multiplatform`, `roku`, `unity` |
+| `--type` | Application type: `browser`, `ios`, `android`, `react-native`, `flutter`, `kotlin-multiplatform`, `roku`, `unity`, `miniprogram`, `harmony`, `electron` |
 | `--team-id` | Owning team ID (required on create) |
 | `--is-private` | Restrict access to team members only |
 | `--no-geo` | Disable geographic inference |
@@ -278,6 +350,45 @@ Common `session-replay-segments` flags:
 | `--ts` | Without `--search-after-ctx`, begin at the most recent full-snapshot segment at or before this timestamp. |
 | `--url-mode` | When `true`, return JSON containing presigned download URLs. By default it is `false` and streams segment bytes directly. URLs are valid for one hour. |
 | `--view-id` | Return segments for one view only; omit it to page through the whole session. |
+
+#### Error ingestion rules (error-ingestion-rules-*)
+
+Error ingestion rules filter or rewrite the error events an application reports:
+
+```bash
+flashduty rum error-ingestion-rules-create <application-id> [flags]       # Create (--rule-name required, 1–128 chars; filters go via --data)
+flashduty rum error-ingestion-rules-list <application-id>                 # List rules
+flashduty rum error-ingestion-rules-update [flags]                        # Update (--application-id, --rule-id required)
+flashduty rum error-ingestion-rules-enable [flags]                        # Enable
+flashduty rum error-ingestion-rules-disable [flags]                       # Disable
+flashduty rum error-ingestion-rules-delete [flags]                        # Delete
+flashduty rum error-ingestion-rules-history-list <application-id>         # View change history (--orderby updated_at|version)
+flashduty rum error-ingestion-rules-history-revert <application-id> --version <v>  # Revert to a history version
+```
+
+`--description` is capped at 512 characters. `create`/`list`/`history-list`/`history-revert` take `application-id` as a positional argument; `update`/`enable`/`disable`/`delete` target rules via the `--application-id` and `--rule-id` flags.
+
+#### Preset severity rules (issue-preset-severity-rules-*)
+
+Preset severity rules assign a preset severity to errors matching a condition, used for issue grading:
+
+```bash
+flashduty rum issue-preset-severity-rules-create <application-id> [flags]  # Create (--rule-name required; --severity Critical|Warning|Info required)
+flashduty rum issue-preset-severity-rules-list <application-id>            # List rules
+flashduty rum issue-preset-severity-rules-update [flags]                   # Update
+flashduty rum issue-preset-severity-rules-enable [flags]                   # Enable
+flashduty rum issue-preset-severity-rules-disable [flags]                  # Disable
+flashduty rum issue-preset-severity-rules-delete [flags]                   # Delete
+flashduty rum issue-preset-severity-rules-reorder [flags]                  # Reorder priority (--drag-rule-id, --target-rule-id)
+flashduty rum issue-preset-severity-rules-history-list <application-id>    # Change history
+flashduty rum issue-preset-severity-rules-history-revert <application-id> --version <v>  # Revert
+```
+
+#### Resource info (resource-info)
+
+```bash
+flashduty rum resource-info [--no-cache]   # View the RUM plan version, quotas, and usage (--no-cache bypasses the short-lived cache)
+```
 
 ### oncall — On-call licenses
 
@@ -363,11 +474,12 @@ FDUTY
 
 ### monit-query — Monitoring datasource queries
 
-Probe monitoring back-end datasources (Prometheus, VictoriaLogs, Loki, MySQL) directly, bypassing the alert-rule layer.
+Probe monitoring back-end datasources directly, bypassing the alert-rule layer. The `data` subcommand supports 9 datasource types (Prometheus, VictoriaLogs, Loki, MySQL, SLS, Elasticsearch, PostgreSQL, Oracle, ClickHouse); `diagnose` and the deprecated `rows` support `prometheus`, `victorialogs`, `loki`, `mysql`.
 
 ```bash
 flashduty monit-query diagnose [flags]   # Pre-clustered RCA findings (log patterns or metric trends)
-flashduty monit-query rows [flags]       # Raw datasource passthrough query
+flashduty monit-query data [flags]       # Structured datasource query (recommended)
+flashduty monit-query rows [flags]       # Raw datasource passthrough query (deprecated — use data)
 ```
 
 Common flags for `diagnose`:
@@ -377,11 +489,23 @@ Common flags for `diagnose`:
 | `--ds-type` | Datasource type supported by the diagnose endpoint (required): `prometheus`, `victorialogs`, `loki` |
 | `--ds-name` | Datasource name as configured in the console (required) |
 | `--input-query` | Filter-only log query or matrix PromQL (required) |
-| `--time-start` | Window start — relative (`15m`, `1h`), unix seconds, or `now` (default `15m`) |
-| `--time-end` | Window end — relative, unix seconds, or `now` (default `now`; window capped at 6h) |
+| `--time-start` | Window start (default `15m`). Accepts a relative duration (`15m`, `1h`), `now`, a date/RFC3339 timestamp, or a unix epoch in seconds or milliseconds |
+| `--time-end` | Window end (default `now`); same formats as `--time-start`; the window is capped at 6h |
 | `--operation` | `log_patterns` (`loki` / `victorialogs`) or `metric_trends` (`prometheus`); inferred from `--ds-type` when omitted |
 
-`rows` requires `--ds-type`, `--ds-name`, and `--expr` (query expression). Use `--args KEY=VALUE` (repeatable) for parameterized queries.
+Common flags for `data`:
+
+| Flag | Description |
+|------|-------------|
+| `--ds-type` | Datasource type (required): `prometheus`, `victorialogs`, `loki`, `mysql`, `sls`, `elasticsearch`, `postgres`, `oracle`, `clickhouse` |
+| `--ds-name` | Datasource name as configured in the console (required) |
+| `--expr` | Query expression (required) |
+| `--delay-seconds` | Look-back offset in seconds for point-in-time queries (default `0`) |
+| `--args KEY=VALUE` | Additional arguments, repeatable (values must be strings). In raw mode (`loki` / `victorialogs`), `<ds-type>.start` and `<ds-type>.end` accept a relative duration (`15m`), `now`, a date/RFC3339 timestamp, or unix seconds/milliseconds; the CLI normalizes them to the unix-seconds form the datasource requires |
+
+`data` returns a stable `query_result.v1` structured result: `format` is always `query_result.v1`, and `result.kind` is one of `frames` (typed table/time-series frames), `records` (schema-flexible records, may contain nested JSON or null), or `samples` (instant samples with complete label sets) — results are no longer flattened into the legacy rows shape.
+
+`rows` requires `--ds-type`, `--ds-name`, and `--expr` (query expression). Use `--args KEY=VALUE` (repeatable) for parameterized queries. **`rows` is deprecated** — use `monit-query data` instead. In raw mode (`loki` / `victorialogs`), `rows` accepts time-window arguments `--args <ds-type>.start=<t>` and `--args <ds-type>.end=<t>` in the same formats as `diagnose`'s `--time-start`/`--time-end` (relative duration, `now`, date/RFC3339, unix seconds or milliseconds); the CLI normalizes them to the unix-seconds form the datasource requires.
 
 ### monit — Alert-expression preview
 
@@ -401,11 +525,74 @@ Common flags:
 | `--delay-seconds` | Shift the query window backward by a few seconds to compensate for ingestion latency |
 | `--data` | Add datasource-specific parameters such as `args` |
 
+### monit servicemap — Service topology (Beta)
+
+The `monit servicemap-*` command family accesses the ServiceMap capability; see [Service Map](/en/monitors/targets/servicemap) for the UI workflow.
+
+```bash
+flashduty monit servicemap-fleet [flags]             # Browse fleet hosts (filter by --statuses/--agent-versions/--capture-modes/--edge-clusters)
+flashduty monit servicemap-fleet-summary [flags]     # Fleet host summary
+flashduty monit servicemap-status [flags]            # Check host collection status (--host-id/--host-ids, or --fleet to sample)
+flashduty monit servicemap-summary --data '<json>'   # Get a topology summary for an anchor host
+flashduty monit servicemap-topology --data '<json>' [flags]  # Query topology (--depth 1–3, default 1)
+```
+
+`summary` and `topology` take the anchor host via `--data '{"anchor":{...}}'`. Common `topology` flags: `--depth` (traversal depth, 1–3, default 1), `--max-nodes` (default 100, cap 500), `--max-edges` (default 200, cap 1000).
+
+### alert — Alert and alert-event queries
+
+```bash
+flashduty alert list [flags]        # List alerts (default: last 24h)
+flashduty alert get <alert_id>      # Get full detail of one alert; detail is an alias
+flashduty alert-event list [flags]  # List alert events (default: last 1h)
+```
+
+Common filter flags for both `list` commands: `--severity` (`Critical,Warning,Info`), `--channel` (comma-separated channel IDs), `--integration` (comma-separated integration IDs), `--since`/`--until`, `--limit` (max 100), `--page`. `alert-event list` also takes `--integration-type`, which filters by comma-separated **plugin keys** (e.g. `AliCloud,Prometheus`) — note these are plugin keys, not integration IDs; use `--integration` to filter by integration ID.
+
+### automation — AI SRE automation rules
+
+The `automation` command group manages AI SRE automation rules — create, query, update, delete, run history, and triggering. See [Automations](/en/ai-sre/automations) for the console workflow.
+
+```bash
+flashduty automation create [flags]               # Create a rule
+flashduty automation list [flags]                 # List rules visible to the caller
+flashduty automation get <rule_id>                # Get one rule by ID
+flashduty automation update <rule_id> [flags]     # Update mutable fields on a rule
+flashduty automation delete <rule_id> [flags]     # Delete a rule (interactive confirmation; --force skips it)
+flashduty automation runs <rule_id> [flags]       # List a rule's run history
+flashduty automation templates [--locale zh-CN]   # List preset templates
+flashduty automation fire <trigger_id>            # Fire one run through its HTTP POST trigger
+```
+
+Common `create` flags:
+
+| Flag | Notes |
+|------|-------|
+| `--name` | Rule name (required) |
+| `--team-id` | Scope team ID; `0` means personal scope (default). The scope is immutable after creation |
+| `--schedule` | Schedule helper: `hourly`, `daily`, `weekly`, or `cron`; defaults to `daily` when omitted |
+| `--at` | `HH:MM` local time (in the rule's timezone); for `hourly` only the minute is used (default 0), for `daily`/`weekly` both hour and minute (default 09:00) |
+| `--weekday` | Weekday for `weekly`: `sun`–`sat` or `0`–`7` (`0` and `7` both mean Sunday; defaults to Monday) |
+| `--cron-expr` | Exact 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers |
+| `--disabled` | Create the rule disabled (enabled by default) |
+| `--schedule-enabled` | Whether the schedule trigger is enabled (default `true`) |
+| `--http-post-trigger` | Create and enable an HTTP POST trigger; when passed alone without any schedule flags, the CLI writes a placeholder cron and disables the schedule trigger |
+| `--prompt` / `--prompt-file` | Task prompt, exactly one required; `--prompt-file` reads from a file (`-` for stdin) |
+| `--environment-kind` / `--environment-id` | Runtime environment: `cloud` or `byoc` (`byoc` requires `--environment-id`); empty means automatic |
+
+`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope is immutable after creation, so `update` exposes no scope flag.
+
+`runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (`schedule`/`debug`/`http_post`), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
+
+<Warning>
+**Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**, which defaults at creation to the caller's member timezone, falling back to the account timezone when the member has none. Pass the user's local time directly — do **not** convert it to UTC. Neither `create` nor `update` has a `--timezone` flag: to pin a different timezone at creation, use the generated command `flashduty safari automation-rule-create --timezone`; a created rule's timezone cannot be changed via `update`.
+</Warning>
+
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **288 API operations**, and the CLI generates corresponding resource-organized commands for them. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **337 API operations**, and the CLI generates corresponding resource-organized commands for 336 of them (`session-read-export` is provided by the hand-written `session export` / `safari session-export` commands). In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
-- **AI SRE (`safari`)**: a2a-agents, automations, mcp-servers, sessions, skills, and more
+- **AI SRE (`safari`)**: a2a-agents, automations, knowledge, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
 - **On-call & scheduling**: calendar, schedule
 - **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
@@ -419,6 +606,36 @@ flashduty --help                 # List all top-level command groups
 flashduty safari --help          # AI SRE generated commands
 flashduty alert --help           # Alert-related generated commands
 ```
+
+Time-window parameters on generated commands (`--start-time` / `--end-time`) accept the same human-friendly formats as the curated commands: relative durations (`7d`, `24h` — interpreted as "now minus duration"), `+7d` ("now plus duration", i.e. a future time), `now`, dates and datetimes (such as `2026-05-01` or `2026-05-01 10:00:00`), and unix timestamps in seconds. In addition, `--since` and `--until` are aliases for `--start-time` and `--end-time` respectively and can be used interchangeably; passing both spellings with different values is an error.
+
+#### knowledge — AI SRE knowledge base
+
+The `safari knowledge-*` command family manages AI SRE **Knowledge Packs** — versioned, account/team-scoped file trees (`DUTY.md` plus runbooks, FAQs, service catalogs, and similar files) staged into every AI SRE sandbox at session start. See [Manage Knowledge](/en/ai-sre/knowledge) for the full feature model (`DUTY.md` structure, `@references`, account/team scope, file constraints).
+
+```bash
+flashduty safari knowledge-get                                  # Get the account knowledge pack (with its file list)
+flashduty safari knowledge-pack-list [flags]                    # List knowledge packs
+flashduty safari knowledge-pack-ensure --scope <account|team> [--scope-id <team-id>]  # Ensure a knowledge pack exists (create if missing)
+flashduty safari knowledge-pack-update <pack-id> [--scope ...]  # Change a pack's scope
+flashduty safari knowledge-pack-delete <pack-id>                # Delete a knowledge pack (irreversible)
+flashduty safari knowledge-file-list [--pack-id <id>]           # List files within a pack
+flashduty safari knowledge-file-get --rel-path <path>           # Read a single knowledge file (content is Base64-encoded)
+flashduty safari knowledge-file-put --rel-path <path> --content-b64 <base64>  # Upload or overwrite a knowledge file
+flashduty safari knowledge-file-delete --rel-path <path> [--force]  # Delete a knowledge file
+```
+
+Common flags:
+
+| Flag | Description |
+|------|-------------|
+| `--pack-id` | Knowledge pack ID; defaults to the caller's account-scope pack when omitted |
+| `--rel-path` | File path relative to the pack root (required; subdirectories allowed, e.g. `runbooks/api-5xx.md`) |
+| `--scope` | Pack scope: `account` or `team` (required for `knowledge-pack-ensure`) |
+| `--scope-id` | Team ID; required for `team` scope, ignored for `account` scope |
+| `--force` | On file delete, skip the "still referenced" check; referrers are then returned as warnings |
+
+`knowledge-file-put` requires `--content-b64` to be the Base64 encoding of valid UTF-8 text; `--content-type` is inferred from the file extension when omitted. `knowledge-file-delete` refuses to remove a file still referenced by other pack files unless `--force` is passed, in which case the referrers are returned as warnings.
 
 ### Utility commands
 
@@ -501,32 +718,23 @@ For example, export only an incident ID, title, and progress:
 flashduty incident list --json --fields incident_id,title,progress
 ```
 
-When a projected structured output exceeds its limit, the CLI keeps the selected field names, shortens long strings, and marks them with `...`. If non-string fields alone exceed the limit, the command asks you to reduce the fields or result count. `incident detail` without `--fields` is not subject to the projection limit.
+When a list projection (`incident list`, `incident similar`, `alert-event list`) exceeds its limit, the CLI keeps the selected field names, shortens long strings, and marks them with `...`. If non-string fields alone exceed the limit, the command asks you to reduce the fields or result count.
+
+`incident detail` behaves differently when its projection overflows: the detail is a single object, and a truncated value is indistinguishable from a genuinely short one, so silently shortening it would hand you wrong data. A projection over 8 KiB therefore fails the command outright, and the error names the largest fields (up to 3, with their byte sizes). Reduce the fields in `--fields`, or omit `--fields` entirely to get the full detail, which is not subject to the projection limit.
+
+When `--fields` is omitted and the default compact projection is used, the CLI prints a one-line note to stderr stating which fields the projection uses and that `--fields` can select others. The note goes only to stderr and never touches stdout, so piping into `jq` or similar tools is unaffected.
 
 ## Agent skills
 
-Flashduty CLI ships with 10 agent skills that teach AI coding agents — Claude Code, Cursor, Codex, Gemini CLI, Windsurf, and 40+ others — how to operate Flashduty from your terminal.
+Flashduty CLI ships with a single agent skill named `flashduty` that teaches AI coding agents — Claude Code, Cursor, Codex, Gemini CLI, Windsurf, and 40+ others — how to operate Flashduty from your terminal.
 
-Install skills to every detected agent on your machine in one shot:
+Install it to every detected agent on your machine in one shot:
 
 ```bash
 npx skills add flashcatcloud/flashduty-cli -y -g
 ```
 
-Available skills:
-
-| Skill | Scope |
-|-------|-------|
-| `flashduty-shared` | Foundation: authentication, three-layer noise model, global flags, safety rules |
-| `flashduty-incident` | Incident lifecycle: triage, investigate, resolve, merge, snooze, reassign |
-| `flashduty-alert` | Alert and alert event investigation: drill down, trace, merge |
-| `flashduty-change` | Change event tracking and deployment frequency trends |
-| `flashduty-oncall` | On-call schedule queries: who is on call, shift details |
-| `flashduty-channel` | Channel and escalation rule lookups |
-| `flashduty-statuspage` | Status page management and Atlassian → Flashduty migration |
-| `flashduty-insight` | Analytics: MTTA/MTTR, noise reduction, notification trends |
-| `flashduty-admin` | Team/member lookups and audit log search |
-| `flashduty-template` | Notification template validation and preview |
+The skill uses a router-plus-reference-card structure: `SKILL.md` carries the shared conventions (authentication, global flags, safety rules) and indexes per-domain reference cards — incidents, alerts, changes, on-call and schedules, channels and escalations, status pages, insights, monitors, RUM and sourcemaps, automations, notification templates, members and teams, and more. Before running a task, the agent reads the card for that domain to get every command, flag, and workflow for it — no `--help` trial-and-error.
 
 ## Common workflows
 

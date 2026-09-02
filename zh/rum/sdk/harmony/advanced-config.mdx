@@ -13,14 +13,19 @@ keywords: ["RUM", "HarmonyOS SDK", "高级配置", "Trace", "Crash", "Sourcemap"
 ```ts
 import {
   ConfigurationBuilder,
-  FlashcatSite
+  FlashcatSite,
+  UploadFrequency,
+  BatchSize,
+  BatchProcessingLevel
 } from '@flashcatcloud/core';
 
 const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
   .setService('shopping-app')
   .setVariant('default')
   .useSite(FlashcatSite.CN)
-  .setBatchUploadFrequencyMs(5000)
+  .setUploadFrequency(UploadFrequency.AVERAGE)
+  .setBatchSize(BatchSize.MEDIUM)
+  .setBatchProcessingLevel(BatchProcessingLevel.MEDIUM)
   .build();
 ```
 
@@ -31,29 +36,101 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setVariant(variant)` | string | `""` | 构建变体名称，用于区分不同产物 |
 | `useSite(site)` | `FlashcatSite` | `FlashcatSite.CN` | 数据接收站点；生产环境使用 `https://browser.flashcat.cloud` |
 | `setCustomEndpoint(endpoint)` | string | `""` | 覆盖上报 host，常用于本地代理或私有化转发；SDK 仍会追加 `/api/v2/rum` |
-| `setBatchUploadFrequencyMs(frequencyMs)` | number | `5000` | 前台批量上报调度间隔，单位为毫秒 |
+| `setUploadFrequency(frequency)` | `UploadFrequency` | `UploadFrequency.AVERAGE` | 上传周期的间隔：`FREQUENT` 500 毫秒 / `AVERAGE` 2 秒 / `RARE` 5 秒 |
+| `setBatchSize(size)` | `BatchSize` | `BatchSize.MEDIUM` | 单个批次收集事件的时长：`SMALL` 3 秒 / `MEDIUM` 10 秒 / `LARGE` 35 秒。批次越大，请求次数越少、压缩率越高，代价是事件等待上报的时间更长 |
+| `setBatchProcessingLevel(level)` | `BatchProcessingLevel` | `BatchProcessingLevel.MEDIUM` | 单个上传周期最多连续发送的批次数：`LOW` 1 / `MEDIUM` 20 / `HIGH` 100。应用自身有延迟敏感请求、上行带宽又窄时设为 `LOW` |
 | `setVerbose(enabled)` | boolean | `false` | 输出 SDK 内部 HiLog，日志标签为 `Flashcat` |
+
+<Note>
+这三个参数与 Android、iOS、Flutter SDK 同名同值，调优结论可以跨平台直接套用。
+
+SDK 0.5.0 起，`setBatchUploadFrequencyMs(5000)` 由 `setUploadFrequency(UploadFrequency.RARE)` 取代。同时两个默认值有变化：上传间隔由 5 秒改为 2 秒、批次时长由 5 秒改为 10 秒，均与其他平台对齐。
+</Note>
 
 <Note>
 `Flashcat.initialize()` 同一个实例名只会初始化一次。重复初始化会返回已存在实例，不会重新注册功能模块。
 </Note>
 
-## 隐私同意状态
+### 降低上传对业务请求的影响
 
-初始化时需要传入 `TrackingConsent`。你也可以在运行时通过 `Flashcat.setTrackingConsent()` 修改。
+如果应用自身有延迟敏感的网络请求（如登录、下单、密钥申请），并且运行在上行带宽较窄的网络上，SDK 的上传可能与业务请求争抢上行链路，表现为业务请求耗时的长尾（P95）升高，且时好时坏。
+
+这种情况下把上面三个参数一起下调，改变的是上传的时间分布——上传次数更少、单次更分散：
+
+```ts
+const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
+  .useSite(FlashcatSite.CN)
+  .setUploadFrequency(UploadFrequency.RARE)          // 上传周期间隔：默认 AVERAGE 2 秒 → RARE 5 秒
+  .setBatchSize(BatchSize.LARGE)                     // 批次收集时长：默认 MEDIUM 10 秒 → LARGE 35 秒
+  .setBatchProcessingLevel(BatchProcessingLevel.LOW) // 单周期连发批次上限：默认 MEDIUM 20 → LOW 1
+  .build();
+```
+
+<Tip>
+这三个参数只改变上传时机，不减少任何事件，也不影响看板上的任何数据维度——如果不希望牺牲数据，只调它们即可。`BatchSize.LARGE` 还有额外收益：批次越大压缩率越好，上行字节数会略降。
+</Tip>
+
+<Note>
+调优结论可跨平台套用，仅 iOS 的 `batchProcessingLevel = .low` 为 5 批次/周期（HarmonyOS 与 Android 为 1），方向一致、降幅略小。参见 [Android SDK 性能影响](/zh/rum/sdk/android/performance-impact) 与 [iOS SDK 性能影响](/zh/rum/sdk/ios/performance-impact)。
+</Note>
+
+HarmonyOS SDK 在其他平台需要额外关闭的几项上天然没有开销，无需也无法配置：
+
+| 能力 | 其他平台 | HarmonyOS SDK |
+|------|----------|---------------|
+| Vitals 采集 | Android / iOS 默认每 500 毫秒采集 | 不采集 |
+| 长任务追踪 | Android / iOS 默认开启 | 不产生 `long_task` 事件 |
+| SDK 内部遥测 | Android / iOS 默认 20% 采样 | 无内部遥测上报 |
+| 用户交互追踪 | Android / iOS 默认开启，需显式关闭 | `setTrackUserInteractions` 默认即为 `false` |
+| 上报压缩 | Web 需显式开启 | body 超过 512 字符时自动压缩，不可配 |
+
+如果事件量本身偏大，可以用 [事件过滤](#事件过滤和脱敏) 的 `setEventMapper` 丢弃指定的噪音事件（返回 `null` 即丢弃），侵入性小于改业务打点代码。
+
+## 用户跟踪同意
+
+为遵守 GDPR、CCPA 等隐私法规，SDK 要求在初始化时设置用户跟踪同意状态（`Flashcat.initialize()` 的第三个参数），并可在初始化后随时变更。
+
+### 同意状态说明
+
+| 状态 | 行为 | 使用场景 |
+|------|------|----------|
+| `TrackingConsent.GRANTED` | 开始收集数据并发送到 Flashduty | 用户已同意数据收集 |
+| `TrackingConsent.NOT_GRANTED` | 不收集任何数据 | 用户拒绝数据收集 |
+| `TrackingConsent.PENDING` | 收集数据但不发送 | 等待用户确认 |
+
+<Info>
+如果初始化时使用 `TrackingConsent.PENDING`，SDK 会将事件写入单独的本地缓冲区，但在同意状态更改为 `GRANTED` 之前不会发送；变更为 `GRANTED` 后缓冲数据自动迁移并上传，变更为 `NOT_GRANTED` 则清空缓冲。
+</Info>
+
+### 应用是同意状态的唯一权威
+
+**每次启动都以你传给 `Flashcat.initialize` 的值为准。** SDK 不会用历史状态覆盖它——这一点与 Android、iOS SDK 完全一致。你的应用负责保存用户的选择，并在每次初始化时传回给 SDK。
+
+<Warning>
+如果你的应用在每次启动时都用固定值（例如 `GRANTED`）初始化 SDK，那么用户撤销授权后重启，采集会重新开启。请在用户做出选择的那一刻调用 `setTrackingConsent`，并把该选择保存下来、下次启动时传给 `initialize`。
+</Warning>
+
+同意状态同时会被持久化到本地，但**只服务于一个用途**：后台上传使用的 `WorkSchedulerExtensionAbility` 是独立进程，它面前没有用户、也拿不到应用的判断，只能读取主进程最后一次记录的决定。详见[后台和延迟上传](#后台和延迟上传)。
+
+撤销授权时（变更为 `NOT_GRANTED`），SDK 不仅清空未发送的 pre-consent 缓冲区，还会**删除已经落盘、尚未上传的批次**。0.2.0 及更早版本只清空缓冲区，已采集批次仍会在恢复授权后发出。
+
+`0.3.2` 起，撤销授权还会删除用于[崩溃归因](/zh/rum/sdk/harmony/data-collection#崩溃归因)的本地 view 快照。该快照是一份完整的 view 事件，包含用户 ID、姓名、邮箱和自定义上下文，与已采集批次同样敏感。
+
+### 设置与更改同意状态
+
+初始化时设置：
 
 ```ts
 import { Flashcat, TrackingConsent } from '@flashcatcloud/core';
 
-Flashcat.setTrackingConsent(TrackingConsent.PENDING);
-Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
+Flashcat.initialize(this.context, coreConfig, TrackingConsent.PENDING);
 ```
 
-| 状态 | 行为 |
-|------|------|
-| `GRANTED` | 写入主上传目录并启动批量上传 |
-| `PENDING` | 事件写入单独的 pending 缓冲区，不上传；变更为 `GRANTED` 后迁移并上传 |
-| `NOT_GRANTED` | 丢弃新事件，清空 pending 缓冲区并停止上传 |
+初始化后通过 `setTrackingConsent` API 更改（例如用户在隐私弹窗中做出选择后）：
+
+```ts
+Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
+```
 
 <Warning>
 Trace header 也受同意状态控制。只有状态为 `GRANTED` 时，SDK 才会向请求注入可关联的 `traceparent` 和 `tracestate`。
@@ -86,8 +163,13 @@ FlashcatRum.enable(
 | `setTrackUserInteractions(enabled)` | boolean | `false` | 控制 `FlashcatRum.trackTap()` 是否记录 tap action |
 | `setTrackNavigation(enabled)` | boolean | `false` | 控制 `FlashcatRum.startViewTracking()` 是否注册 ArkUI `routerPageUpdate` 监听 |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | 控制 Trace 发布的网络生命周期是否转换为 RUM resource |
+| `setTrackErrors(enabled)` | boolean | `true` | 控制是否**自动**采集未捕获错误和未处理的 Promise rejection |
 | `setTrackFrustrations(enabled)` | boolean | `false` | 保留开关；当前版本尚未生成 frustration 事件 |
 | `setEventMapper(mapper)` | function | `null` | 在事件写入磁盘前修改或丢弃 view、action、error、resource 事件 |
+
+<Note>
+`setTrackErrors(false)` 只关闭**自动**错误采集。崩溃不受影响：启用 Crash 模块后，未捕获异常仍按 `JsCrashPolicy` 持久化、计数，并作为 `is_crash` error 回放到崩溃发生的那个会话；手动调用的 `addError` 属于应用的显式意图，同样照常上报。如需连这两类一起过滤，请使用 `setEventMapper()`。
+</Note>
 
 ### 事件过滤和脱敏
 
@@ -138,7 +220,25 @@ const monitor = GlobalRumMonitor.get();
 monitor.addAttribute('tenant', 'acme');
 monitor.addError('checkout failed', RumErrorSource.CUSTOM);
 monitor.removeAttribute('tenant');
+
+// 读取当前全局属性快照
+const attrs = monitor.getAttributes();
+
+// 一次性清除全部全局属性（例如用户退出登录时）
+monitor.clearAttributes();
 ```
+
+| 方法 | 说明 |
+|------|------|
+| `addAttribute(key, value)` | 新增或覆盖一个全局属性 |
+| `removeAttribute(key)` | 移除指定全局属性 |
+| `getAttributes()` | 返回当前全局属性的快照 |
+| `clearAttributes()` | 移除全部全局属性 |
+| `stopSession()` | 立即结束当前会话。活跃 view 会带着最终 `time_spent` 关闭；下一个事件会开启新会话，并在新会话中重启该 view |
+
+<Note>
+用户退出登录时，建议先 `clearAttributes()` 清掉上一位用户的业务属性，再 `stopSession()` 结束会话，避免两位用户的行为落在同一个会话里。
+</Note>
 
 用户信息通过核心实例设置。`id`、`name` 和 `email` 会写入后续事件的 `usr` 对象。
 
@@ -185,12 +285,18 @@ FlashcatTrace.enable(
 
 ## 崩溃采集配置
 
-Crash 模块通过 HarmonyOS `hiAppEvent` 监听 `APP_CRASH` 和 `APP_FREEZE`。系统会在下一次启动时回放故障事件，SDK 再通过 RUM error 管道上报。
+Crash 模块提供两条采集路径：
+
+- 通过 HarmonyOS `hiAppEvent` 监听 `APP_CRASH` 和 `APP_FREEZE`，在后续启动时通过 RUM error 管道上报系统回放的故障事件
+- 实时处理主线程上未捕获的 ArkTS 异常，根据 `JsCrashPolicy` 在进程退出或重启前完成上报
+
+默认的 JS 崩溃策略是 `REPORT_THEN_EXIT`。
 
 ```ts
 import {
   FlashcatCrash,
-  CrashConfigurationBuilder
+  CrashConfigurationBuilder,
+  JsCrashPolicy
 } from '@flashcatcloud/crash';
 
 FlashcatCrash.enable(
@@ -198,23 +304,83 @@ FlashcatCrash.enable(
     .setTrackCrashes(true)
     .setTrackAppHangs(true)
     .setSampleRate(100)
+    .setJsCrashPolicy(JsCrashPolicy.REPORT_THEN_EXIT)
     .build()
 );
 ```
 
 | 方法 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `setTrackCrashes(enabled)` | boolean | `true` | 采集 ArkTS / JS 和 Native C/C++ 崩溃 |
-| `setTrackAppHangs(enabled)` | boolean | `true` | 采集 `APP_FREEZE`，即主线程卡死或 watchdog 超时 |
-| `setSampleRate(rate)` | number | `100` | 崩溃和卡死事件采样率，SDK 会将输入值限制在 `0` 到 `100` |
+| `setTrackCrashes(enabled)` | boolean | `true` | 监听 `hiAppEvent.APP_CRASH` 回放，包括 ArkTS 和 Native 崩溃；不控制 JS 策略的同步上报 |
+| `setTrackAppHangs(enabled)` | boolean | `true` | 监听 `hiAppEvent.APP_FREEZE` 回放 |
+| `setSampleRate(rate)` | number | `100` | `hiAppEvent` 崩溃和卡死事件的上报百分比；输入值限制在 `0` 到 `100`；不对 JS 策略的同步上报采样 |
+| `setJsCrashPolicy(policy)` | `JsCrashPolicy` | `REPORT_THEN_EXIT` | 设置主线程上未捕获 ArkTS 异常的处理策略 |
+| `setCrashLoopThreshold(threshold)` | number | `3` | 滚动窗口内第 N 次崩溃禁止再次重启，最多允许 N-1 次恢复重启；小于 `1` 的值按 `1` 处理 |
+| `setCrashLoopWindowMs(windowMs)` | number | `60000` | 统计可恢复崩溃的滚动窗口，单位为毫秒；小于 `1` 的值按 `1` 处理 |
+| `setCrashLoopCooldownMs(cooldownMs)` | number | `300000` | 已触发保护后，重置持久化记录所需的无崩溃时长，单位为毫秒；小于 `1` 的值按 `1` 处理 |
 
 <Warning>
-请在 `Flashcat.initialize()` 和 `FlashcatRum.enable()` 之后尽早启用 Crash。Crash 事件通过 RUM feature 写入，如果未启用 RUM，Crash 模块会丢弃收到的崩溃回放。
+从 `0.2.0` 开始，默认策略由旧版的进程存活行为改为 `REPORT_THEN_EXIT`。仅初始化旧版 SDK 会在未捕获 ArkTS 异常后抑制宿主应用退出，使应用在业务状态未定义的情况下继续运行。新默认行为会同步保存崩溃并恢复平台退出语义。如需恢复旧行为，请显式设置 `JsCrashPolicy.OBSERVE_ONLY`，并确认保留受损进程符合你的业务预期。
+</Warning>
+
+### `REPORT_THEN_EXIT`
+
+这是默认策略。发生主线程上未捕获的同步或异步 ArkTS 异常时，SDK 会同步持久化崩溃记录、刷新当前 RUM 写入器，然后退出进程。记录会在下一次启动时回放到 RUM。如果同步写入失败，SDK 会尝试异步上报并仍然退出。
+
+### `REPORT_AND_RECOVER`
+
+SDK 会同步持久化崩溃记录，检查持久化的崩溃循环保护，然后调用 `appRecovery.saveAppState()` 和 `restartApp()`。旧进程退出并启动新进程，下一次启动回放的记录会带有 `crash.recovered: true`。
+
+如果无法启用恢复、无法持久化循环记录、保护被触发、无法把记录标记为可恢复，或重启请求失败，SDK 会降级为退出。
+
+### `OBSERVE_ONLY`
+
+SDK 会异步上报异常并让当前进程继续运行。该策略恢复 `0.2.0` 之前的存活行为，不会退出或重启进程。事件循环可能仍能响应，但未捕获异常可能已经使应用处于损坏或不一致的业务状态。
+
+### 崩溃循环保护
+
+循环保护仅影响 `REPORT_AND_RECOVER`。默认配置下，60 秒滚动窗口内前两次崩溃可以重启，第三次崩溃会同步上报但降级为退出，即窗口内第 N 次崩溃禁止重启，最多允许 N-1 次恢复重启。
+
+崩溃时间戳会跨进程持久化，应用重启不会重置保护。保护触发后，每次被阻止的崩溃都会成为最新时间戳；应用需要保持完整的 5 分钟无崩溃冷却期，记录才会重置。将 `setCrashLoopThreshold(1)` 设为 `1` 会完全禁用恢复重启：每次崩溃仍同步上报，但都会退出，也不会标记 `crash.recovered`。
+
+### 恢复宿主应用状态
+
+自动重启不会自行定义需要恢复的页面状态。宿主 `UIAbility` 需要实现 `onSaveState`，把需要的状态写入 `wantParam`，并返回 `ALL_AGREE`：
+
+```ts
+import { AbilityConstant, UIAbility } from '@kit.AbilityKit';
+
+export default class EntryAbility extends UIAbility {
+  onSaveState(
+    _reason: AbilityConstant.StateType,
+    wantParam: Record<string, Object>
+  ): AbilityConstant.OnSaveResult {
+    wantParam['route'] = 'pages/Checkout';
+    wantParam['draftId'] = 'draft-123';
+    return AbilityConstant.OnSaveResult.ALL_AGREE;
+  }
+}
+```
+
+宿主应用需要在恢复启动的 `Want` 中读取这些参数，并且只恢复可以安全继续的状态。状态恢复依赖宿主实现 `onSaveState`，SDK 负责在崩溃时触发状态保存和重启。
+
+### 能力边界
+
+| 故障类型 | 采集和策略行为 |
+|----------|----------------|
+| 主线程上未捕获的 ArkTS 同步或异步异常 | 实时采集；应用所选 `JsCrashPolicy`，包括同步持久化和可选重启 |
+| 未处理的 Promise rejection | 作为普通非崩溃 RUM error 上报，`error.source_type: promise`；进程不会退出，也不应用崩溃策略 |
+| TaskPool 或 Worker 抛出异常 | 不会到达 error observer，不会导致宿主进程退出，不属于崩溃策略覆盖范围 |
+| Native C/C++ 信号崩溃 | JS 崩溃策略无法阻止或重启；仅在后续启动时通过 `hiAppEvent.APP_CRASH` 采集 |
+| `APP_FREEZE` | 仅通过 `hiAppEvent.APP_FREEZE` 在后续启动时采集 |
+
+<Warning>
+请在 `Flashcat.initialize()` 后尽早启用 RUM 和 Crash。JS 崩溃策略的传递不依赖启用顺序：Crash 会把策略推送给 RUM，RUM 启动时也会主动读取策略，因此先启用任一模块都能激活策略。仍建议先调用 `FlashcatRum.enable()`，再调用 `FlashcatCrash.enable()`，以便立即回放上一次启动留下的待处理崩溃记录。Crash 事件需要通过 RUM 管道发布。
 </Warning>
 
 ## 后台和延迟上传
 
-SDK 默认在前台按 `setBatchUploadFrequencyMs()` 的间隔上传，并在应用进入后台时触发 `flush()`。如果需要由 HarmonyOS WorkScheduler 唤醒上传，可以注册延迟上传任务。
+SDK 默认在前台按 `setUploadFrequency()` 的间隔上传，并在应用进入后台时触发 `flush()`。如果需要由 HarmonyOS WorkScheduler 唤醒上传，可以注册延迟上传任务。
 
 ```ts
 const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
@@ -230,9 +396,29 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 | `setUploadOnWifiOnly(enabled)` | `false` | 为延迟上传任务设置 Wi-Fi 网络限制 |
 | `setDeferredUploadRequiresCharging(enabled)` | `true` | 为延迟上传任务设置充电状态限制 |
 
-<Note>
-SDK 负责注册 WorkScheduler 任务；你的 `WorkSchedulerExtensionAbility` 被唤醒后，应调用 `Flashcat.flushAndWait()` 执行有界批量上传。
-</Note>
+SDK 负责注册 WorkScheduler 任务。任务是持久化的（`isPersisted`，跨重启存活），按 2 小时周期唤醒。
+
+### 在扩展进程中初始化
+
+`WorkSchedulerExtensionAbility` 是**独立进程**，不共享主进程的 SDK 实例。被唤醒后必须先用 `initializeForDeferredUpload` 初始化，再调用 `flushAndWait()`：
+
+```ts MyUploadExtensionAbility.ets
+import { Flashcat } from '@flashcatcloud/core';
+
+async onWorkStart(workInfo: workScheduler.WorkInfo): Promise<void> {
+  Flashcat.initializeForDeferredUpload(this.context, buildConfig());
+  await Flashcat.flushAndWait();
+}
+```
+
+`initializeForDeferredUpload` 与 `initialize` 有两点关键差别：
+
+- **不接收同意状态参数。** 扩展进程面前没有用户，只能依据主进程最后一次持久化的决定行事；没有持久化记录（主进程从未初始化过）或记录为 `NOT_GRANTED` 时，它不读取、不迁移、也不上传任何数据。
+- **只读。** 它不会写回同意状态、设备标识或任务注册信息。HarmonyOS Preferences 是按进程的整文件缓存，扩展进程的写入可能覆盖主进程正在进行的撤销操作。
+
+<Warning>
+不要在扩展进程里调用 `Flashcat.initialize()`。它会用你传入的字面值覆盖持久化的同意状态，从而在用户已经撤销授权后仍然上传数据。`setTrackingConsent` 在扩展进程中也会被忽略并打印错误日志。
+</Warning>
 
 ## 上传 HarmonyOS 崩溃符号
 
@@ -248,7 +434,7 @@ SDK 负责注册 WorkScheduler 任务；你的 `WorkSchedulerExtensionAbility` �
 该插件以 npm 包发布（在 **npm**，不在 ohpm），作为构建期开发依赖安装到工程根目录的 `package.json`，而不是 `oh-package.json5`：
 
 ```bash
-npm install -D @flashcatcloud/hvigor-plugin
+npm install -D @flashcatcloud/hvigor-plugin@^0.1.3
 ```
 
 然后在模块的 `hvigorfile.ts` 中注册插件：
@@ -261,7 +447,6 @@ export default {
   system: hapTasks,
   plugins: [
     flashcatSymbolUploadPlugin({
-      endpoint: 'https://browser.flashcat.cloud',
       apiKey: process.env.FLASHCAT_API_KEY ?? '',
       service: 'shopping-app',
       version: '1.0.0',
@@ -272,7 +457,7 @@ export default {
 ```
 
 <Note>
-`flashcatSymbolUploadPlugin()` 还接受两个可选参数：`buildDir`（构建产物目录，默认 `build/default`）和 `pluginVersion`（写入上传请求头 `DD-EVP-ORIGIN-VERSION` 的版本号，默认 `0.1.0`）。一般无需设置。
+公有云省略 `endpoint` 时，**hvigor-plugin ≥ 0.1.3** 默认上传到 `https://ci.flashcat.cloud`（**不是** RUM 上报用的 `browser.flashcat.cloud`）。私有化部署请设置环境变量 `FLASHCAT_SOURCEMAP_INTAKE_URL`（协议 + 域名，不带路径；同样需要 ≥ 0.1.3），或传 `endpoint: 'https://rum.example.com'`。旧版 0.1.2 不认 `FLASHCAT_SOURCEMAP_INTAKE_URL`，可显式写 `endpoint`，或设置旧环境变量 `FLASHCAT_ENDPOINT`（0.1.3 起弃用，但仍生效）。`flashcatSymbolUploadPlugin()` 还接受两个可选参数：`buildDir`（构建产物目录，默认 `build/default`）和 `pluginVersion`（写入上传请求头 `DD-EVP-ORIGIN-VERSION` 的版本号，默认与插件版本一致）。一般无需设置。
 </Note>
 
 发布构建后执行上传任务：

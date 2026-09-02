@@ -6,7 +6,7 @@ sidebarTitle: Apps
 ---
 
 <Info>
-  **公测功能**：AI SRE 正在公测，面向 On-call 专业版及以上账户灰度开放，公测期间不单独收费；如需开通，请填写 [AI SRE 公测申请表](https://c9xudyniiq.feishu.cn/share/base/form/shrcn0ngCfdoygiaHnAT80BfZiH)。功能与界面可能继续调整。
+  **公测功能**：AI SRE 已全量开放公测，无需申请，登录控制台即可直接使用，公测期间免费。功能与界面可能继续调整。
 </Info>
 
 ## 概述
@@ -50,7 +50,7 @@ Kubernetes App 将集群中的 Agent 接入 AI SRE。创建后，AI SRE 可以�
     进入 **插件 → Apps → Kubernetes App**，点击 **创建 Kubernetes App**。填写集群名称，并选择范围：**共享** 可供账户内所有会话使用；**团队** 可供该团队会话及该团队成员的个人会话使用。同一范围内的集群名称不能重复。
   </Step>
   <Step title="设置 namespace 与权限">
-    选择 **全部 namespace** 或 **指定 namespace**。全部 namespace 会把同一权限应用到当前和未来的 namespace；指定 namespace 可以为每个 namespace 单独选择 **只读** 或 **读取 + 有限修改**。不填写指定 namespace 时，Agent 只能读取集群基础元数据。
+    选择 **全部 namespace** 或 **指定 namespace**。全部 namespace 会把同一权限应用到当前和未来的 namespace；指定 namespace 可以为每个 namespace 单独选择 **只读**、**读取 + 有限修改** 或 **完全权限**。不填写指定 namespace 时，Agent 只能读取集群基础元数据。**完全权限** 是该 namespace 内的最高权限：指定 namespace 的完全权限仅作用于该 namespace，集群基础元数据仍保持只读；**全部 namespace + 完全权限** 会通过 `ClusterRoleBinding` 授予 `cluster-admin`，包括集群级资源与集群 RBAC（该能力仅「全部 namespace」支持）。各档位的具体能力见下文 [权限说明](#权限说明)，完整 RBAC 规则可在表单中点击「查看 Kubernetes RBAC 详情」核对。
   </Step>
   <Step title="执行安装命令">
     保存后复制控制台生成的安装命令，并在目标集群中执行。安装命令会过期；过期后重新打开安装配置或查看 Manifest 生成新命令，无需轮换 Token。
@@ -58,12 +58,38 @@ Kubernetes App 将集群中的 Agent 接入 AI SRE。创建后，AI SRE 可以�
 </Steps>
 
 <Warning>
-修改 namespace 或权限后，必须重新执行安装命令，集群中的 RBAC 才会更新。选择 **读取 + 有限修改** 前，请确认该 namespace 中允许 AI SRE 执行相应操作。
+修改 namespace 或权限后，必须重新执行安装命令，集群中的 RBAC 才会更新。选择 **读取 + 有限修改** 前，请确认该 namespace 中允许 AI SRE 执行相应操作。**完全权限** 是高风险选项：指定 namespace 的完全权限允许此 App 读取、创建、修改和删除该 namespace 内的全部资源；**全部 namespace + 完全权限** 会升级为集群管理员访问（`cluster-admin`），请谨慎选择。
 </Warning>
+
+### 权限说明
+
+以下能力边界适用于所有档位：
+
+- 所有档位都可以读取集群信息、节点、Pod、事件、日志和 ConfigMap 等非敏感资源
+- 所有档位都不支持进入容器（exec）、Attach、端口转发，以及 watch 和日志实时跟随（`-f`）。这是接入方式的限制，与权限档位无关
+
+各档位的差异操作如下：
+
+| 操作 | 只读 | 读取 + 有限修改 | 完全权限 |
+| --- | --- | --- | --- |
+| 读取 Secret | 否 | 否 | 是 |
+| 驱逐 Pod（用于重启工作负载） | 否 | 是 | 是 |
+| 扩缩容 Deployment 和 StatefulSet | 否 | 是 | 是 |
+| 调整 HPA 副本数上下限 | 否 | 是 | 是 |
+| 回滚工作负载 | 否 | 否（AI SRE 推算出目标 revision 并给出完整命令，由你执行） | 是 |
+| 修改工作负载配置（镜像、启动命令、环境变量等） | 否 | 否 | 是 |
+| 修改 ConfigMap 和 Secret | 否 | 否 | 是 |
+| 创建或删除资源 | 否 | 否 | 是 |
+| 修改 namespace 内的 RBAC | 否 | 否 | 是 |
+| 操作集群级资源和集群 RBAC | 否 | 否 | 仅「全部 namespace」 |
+
+- **只读**：授权 namespace 内的读取权限直接绑定 Kubernetes 内置的 `view` 角色，不再由 FlashDuty 自行维护资源清单。它覆盖 Pod、日志、工作负载、事件、ConfigMap 等资源，不含 Secret；集群中的组件如果把自己的 CRD 标记为 view 可读，也会一并包含。此外还会授予 nodes、namespaces、persistentvolumes、storageclasses、ingressclasses 等集群级只读权限
+- **读取 + 有限修改**：在只读基础上，额外允许驱逐 Pod（`pods/eviction`）、扩缩容 Deployment 和 StatefulSet（`deployments/scale`、`statefulsets/scale`）以及调整 HPA 副本数上下限（`horizontalpodautoscalers`）。这些规则只能改变已有工作负载运行几个副本、以及用同一份配置重建 Pod，无法改动任何 Pod 的镜像、启动命令、环境变量、身份或挂载——因此 `kubectl rollout restart` 和 `kubectl rollout undo` 都会被拒绝（两者在 Kubernetes 里都是对工作负载的 patch），重启工作负载请改用逐个驱逐 Pod。回滚工作负载时，AI SRE 会从 ReplicaSet 历史推算出目标 revision，给出完整的 `kubectl rollout undo --to-revision=N` 命令，由你在集群中执行
+- **完全权限**：可读取 Secret、修改 ConfigMap 和 Secret、修改工作负载配置、创建或删除资源、修改 namespace 内的 RBAC；「全部 namespace + 完全权限」还会通过 `ClusterRoleBinding` 授予 `cluster-admin`，可操作集群级资源和集群 RBAC
 
 ### 编辑与撤销
 
-你可以在 Kubernetes App 列表中编辑集群名称、范围和 namespace 权限。撤销会立即使连接和 Token 失效，但不会自动删除集群中的 Agent 与 RBAC。控制台会提供卸载命令；请在对应集群执行它。该命令只删除当前 Kubernetes App 的资源，不会删除共享的 `flashduty` namespace。
+你可以在 Kubernetes App 列表中编辑集群名称、范围和 namespace 权限。将范围改为**共享**与创建共享 App 同门槛：仅限账户 Owner / 管理员操作，普通成员即使编辑自己团队的 App 也不能把它提升为共享，只能把 App 移动到其所属的团队。撤销会立即使连接和 Token 失效，但不会自动删除集群中的 Agent 与 RBAC。控制台会提供卸载命令；请在对应集群执行它。该命令只删除当前 Kubernetes App 的资源，不会删除共享的 `flashduty` namespace。
 
 ## GitHub 应用
 

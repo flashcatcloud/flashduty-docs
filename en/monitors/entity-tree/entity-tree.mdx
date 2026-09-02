@@ -1,0 +1,426 @@
+---
+title: "Entity Tree"
+description: "Continuously discover entities from Prometheus metric labels and manage entity alerts with dynamic groups and inherited rules."
+keywords: ["Entity Tree", "entity alerts", "dynamic groups", "rule inheritance", "Prometheus"]
+---
+
+When hosts, containers, instances, or business components scale and change continuously, maintaining monitoring objects and alert rules one by one quickly becomes unreliable. Entity Tree discovers these dynamic resources from Prometheus query results, organizes them into stable entities, and automatically places them into groups based on labels.
+
+You can configure a shared alert rule in a higher-level group and let it apply automatically to matching descendant entities. When an environment or service needs a different threshold, override only the relevant parameters in that group. This reduces duplicate rules while keeping alert policies aligned with changing entities.
+
+The current version focuses on entity alerts. Entity Tree first establishes a consistent, stable entity view, which also provides a common entry point for future metric views and analysis in entity context.
+
+<Frame caption="Entity Tree discovers entities from data sources and inherits alert policies through dynamic groups">
+  <img
+    src="https://static.flashcat.cloud/images/flashmonit/entity-alert-architecture-light-v1.png"
+    alt="Multiple Prometheus data sources discover entities that enter dynamic groups and inherit alert policies"
+  />
+</Frame>
+
+## When to use Entity Tree
+
+Entity Tree works well when:
+
+- Kubernetes pods, cloud hosts, database instances, or other resources are frequently created, removed, or changed
+- Multiple environments or services use the same metric but require different alert thresholds
+- You want labels such as region, environment, cluster, team, or service to define alert scope automatically
+- Multiple Prometheus data sources should reuse the same entity definition and alert policies
+
+If your monitoring objects are fixed and each alert rule maps to one explicit query, standard alert rules are usually more direct.
+
+## How Entity Tree organizes monitoring
+
+| Concept | Purpose | Example |
+| --- | --- | --- |
+| **Entity definition** | Defines which data sources and query discover a type of entity, and which labels identify it consistently | Node, pod, database instance |
+| **Entity** | A specific resource that is discovered continuously. Within one data source, query results with the same identity label values merge into one entity | instance=10.0.0.8:9100 |
+| **Dynamic group** | Uses entity labels to define scope automatically. Group membership updates as entity attributes change | Production, Payment, East China |
+| **Entity alert rule** | Is created in a group and applies automatically to matching descendant entities | High node CPU usage |
+| **Rule override** | Adjusts inherited severity levels, parameters, or consecutive hit counts in a child group | 90% in production and 95% in testing |
+
+<Note>
+The same identity label values in different data sources form separate entities. Switch data sources in the workspace to inspect their entities, rule evaluations, and active alerts independently.
+</Note>
+
+## Prerequisites
+
+Before you begin, make sure:
+
+- Monitors is enabled for the account and an alert engine is deployed
+- At least one Prometheus data source exists
+- Your account has Entity Tree view permission; creating or changing configuration also requires Entity Tree management permission and management access to the relevant entity definition or group
+- The alert engine version meets the requirement shown on the Entity Tree page
+
+<Warning>
+If the alert engine version is incompatible, the page prompts you to upgrade and entity or entity-alert status may be temporarily unavailable. Standard alert rules are not affected.
+</Warning>
+
+## Configure Entity Tree
+
+### 1. Request access
+
+Go to **Monitors > Entity Tree**. If Entity Tree is not enabled for the account, click **Request access**. The page shows the submission time while the request is pending. You can start configuring Entity Tree after approval.
+
+### 2. Create an entity definition
+
+An entity definition describes how Monitors discovers and identifies a type of resource. Click **Create entity definition** and configure:
+
+| Setting | Description |
+| --- | --- |
+| **Name** | A resource category name that is easy to understand, such as “Nodes” or “Database instances” |
+| **Management team** | Members of the selected team can manage the category and all of its groups. If you do not select a team, only the creator and account administrators can manage it |
+| **Data sources (exact match)** | Select data sources by ID. Renaming a data source does not affect the match |
+| **Data sources (name pattern)** | Match data source names with patterns that support *, ?, and character ranges. This can include new data sources that follow the same naming convention |
+| **Discovery PromQL** | Returns an instant vector of entities to discover. Labels in the result become candidate entity attributes |
+| **Identity labels** | One or more stable labels that uniquely identify an entity |
+| **Multi-value labels** | Optional. When multiple results belong to the same entity, non-empty values from these labels merge into a set |
+| **Sync interval** | How often Monitors discovers entities again. The default is 15 seconds |
+| **Missing grace period** | How long Monitors retains an entity after it disappears from a successful discovery result. The minimum is 3,600 seconds |
+
+You can combine exact matching and name patterns. Monitors uses the union of all matched data sources, and you must configure at least one matching method.
+
+The form also enforces these constraints: name patterns do not support the `{}` brace syntax; the name is limited to 128 characters and the discovery PromQL to 1,024 characters; when editing an existing entity definition, you cannot change identity labels and multi-value labels in the same save — complete the two changes separately.
+
+For example, this query discovers nodes with an instance label:
+
+~~~promql
+up{job="node"}
+~~~
+
+After entering the query, click **Preview**, then select identity labels from the results. The preview helps you verify:
+
+- Whether every result contains the identity labels
+- Whether ordinary single-value labels conflict for the same identity
+- How multiple results merge by identity
+
+<Tip>
+Choose labels that remain stable and uniquely locate the resource, such as instance, pod_uid, or a database instance ID. Avoid labels that change frequently, such as status, version, or release batch, because the same resource could be identified as a new entity.
+</Tip>
+
+If an entity naturally has multiple values for one attribute, such as a node belonging to several business groups, configure that attribute as a multi-value label. A multi-value label cannot also be an identity label.
+
+### 3. Create dynamic groups
+
+After creating an entity definition, the definition and its group tree appear in the left sidebar. The search box at the top of the sidebar finds entity definitions and groups by name, highlighting matches and auto-expanding the matched paths. Open the action menu for the target node, select **Create child group**, and define the entity scope with label conditions. When creating or editing a group, the drawer also provides an optional **Management team** setting: this group's team permissions are inherited by child groups, while permissions from the entity definition and parent groups remain in effect.
+
+| Operator | Meaning |
+| --- | --- |
+| = | The label value is equal. An empty value matches a missing or empty label |
+| != | The label value is not equal. An empty value matches a label with at least one value |
+| =~ | The label value matches a regular expression |
+| !~ | The label value does not match a regular expression |
+
+Matcher label names must match `^[A-Za-z_][A-Za-z0-9_]*$`, and `__name__` is a system-reserved name and cannot be used.
+
+When an entity definition and data source are selected, the label-name and match-value inputs autocomplete candidates from the entity snapshot within the current entity definition, data source, and group scope, and each candidate shows the number of entities that match it. With `=~` or `!~`, the match-value input enters regexp candidate mode, and selecting a candidate escapes it as a regexp literal; when there are too many candidates, the page asks you to keep typing to narrow the results. When some entities are missing the selected label or have an empty value, an **Empty (missing or no values)** option is pinned to the top of the value candidates. If the current Edge version does not support runtime queries, regexp candidates are unavailable, but you can still type a regular expression manually and save it.
+
+All conditions in a group must match. A child group also inherits every condition from its parent groups.
+
+For example, first create a “Production” group with env = prod, then create a “Payment” group below it with service = payment. The second group contains only entities that match both conditions.
+
+<Note>
+An entity can match multiple sibling groups. Give sibling groups clear, non-conflicting responsibilities, and check the final alert scope when you configure different rule overrides.
+</Note>
+
+### 4. Create an entity alert rule
+
+Select the group that should own the rule, open the **Rules** tab, and click **Create rule**.
+
+| Setting | Description |
+| --- | --- |
+| **Rule name** | The alert name. You can use the template variables provided in the UI |
+| **PromQL** | The query that evaluates the alert condition. Parameter placeholders let multiple severities or groups reuse one query |
+| **Severity** | Enable Critical, Warning, and Info independently, then set parameters and consecutive hit counts |
+| **Recovery mode** | Recover when the condition no longer matches, or use a separate recovery PromQL query |
+| **Consecutive recoveries** | How many consecutive recovery evaluations are required |
+| **Advanced settings** | Configure the evaluation schedule, time zone, execution delay, and repeat notifications. The schedule accepts `@every` fixed intervals (for example `@every 60s`) or a six-field cron (second minute hour day month weekday, for example `0 */5 * * * *`). A cron schedule requires a valid IANA time zone (default `Asia/Shanghai`) and must not embed a time zone; an `@every` schedule needs no time zone. New rules run every 60 seconds by default and repeat notifications every 3,600 seconds up to 3 times |
+| **Labels and annotations** | Add routing labels and context. Rule names and annotations support template variables |
+
+The rule is created in the current group and applies automatically to that group and matching descendant entities. The rule list separates **Rules in this group** from **Inherited rules** so you can identify each rule's source.
+
+<Tip>
+Define a reusable threshold parameter in PromQL, then enter different values for Critical, Warning, and Info. This lets one query express multiple alert severities.
+</Tip>
+
+<Note>
+Rule label and annotation names must match `^[A-Za-z_][A-Za-z0-9_]*$`, and must not use the reserved name `check` or names starting with `__entity_alert_` or `__flashduty_`. Names that match an entity identity label are rejected, because identity labels cannot be overridden by rule labels or annotations.
+</Note>
+
+#### Query preview
+
+The **Query preview** button next to the condition and recovery PromQL fields opens a preview dialog (requires at least one Prometheus data source bound to the current entity definition). The dialog renders the **final PromQL to be executed** after substituting parameters and label variables, and runs it as an instant query against the selected data source:
+
+- A condition query generates one variant per enabled severity. Select a **Severity** in the dialog to substitute `${parameter}` placeholders with that severity's parameter values
+- A recovery query loads the rule's active alerts. Select a **Preview alert** to substitute `${labels.<name>}` placeholders with that alert's entity labels and result dimensions; if the rule is not saved yet or has no active alerts, the preview falls back to entity labels only, and alert dimensions cannot be resolved until the rule is saved and produces alerts
+- The dialog runs a query automatically when opened and reruns it when you switch data sources or severities; you can also click **Re-run query**
+
+After a successful query, the dialog shows these diagnostics:
+
+| Diagnostic | Description |
+| --- | --- |
+| Query duration | Duration of this query in milliseconds |
+| Returned rows | Number of rows returned by the query |
+| Valid entities | Distinct entities whose results contain all identity labels; alert queries additionally count entities within the current group when the entity snapshot is available |
+| Alert / discovery diagnostics | Alert queries count alert instances and flag missing identity and duplicate alerts; discovery queries flag missing identity and scalar-conflict entities, and show how many rows merge into entities by identity |
+
+If no identity labels are selected yet, the dialog only shows returned rows and prompts you to select identity labels to compute valid entities and diagnostics. An empty result does not mean the rule configuration is invalid — try again at another time.
+
+Condition PromQL uses `${parameter}` placeholders to reuse one query. After you type the full parameter name and leave the editor, the page automatically creates a parameter row for every severity. Preview substitution failures show a specific error: **unterminated placeholder** (the placeholder is not closed), `placeholder "{{name}}" has no argument value` (no value was entered for the parameter), and `argument "{{name}}" is not referenced` (a parameter value exists but the query does not use it).
+
+Recovery PromQL also supports `${parameter}` (for example `${threshold}`). It can additionally reference the entity's single-value labels and the current alert's scalar dimensions, written as `${labels.instance}`, `${labels.path}`, `${labels.busigroup}`, and only inside double-quoted strings in PromQL. Leaving the editor automatically creates ordinary parameter rows; entity labels do not create parameter rows.
+
+### 5. Import alert rules
+
+Besides creating rules one by one, you can click **Import rules** on a group's **Rules** tab to upload a YAML file and import rules into the current group in bulk. Monitors automatically detects three source formats:
+
+| Source format | Description |
+| --- | --- |
+| **Entity Alert rule bundle** | A bundle exported from another group or account, preserving the full rule configuration. The identity labels recorded in the bundle must match the target entity definition, otherwise the import is rejected |
+| **Prometheus Rules** | A standard Prometheus alert rules file (a `groups` list, a `rules` list, or a single rule), converted during import as described below |
+| **Prometheus Operator** | A PrometheusRule CRD (`spec.groups`), converted the same way as Prometheus Rules |
+
+Limits and requirements:
+
+- Upload one `.yaml` or `.yml` file of at most 1 MB at a time, with at most 100 rules per import
+- Recording rules are not supported (rules that define only `record` are ignored); a rule must not define both `alert` and `record`
+- Rule label values must not contain `{{ }}` dynamic templates; PromQL must return an instant vector, and comparisons must not use the `bool` modifier
+- When importing from Prometheus formats, every PromQL result must contain the target entity's identity labels, otherwise alerts cannot be associated with entities
+
+After the upload, Monitors runs a **precheck** that shows the conversion result and name conflicts for each rule without writing anything. Each rule is marked with one of these statuses:
+
+| Precheck status | Meaning |
+| --- | --- |
+| **Ready to import** | Validation passed; the rule can be written |
+| **Create copy** | A rule with the same name exists in the current group; the rule will be created with a numbered new name |
+| **Skipped** | A rule with the same name exists in the current group and the existing rule is kept per the selected policy |
+| **Ignored** | An unsupported rule, such as a recording rule; it will not be imported |
+| **Validation failed** | Issues such as a missing `alert` or `expr`, or invalid PromQL; the rule cannot be imported |
+
+After uploading a file, you can choose how to handle **rules with duplicate names**: **Skip rules with the same name** (default, keeps the existing rules in the target group) or **Create copy** (automatically uses a numbered new name); switching the policy reruns the precheck. Entity Alert rule bundles are validated strictly: if any rule fails validation, the import cannot be submitted. Prometheus formats allow skipping the failed entries and importing only the rules that are ready.
+
+When importing from Prometheus formats, Monitors converts rules as follows and flags every downgrade in the precheck result:
+
+- `labels.severity` maps to the alert severity: `page`, `p1`, `error`, and `critical` become Critical, `info` becomes Info, and any other value becomes Warning; a severity that uses `{{ }}` dynamic values is converted to Warning
+- Without an `interval`, the evaluation schedule defaults to 1 minute; `for` is converted to consecutive hit counts, and `keep_firing_for` to consecutive recovery counts
+- Rule labels that share a name with an entity identity label are ignored so they do not interfere with entity identification
+- Unrecognized or unsupported group and rule fields are ignored during import and flagged in the precheck result (for example `Group field {{field}} is not supported`, `Unrecognized group field {{field}}`, `Unrecognized rule field {{field}}`); they do not block the remaining rules from being imported
+
+<Warning>
+To prevent imported rules from alerting immediately, every imported rule stays **disabled** and is automatically selected in the rule list. Review the conversion results, then use batch enable to activate them.
+</Warning>
+
+### 6. Override an inherited rule
+
+When a child group needs different thresholds, find the rule under **Inherited rules** and select **Override inherited rule**. You can change:
+
+- Whether a severity inherits, is enabled, or is disabled
+- Parameters and consecutive hit counts for each severity
+- Recovery-query parameters and consecutive recovery counts
+
+The query text, evaluation schedule, recovery mode, and repeat notifications continue to inherit from the parent rule. If those execution settings must differ, create a new rule in the current group.
+
+Before saving, the page shows the final effective configuration and a query preview. Removing the override restores the parent configuration for the current group.
+
+### 7. Manage rules in bulk
+
+Select rules in this group on the **Rules** tab to run bulk operations. You can select at most 100 rules at a time:
+
+- **Batch enable / batch disable**: Changes the enablement of all selected rules after confirmation. Batch disabling ends related active alerts asynchronously, and re-enabling does not reopen ended alerts
+- **Export rules**: Exports the selected rules as an Entity Alert rule bundle (`entity-alert-rules.yaml`), at most 100 rules per export. You can re-import the bundle into another group or account with **Import rules**, which forms a complete migration path
+
+The **Enablement** switch in the rule list enables or disables a single rule. Disabling requires confirmation, and related active alerts end asynchronously.
+
+<Note>
+Selection, batch enable/disable, import, and export all require Entity Tree management permission and management access to the current group. Rules you cannot manage cannot join batch enable/disable, but they can still be exported with the other selected rules.
+</Note>
+
+## Inspect runtime status
+
+The **View runtime status** button in the top-right corner of the workspace opens a runtime status drawer showing the availability of the current entity definition on the selected data source, the responsible Edge instance, plan sync results, and runtime shard and discovery status. The drawer refreshes every 15 seconds automatically; you can also click **Refresh** to update it manually.
+
+### Availability states
+
+| State | Meaning |
+| --- | --- |
+| **Running normally** | The entity definition runs normally on this data source |
+| **Initializing** | The entity snapshot or runtime shard is still initializing |
+| **Unavailable** | Entity data is temporarily unavailable because the plan has not taken effect, the Edge is disconnected, or the runtime shard is missing |
+| **Version unsupported** | The Edge version is below the Entity Alert minimum; the page shows the minimum supported Edge version |
+| **Unknown** | Runtime status cannot be obtained at the moment |
+
+When the state is not **Running normally**, the page explains the reason. Common reasons include: no compatible Edge, plan being delivered, plan sync failed, the Edge responsible for this data source disconnected, runtime shard not created yet, and entity snapshot initializing or not generated yet. With no compatible Edge, Entity Alert requires the minimum version shown on the page or higher; standard alert rules are not affected.
+
+### Responsible instance
+
+Shows the Edge instance responsible for this data source: instance ID and IP:port, Edge version, last heartbeat time, and the minimum supported version required by the current entity definition.
+
+### Plan sync
+
+Shows the outcome of the latest plan delivery (success or failure), format version, configuration revision, last attempt and last success times, and the error kind and summary on failure. The page also compares the template and plan digests reported by Edge with the expected values compiled by the center, and shows **Center and Edge match**, **Center and Edge differ**, or **Waiting for Edge to apply the plan**. The full deployment plan is available only to entity definition managers: without management access, this area shows only the Edge state and the assignment digest.
+
+### Runtime shard and discovery
+
+Shows the runtime shard for the current data source: shard phase (initializing, ready, evaluating), snapshot revision, active entity count, stale entity count, snapshot generation time, and discovery details such as last success time, discovery duration, discovery result count, consecutive discovery failures, and last discovery attempt time. Discovery or active-baseline backfill failures also show their error summaries.
+
+## Inspect the deployment plan (debug)
+
+Accounts with management access to the entity definition can click **View deployment plan (debug)** in the workspace to open a read-only drawer showing the complete execution plan compiled from the **currently saved configuration**. Unsaved form edits are not reflected in the plan.
+
+Summary cards at the top show the number of data sources, groups, rules, and execution policies, followed by four expandable sections:
+
+| Section | Content |
+| --- | --- |
+| **Entity definition parameters** | Entity definition ID, format version, sync interval, stale retention, identity labels, multi-value labels, and the template digest (copyable); expand to view the discovery PromQL |
+| **Data source bindings** | The plan digest per data source (copyable), for verifying the plan version at the data source level |
+| **Groups and matchers** | The group tree and each group's matcher expressions |
+| **Rule execution summary** | Schedule, time zone, execution delay, repeat notifications, rule labels, and rule digest (copyable) for each enabled rule, with execution policies expanded by policy scope |
+
+Execution policies are grouped by **policy scope** (the group where the policy actually applies): whether each severity is enabled, consecutive hit counts, parameter values, recovery mode and consecutive recovery counts, plus the alert PromQL, recovery PromQL, and configuration key (copyable). One rule can form multiple policy scopes through inheritance and overrides; each is listed separately.
+
+The template digest, plan digests, rule digests, and configuration keys can each be copied with one click, which is useful for describing the current configuration version in a support ticket.
+
+## Deep-link directly to a rule
+
+Entity Tree supports jumping straight to a specific entity alert rule through URL parameters. For example, when you see an entity alert in an alert detail page, you can follow a link back to Entity Tree and adjust the rule that produced the alert. Append the following parameters to the Entity Tree page URL:
+
+```text
+?tab=rules&account_id=<account ID>&definition_id=<entity definition ID>&datasource_id=<data source ID>&group_id=<group ID>&rule_id=<rule ID>&open=edit
+```
+
+After a successful jump, the page automatically:
+
+- Switches to the **Rules** tab, auto-selects the entity definition, group, and data source specified in the link, and expands the matching group
+- Opens the drawer for the target rule: rules owned by the current group open the **edit** drawer, and rules inherited from a parent group open the **override** drawer
+
+If the link cannot resolve, the page shows the corresponding error:
+
+- The account ID in the link does not match the currently signed-in organization: it prompts you to switch organization and retry
+- The entity definition, group, data source, or rule does not exist (for example, the rule was deleted): it reports that the rule cannot be located
+- The current account lacks Entity Tree management permission or rule management access to the matching group: the drawer does not open and it reports missing rule management permission
+
+<Note>
+All IDs in the URL must be positive integers. If a parameter is missing or invalid, or `open=edit` is not present, the link does not take effect and the page opens normally.
+</Note>
+
+## Rule name and annotation template variables
+
+Rule names and annotations support Go `text/template` syntax. Templates are rendered on the alert engine each time an alert event is produced, so they can reference the labels, value, and entity context of that evaluation. If rendering fails, the field shows `<error expanding template: ...>`, and you can find the reason in the rule's execution error summary.
+
+### Built-in variables
+
+| Variable | Type | Description |
+| --- | --- | --- |
+| `$labels` | `map[string]string` | Alert labels. Read a single label with `$labels.<name>` or `index $labels "<name>"`; a missing label returns an empty string |
+| `$value` | `float64` | The alert value of the current evaluation |
+| `.Labels` | `map[string]any` | Same as `$labels` |
+| `.Value` | `float64` | Same as `$value` |
+| `.EntityAlert` | `map[string]any` | Entity alert context; available fields are listed below |
+| `$__entity_alert` | `map[string]any` | Same as `.EntityAlert`; fields are listed below. The rule editor's **Available variables** panel shows these as `$__entity_alert.*`, where `$__entity_alert.name` is available only in annotation templates |
+
+### `.EntityAlert` fields
+
+| Field | Description |
+| --- | --- |
+| `.EntityAlert.entity_key` | The entity key |
+| `.EntityAlert.entity_definition_id` / `.EntityAlert.entity_definition_name` | Entity definition ID and name |
+| `.EntityAlert.rule_id` | Rule ID |
+| `.EntityAlert.name` | The rendered rule name. Available only in annotation templates; a rule name cannot reference itself |
+| `.EntityAlert.event_kind` | Event type: `firing`, `severity_changed`, `repeat`, `recovery`, or `closed` |
+| `.EntityAlert.value` | The alert value of the current evaluation, same as `$value` |
+| `.EntityAlert.promql` | The effective alert PromQL |
+| `.EntityAlert.recovery_promql` | The effective recovery PromQL; empty when no separate recovery query is configured |
+| `.EntityAlert.query_at_ms` | Query time as a Unix timestamp in milliseconds |
+| `.EntityAlert.policy_scope_group_id` | ID of the group whose policy actually applies |
+| `.EntityAlert.account_id` | Account ID |
+| `.EntityAlert.data_source_name` / `.EntityAlert.data_source_type` | Data source name and type |
+| `.EntityAlert.entity_multi_value_fields` | Value sets of multi-value labels |
+
+Multi-value labels are provided as sets under `.EntityAlert.entity_multi_value_fields`. Use the `len`, `range`, `join`, `has`, `first`, `last`, and `toJSON` functions to read them:
+
+```gotemplate
+{{ join "," (index .EntityAlert.entity_multi_value_fields "biz_group") }}
+```
+
+Rule name example:
+
+```gotemplate
+Node {{ $labels.instance }} CPU usage {{ printf "%.1f" $value }}%
+```
+
+Annotation example (each annotation field is its own template):
+
+```gotemplate
+https://example.com/runbooks/node-cpu?entity={{ .EntityAlert.entity_key }}
+```
+
+### Query and common functions
+
+Besides the common variables, templates can run queries on the Edge and take values from, sort, and format the results. The rule editor's **Available variables** panel lets you copy these examples directly:
+
+| Expression | Type | Description |
+| --- | --- | --- |
+| `{{ query "up" }}` | vector | Runs a PromQL instant query on the Edge at the evaluation time of this evaluation |
+| `{{ value (first (query "up")) }}` | float64 | Reads the value of the first sample in the query result |
+| `{{ label "instance" (first (query "up")) }}` | string | Reads a label of a sample in the query result |
+| `{{ sortByLabel "instance" (query "up") }}` | vector | Sorts the query result by a label; can be combined with `range` |
+| `{{ humanize $value }}` | string | Formats values with common Prometheus formatting functions (such as humanize) or `printf` |
+
+## Inspect entities and alerts
+
+After selecting an entity definition, group, and data source, the workspace provides three tabs:
+
+| Tab | What you can inspect |
+| --- | --- |
+| **Entities** | Entity key, state, labels, matched groups, and last-seen time. Filter by state, entity-key prefix, or labels |
+| **Rules** | Rules in this group, inherited rules, enablement, latest evaluation, and matched entity and alert counts. You can also inspect execution history and error summaries |
+| **Active alerts** | Severity, alert name, entity key, alert dimensions, effective policy group, current value, notification count, and trigger time. Filter by severity, rule, exact entity key, and effective policy scope |
+
+The Entities tab shows at most the first 200 entities; when more match, the page reports that only the first 200 are shown and asks you to narrow the filters.
+
+On the **Rules** tab, click a rule's name to open its drawer directly: rules owned by the current group open the **Edit** drawer, and rules inherited from a parent group open the **Override** drawer — the same behavior as [deep-linking directly to a rule](#deep-link-directly-to-a-rule). If your account lacks entity-tree management permission or rule management permission for the group, the page shows a permission toast and does not open the drawer.
+
+Click an active alert row (or the **View details** button inside it) to inspect its entity source, rule, alert dimensions, labels, and notification status. During troubleshooting, first confirm the data source and current group at the top of the page, then check the rule's source group and effective policy scope.
+
+The active alerts tab provides a filter bar with **Severity** and **Rule** (searchable dropdown) filters. Under **More filters** you can enter an **Exact entity key** (or click an entity key directly in the table). After selecting a rule, you can also filter by **Effective policy scope** to locate the policy scope a rule actually adopts through inheritance or overrides. When filtering by multi-value labels hits the scan limit, the page reports that the current page's results are incomplete; narrow the group or other filters and retry.
+
+### Rule execution history
+
+On the **Rules** tab, click a rule's **View execution history** to open a drawer with the rule's actual execution records retained for the last 24 hours. It queries the last 15 minutes by default, with presets for the last 5 minutes, 30 minutes, 1 hour, 4 hours, and 1 day, plus a custom range; the lower bound of the queryable range is fixed at 24 hours before the current moment.
+
+Each record shows the execution outcome (success or failure), query time, duration, and matched entity and alert counts. Expanding a record shows the query and recording times, Edge instance, execution ID, rule digest, the error kind and summary on failure, and the **actual PromQL executed** (the final expression after parameter substitution) for the alert and recovery queries of that evaluation, with their outcomes, durations, and returned row counts.
+
+When more than 200 records match, only the latest 200 are shown; narrow the time range to inspect earlier records. Execution history depends on server-side VictoriaLogs: if the server has not configured a VictoriaLogs query address, the drawer reports that execution history is temporarily unavailable; if the log query service is down, retry later.
+
+## Understand missing grace
+
+An entity can temporarily disappear from a successful discovery result because of scrape jitter, a short network outage, or a rolling deployment. During the missing grace period:
+
+- The entity state is **Missing grace**
+- Alert evaluation, recovery evaluation, and repeat notifications pause for that entity
+- If the entity reappears, its existing alert state continues
+- If it remains missing beyond the retention period, related active alerts end
+
+The minimum missing grace period is 3,600 seconds. Set it according to the normal resource replacement cycle and avoid amplifying short-lived jitter with an overly short period.
+
+## Configuration change considerations
+
+The following operations can change entity identity, group scope, or alert lifecycles:
+
+- **Changing identity labels:** The page first previews the impact of the identity migration on entities and recovery rules, listing every affected recovery rule as **Auto-rewritten** or **Manual review required** (with the reason). You can edit the migrated recovery PromQL; rules marked **Manual review required** must have the "I have reviewed and confirmed this recovery PromQL" checkbox ticked before you can commit. After confirmation, active alerts for old identities close and new identities are discovered. This operation cannot be reversed losslessly
+- **Changing multi-value labels:** Entities are reclassified and related alerts are evaluated again with the new configuration
+- **Changing group conditions or rule overrides:** Effective entity scope or policy can change, so current alerts may end and be evaluated again
+- **Changing a rule in this group:** Before saving, the page previews the impact on override configurations in descendant nodes and lists how many overrides are affected. If the change invalidates severity or parameter overrides, the dialog asks you to confirm their permanent removal; removed override configurations cannot be recovered
+- **Disabling or deleting a rule:** Related active alerts end asynchronously. Re-enabling the rule does not reopen ended alerts
+- **Deleting an entity definition or group:** You must first remove the dependencies shown in the UI. Affected active alerts end asynchronously
+
+<Warning>
+Before changing identity labels, group conditions, or inherited overrides in production, use the preview to confirm the impact and make the change during a low-traffic period.
+</Warning>
+
+## Best practices
+
+- Choose stable identity labels for each entity definition and preview them across multiple data sources before rollout
+- Design groups around stable dimensions such as environment, region, and service instead of temporary organizational layers
+- Place shared rules higher in the tree and override thresholds only where requirements actually differ
+- Create a new rule when the query or schedule must differ instead of adding too many exceptions to an inherited rule
+- Regularly inspect latest evaluations, execution history, and active alerts to catch data-source or alert-engine version issues

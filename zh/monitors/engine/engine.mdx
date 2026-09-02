@@ -103,19 +103,23 @@ API Key 用于告警引擎与 SaaS 端的身份认证。你可以在引擎安装
 |------|--------|------|
 | `alerter.serverURL` | `https://api.flashcat.cloud` | FlashDuty SaaS 服务地址 |
 | `alerter.serverAPIKey` | —（必填） | 用于与 SaaS 端认证的 API Key |
-| `alerter.serverConcurrency` | `64` | 并行推送告警事件的 worker goroutine 数量 |
 | `alerter.serverTimeout` | `30s` | 单次推送请求的超时时间 |
-| `alerter.serverRetry` | `2` | 推送失败时的最大重试次数 |
-| `alerter.serverSleep` | `3s` | 两次重试之间的等待时间 |
+| `alerter.alertRuleDeliveryWorkers` | `64` | 普通告警规则事件投递的 worker 数量。事件按告警 key 分区到各 worker 队列，同一条告警的事件始终由同一个 worker 串行投递 |
+| `alerter.alertRuleEventQueueSize` | `2048` | 每个投递 worker 的事件队列容量 |
+| `alerter.alertRuleEventBatchSize` | `200` | 单次批量投递的事件条数上限，最大 200。队列中的事件会攒批发送，满一批或暂时无新事件时即投递 |
+| `alerter.alertRuleDeliveryResponseBytes` | `8MB` | 投递接口响应体的大小上限，超出后本次请求按失败处理 |
+| `alerter.serverSleep` | `3s` | 批量投递失败后的重试退避初始间隔，每次失败后翻倍，最大 30 秒 |
+
+普通告警规则的 firing / repeat / recovery 事件由批量投递服务（alertruledelivery）发送到 SaaS 端 `POST /monit/api/edge/alert-rule/v1/events` 接口：事件先进入各 worker 的队列，再按批次合并发送，单批不超过 200 条事件且不超过 4 MB。
+
+**重试策略说明**：批量投递采用指数退避重试——首次失败后等待 `alerter.serverSleep`（默认 3 秒），之后每次失败等待时间翻倍，最大 30 秒，重试没有次数上限，直到投递成功或引擎实例关闭。相比旧的固定间隔重试，指数退避能在网络短暂拥塞时避免高频无效重试。
 
 <Note>
-引擎启动时会按 `alerter.serverConcurrency` 的值启动对应数量的 worker goroutine，它们从同一个内部队列并发消费并推送告警事件。若将该值设为小于 1，引擎会自动修正为 1（单 worker 串行推送）。
+早期版本通过 `alerter.serverConcurrency` 和 `alerter.serverRetry` 控制一个内部内存队列的并发消费（固定间隔、有限次数重试）。该消费者已不再启动，普通告警规则的投递已切换到上述批量投递服务，这两个参数不再生效，无需配置。
 </Note>
-
-**重试策略说明**：当前采用"少次长超时"策略——每次请求最多等待 30 秒，最多重试 2 次。这与早期版本的"多次短超时"策略（10 秒超时、最多 40 次重试）有所不同。新策略更适合网络质量稳定但偶有抖动的场景，能避免在网络短暂拥塞时产生大量无效重试。
 
 **调优建议**：
 
-- **高吞吐场景**（规则数量多、告警频率高）：可适当提高 `alerter.serverConcurrency`（例如 128），以减少事件在内部队列中的积压时间。
-- **网络或 CPU 受限场景**：可适当降低 `alerter.serverConcurrency`（例如 16–32），避免并发出站连接过多影响其他业务流量。
-- **网络质量差、丢包率高的场景**：可适当增大 `alerter.serverRetry`（例如 5）并缩短 `alerter.serverTimeout`（例如 10s），以便更快发现失败并重试。
+- **高吞吐场景**（规则数量多、告警频率高）：可适当提高 `alerter.alertRuleDeliveryWorkers`（例如 128），减少事件在队列中的积压时间；必要时同步提高 `alerter.alertRuleEventQueueSize`。
+- **网络或 CPU 受限场景**：可适当降低 `alerter.alertRuleDeliveryWorkers`（例如 16–32），避免并发出站连接过多影响其他业务流量。
+- **网络质量差、丢包率高的场景**：可适当增大 `alerter.serverSleep`（例如 10s），让退避从更长的初始间隔开始，减少拥塞期间的无效请求。

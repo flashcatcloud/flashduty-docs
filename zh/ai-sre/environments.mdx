@@ -6,7 +6,7 @@ sidebarTitle: 运行环境
 ---
 
 <Info>
-  **公测功能**：AI SRE 正在公测，面向 On-call 专业版及以上账户灰度开放，公测期间不单独收费；如需开通，请填写 [AI SRE 公测申请表](https://c9xudyniiq.feishu.cn/share/base/form/shrcn0ngCfdoygiaHnAT80BfZiH)。功能与界面可能继续调整。
+  **公测功能**：AI SRE 已全量开放公测，无需申请，登录控制台即可直接使用，公测期间免费。功能与界面可能继续调整。
 </Info>
 
 ## 概述
@@ -169,6 +169,61 @@ BYOC Runner 的出网策略由您的机器和防火墙决定。云端 Sandbox �
 `connect-url` 与 `install_script_url` 都由后端下发，前端不会硬编码。私有化或离线部署可以把安装脚本分发源替换为内部镜像，但镜像需要同时提供 `install.sh`、`releases/latest` 与 `releases/download/<version>/...` release assets。
 </Note>
 
+### 连接使用自签证书的私有化端点
+
+Runner 默认会校验控制 WebSocket 的证书链和主机名。私有化端点使用自签证书时，优先把对应 CA 加入 Runner 所在系统或容器的信任库；只有无法安装 CA、且端点位于可信私有网络内时，才关闭校验。
+
+| 配置方式 | 值 | 默认值 | 说明 |
+|---|---|---|---|
+| 环境变量 | `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true` | `false` | 适用于 systemd、Docker 和其他进程管理器 |
+| 命令行参数 | `--insecure-skip-tls-verify` | 未启用 | 适用于手动运行；命令行参数优先于环境变量 |
+
+<Tabs>
+  <Tab title="Linux (systemd)">
+    编辑 `/etc/flashduty-runner/env`，写入私有化端点和 TLS 配置：
+
+    ```bash
+    FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws
+    FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true
+    ```
+
+    重启 Runner，让新的环境变量生效：
+
+    ```bash
+    sudo systemctl restart flashduty-runner
+    ```
+  </Tab>
+  <Tab title="Docker">
+    创建容器时传入环境变量：
+
+    ```bash
+    docker run -d \
+      --name flashduty-runner \
+      -e FLASHDUTY_RUNNER_TOKEN=<your-token> \
+      -e FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws \
+      -e FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true \
+      -v /var/flashduty/workspace:/workspace \
+      registry.flashcat.cloud/public/flashduty-runner:latest
+    ```
+  </Tab>
+  <Tab title="手动 / macOS">
+    启动时传入命令行参数：
+
+    ```bash
+    flashduty-runner run \
+      --token <your-token> \
+      --url wss://private.example.com/safari/environment/ws \
+      --insecure-skip-tls-verify
+    ```
+
+    如果环境变量已经设为 `true`，可以传入 `--insecure-skip-tls-verify=false`，显式恢复证书校验。
+  </Tab>
+</Tabs>
+
+<Warning>
+开启后，Runner 不再校验控制 WebSocket 的证书链和主机名，攻击者可能冒充控制端。该开关只影响 Runner 到 AI SRE 的控制 WebSocket，不会改变任务执行期间 MCP、A2A 或其他 HTTPS 请求的 TLS 配置。Runner 启动时会在日志中明确提示校验已关闭。
+</Warning>
+
 ### Linux 服务用户
 
 Linux (systemd) 安装默认使用安装脚本自动创建的 `flashduty` 用户。该用户没有 sudo 权限，systemd unit 会启用 `NoNewPrivileges=true`、`ProtectSystem=strict`、`PrivateTmp=true` 等限制，并只把 Runner 的状态目录设为可写。
@@ -199,7 +254,19 @@ Runner 启动后会持续发送心跳。列表状态含义如下：
 |---|---|
 | 等待中（pending） | Environment 已创建，但 Runner 从未连接过。 |
 | 在线（online） | Runner 当前已连接，心跳正常，可承接任务。 |
+| 性能下降（degraded） | Runner 仍然连接着、心跳也正常，但它的执行器跟不上——任务排队积压或迟迟不返回。**可以继续使用，只是响应会变慢**。 |
 | 离线（offline） | Runner 曾连接过，但当前心跳已断。 |
+
+`degraded` 是一个**实时计算**的状态，不会被持久化：每次读取时根据当前信号重新判定，因此不需要手动清除。它由两类信号触发——
+
+- 较新版本的 Runner 会在心跳里上报自身执行器的健康探针与积压任务数，据此直接判定；
+- 不上报这些指标的旧版本 Runner，则采用回退规则：针对同一个 Environment **连续 3 次**任务超时即标记为性能下降（只有超过 20 秒的超时才计数，避免调用方自己设置的短超时被误判）。
+
+恢复同样是自动的：新版本 Runner 的心跳恢复正常（探针通过且无积压）即回到 `在线`；旧版本 Runner 只要有任意一次任务成功就会重置计数，或在持续安静 30 分钟后自动恢复。
+
+<Tip>
+看到 `性能下降` 时，先检查 Runner 所在主机的 CPU、内存与磁盘负载，以及是否有长时间占用执行器的任务。它不阻断会话，但持续处于该状态说明这台主机已经吃不消当前的任务量。
+</Tip>
 
 Runner 版本由服务端在心跳中比对。发现新版本时，Runner 会收到升级通知并自行下载、校验、替换。手动重跑安装命令也可升级。
 
@@ -315,6 +382,15 @@ permission:
 命令权限当前仅支持通过配置文件设置，控制台暂无对应的可视化配置界面。
 </Note>
 
+### 文件访问边界
+
+权限配置约束的是**命令**；Agent 的**文件读写工具**另有独立的路径语义，与 `bash` 的行为保持一致：
+
+- **相对路径**：限制在 workspace 根目录内，并带符号链接逃逸保护——通过相对路径只能读写 workspace 内的文件。
+- **绝对路径**：按设计直接落到宿主机文件系统，与 `bash` 一致。
+
+因此真正划定文件访问边界的，是 Runner 运行的 **OS 用户** 与部署隔离（systemd 的用户与目录保护、Docker 的挂载与容器边界），而不是权限配置文件。
+
 ## 在会话中选择环境
 
 ---
@@ -325,7 +401,7 @@ permission:
 |---|---|
 | **自动** | 新会话默认值。优先使用当前成员可用的在线 Runner，否则回退到云端 Sandbox。 |
 | **云端 Sandbox · 默认** | 强制使用系统托管的云端 Sandbox，忽略自托管 Runner。 |
-| **自托管 Environment** | 列出当前成员可使用的 Runner。离线、从未连接或团队权限不匹配的 Runner 不可选。 |
+| **自托管 Environment** | 列出当前成员可使用的 Runner。离线、从未连接或团队权限不匹配的 Runner 不可选；处于 **性能下降（degraded）** 的 Runner **仍然可选**，选中后会提示「性能下降 — 可继续使用，响应可能变慢」。 |
 
 <Warning>
 环境选择对一条会话是一次性锁定的：会话首次发送消息时确定的运行环境会被记录，后续轮次始终沿用，不会因为您之后切换选择器而改变。要换环境，请新建会话。
@@ -346,8 +422,8 @@ permission:
 
 编辑权限遵循统一规则：
 
-1. 账户所有者或账户管理员可编辑任意 Environment；
-2. 团队成员可编辑本团队的团队级 Environment；
+1. 团队级 Environment 仅该团队的成员可以操作，组织管理员也需要先加入该团队；
+2. 账户级 Environment（共享范围）仅组织管理员可以操作；
 3. 不存在“创建者额外权限”，不是创建者也可以按上述规则编辑。
 
 <Note>
@@ -366,6 +442,9 @@ permission:
 </Accordion>
 <Accordion title="Runner 一直等待首次连接" icon="wrench">
   等待中说明这条 Environment 从未成功连接过。请确认安装命令完整执行、Token 属于这条 Environment、`URL` 从目标机器可达。如果使用了权限配置，也要确认配置文件存在且 YAML 可解析。
+</Accordion>
+<Accordion title="日志提示 certificate signed by unknown authority" icon="shield-xmark">
+  私有化端点的证书未被 Runner 信任。优先把签发该证书的 CA 加入 Runner 所在系统或容器的信任库；如果端点使用自签证书且位于可信私有网络内，也可以按上文说明显式开启 `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY`。systemd 部署需要重启服务，Docker 部署需要用新的环境变量重新创建容器，手动运行的进程需要重新启动。
 </Accordion>
 <Accordion title="会话提示连接超时或无响应" icon="server">
   如果会话固定到了某个离线 Runner，AI SRE 不会偷偷改派到其他环境。请先恢复该 Runner，或新建会话并选择“自动”或“云端 Sandbox”。如果 Runner 在线但任务失败，多半是 Runner 到目标资源这一段的网络或权限问题。

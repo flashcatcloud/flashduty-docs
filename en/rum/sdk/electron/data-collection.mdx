@@ -1,0 +1,167 @@
+---
+title: "Electron SDK data collection"
+description: "Learn what Electron RUM collects in the main and renderer processes, how events are associated, and how they are uploaded"
+keywords: ["RUM", "Electron SDK", "data collection", "main process", "renderer process", "crash"]
+---
+
+The Electron SDK associates main-process and renderer data with the same session, allowing you to analyze desktop runtime activity and page experience together.
+
+## Collection overview
+
+| Data | Main process | Renderer process |
+|------|--------------|------------------|
+| Session | Creates, renews, and ends the session | Uses the main-process session ID |
+| View | Maintains one fixed view per main-process instance | Records page loads and route changes |
+| User actions | Not collected | Clicks, input, and custom actions |
+| Network requests | `http`, `https`, `fetch`, and `net.fetch` | `fetch`, XHR, and static resources |
+| JavaScript errors | Uncaught exceptions, Promise rejections, and manual errors | Page errors and manual errors |
+| Native crashes | Main-process crashes and process termination | The main process observes renderer termination |
+| Performance metrics | Does not produce Web Vitals | LCP, INP, CLS, long tasks, and more |
+| Session Replay | Not recorded | Recorded and uploaded directly by the renderer |
+
+Renderer page data is collected by `@flashcatcloud/browser-rum` and follows [Web SDK data collection](/en/rum/sdk/web/data-collection).
+
+## Distinguish main and renderer events
+
+Main-process and renderer events use different source fields:
+
+| Event origin | `source` | `container.source` | `view.url` |
+|--------------|----------|--------------------|------------|
+| Main process | `electron` | Absent | `electron://main-process` |
+| Renderer process | `browser` | `electron` | Current page URL |
+
+Use this query to select every event produced by an Electron application:
+
+```text
+source:electron OR container.source:electron
+```
+
+Filtering on `source:electron` alone omits renderer data.
+
+<Note>
+If a renderer event does not contain `container.source: electron`, it did not use the main-process bridge. See [Why do I only see main-process data?](/en/rum/sdk/electron/faq#why-do-i-only-see-main-process-data).
+</Note>
+
+In the console, the attribute panel of error details and session event details also surfaces a virtual `process` attribute in the "Other" attribute group, with the value "Main process" or "Renderer process", to tell which process emitted the event at a glance; in the session event list, main-process events additionally carry a "Main process" chip.
+
+## Sessions
+
+The main process owns the Electron application session lifecycle:
+
+| Rule | Behavior |
+|------|----------|
+| Inactivity timeout | Ends the session after 15 minutes without valid UI input |
+| Maximum duration | A session lasts up to 4 hours |
+| Activity signals | Electron mouse-down, wheel, and key input events |
+| Application restart | An unexpired session can continue after restart |
+| Renewal | The next valid input after expiration creates a new session and view |
+
+Main-process background work does not extend or create a session by itself.
+
+## User identity
+
+The main-process SDK creates a stable anonymous device identifier. After you call `setUser()`, main-process events and bridged renderer events carry the signed-in user identity.
+
+| State | User information on subsequent events |
+|-------|---------------------------------------|
+| Before `setUser()` | Anonymous device identifier only |
+| After `setUser({ id, name, email })` | Anonymous device identifier and signed-in user fields |
+| After `clearUser()` | Signed-in user fields are removed; the anonymous identifier remains |
+
+The renderer uploads Session Replay directly. When replay is enabled, also call `flashcatRum.setUser()` and `flashcatRum.clearUser()` in the renderer.
+
+See [Identify the signed-in user](/en/rum/sdk/electron/advanced-config#identify-the-signed-in-user) for API usage.
+
+## Main-process view
+
+The main process has no page routing. The SDK maintains one fixed view per main-process instance and associates main-process errors and network requests with it.
+
+The view uses these identifiers:
+
+| Field | Value or meaning |
+|-------|------------------|
+| `view.url` | `electron://main-process` |
+| `view.name` | `main process` |
+| `view.time_spent` | Duration of the current main-process view |
+| `view.is_active` | Whether the current session is active |
+
+Renderers still create page views according to Browser SDK rules. The main-process view does not include renderer Web Vitals or user action counts.
+
+## Errors and crashes
+
+### JavaScript errors
+
+| Origin | Collection method |
+|--------|-------------------|
+| Uncaught main-process exception | Automatically captures `uncaughtException` |
+| Unhandled main-process Promise rejection | Automatically captures `unhandledRejection` |
+| Handled main-process exception | Report manually with `addError()` |
+| Renderer JavaScript error | Captured by the Browser SDK |
+
+Main-process and renderer stacks are normalized to stable paths and can be restored with source maps. See [Electron error symbolication](/en/rum/sdk/electron/error-symbolication#symbolicate-javascript-errors).
+
+### Native crashes
+
+Electron writes a minidump when a native crash occurs. Because the process has already terminated, the SDK reads and reports the crash on the next application start.
+
+Crash events include:
+
+- Crash type and process information
+- The crashed thread and other thread stacks
+- Loaded native modules
+- Operating system and CPU architecture
+
+Without symbol files, native stacks show module names and addresses. After you upload matching Breakpad symbols, Flashduty can restore function names, file names, and line numbers.
+
+### Process termination
+
+The SDK also observes renderer and Electron child process termination, including cases such as system termination, launch failure, or sandbox termination that do not produce a minidump.
+
+These events include process type, exit reason, exit code, and page URL, but no stack trace.
+
+## Main-process network requests
+
+The SDK automatically collects main-process `http`, `https`, `fetch`, and `net.fetch` requests as RUM resources.
+
+Primary fields include:
+
+- Request URL and method
+- HTTP status code
+- Request duration
+- Trace ID and Span ID
+
+Main-process resources use `resource.type: native`, distinguishing them from renderer `fetch` and `xhr` resources.
+
+The Electron SDK does not provide a full APM pipeline. Only HTTP spans become RUM resources; IPC and child-process command spans are not uploaded.
+
+## Upload and retry
+
+Regular RUM events and Session Replay use different upload paths:
+
+| Data | Upload process | Buffer and retry behavior |
+|------|----------------|---------------------------|
+| Main-process events | Main process | Written to disk and deleted after upload; remaining batches can continue after restart |
+| Regular renderer RUM events | Bridged to the main process | Uses the same main-process disk buffer |
+| Session Replay segments | Uploaded directly by the renderer | Uses Browser SDK memory retry and is not written to main-process storage |
+
+As a result, main-process `site`, `proxy`, `batchSize`, and `uploadFrequency` do not change Session Replay upload behavior. Configure a self-hosted replay endpoint separately in the renderer.
+
+## Related pages
+
+<CardGroup cols={2}>
+<Card title="SDK integration" icon="plug" href="/en/rum/sdk/electron/sdk-integration">
+Instrument the main and renderer processes.
+</Card>
+
+<Card title="Advanced configuration" icon="sliders" href="/en/rum/sdk/electron/advanced-config">
+Configure upload endpoints, user identity, and public APIs.
+</Card>
+
+<Card title="Error symbolication" icon="bug" href="/en/rum/sdk/electron/error-symbolication">
+Restore JavaScript and native crash stacks.
+</Card>
+
+<Card title="Troubleshooting" icon="circle-question" href="/en/rum/sdk/electron/faq">
+Diagnose missing data, bridge, and replay issues.
+</Card>
+</CardGroup>
