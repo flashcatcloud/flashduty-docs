@@ -62,6 +62,7 @@ export const docMap = {
   UcloudCloudWatch: `${alertBase}/ucloud-cloudwatch.mdx`,
   Nagios: `${alertBase}/nagios.mdx`,
   JDCloudMonitor: `${alertBase}/jdcloud.mdx`,
+  KSCloudMonitor: `${alertBase}/kscloud-monitor.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
   DbPull: `${alertBase}/db-pull.mdx`,
