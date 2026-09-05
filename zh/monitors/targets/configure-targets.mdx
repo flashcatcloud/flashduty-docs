@@ -8,7 +8,7 @@ keywords: ["agent.yaml", "MySQL", "Redis", "PostgreSQL", "MongoDB", "Kafka", "El
 
 ## 基础配置示例
 
-下面是一个适合首次接入的基础配置：
+下面的基础配置适用于 monit-agent `v0.3.0` 或以上版本。使用 `unknown_command_policy` 前，请先升级 Agent；旧版本不识别该字段，会导致配置加载失败。
 
 ```yaml
 locator_mappings: {}
@@ -51,6 +51,7 @@ host:
 
   shell_exec:
     enabled: true
+    unknown_command_policy: require_approval
     default_max_lines: 200
     cat_max_file_size: 20971520
     user_allow_list: []
@@ -116,18 +117,40 @@ locator_mappings:
 host:
   shell_exec:
     enabled: true
+    unknown_command_policy: require_approval
     default_max_lines: 200
     cat_max_file_size: 20971520
     user_allow_list: []
 ```
 
+### 未知命令策略
+
+`host.shell_exec.unknown_command_policy` 控制未通过自动安全规则、但满足现有语法和执行限制的命令如何获得执行授权。这类“未知命令”既可能是未收录的只读操作，也可能修改数据或影响服务。
+
+| 命令分类 | `require_approval`（默认） | `allow` |
+|---|---|---|
+| 已知安全操作 | 自动执行 | 自动执行 |
+| 命中永久拒绝规则的操作 | 拒绝执行 | 拒绝执行 |
+| 未知操作 | 本机 root 审批后执行 | 直接执行，无需审批会话 |
+
+省略该字段或将其设为空字符串时，使用 `require_approval`，保持原有审批行为。只有 `require_approval` 和 `allow` 是合法值；大小写或拼写错误会导致配置校验失败。
+
+你只能在 Agent 本地的 `agent.yaml` 中设置该策略，不能通过控制台或工具调用参数切换。它只影响 `shell.exec`，不会开启数据库、中间件等其他诊断工具的写权限，也不会覆盖 `enabled: false` 或 `disabled_tools`。
+
+<Warning>
+将策略设置为 `allow`，表示授权未知命令以 Agent 的运行账号权限直接执行。这也包括原本需要审批的 `docker exec`、`kubectl exec`，实际可访问范围取决于该账号的容器运行时权限和 Kubernetes 凭据。
+
+未知命令可能修改或删除数据、访问敏感信息、影响服务或调用其他程序；中心端被攻破时也可能利用这些能力。Agent 仍执行永久拒绝规则、语法检查、超时和输出限制，但这些规则不能完备识别任意未知程序的间接危险行为。
+</Warning>
+
 建议：
 
-- 需要 AI-SRE 做主机现场诊断时，保持 `enabled: true`。只有受控的 shell 才能执行，放心开启。
-- 命令偶尔被拦截时，可以由本机 root [人工审批该命令](/zh/monitors/targets/install-agent#人工审批被拦截的-shell-命令)。
+- 需要 AI-SRE 做主机现场诊断时，设置 `enabled: true`，并保留默认的 `require_approval` 策略。
+- 未知命令需要逐条确认时，由本机 root [人工审批该命令](/zh/monitors/targets/install-agent#人工审批被拦截的-shell-命令)。
 - 对于需要长期重复使用的命令，确认其安全、只读且不会输出敏感信息后，再将完整命令添加到 `user_allow_list`。
+- 只有在接受未知命令直接执行的风险时，才将策略改为 `allow`。它不提供一份限定写操作范围的白名单。
 
-人工审批和 `user_allow_list` 都不能放开关机、重启、破坏系统或读取敏感凭据等高危操作。
+命中永久拒绝规则的命令，不能通过人工审批、`user_allow_list` 或 `allow` 放开。
 
 如需紧急禁用某个工具，可以使用 `tool_policy.disabled_tools`：
 
@@ -137,7 +160,7 @@ tool_policy:
     - shell.exec
 ```
 
-修改 `shell_exec.enabled` 或 `tool_policy.disabled_tools` 后，发送 SIGHUP reload 即可生效，无需重启 Agent。
+修改 `shell_exec.enabled`、`shell_exec.unknown_command_policy` 或 `tool_policy.disabled_tools` 后，发送 SIGHUP reload 即可生效，无需重启 Agent。策略切换对新调用生效；已开始执行或等待审批的命令保持原行为，详见[配置生效与接入验证](/zh/monitors/targets/reload-and-verify#切换未知命令策略)。
 
 ## MySQL
 

@@ -8,7 +8,7 @@ The installation package includes a default `agent.yaml`. If you only need to on
 
 ## Basic configuration example
 
-The following configuration is suitable for first-time onboarding:
+The following configuration requires monit-agent `v0.3.0` or later. Upgrade the Agent before adding `unknown_command_policy`; older versions do not recognize this field and fail to load the configuration.
 
 ```yaml
 locator_mappings: {}
@@ -51,6 +51,7 @@ host:
 
   shell_exec:
     enabled: true
+    unknown_command_policy: require_approval
     default_max_lines: 200
     cat_max_file_size: 20971520
     user_allow_list: []
@@ -116,18 +117,40 @@ Recommendations:
 host:
   shell_exec:
     enabled: true
+    unknown_command_policy: require_approval
     default_max_lines: 200
     cat_max_file_size: 20971520
     user_allow_list: []
 ```
 
+### Unknown command policy
+
+`host.shell_exec.unknown_command_policy` determines how commands that do not pass automatic safety rules, but meet the existing syntax and execution requirements, receive authorization. These "unknown commands" can include unrecognized read-only operations as well as operations that modify data or affect services.
+
+| Command category | `require_approval` (default) | `allow` |
+|---|---|---|
+| Known-safe operations | Execute automatically | Execute automatically |
+| Operations that match a permanent-deny rule | Reject | Reject |
+| Unknown operations | Execute after local root approval | Execute directly, without an approval session |
+
+Omitting the field or setting it to an empty string uses `require_approval`, preserving the existing approval behavior. The only valid values are `require_approval` and `allow`. Incorrect capitalization or spelling fails configuration validation.
+
+You can set this policy only in the Agent's local `agent.yaml`, not through the console or tool call parameters. It affects only `shell.exec`; it does not grant write access to database or middleware diagnostic tools, or override `enabled: false` or `disabled_tools`.
+
+<Warning>
+Setting the policy to `allow` authorizes unknown commands to execute directly with the permissions of the account running the Agent. This includes `docker exec` and `kubectl exec`, which previously required approval. Their actual access depends on that account's container runtime permissions and Kubernetes credentials.
+
+Unknown commands can modify or delete data, access sensitive information, affect services, or invoke other programs. A compromised control plane can also use these capabilities. The Agent still enforces permanent-deny rules, syntax checks, timeouts, and output limits, but these rules cannot identify every indirect dangerous behavior of an unknown program.
+</Warning>
+
 Recommendations:
 
-- Keep `enabled: true` when AI-SRE needs live host diagnostics. Only controlled shell commands can be executed.
-- If a command is occasionally blocked, local root can [approve that command](/en/monitors/targets/install-agent#approve-a-blocked-shell-command).
+- Set `enabled: true` when AI-SRE needs live host diagnostics, and keep the default `require_approval` policy.
+- When you need to confirm unknown commands individually, have local root [approve each command](/en/monitors/targets/install-agent#approve-a-blocked-shell-command).
 - For a command that needs to run repeatedly, add the complete command to `user_allow_list` only after confirming that it is safe, read-only, and does not expose sensitive information.
+- Choose `allow` only if you accept the risks of executing unknown commands directly. It does not restrict write operations to a separate allowlist.
 
-Neither human approval nor `user_allow_list` can allow high-risk operations such as shutdown, reboot, system destruction, or reading sensitive credentials.
+Commands that match permanent-deny rules cannot be enabled through human approval, `user_allow_list`, or `allow`.
 
 To urgently disable a tool, use `tool_policy.disabled_tools`:
 
@@ -137,7 +160,7 @@ tool_policy:
     - shell.exec
 ```
 
-After changing `shell_exec.enabled` or `tool_policy.disabled_tools`, send SIGHUP to reload the configuration. The change takes effect without restarting the Agent.
+After changing `shell_exec.enabled`, `shell_exec.unknown_command_policy`, or `tool_policy.disabled_tools`, send SIGHUP to reload the configuration without restarting the Agent. Policy changes apply to new calls; commands already running or awaiting approval retain their original behavior. See [Reload configuration and verify onboarding](/en/monitors/targets/reload-and-verify#change-the-unknown-command-policy).
 
 ## MySQL
 
