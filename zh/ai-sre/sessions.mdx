@@ -264,7 +264,66 @@ Agent 产出的文件会以产物形式提供预览。点击产物即在右侧�
 报告类产物（如运营洞察报告）可生成包含 Mermaid 图、图表的 HTML，并在渲染视图中直接查看。运营洞察相关能力见 <a href="/zh/ai-sre/insight">运营洞察报告</a>。
 </Tip>
 
-所有已发布的产物也可在左侧导航 **产物** 页统一查看与管理（列表、搜索、按个人 / 团队筛选、重命名、下载与删除），详见 <a href="/zh/ai-sre/artifacts">产物</a>。
+所有已发布的产物也可在左侧导航 **产物** 页统一查看与管理（列表、搜索、按个人 / 团队筛选、卡片 / 列表视图切换、按创建 / 修改时间排序、重命名、下载与删除），详见 <a href="/zh/ai-sre/artifacts">产物</a>。
+
+### 状态页更新草稿
+
+Agent 可以调用 `statuspage_draft` 工具，为公开状态页**起草**一份公告——新建故障或维护计划事件，或向已有事件追加一条更新。草稿保存在服务端，并在对话流中渲染为一张**状态页更新草稿卡**；但草稿**永远不会被自动发布**：发布状态页会立刻触达订阅者且不可撤回，所以这一步始终留给人工——在控制台的状态页发布表单里逐项核对后再点击发布。
+
+#### 草稿卡上有什么
+
+卡片复用控制台同类卡片（IncidentCard / MaintenanceCard）的视觉、字段顺序与组件状态图标，让审阅者看到的就是将要发布的内容：
+
+| 内容 | 说明 |
+|---|---|
+| 标题 | 新建事件时为表单的 `name` 字段（后端 `title`，最长 255 字符）；追加更新时为其挂靠事件的标题——追加更新表单没有标题字段，此处仅作标识（未提供时显示「未命名状态页更新」） |
+| 状态 / 计划时间 | 新建维护计划显示「计划于 〈开始〉 → 〈结束〉」（未设置时显示「未设置计划时间」）；其余情况显示状态文案——故障：排查中 / 已定位 / 监控中 / 已恢复；维护追加更新：已排期 / 进行中 / 已完成 |
+| 正文 | `message` 字段**完整渲染**为 Markdown——这是客户将要读到的话，审阅者必须看到全貌，不以纯文本形式出现 |
+| 受影响组件 | 每个组件一枚芯片：组件状态图标 + 名称（悬停显示「名称 · 状态」） |
+| 目标与类型 | 底部左侧「将发布到 〈状态页〉」（追加更新显示「追加更新 · 〈事件标题〉」），右侧标明类型：故障 / 维护计划 |
+| 警示条 | 草稿消息若含有状态页编辑器不支持、加载进表单时会被**静默丢弃**的 Markdown（标题、代码块、引用、图片、删除线、行内代码），卡片会以警示条逐条列出——这是起草时工具已检测到的 |
+
+#### 卡片状态
+
+| 状态 | 表现 |
+|---|---|
+| 起草中 | 骨架屏，底部显示「正在起草状态页更新…」 |
+| 工具报错 | 「没能生成草稿」+ 具体原因；可让 AI 再试一次，或直接去状态页手动创建 |
+| 草稿不完整 | 「草稿不完整」+ 同样提示（工具返回了结果但缺少可用的草稿对象） |
+| 可审阅 | 按钮为 **审阅 →**：在新标签页打开控制台状态页对应表单，草稿内容自动填入（URL 约定见下） |
+| 已发布 | 按钮变为禁用的 **已发布**；底部目标变为**已发布变更**的链接（`/status-page/{page_id}?menu=incidents\|maintenance&incident\|maintenance={change_id}`），可回看草稿最终发布成了什么 |
+| 草稿已过期 / 不存在 | 按钮变为禁用的 **草稿已过期**，提示「草稿已过期或不存在，请让 AI 重新起草一份」——控制台查询返回 ResourceNotFound 或网络错误时都按此处理 |
+
+「是否已发布」是卡片自己无法观察的事实（发布发生在另一个标签页的控制台里），因此卡片会按草稿 ID 请求 `GET /status-page/draft/info?draft_id=...`，返回 `status: pending | published`。草稿仍为 pending 时，窗口每次重新获得焦点都会刷新（「在这里审阅、去那里发布、再回来」是常规路径）；`published` 与「草稿不存在」都是终态，结果缓存在当前页面的生命周期内。只读分享会话不渲染审阅按钮，对草稿状态的查询也一并跳过。
+
+#### 审阅交接 URL
+
+草稿本身保存在服务端（fc-statuspage 的草稿存储），跨到控制台的只有 `draft_id`：表单按 ID 从 `/status-page/draft/info` 拉取正文。URL 按「新建 / 追加」×「故障 / 维护」组合为四种：
+
+| 场景 | URL |
+|---|---|
+| 新建故障 | `/status-page/{page_id}?menu=incidents&incident=new&draft={draft_id}` |
+| 新建维护计划 | `/status-page/{page_id}?menu=maintenance&maintenance=new&draft={draft_id}` |
+| 追加故障更新 | `/status-page/{page_id}?menu=incidents&incident={change_id}&action=add-update&draft={draft_id}` |
+| 追加维护更新 | `/status-page/{page_id}?menu=maintenance&maintenance={change_id}&action=add-update&draft={draft_id}` |
+
+`action=add-update` 让详情页自动展开追加更新表单；缺了它，路由只会打开事件本身，草稿不会被读取。`?draft=` 只携带草稿 ID——草稿是服务端状态，不是 URL 里的一段 JSON。
+
+#### 工具要点
+
+| 字段 | 说明 |
+|---|---|
+| `page_id` / `page_name` | 目标状态页（必填）与其显示名（用于卡片展示） |
+| `type` | `incident`（故障）/ `maintenance`（维护计划） |
+| `change_id` | 省略 = 新建事件；设置 = 向该事件追加更新。起草前工具会先查 `fduty status-page list` 与 `fduty status-page change-active-list`——目标已有进行中的事件时应追加，而不是再开一个（二次事件会被客户读成又一次独立故障） |
+| `title` / `message` | 新建事件的标题（≤255 字符）与正文（必填，Markdown；状态页编辑器只保留加粗、斜体、链接、有序 / 无序列表、表格与 `---` 分隔线） |
+| `status` | 新建故障：`investigating` / `identified` / `monitoring` / `resolved`；新建维护：省略（是否按计划自动推进由发布表单的开关决定）；追加维护更新：`scheduled` / `ongoing` / `completed` |
+| `affected_components` | 受影响组件（`component_id` + `status`，可带显示名 `name`）；故障组件状态：`operational` / `degraded` / `partial_outage` / `full_outage`，维护组件状态：`operational` / `under_maintenance` |
+| `start_at_seconds` / `end_at_seconds` | 仅新建维护计划：计划窗口起止，unix **秒**（毫秒与 ISO 字符串都会被视为非法） |
+
+<Note>
+渠道差异：控制台（`web`）与自动化渠道渲染上述卡片；IM 与 API 渠道不渲染卡片——Agent 会在**回复开头**放一个「[审阅并发布](〈同样的交接 URL〉)」链接，再用一两句话总结草稿要点（IM 消息截断不识别 Markdown，链接放开头才安全）。若草稿保存失败（没有 `review_url`），它会改为文字总结，并引导你到控制台的状态页手动核对。
+</Note>
 
 ### 消息操作
 
