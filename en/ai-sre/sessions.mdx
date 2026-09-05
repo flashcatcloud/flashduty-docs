@@ -1,7 +1,7 @@
 ---
 title: Console
-description: An AI SRE session holds one complete conversation between you and the agent, including messages, streaming responses, tool calls, and artifacts. This page covers creating and managing sessions, sharing, sending messages, previewing artifacts, session forking, context compaction, team binding, and session data export.
-keywords: ["AI SRE", "session", "chat", "streaming response", "tool call", "Artifacts", "Fork", "context compaction", "team binding", "export", "NDJSON"]
+description: An AI SRE session holds one complete conversation between you and the agent, including messages, streaming responses, tool calls, and artifacts. This page covers creating and managing sessions, sharing, sending messages, the task panel and background tasks, previewing artifacts, session forking, context compaction, team binding, and session data export.
+keywords: ["AI SRE", "session", "chat", "streaming response", "tool call", "task panel", "background tasks", "Artifacts", "Fork", "context compaction", "team binding", "export", "NDJSON"]
 sidebarTitle: Console
 ---
 
@@ -90,6 +90,7 @@ Hover over a session row to reveal the pin and archive actions. A pinned session
 | Pin / Unpin | Inline pin button on hover | Pinned sessions appear at the top of the list |
 | Archive / Unarchive | Inline archive button on hover | Archived sessions are hidden from the active list by default; switch to **Archived** in the filter to find them |
 | Rename | Click the chat title to edit in place | Press Enter or click away to confirm; press Esc to cancel; maximum 60 characters |
+| Delete | Delete button in the chat header (requires manage permission) | Deletes the session after confirmation; the conversation history cannot be recovered. Deletion also best-effort stops the session's still-running background command / monitor processes — a failed stop does not block the deletion, and no task notifications are sent for it |
 
 A new session does not need a manual title: after the first turn completes, the system auto-generates a title server-side from the session's content and pushes it back through the session stream as a `session.renamed` frame, which updates the sidebar and title in place. Until that finishes, a placeholder title derived from your first message is shown so the sidebar never sticks at "Untitled." You can **rename** the session at any time to override the auto-generated title (title limit: 60 characters).
 
@@ -99,13 +100,14 @@ Hovering over a session row for a moment shows a tooltip with the full session n
 
 ### List Status Indicators
 
-Each row shows one mutually exclusive indicator on the right:
+Each row shows status indicators by priority: while a session is running, only the spinner is shown; otherwise the background-task badge and the unread dot can appear together; when neither applies, the relative time is shown.
 
 | Indicator | Meaning |
 |---|---|
-| Spinning circle | The agent in this session is running (a turn is in progress) |
-| Blue dot (unread) | The agent has produced new content you have not yet viewed |
-| Relative time | When neither of the above applies, the relative time of the last activity is shown (e.g. `5m`, `3h`, `3d`) |
+| Spinning circle | The agent in this session is running (a turn is in progress or waiting on subtask reports); takes priority over all other indicators |
+| 🔭 + count | The session has that many live background tasks (monitors / background commands) — see "Task Panel and Background Tasks" below |
+| Blue dot (unread) | The agent has produced new content you have not yet viewed; can appear alongside the 🔭 badge |
+| Relative time | When none of the above applies, the relative time of the last activity is shown (e.g. `5m`, `3h`, `3d`) |
 
 Opening a session clears its unread dot.
 
@@ -135,7 +137,7 @@ When the console publishes a new version, a **version update notice** appears ab
     **Inline truncation of large files**: attachments reach the agent as extracted text. When the extracted text exceeds **64 KB**, only the first **32 KB** is inlined (cut at a valid UTF-8 boundary), and the attachment envelope carries a pointer to the full file staged in the sandbox (like `~/.flashduty/attachments/...`) — if the full content matters, ask the agent to read the file from the sandbox with the read / bash tools; nothing is lost. In addition, PDFs larger than **3 MB** are no longer passed natively to the model; they fall back to text extraction under the same truncation rule.
   </Accordion>
   <Accordion title="Context references" icon="link">
-    When you enter AI SRE from an incident, alert, monitor rule, monitor target, or service topology page, the related object is embedded into the input box as a **reference capsule** — a small inline tag indicating the kind of object referenced — an incident, alert event, alert, monitor rule, host, monitor target, service topology, or on-call analytics — that travels with the message so the agent can start its analysis from that object directly. Click the capsule to open the referenced object in a new tab, or click its close button to remove the reference before sending. A single message can carry multiple references. Besides objects carried in automatically from a related page, you can also type `@` directly in any session's input box to trigger an incident search dropdown (supporting fuzzy keyword search and a list of recent incidents); selecting one inserts the same kind of reference capsule — a standalone entry point available at any time.
+    When you enter AI SRE from an incident, alert, monitor rule, monitor target, or service topology page, the related object is embedded into the input box as a **reference capsule** — a small inline tag indicating the kind of object referenced — an incident, alert event, alert, monitor rule, host, monitor target, service topology, or on-call analytics — that travels with the message so the agent can start its analysis from that object directly. Click the capsule to open the referenced object in a new tab, or click its close button to remove the reference before sending. A single message can carry multiple references. Besides objects carried in automatically from a related page, you can also type `@` directly in any session's input box to trigger an incident search dropdown (supporting fuzzy keyword search and a list of recent incidents); selecting one inserts the same kind of reference capsule — a standalone entry point available at any time. Typing an email address does not false-trigger it: when the `@` directly follows an email-address character (a letter, a digit, or one of `._%+-`), the picker does not open; an `@` after a space or adjacent to Chinese text still triggers it.
   </Accordion>
   <Accordion title="Knowledge and skills" icon="book">
     When a session starts, the knowledge packs and skills for the bound team are loaded automatically. See <a href="/en/ai-sre/knowledge">Knowledges</a> and <a href="/en/ai-sre/skills">Skills</a> for details.
@@ -205,7 +207,43 @@ OAuth authorization links expire. After expiry, the card shows "Authorization li
 
 ### Subagents
 
-When the agent delegates a subtask, a clickable chip appears in the conversation: it shows the subtask's name and current intent, a spinner and a dedicated stop button while it's running, and tool-call count / token usage / duration once it finishes (or the failure reason if it fails); if the subtask is stuck waiting on authorization, the chip also shows a clickable authorization link. Clicking the chip opens a subagent session panel on the right, side by side with the main conversation — the main chat area shrinks accordingly rather than being covered by a modal. The panel can be expanded to fill the main area, or collapsed back to the side-by-side layout. While a subtask is still running, both the panel and the chip provide an independent stop button that interrupts only that subtask without affecting the main session.
+When the agent delegates a subtask, a clickable **dispatch reference line** appears in the conversation: a status ring, a type badge (Agent / A2A), the subtask's name and current intent, and right-aligned status and elapsed time; once finished it adds the tool-call count / token usage / total duration, and on failure a red reason line appears underneath. The reference line is a compact single row and carries **no stop button** — stopping lives in the task panel's detail header (see "Task Panel and Background Tasks" below). Clicking the line opens a subagent session panel on the right, side by side with the main conversation — the main chat area shrinks accordingly rather than being covered by a modal. The panel can be expanded to fill the main area, or collapsed back to the side-by-side layout.
+
+Besides running, completed, failed, and interrupted, a subtask can also sit in one of two "needs you" states:
+
+- **Awaiting authorization**: an action area unfolds beneath the reference line — click **Authorize** to open the OAuth popup; once authorization completes, the button becomes **Continue task**, and clicking it lets the main agent resume the same task in place instead of starting a new one.
+- **Awaiting input**: the subtask has asked you a question and is parked waiting for an answer; the question text is read on the task's row in the task panel, not inline on the reference line.
+
+An orphaned subtask (its executor is gone) renders as **Failed**; a task terminated by the platform shows as **Killed**.
+
+### Task Panel and Background Tasks
+
+Beyond subagents, the agent can push time-consuming work into the background. Tasks dispatched within a session come in three kinds:
+
+| Kind | Dispatched by | Notes |
+|---|---|---|
+| agent | Subagent / A2A subagent dispatch | Has its own child session — see "Subagents" above |
+| shell | The `bash` tool with `run_in_background` | A long one-shot command (build, batch job, data pull); only its completion needs reporting |
+| monitor | The `monitor` tool | A standing watcher task: watches a condition until it hits or reaches its deadline, and the script's output flows back to the agent as event batches; a one-shot delayed action (e.g. "check again in half an hour") is done with a monitor plus `sleep` |
+
+A unified **Tasks** panel on the right side of the session tracks every task of the session, grouped into **Needs you / Running / Finished**. There are two entry points:
+
+- **The tasks button in the chat header**: carries a count badge for "needs you + running" tasks, capped at `9+`; the badge is red when any task needs you (awaiting authorization / awaiting input), and blue when tasks are only running.
+- **The generation status row while a turn is running**: shows the live task count (e.g. "3 tasks · 1 agent needs you"); clicking it opens the same task panel.
+
+Task details differ by kind: clicking an **agent** task opens the child session's execution transcript (see above); clicking a **shell / monitor** task opens its own event-timeline detail, which includes the status (a running task also shows how many seconds ago its last liveness probe landed — probing happens roughly every 30 seconds), run duration, event count, output bytes, the monitor's deadline (standing tasks with no deadline show "Persistent"), the exit code, the full command, and the event timeline in order. **The stop button lives in the detail header** — **Stop task** for shell / monitor tasks and **Stop Subagent** for subagents — and interrupts only that task, without affecting the main session.
+
+How this surfaces in the conversation stream:
+
+- A tool line that starts a background command reads **Started background command**; when a turn mixes foreground and background commands, the collapsed tool group counts each category separately (e.g. `Ran 1 command, started 1 background command`).
+- Each time a monitor's condition hits, a 🔭 system line is inlined into the conversation: the first line shows the monitor's description plus a first-line summary of that output batch, and clicking it expands the full batch in place.
+- When a task ends, a terminal line appears with the end state and a result summary, plus the exit code and a note when the task envelope carries them.
+- The `monitor` tool line itself does not expand into input / output — the bookkeeping it returns (task ID, output file, deadline, and so on) is presented more completely in the task panel's detail.
+
+Two status indicators related to background tasks:
+
+- **The 🔭 badge on a session list row** means the session has live background tasks (`standing_tasks`; the number is the count). When the session is running, the spinner takes priority.
+- **A session's "running" indicator reflects only agent turns and subagent tasks**: standing monitors / background commands do not keep a session "running" — a session with only standing tasks alive shows as idle.
 
 ### Artifacts Preview
 
@@ -240,7 +278,7 @@ Hover over a message to reveal action buttons:
 | Fork | Agent reply from a completed turn | Creates a new session from the completed turn that produced that reply, so you can continue down a different investigation path |
 
 <Note>
-Editing a historical message is, under the hood, a **rewind** operation: once submitted, the conversation regenerates from that message onward, and any content after that message is replaced. Confirm before submitting. If the turn that produced the target message is still running or stopping, the rewind is rejected (`rewind target invocation is still active`) — wait for that turn to settle before submitting.
+Editing a historical message is, under the hood, a **rewind** operation: once submitted, the conversation regenerates from that message onward, and any content after that message is replaced. Confirm before submitting. If the turn that produced the target message is still running or stopping, the rewind is rejected (`rewind target invocation is still active`) — wait for that turn to settle before submitting. When a rewind takes effect, the background processes and dispatched subagents spawned by the wiped turns are stopped along with it, and their task rows are removed from the task panel.
 </Note>
 
 ### Forking a session
