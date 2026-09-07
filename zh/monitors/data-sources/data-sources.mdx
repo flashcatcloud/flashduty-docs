@@ -1,7 +1,7 @@
 ---
 title: "数据源管理"
-description: "配置和管理 Monitors 的数据源，包括 Prometheus、Elasticsearch、Loki、ClickHouse、MySQL、Oracle、PostgreSQL、Aliyun SLS、Tencent CLS、VictoriaLogs 等类型"
-keywords: ["数据源", "Prometheus", "Elasticsearch", "Loki", "ClickHouse", "MySQL", "Oracle", "PostgreSQL", "SLS", "Tencent CLS", "VictoriaLogs"]
+description: "配置和管理 Monitors 的数据源，包括 Prometheus、Elasticsearch、Loki、ClickHouse、MySQL、Oracle、PostgreSQL、Aliyun SLS、Tencent CLS、VictoriaLogs、Redis、MongoDB、Kafka 等类型"
+keywords: ["数据源", "Prometheus", "Elasticsearch", "Loki", "ClickHouse", "MySQL", "Oracle", "PostgreSQL", "SLS", "Tencent CLS", "VictoriaLogs", "Redis", "MongoDB", "Kafka", "数据源工具"]
 ---
 
 数据源是告警引擎查询数据的来源。你需要先配置数据源，告警引擎才能从中读取数据进行异常判定。
@@ -10,7 +10,7 @@ keywords: ["数据源", "Prometheus", "Elasticsearch", "Loki", "ClickHouse", "My
 
 ## 支持的数据源类型
 
-Monitors 支持以下 10 种数据源类型：
+Monitors 支持以下 15 种数据源类型：
 
 | 类型 | 说明 |
 |------|------|
@@ -24,6 +24,13 @@ Monitors 支持以下 10 种数据源类型：
 | **Aliyun SLS** | 阿里云日志服务 |
 | **Tencent CLS** | 腾讯云日志服务 |
 | **VictoriaLogs** | 日志数据库，VictoriaMetrics 生态的日志解决方案 |
+| **Redis Node**（`redis_node`） | Redis 单节点，仅诊断类型 |
+| **Redis Sentinel**（`redis_sentinel`） | Redis Sentinel 集群，仅诊断类型 |
+| **MongoDB Mongod**（`mongodb_mongod`） | MongoDB 单节点，仅诊断类型 |
+| **MongoDB Mongos**（`mongodb_mongos`） | MongoDB 分片集群路由，仅诊断类型 |
+| **Kafka**（`kafka`） | Apache Kafka 集群，仅诊断类型 |
+
+其中 Redis Node、Redis Sentinel、MongoDB（mongod/mongos）与 Kafka 这 5 种**仅诊断类型**用于数据库与中间件诊断（详见[主机诊断与数据源诊断](/zh/monitors/targets/overview#主机诊断与数据源诊断)），不能用于告警评估：它们不允许开启 `alerting_enabled`（恒为 `false`），无法参与告警规则的查询与评估。连接地址等配置要求见[各数据源类型配置](#各数据源类型配置)。
 
 ## 数据源列表
 
@@ -72,6 +79,20 @@ Monitors 支持以下 10 种数据源类型：
 <Warning>
 名称通配方式存储的是名称字符串，如果数据源改名，已有的通配规则可能不再匹配。精确匹配方式存储的是数据源 ID，不受改名影响。如果对稳定性要求高，建议优先使用精确匹配。
 </Warning>
+
+## 启用与告警评估开关
+
+数据源有两个相互独立的开关，分别控制业务执行与告警评估：
+
+| 开关 | 字段 | 含义 |
+|------|------|------|
+| **启用** | `enabled` | 是否开启业务执行。关闭后数据源不接受业务查询与数据源工具调用，但不会改变 `alerting_enabled` |
+| **允许告警评估** | `alerting_enabled` | 是否允许该数据源参与告警规则的查询与评估。告警评估同时要求 `enabled=true` 且数据源类型支持告警；`false` 不会阻断非告警查询与数据源工具 |
+
+- **创建时的默认值**：`enabled` 默认为 `true`；`alerting_enabled` 对支持告警的类型默认为 `true`，对仅诊断类型默认为 `false`。
+- **更新时的行为**：两个字段省略时均保留当前值；显式传入 `null` 非法。
+- **仅诊断类型**（`redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka`）不允许设置 `alerting_enabled=true`。
+- **冲突保护**：存在启用中的告警规则引用该数据源时，关闭 `alerting_enabled` 会被拒绝并返回冲突（HTTP 409），需要先处理引用该数据源的告警规则。实际执行告警评估时，数据源还必须处于 `enabled=true` 状态。
 
 ## 各数据源类型配置
 
@@ -244,6 +265,57 @@ SecretKey 为只写字段：保存后列表与详情均不返回字面量密钥�
 #### 规则绑定约束
 
 Tencent CLS 类型的告警规则只能精确绑定一个数据源，不支持名称通配。创建规则时数据源选择为单选、名称通配输入被隐藏；配置非法时保存会提示「该数据源类型只能绑定一个数据源」或「该数据源类型不支持名称通配，请清空后重新选择」。详见 [Tencent CLS 告警规则](/zh/monitors/alert-rules/tencent-cls)。
+
+### Redis Node / Redis Sentinel
+
+`redis_node`（Redis 单节点）与 `redis_sentinel`（Redis Sentinel 集群）是仅诊断类型，不支持告警评估。连接地址为单个 `host:port`（如 `localhost:6379`、`localhost:26379`），IPv6 地址需加方括号（如 `[::1]:6379`）；不接受 URI、userinfo 或查询参数，连接地址中也不支持 `${env:}` 引用。地址规范化后最多 4096 个字符。
+
+| 配置项 | 说明 |
+|--------|------|
+| **连接地址** | 单个 `host:port`；IPv6 加方括号；不接受 URI、userinfo 或查询参数 |
+| **用户名** | 可选；支持 `${env:NAME}` 环境变量引用 |
+| **密码** | 可选；支持 `${env:NAME}` 引用；保存后不回显字面密码 |
+| **数据库编号**（仅 Redis Node） | Redis DB 编号，默认 `0` |
+| **超时时间（毫秒）** | 连接超时，默认 `3000`，范围 1000–10000 |
+
+### MongoDB（mongod / mongos）
+
+`mongodb_mongod`（MongoDB 单节点）与 `mongodb_mongos`（MongoDB 分片集群路由）是仅诊断类型，不支持告警评估。连接地址为单个 `host:port`（如 `localhost:27017`），IPv6 地址需加方括号；不接受 URI、userinfo 或查询参数，连接地址中也不支持 `${env:}` 引用。地址规范化后最多 4096 个字符。
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| **连接地址** | 单个 `host:port`；IPv6 加方括号；不接受 URI、userinfo 或查询参数 | - |
+| **用户名 / 密码** | 认证凭据，必须同时配置；支持 `${env:NAME}` 引用；密码保存后不回显字面值 | - |
+| **认证数据库** | 认证所用数据库 | `admin` |
+| **超时时间（毫秒）** | 连接超时 | `3000` |
+| **TLS** | 是否启用 TLS | 关闭 |
+| **CA 证书** | PEM 格式 CA 证书或 `${env:NAME}` 引用 | - |
+| **最低 / 最高 TLS 版本** | TLS 1.2（默认）或 1.3；最高版本不能低于最低版本 | 1.2 / 不限制 |
+| **服务端名称** | TLS 握手 SNI / 证书校验主机名；留空取连接地址中的主机名 | - |
+| **跳过服务端证书校验** | 启用 TLS 时是否不校验服务端证书 | 否 |
+
+MongoDB 不支持客户端证书认证（mTLS）。
+
+### Kafka
+
+`kafka` 是仅诊断类型，不支持告警评估。连接地址为 1–32 个不重复、逗号分隔的 `host:port` 引导地址（如 `broker1:9092,broker2:9092`），broker 列表只写在连接地址中，payload 不包含 broker 列表；IPv6 地址需加方括号；不接受 URI、userinfo 或查询参数，连接地址中也不支持 `${env:}` 引用。地址规范化后最多 4096 个字符。
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| **连接地址** | 1–32 个不重复的 `host:port`，逗号分隔 | - |
+| **SASL 机制** | `none`（不接受凭据）、`plain`、`scram-sha-256`、`scram-sha-512`（后三者需要用户名与密码） | `none` |
+| **用户名 / 密码** | SASL 认证凭据；支持 `${env:NAME}` 引用；密码保存后不回显字面值 | - |
+| **超时时间（毫秒）** | 连接超时 | `5000` |
+| **TLS** | 是否启用 TLS | 关闭 |
+| **CA 证书** | PEM 格式 CA 证书或 `${env:NAME}` 引用 | - |
+| **客户端证书 / 私钥** | PEM 格式，必须成对配置；私钥保存后不回显字面值，支持 `${env:NAME}` 引用 | - |
+| **最低 / 最高 TLS 版本** | TLS 1.2（默认）或 1.3；最高版本不能低于最低版本 | 1.2 / 不限制 |
+| **服务端名称** | TLS 握手 SNI / 证书校验主机名；留空取连接地址中的主机名 | - |
+| **跳过服务端证书校验** | 启用 TLS 时是否不校验服务端证书 | 否 |
+
+### 凭据的保存语义
+
+以上 5 种诊断类型与 Tencent CLS 一致：密码（以及 Kafka 的客户端私钥）为只写字段，保存后列表与详情均不返回字面值；以 `${env:}` 引用保存的值不是秘密，会正常回显。更新时省略该字段表示保持原值，显式传空字符串表示清除。
 
 ## 在 Edge 本地引用凭据
 

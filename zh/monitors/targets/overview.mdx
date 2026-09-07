@@ -43,6 +43,41 @@ flowchart TD
 
 Agent 提供 `os.overview`、`os.top_processes`、`shell.exec`、`net.tcp_ping` 和 `http.get` 五个主机工具，实际可用集合受 Agent 版本与本地策略控制。TCP/HTTP 探测提供主机视角的连通性证据，数据库内部状态由数据源诊断获取。
 
+Agent 主机工具只作用于主机本身：`tools-catalog` 与 `tools-invoke` 的目标类型仅支持 `host`，数据库服务端点不是 Agent 目标。数据库与中间件的诊断需要改用**数据源工具**（见下文），由能访问数据源的 Edge 执行。数据源工具调用要求数据源 `enabled=true`；`alerting_enabled=false` 不影响诊断。
+
+### 数据源工具
+
+每个已配置的数据源提供一组命名诊断工具，工具名以数据源类型为前缀，例如：
+
+| 数据源类型 | 工具示例 |
+|------------|----------|
+| MySQL | `mysql.overview`、`mysql.lock_contention` |
+| PostgreSQL | `postgres.activity` |
+| Redis | `redis_node.slowlog` |
+| Kafka | `kafka.consumer_lag` |
+| Elasticsearch | `elasticsearch.cat` |
+| Prometheus | `prometheus.metric_trends` |
+| Loki / VictoriaLogs | `loki.log_patterns`、`victorialogs.log_patterns` |
+
+- **一次调用执行一个命名工具**，通过数据源 ID（`datasource_id`）指定目标。同一个连接地址配置成多个数据源 ID 表示不同的凭据或配置，必须保持独立。
+- **没有工具目录**：各类型的工具名称与参数由类型相关参考提供，不要猜测参数。`mysql.query`、`postgres.query` 工具已移除，自由 SQL 查询请使用数据源查询（monit-query 的 Data）能力。
+- **版本门禁**：要求所选集群内**所有当前在线可路由的 Edge 会话**支持 v0.71.0 基础 invoke 协议，具体工具可能要求更新的实现。不满足时错误原因见表。
+- **没有自动回退**：接口不提供工具目录、自动重放，也不会回退到 Agent 或旧的 diagnose 流程；出现版本类错误时应升级 Edge，而不是重启或轮换 Edge。请求体上限 128 KiB，完整成功响应上限 1 MiB，单次工具执行超时最多 25 秒。
+
+错误通过 `error.reason` 返回：
+
+| reason | 含义 |
+|--------|------|
+| `edge_upgrade_required` | Edge 版本低于 v0.71.0，需升级集群内的 Edge |
+| `mixed_edge_versions` | 集群内 Edge 版本混杂，部分实例过旧，需统一升级 |
+| `no_active_edge` | 集群内没有在线可路由的 Edge 会话 |
+| `tool_not_supported` | 该工具不被当前实现支持 |
+| `invalid_request` | 请求参数错误，需修正参数后重试 |
+| `source_too_large` | 请求体超过 128 KiB，需要缩小查询范围 |
+| `result_too_large` | 结果超过 1 MiB，需要缩小查询范围 |
+| `datasource_disabled` | 数据源未启用（`enabled=false`） |
+| `datasource_not_found` | 数据源不存在 |
+
 Agent 同时提供 [ServiceMap](/zh/monitors/targets/servicemap) 的主机拓扑采集与上报能力。
 
 <Tip>

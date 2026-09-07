@@ -264,7 +264,22 @@ flashduty status-page list                                             # List st
 flashduty status-page change-active-list <page-id>                    # List active status page events
 flashduty status-page change-create <page-id> [flags]                 # Create a status page event
 flashduty status-page change-timeline-create [flags]                  # Append a timeline update
+flashduty status-page draft-create [flags]                            # Create a status page event draft (reviewed by a human, then published from the console)
 ```
+
+#### Event drafts (draft-create)
+
+`draft-create` stores a status page event draft (incident or maintenance) so a human can review and publish it from the console — the draft itself is never published publicly:
+
+```bash
+flashduty status-page draft-create \
+  --source 'ai_sre:sess_xxx' \
+  --data '{"draft":{"page_id":5750613685214,"type":"incident","name":"Web Console Degraded Performance","message":"We are investigating degraded performance affecting the web console.","status":"investigating","affected_components":[{"component_id":"01KC3GAZ6ZJE40H55GM31RPWZE","status":"degraded"}]}}'
+```
+
+- `--source`: opaque marker of the drafting origin (e.g. `ai_sre:sess_xxx`), up to 64 characters.
+- The `draft` object in `--data` (required, stored verbatim, up to 64 KB serialized). Required fields: `page_id`, `type` (`incident` or `maintenance`), `name`, `message`; optional `change_id` (append an update to an existing event when > 0), `status`, `affected_components`, and `start_time`/`end_time` (Unix epoch seconds, new maintenance only).
+- The response returns `draft_id` (matching `draft_[A-Za-z0-9]{22}`) and `created_at`; the console review link carries `draft_id`.
 
 #### Migrate from Atlassian Statuspage
 
@@ -290,7 +305,7 @@ flashduty status-page migrate-email-subscribers \
 flashduty status-page migration-cancel <job-id>
 ```
 
-Other available subcommands: `change-delete`, `change-info`, `change-list`, `change-timeline-delete`, `change-timeline-update`, `change-update`, `component-upsert`, `component-delete`, `section-upsert`, `section-delete`, `info`, `subscriber-list`, `subscriber-import`, `subscriber-export`, `template-list`, `template-upsert`, `template-delete`.
+Other available subcommands: `draft-create`, `change-delete`, `change-info`, `change-list`, `change-timeline-delete`, `change-timeline-update`, `change-update`, `component-upsert`, `component-delete`, `section-upsert`, `section-delete`, `info`, `subscriber-list`, `subscriber-import`, `subscriber-export`, `template-list`, `template-upsert`, `template-delete`.
 
 ### rum — RUM applications and session replay
 
@@ -429,7 +444,7 @@ Common flags for `session list`:
 | `--since` | Keep only sessions updated within the window (client-side filter), e.g. `30d`, `24h`, `2026-05-01` | - |
 | `--limit` | Max sessions to fetch | `200` |
 | `--page` | Start page (1-based) | `1` |
-| `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope), `toon` (compact) | `jsonl` |
+| `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope; subject to the 16 KiB output bound — see "Output formats"), `toon` (compact) | `jsonl` |
 
 <Note>
 The server endpoint `/safari/session/list` caps each page at 100 rows; when `--limit` exceeds that, the CLI paginates automatically — no manual paging required. The API has no time-window filter, so `--since` is applied client-side against each session's `updated_at` after fetching.
@@ -446,38 +461,39 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 |------|-------------|
 | `--include-subagents` | After each `subagent_dispatch`, recursively inline that subagent's own full event stream |
 
-### monit-agent — On-box host/database diagnostics
+### monit-agent — Host diagnostics
 
-Run live diagnostics on a target host or data source through flashmonit agents, without needing a shell login on the target machine.
+Run live diagnostics on a **host** through flashmonit agents, without needing a shell login on the target machine. For database/middleware diagnosis use `monit datasource-tools-invoke` (see below) — database service endpoints are not agent targets.
 
 ```bash
-flashduty monit-agent catalog --target-locator <host>    # List available diagnostic tools for a target
+flashduty monit-agent catalog --target-locator <host>    # List diagnostic tools available for a host
 flashduty monit-agent invoke  --target-locator <host> --data '<json>'  # Run up to 8 tools concurrently
 ```
 
-Both subcommands require `--target-locator` (internal IP, hostname, or data-source name). `--target-kind` is optional (`host`, `mysql`, `redis`, etc.) and is inferred automatically when omitted.
+- `--target-locator` (required): a registered host's **internal IP or hostname**.
+- `--target-kind`: accepts `host` only; omit it to use host routing. Any other value (e.g. `mysql`, `redis`) is rejected: `monit-agent supports host targets only; use monit datasource-tools-invoke for datasource diagnostics`.
 
-`invoke` accepts a `--data` JSON payload listing the tools to run, up to 8 concurrently:
+`invoke` takes a `--data` JSON payload listing the tools to run (`params` is optional and defaults to `{}`), up to 8 concurrently; `--target-locator` / `--target-kind` override matching keys in `--data`:
 
 ```bash
 flashduty monit-agent invoke --target-locator '10.0.0.1' \
   --data '{"tools":[{"tool":"os.overview"},{"tool":"os.top_processes","params":{"top_n":10}}]}'
 ```
 
-For SQL parameters containing quotes or commas, pass `--data -` and supply the body via a stdin heredoc to avoid shell-quoting issues:
+For params JSON containing quotes or commas, pass `--data -` and supply the body via a stdin heredoc to avoid shell-quoting issues:
 
 ```bash
-flashduty monit-agent invoke --target-locator 'db-host' --data - <<'FDUTY'
-{"tools":[{"tool":"mysql.query","params":{"sql":"SELECT a, b FROM t WHERE s='RUNNING'","max_rows":50}}]}
+flashduty monit-agent invoke --target-locator 'web-01' --data - <<'FDUTY'
+{"tools":[{"tool":"os.overview"}]}
 FDUTY
 ```
 
 ### monit-query — Monitoring datasource queries
 
-Probe monitoring back-end datasources directly, bypassing the alert-rule layer. The `data` subcommand supports 9 datasource types (Prometheus, VictoriaLogs, Loki, MySQL, SLS, Elasticsearch, PostgreSQL, Oracle, ClickHouse); `diagnose` supports `prometheus` (metric trends), `victorialogs`, and `loki` (log patterns).
+Probe monitoring back-end datasources directly, bypassing the alert-rule layer. The `data` subcommand supports 9 datasource types (Prometheus, VictoriaLogs, Loki, MySQL, SLS, Elasticsearch, PostgreSQL, Oracle, ClickHouse); `diagnose` is a **legacy** interface (its log_patterns / metric_trends evidence has moved to `monit datasource-tools-invoke`) supporting `prometheus` (metric trends), `victorialogs`, and `loki` (log patterns).
 
 ```bash
-flashduty monit-query diagnose [flags]   # Pre-clustered RCA findings (log patterns or metric trends)
+flashduty monit-query diagnose [flags]   # Legacy: pre-clustered RCA findings (log patterns or metric trends; prefer monit datasource-tools-invoke)
 flashduty monit-query data [flags]       # Structured datasource query
 ```
 
@@ -491,6 +507,8 @@ Common flags for `diagnose`:
 | `--time-start` | Window start (default `15m`). Accepts a relative duration (`15m`, `1h`), `now`, a date/RFC3339 timestamp, or a unix epoch in seconds or milliseconds |
 | `--time-end` | Window end (default `now`); same formats as `--time-start`; the window is capped at 6h |
 | `--operation` | `log_patterns` (`loki` / `victorialogs`) or `metric_trends` (`prometheus`); inferred from `--ds-type` when omitted |
+
+`diagnose` is a legacy interface (the equivalent of the SDK's deprecated `QueryDiagnose`): for new scenarios use the `prometheus.metric_trends`, `loki.log_patterns`, and `victorialogs.log_patterns` tools of `monit datasource-tools-invoke`, below.
 
 Common flags for `data`:
 
@@ -506,7 +524,34 @@ Common flags for `data`:
 
 `rows` requires `--ds-type`, `--ds-name`, and `--expr` (query expression). Use `--args KEY=VALUE` (repeatable) for parameterized queries. **`rows` is deprecated** — use `monit-query data` instead. In raw mode (`loki` / `victorialogs`), `rows` accepts time-window arguments `--args <ds-type>.start=<t>` and `--args <ds-type>.end=<t>` in the same formats as `diagnose`'s `--time-start`/`--time-end` (relative duration, `now`, date/RFC3339, unix seconds or milliseconds); the CLI normalizes them to the unix-seconds form the datasource requires.
 
-### monit — Alert-expression preview
+### monit datasource-tools-invoke — Datasource diagnostics
+
+`monit datasource-tools-invoke` executes **one deterministic read-only tool** against a configured datasource — the current path for structured datasource diagnostics (replacing `monit-query diagnose` and the agent's diagnostic role). Get the datasource ID from the `id` field of `monit datasource-list`:
+
+```bash
+flashduty monit datasource-list --type redis_node --json | jq '.[] | {id, name, type_ident, address}'
+flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowlog' \
+  --data '{"params":{}}'
+```
+
+| Flag | Description |
+|------|-------------|
+| `--datasource-id` | Datasource ID (required, from `monit datasource-list`, min 1) |
+| `--tool` | Tool name (required), prefixed by the datasource type, e.g. `mysql.overview`, `postgres.activity`, `redis_node.slowlog`, `kafka.consumer_lag`, `elasticsearch.cat`, `prometheus.metric_trends`, `loki.log_patterns`, `victorialogs.log_patterns`; 1–128 chars |
+| `--data` | Tool parameters JSON (`{"params":{...}}`; may be omitted, meaning `{}`; an explicit `null` is invalid) |
+| `--account-id` | Optional consistency check; must equal the authenticated account |
+
+Semantics and limits:
+
+- **No tool catalog, no auto-replay, no fallback**: one call runs exactly one named tool; fill parameters according to the datasource tool's contract rather than guessing from the command list. The `mysql.query` / `postgres.query` tools have been removed — free SQL stays under `monit-query data`.
+- Requires **all** currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation); normal datasource queries retain their existing version compatibility.
+- Request body limit 128 KiB; complete success response limit 1 MiB; tool timeout at most 25 seconds.
+- The datasource must have `enabled=true`; `alerting_enabled=false` does not block diagnostics.
+- Response: `data` (tool-specific JSON evidence, preserved without conversion, never null, no legacy diagnose envelope), `tool`, `datasource_id`, optional `summary`, and a `truncated` object (with `reason`; its presence indicates truncation).
+
+Errors are returned as-is; common codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `no_active_edge` (no routable online Edge), `tool_not_supported` (tool unavailable), `invalid_request` (fix the parameters), `source_too_large` / `result_too_large` (narrow the request). On Edge version issues, do not rotate Edges or fall back to the Agent/legacy diagnose.
+
+### monit — Datasource and alert-expression preview
 
 If you want to validate a datasource expression before saving a rule, use `preview-sync` to execute a synchronous preview request and inspect the raw result.
 
@@ -523,6 +568,41 @@ Common flags:
 | `--expr` | Query expression to preview (required) |
 | `--delay-seconds` | Shift the query window backward by a few seconds to compensate for ingestion latency |
 | `--data` | Add datasource-specific parameters such as `args` |
+
+#### Datasource management (datasource-*)
+
+The `monit datasource-*` command family manages monitoring datasources (provided by the OpenAPI-generated commands):
+
+```bash
+flashduty monit datasource-list [--type <type-ident>]   # List datasources (--type filters by type; omit for all)
+flashduty monit datasource-info --id <datasource-id>    # Get one datasource
+flashduty monit datasource-create [flags]               # Create a datasource (payload via --data)
+flashduty monit datasource-update [flags]               # Update a datasource (--id required)
+flashduty monit datasource-delete --id <datasource-id>  # Delete a datasource (referencing rules are not blocked; the datasource leaves their monitoring scope and their open alerts are closed)
+```
+
+Core fields for `datasource-create` / `datasource-update`:
+
+| Flag | Description |
+|------|-------------|
+| `--name` | Datasource display name (required); the `ds_name` referenced by query/diagnose APIs |
+| `--type-ident` | Datasource type identifier (required): `prometheus`, `loki`, `mysql`, `oracle`, `postgres`, `clickhouse`, `elasticsearch`, `sls`, `tencent_cls`, `victorialogs`, plus 5 **diagnostic-only** types: `redis_node`, `redis_sentinel`, `mongodb_mongod`, `mongodb_mongos`, `kafka` |
+| `--address` | Connection address. Required for every type except `elasticsearch` with `deployment: cloud`. Prometheus/Loki/VictoriaLogs: HTTP URL; MySQL/Oracle/Postgres/ClickHouse: `host:port`; SLS: endpoint without the `http(s)://` prefix. **Redis/MongoDB diagnostic types**: one `host:port`, bracket IPv6; no URI, userinfo or query. **Kafka**: 1–32 unique comma-separated `host:port` bootstrap addresses (no broker list in the payload). At most 4096 characters after normalization |
+| `--edge-cluster-name` | Monitors edge cluster name responsible for evaluating rules using this datasource (required) |
+| `--note` | Optional description |
+| `--enabled` | **Business execution** switch. Omitted on create: `true`; omitted on update: preserve the current value. Explicit `false` disables execution (disabled datasources reject business queries and tools); `null` is invalid. **Does not change `alerting_enabled`** |
+| `--alerting-enabled` | Whether this datasource may evaluate alerts. Omitted on create: `true` for alerting types, `false` for diagnostic-only types; omitted on update: preserve the current value; `null` is invalid. The 5 diagnostic types reject `true`; disabling is rejected with a conflict when enabled rules reference the datasource |
+| `--data` | The `payload` configuration block (required), whose key must match `type_ident`, e.g. `{"payload":{"redis_node":{"database":0,"password":"..."}}}` |
+
+`enabled` and `alerting_enabled` are independent: alert evaluation requires both `enabled=true` and an alerting-capable type; `alerting_enabled=false` does not block non-alerting queries or tools, and `monit datasource-list` always reports `alerting_enabled=false` for diagnostic-only types.
+
+**Diagnostic-type payloads and secret handling**:
+
+- `redis_node`: `database` (Redis database number, default 0), `username` / `password`, `timeout_ms` (default 3000, range 1000–10000).
+- `redis_sentinel`: `username` / `password`, `timeout_ms` (default 3000).
+- `mongodb_mongod` / `mongodb_mongos`: `auth_source` (authentication database, defaults to `admin`; username and password must be configured together), `username` / `password`, `timeout_ms` (default 3000), TLS fields; client certificates are unsupported.
+- `kafka`: `sasl_mechanism` (`none` default / `plain` / `scram-sha-256` / `scram-sha-512`, the latter three require username and password), `username` / `password`, `timeout_ms` (default 5000), TLS fields (`tls_min_version` defaults to 1.2, max 1.3).
+- Passwords and `kafka.tls_key` support `${env:NAME}` references (resolved on the edge); literal values are omitted from responses, only `${env:...}` references are echoed. **On update, omit those fields to preserve stored secrets; explicitly send an empty string to clear**.
 
 ### monit servicemap — Service topology (Beta)
 
@@ -587,11 +667,36 @@ Common `create` flags:
 **Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**, which defaults at creation to the caller's member timezone, falling back to the account timezone when the member has none. Pass the user's local time directly — do **not** convert it to UTC. Neither `create` nor `update` has a `--timezone` flag: to pin a different timezone at creation, use the generated command `flashduty safari automation-rule-create --timezone`; a created rule's timezone cannot be changed via `update`.
 </Warning>
 
+### insight — Insight queries
+
+The `insight` command family queries aggregated incident metrics over a time window (response times, notification counts, and so on):
+
+```bash
+flashduty insight incidents [flags]          # List incidents with performance metrics (MTTA, MTTR, notifications)
+flashduty insight top-alerts [flags]         # Query top alert sources grouped by a label
+flashduty insight incident-export [flags]    # Export the filtered incident list as CSV (redirect to a file)
+```
+
+Common flags for `insight incidents`:
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--since` / `--until` | Time window (same human-friendly formats as `incident list`) | `7d` / `now` |
+| `--limit` | Max results (capped at 100) | `20` |
+| `--page` | Page number | `1` |
+| `--fields` | Field projection for `json`/`toon` output (comma-separated, e.g. `incident_id,title,severity`); ignored in table mode; at least one field required | default compact projection |
+
+In `json`/`toon` mode the rows default to the compact fields `incident_id`, `title`, `severity`, `channel_name`, `seconds_to_ack`, `seconds_to_close`, `notifications` (a stderr note announces the default projection and that `--fields` can change it); output is bounded at 16 KiB — overflowing rows are dropped or shortened, with all notes on stderr (see "Field projections for structured output" under "Output formats" below).
+
+`insight top-alerts`: `--label` is required (`check` or `resource`), `--since`/`--until` as above, `--limit` defaults to `10` (top-K), returning the alert count and event count per label value.
+
+`insight incident-export`: writes the filtered incident list as a CSV of header row plus data rows (redirect to a file; `--start-time`/`--end-time` take Unix seconds). The export endpoint returns a one-shot CSV and caps its row count server-side, so the command verifies the CSV data-row count against the `incident-list` total for the same filter after writing: on a shortfall the CSV is still written (a `rows=N` line goes to stderr) and the command exits non-zero stating written vs total — narrow the time window and retry.
+
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **337 API operations**, and the CLI generates corresponding resource-organized commands for 336 of them (`session-read-export` is provided by the hand-written `session export` / `safari session-export` commands). In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **348 API operations**, and the CLI generates resource-organized commands for **345** of them; the remaining operations (e.g. `session-read-export`) are provided by hand-written commands (`session export` / `safari session-export`). In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
-- **AI SRE (`safari`)**: a2a-agents, automations, knowledge, mcp-servers, sessions, skills, and more
+- **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
 - **On-call & scheduling**: calendar, schedule
 - **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
@@ -636,6 +741,31 @@ Common flags:
 
 `knowledge-file-put` requires `--content-b64` to be the Base64 encoding of valid UTF-8 text; `--content-type` is inferred from the file extension when omitted. `knowledge-file-delete` refuses to remove a file still referenced by other pack files unless `--force` is passed, in which case the referrers are returned as warnings.
 
+#### artifacts — AI SRE artifact gallery
+
+The `safari artifact-*` command family manages **artifacts** produced by AI SRE sessions — publishing to the gallery, sharing, and signed downloads. See [Artifacts](/en/ai-sre/artifacts) for the console workflow:
+
+```bash
+flashduty safari artifact-gallery-list [flags]                                     # List artifacts (--scope all|personal|team, --query title search, --orderby created_at|updated_at, --limit default 20 cap 100, --page, --team-ids, --asc)
+flashduty safari artifact-gallery-get <artifact-id>                                # Get artifact detail (including public-share state)
+flashduty safari artifact-gallery-publish-from-file <file-id> --title <t>          # Publish a session-produced file (pf_ prefix) as an artifact
+flashduty safari artifact-gallery-file-state <file-id> [<id2>...]                  # Check which files already have a live artifact (at most 50 per call)
+flashduty safari artifact-gallery-update <artifact-id> [flags]                     # Rename (--title) or transfer scope (--team-id: 0 = personal, positive = team)
+flashduty safari artifact-gallery-delete <artifact-id>                             # Remove from the gallery (the source file stays with its session)
+flashduty safari artifact-sign <file-id> [--share-token <t>]                       # Create short-lived signed URLs (download/preview, valid 5 minutes)
+flashduty safari artifact-stream --t <token> [--mode download|preview]             # Download or preview file bytes with a signed token (any other --mode falls back to download)
+flashduty safari artifact-gallery-share-enable <artifact-id>                       # Enable anonymous public sharing, returns public_url
+flashduty safari artifact-gallery-share-revoke <artifact-id>                       # Revoke public sharing (the link stops resolving immediately)
+flashduty safari artifact-gallery-share-sync <artifact-id>                         # Refresh the public snapshot with the latest content
+```
+
+Public-sharing and signing semantics:
+
+- `public_url` is a console `/share/artifact/<artifact-id>` page served **entirely from the CDN**; it exists only while sharing is on, and anyone with the link can view the content without logging in.
+- The public snapshot is materialized from the artifact's current `file_id`: when `share_enabled=true` and the response's `share_file_id` differs from `file_id`, the public snapshot is stale — call `artifact-gallery-share-sync` to refresh it before referencing it externally.
+- The `artifact-sign` token is bound to the calling account and person and is valid for 5 minutes (response `expires_in`); `download_url` / `preview_url` are relative paths (`/safari/artifact/stream?...`) — prepend the API base (`https://api.flashcat.cloud`).
+- An artifact's initial scope inherits from its source session (personal-session artifacts belong to the creator; team-bound session artifacts belong to the team); `can_edit` tells whether the caller may rename/transfer/delete/share it (the creator, any member of the owning team, or a manager of the source session).
+
 ### Utility commands
 
 ```bash
@@ -676,7 +806,7 @@ Showing 2 results (page 1, total 2).
 </Tab>
 
 <Tab title="JSON (--json / --output-format json)">
-Machine-parseable. Except for the commands with default compact fields listed below, it returns the command's full response data; table-column truncation does not apply to JSON. Ideal for scripts and CI/CD pipelines.
+Machine-parseable. Except for the commands with default compact fields listed below, it returns the command's full response data; table-column truncation does not apply to JSON. Ideal for scripts and CI/CD pipelines. Note that generated commands' **list-shaped** responses are bounded at 16 KiB in `json` mode too (see "Generated-command output bound" below).
 
 ```bash
 flashduty incident list --json | jq '.[].title'
@@ -684,7 +814,7 @@ flashduty incident list --json | jq '.[].title'
 </Tab>
 
 <Tab title="TOON (--output-format toon)">
-TOON (Token-Oriented Object Notation) drops the per-row field names that JSON repeats for homogeneous arrays, cutting token usage substantially on list output and making it well suited to AI agents. Commands with default compact fields listed below emit their field projections and are size-bounded.
+TOON (Token-Oriented Object Notation) drops the per-row field names that JSON repeats for homogeneous arrays, cutting token usage substantially on list output and making it well suited to AI agents. Commands with default compact fields listed below emit their field projections and are size-bounded; generated commands' list-shaped output is bounded at 16 KiB as well (see "Generated-command output bound" below).
 
 ```bash
 flashduty incident list --output-format toon
@@ -700,6 +830,16 @@ Table view with no column truncation — useful for copy-paste or wide terminals
 </Tab>
 </Tabs>
 
+#### Generated-command output bound
+
+Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply the same 16 KiB bound to **list-shaped** responses in `json`/`toon` mode, mirroring the curated commands' behavior, with every note going only to stderr and stdout left untouched:
+
+1. **The whole page overflows**: only the leading rows that fit are emitted, with every value intact, and a stderr note reports how many of the N/M rows were emitted.
+2. **A single row alone overflows the budget**: that row's string values are shortened and end with `...`; a stderr note names the clipped fields. Identifier fields (keys ending in `_id` or `_key`) are never shortened.
+3. **A row cannot be reduced enough to fit**: the command fails and names the largest fields (up to 3, with their byte sizes); lower `--limit` or reduce the output fields and retry.
+
+**Detail-shaped single objects** (e.g. `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands mostly have no `--fields`; for complete JSON lower `--limit` and page through with `--page` (e.g. `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
+
 ### Field projections for structured output
 
 The following commands support `--fields` with `json` or `toon` output. Supply comma-separated top-level response fields; an unknown field fails immediately, and table output ignores this flag.
@@ -711,6 +851,7 @@ The following commands support `--fields` with `json` or `toon` output. Supply c
 | `flashduty incident detail <id>` | Returns full detail when `--fields` is omitted; otherwise returns only the selected fields | 8 KiB for projections only |
 | `flashduty alert-event list` | `event_id`, `alert_id`, `event_severity`, `event_status`, `event_time`, `title` | 16 KiB |
 | `flashduty channel escalate-rule-list <channel-id>` | `rule_id`, `rule_name`, `status`, `priority`, `filters` | 16 KiB |
+| `flashduty insight incidents` | `incident_id`, `title`, `severity`, `channel_name`, `seconds_to_ack`, `seconds_to_close`, `notifications` | 16 KiB |
 
 For example, export only an incident ID, title, and progress:
 
@@ -718,7 +859,7 @@ For example, export only an incident ID, title, and progress:
 flashduty incident list --json --fields incident_id,title,progress
 ```
 
-When a list projection (`incident list`, `incident similar`, `alert-event list`, `channel escalate-rule-list`) exceeds its 16 KiB limit, the CLI handles it in three tiers, with every note going to stderr and stdout left untouched:
+When a list projection (`incident list`, `incident similar`, `alert-event list`, `channel escalate-rule-list`, `insight incidents`) exceeds its 16 KiB limit, the CLI handles it in three tiers, with every note going to stderr and stdout left untouched:
 
 1. **Whole page overflows**: only the leading rows that fit are emitted, with every value left intact (no truncation), and a stderr note reports how many of the rows were emitted while the rest were not; narrow `--fields` or lower `--limit` to fit more rows per page.
 2. **A single row alone overflows the budget**: that row's string values are shortened and end with `...`, and a stderr note names the clipped fields — matching or filtering on a shortened field will miss, so narrow `--fields` or `--limit` for untruncated values. Identifier fields (keys ending in `_id` or `_key`) are never shortened at any tier.
