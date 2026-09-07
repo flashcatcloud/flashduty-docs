@@ -1,7 +1,7 @@
 ---
 title: Flashduty Go SDK
 sidebarTitle: Go SDK
-description: "go-flashduty is the official open-source Go SDK for Flashduty — a typed, strictly 1:1 wrapper over the Open API currently covering all 337 API operations across 39 services."
+description: "go-flashduty is the official open-source Go SDK for Flashduty — a typed, strictly 1:1 wrapper over the Open API currently covering all 349 API operations across 39 services."
 keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "client"]
 ---
 
@@ -11,7 +11,7 @@ keywords: ["Go SDK", "go-flashduty", "Open API", "Golang", "client"]
 
 `go-flashduty` is the official open-source Go client for Flashduty, covering every REST endpoint of the Flashduty Open API. It follows the same design as [go-github](https://github.com/google/go-github) — service groups, typed requests and responses, a composable transport layer — and stays strictly 1:1 with the OpenAPI spec: each method maps to exactly one HTTP call, returns `(*T, *Response, error)`, and performs no implicit cross-endpoint aggregation or enrichment.
 
-The SDK currently covers **337 API operations** across **39 services**, all generated from the Flashduty OpenAPI spec, covered by unit tests, and end-to-end verified against the live API.
+The SDK currently covers **349 API operations** across **39 services**, all generated from the Flashduty OpenAPI spec, covered by unit tests, and end-to-end verified against the live API.
 
 <Note>
 The SDK is deliberately "thin." Consumer-side logic such as short-ID resolution and cross-endpoint orchestration belongs in the caller (CLI / MCP), not stuffed into the SDK or shoehorned into an endpoint. This keeps the SDK strictly one-to-one with the API — predictable, generatable, and verifiable.
@@ -164,6 +164,7 @@ Endpoints are grouped by service and hang off the client: the call convention is
 | `client.ServiceMap` | Service map (ServiceMap) |
 | `client.Analytics` | Analytics |
 | `client.A2aAgents` | A2A Agents |
+| `client.Artifacts` | AI SRE artifacts |
 | `client.Automations` | AI SRE automations |
 | `client.Knowledge` | AI SRE knowledge base (knowledge packs and files) |
 | `client.McpServers` | MCP Servers |
@@ -179,9 +180,19 @@ Endpoints are grouped by service and hang off the client: the call convention is
 | `client.SessionReplay` | RUM session replay |
 | `client.Sourcemaps` | RUM sourcemaps |
 
+`client.StatusPages.DraftCreate` (`POST /status-page/draft/create`) stores a status page event draft for a human to review and publish from the console; it is never directly visible to the public: `draft` is arbitrary JSON stored verbatim, up to 64 KB serialized, with `page_id`, `type` (`incident` or `maintenance`), `name`, and `message` validated; `change_id` (> 0 appends an update to an existing event), `status`, and `affected_components` are optional, and for a new maintenance you can set `start_time` / `end_time` (Unix seconds) for the window. The request-level `source` is an opaque marker of the drafting origin (up to 64 characters, e.g. `ai_sre:sess_xxx`); the response returns a `draft_id` matching `draft_[A-Za-z0-9]{22}`, which the console review link carries.
+
 `client.Knowledge` covers the 9 operations under `/safari/knowledge/*`: on the pack side `PackReadGet` (get the account pack), `PackReadList` (list packs), `PackWriteEnsure` (ensure a pack exists), `PackWriteUpdate` (change a pack's scope), and `PackWriteDelete` (delete a pack); on the file side `FileReadGet`, `FileReadList`, `FileWritePut` (upload/overwrite), and `FileWriteDelete`. Exported types include `KnowledgePackItem`, `KnowledgeFileItem`, `KnowledgeWarning`, and the various `Knowledge*Request` / `Knowledge*Response` structs.
 
-`client.Diagnostics` (diagnostics) provides datasource query methods: `QueryData` runs a synchronous query via `POST /monit/query/data` and returns a stable `query_result.v1` structured result (`format` is always `query_result.v1`; `result.kind` is one of `frames` / `records` / `samples`). This API requires monit-edge v0.65.0 or later. `QueryDiagnose` (`POST /monit/query/diagnose`) runs pre-clustered RCA analysis (log patterns or metric trends) and can take up to 35 seconds.
+`client.Artifacts` (AI SRE artifacts) covers the 11 operations under `/safari/artifact/*`: on the gallery read side `ReadGet` (get a single published artifact by ID), `ReadList` (list artifacts visible to the caller, with title substring search and `scope` (`all` / `personal` / `team`) plus `team_ids` filtering), and `ReadGetFileState` (probe up to 50 presented-file IDs (`pf_` prefix) in one call for ones that already have a live published artifact); on the file side `ReadSign` (issue short-lived download/preview URLs for a presented file, valid 5 minutes, `expires_in` is fixed at 300) and `ReadStream` (download or preview the file's bytes with a signed token — the success body is a file, not a JSON envelope, with the raw bytes on `Response.Raw`); on the write side `WritePublish` (publish a session-produced file to the gallery), `WriteUpdate` (rename the artifact or transfer it between personal and team scope), and `WriteDelete` (detach it from the gallery; the source file stays with its session); public sharing `WriteShareEnable` (turn on anonymous public sharing and return the public link — anyone with the link can view it, no login required), `WriteShareRevoke` (turn sharing off; the link stops resolving immediately), and `WriteShareSync` (refresh the public snapshot with the latest content — when `share_enabled` is true and `share_file_id` differs from `file_id`, the snapshot is stale and calling this refreshes it). Exported types include `PublishedArtifactItem`, `ArtifactShareState`, `SignedUrLs`, and the various `Artifact*Request` / `Artifact*Response` structs.
+
+`client.Diagnostics` (diagnostics) provides datasource query methods: `QueryData` runs a synchronous query via `POST /monit/query/data` and returns a stable `query_result.v1` structured result (`format` is always `query_result.v1`; `result.kind` is one of `frames` / `records` / `samples`). This API requires monit-edge v0.65.0 or later. `QueryDiagnose` (`POST /monit/query/diagnose`) runs pre-clustered RCA analysis (log patterns or metric trends) and can take up to 35 seconds — **but it is deprecated**: migrate to `client.DataSources.ToolsInvoke` using the `prometheus.metric_trends`, `loki.log_patterns`, or `victorialogs.log_patterns` tools. It is retained for existing consumers; the legacy request and response remain unchanged.
+
+`client.DataSources.ToolsInvoke` (`POST /monit/datasource/tools/invoke`, `monit-datasource-tools-invoke`) executes one deterministic tool against a configured datasource: `tool` is a single tool name prefixed by the datasource type (e.g. `mysql.overview`), and `params` is the tool-specific JSON parameters (omitted means `{}`; an explicit `null` is invalid). Free SQL goes through `/monit/query/data`; `mysql.query` and `postgres.query` are unsupported. It requires all currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation), and there is no tool catalog, no automatic replay, and no fallback to Agent or legacy diagnose. The request body limit is 128 KiB, the complete success response limit is 1 MiB, and the tool timeout is at most 25 seconds; the response is a `DatasourceToolResult` (`data` is tool-specific JSON, never null, `summary` is optional, and a `truncated` object with `reason` indicates truncation).
+
+For `client.DataSources`, the `payload` selects a type-specific configuration block by `type_ident`. Fifteen `type_ident` values are allowed: `prometheus`, `loki`, `mysql`, `oracle`, `postgres`, `clickhouse`, `elasticsearch`, `sls`, `tencent_cls`, `victorialogs`, plus the new diagnostic-only types `redis_node`, `redis_sentinel`, `mongodb_mongod`, `mongodb_mongos`, and `kafka` — diagnostic-only types always have `alerting_enabled` false (which does not block non-alerting queries or tools) and reject true. Connection address rules: Redis/MongoDB diagnostic types take a single `host:port` (bracket IPv6), with no URI, userinfo, or query; `kafka` takes 1–32 unique comma-separated `host:port` bootstrap addresses (at most 4096 characters after normalization, and the payload has no broker list); for `mongodb_mongod` / `mongodb_mongos` the configuration block's `auth_source` defaults to `admin`, username and password must be configured together, and client certificates are unsupported; the Redis node configuration's `database` defaults to 0. Sensitive fields such as the diagnostic types' `password` and Kafka's `tls_key` support `${env:NAME}` references: literal values are omitted from responses (only `${env:...}` references are echoed back), omitting the fields on update preserves the stored values, and explicitly sending an empty string clears them.
+
+`enabled` and `alerting_enabled` are independent: `enabled` (whether business execution is enabled) defaults to true on create; `alerting_enabled` (whether alert evaluation is allowed; alerting also requires `enabled` true and an alerting-capable type) defaults to true for alerting types and false for diagnostic-only types on create. On update, omitting either preserves the current value and an explicit `null` is invalid; disabling (`enabled` false) is rejected with a conflict when enabled rules reference the datasource. Also note that `payload` is always `null` in `/monit/datasource/list` responses (the list query does not read the payload column); it is populated in create/update/info responses.
 
 <Note>
 All identifiers, service field names, and method names match the generated code. For exactly which methods each service has and their request and response types, rely on `services_gen.go` and the per-service files, plus the [Open API reference](/en/openapi/introduction).
@@ -259,7 +270,7 @@ for page := 0; page < 100; page++ {
 
 ---
 
-An unsuccessful call returned by the Flashduty API — whether the envelope carries an error or the HTTP status is non-2xx — returns `*ErrorResponse`. It has `Code`, `Message`, and `RequestID` fields; when troubleshooting, give `RequestID` to the support team to pinpoint the request.
+An unsuccessful call returned by the Flashduty API — whether the envelope carries an error or the HTTP status is non-2xx — returns `*ErrorResponse`. It has `Code`, `Message`, an optional `Reason`, and `RequestID` fields; when troubleshooting, give `RequestID` to the support team to pinpoint the request. `Reason` carries the server-supplied optional cause (the envelope's `DutyError` has the same field, JSON `reason`,omitempty); when non-empty it is also appended to the end of the error string, as `, reason X`.
 
 When the API returns 429, the error is promoted to `*RateLimitError`: it embeds `*ErrorResponse` (so `errors.As` for `*ErrorResponse` still matches) and additionally carries a `RetryAfter` hint.
 
