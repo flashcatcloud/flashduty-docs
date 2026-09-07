@@ -1,7 +1,7 @@
 ---
 title: "Data source management"
-description: "Configure and manage data sources for Monitors, including Prometheus, Elasticsearch, Loki, ClickHouse, MySQL, Oracle, PostgreSQL, Aliyun SLS, Tencent CLS, and VictoriaLogs"
-keywords: ["data source", "Prometheus", "Elasticsearch", "Loki", "ClickHouse", "MySQL", "Oracle", "PostgreSQL", "SLS", "Tencent CLS", "VictoriaLogs"]
+description: "Configure and manage data sources for Monitors, including Prometheus, Elasticsearch, Loki, ClickHouse, MySQL, Oracle, PostgreSQL, Aliyun SLS, Tencent CLS, VictoriaLogs, Redis, MongoDB, and Kafka"
+keywords: ["data source", "Prometheus", "Elasticsearch", "Loki", "ClickHouse", "MySQL", "Oracle", "PostgreSQL", "SLS", "Tencent CLS", "VictoriaLogs", "Redis", "MongoDB", "Kafka", "datasource tool"]
 ---
 
 Data sources are where the alert engine queries data. You need to configure data sources first so the alert engine can read data from them for anomaly detection.
@@ -10,7 +10,7 @@ Data sources are where the alert engine queries data. You need to configure data
 
 ## Supported data source types
 
-Monitors supports the following 10 data source types:
+Monitors supports the following 15 data source types:
 
 | Type | Description |
 |------|-------------|
@@ -24,6 +24,13 @@ Monitors supports the following 10 data source types:
 | **Aliyun SLS** | Alibaba Cloud Log Service |
 | **Tencent CLS** | Tencent Cloud Log Service |
 | **VictoriaLogs** | Log database, a logging solution from the VictoriaMetrics ecosystem |
+| **Redis Node** (`redis_node`) | Standalone Redis, diagnostic-only |
+| **Redis Sentinel** (`redis_sentinel`) | Redis Sentinel cluster, diagnostic-only |
+| **MongoDB Mongod** (`mongodb_mongod`) | Standalone MongoDB, diagnostic-only |
+| **MongoDB Mongos** (`mongodb_mongos`) | MongoDB sharded cluster router, diagnostic-only |
+| **Kafka** (`kafka`) | Apache Kafka cluster, diagnostic-only |
+
+Of these, the 5 **diagnostic-only types** — Redis Node, Redis Sentinel, MongoDB (mongod/mongos) and Kafka — are used for database and middleware diagnostics (see [Host diagnostics and data source diagnostics](/en/monitors/targets/overview#host-diagnostics-and-data-source-diagnostics)) and cannot evaluate alerts: `alerting_enabled` cannot be enabled (always `false`), so they cannot participate in alert rule queries and evaluation. Connection address requirements are covered in [Data source type configuration](#data-source-type-configuration).
 
 ## Data source list
 
@@ -72,6 +79,20 @@ Alert rules support two methods for binding data sources. Both can be used toget
 <Warning>
 Wildcard by name stores name strings — if a data source is renamed, existing wildcard rules may no longer match. Exact match by ID stores the data source ID and is unaffected by renames. If stability is a priority, prefer exact match.
 </Warning>
+
+## Enabled and alert evaluation switches
+
+Data sources have two independent switches, controlling business execution and alert evaluation respectively:
+
+| Switch | Field | Meaning |
+|--------|-------|---------|
+| **Enabled** | `enabled` | Whether business execution is enabled. When disabled, the data source rejects business queries and datasource tools, but `alerting_enabled` is unchanged |
+| **Alert evaluation** | `alerting_enabled` | Whether the data source may participate in alert rule queries and evaluation. Alert evaluation also requires `enabled=true` and an alerting-capable type; `false` does not block non-alerting queries and datasource tools |
+
+- **Create defaults**: `enabled` defaults to `true`; `alerting_enabled` defaults to `true` for alerting-capable types and `false` for diagnostic-only types.
+- **Update behavior**: omitting either field preserves the current value; an explicit `null` is invalid.
+- **Diagnostic-only types** (`redis_node`, `redis_sentinel`, `mongodb_mongod`, `mongodb_mongos`, `kafka`) reject `alerting_enabled=true`.
+- **Conflict protection**: when enabled alert rules reference the data source, disabling `alerting_enabled` is rejected with a conflict (HTTP 409); handle the referencing rules first. In addition, alert evaluation in practice requires the data source to be `enabled=true`.
 
 ## Data source type configuration
 
@@ -244,6 +265,57 @@ The region picker, shared by rule queries and the connection test, offers a list
 #### Rule Binding Constraint
 
 Alert rules of the Tencent CLS type can bind exactly one data source and do not support name patterns. When creating a rule, the data source picker is single-select and the name-pattern input is hidden; an invalid configuration is rejected on save with "This data source type can bind only one data source" or "This data source type does not support name patterns. Clear them and pick one data source." See [Tencent CLS alert rules](/en/monitors/alert-rules/tencent-cls).
+
+### Redis Node / Redis Sentinel
+
+`redis_node` (standalone Redis) and `redis_sentinel` (Redis Sentinel cluster) are diagnostic-only types and cannot evaluate alerts. The connection address is a single `host:port` (e.g., `localhost:6379`, `localhost:26379`); IPv6 addresses must be bracketed (e.g., `[::1]:6379`). URIs, userinfo, and query parameters are not accepted, and `${env:}` references are not supported in the address. Addresses are limited to 4096 characters after normalization.
+
+| Config Item | Description |
+|-------------|-------------|
+| **Connection address** | Single `host:port`; bracket IPv6; no URI, userinfo, or query parameters |
+| **Username** | Optional; supports `${env:NAME}` environment variable references |
+| **Password** | Optional; supports `${env:NAME}` references; literal password is not echoed after saving |
+| **Database number** (Redis Node only) | Redis DB number; defaults to `0` |
+| **Timeout (milliseconds)** | Connection timeout; defaults to `3000`; range 1000–10000 |
+
+### MongoDB (mongod / mongos)
+
+`mongodb_mongod` (standalone MongoDB) and `mongodb_mongos` (MongoDB sharded cluster router) are diagnostic-only types and cannot evaluate alerts. The connection address is a single `host:port` (e.g., `localhost:27017`); IPv6 addresses must be bracketed. URIs, userinfo, and query parameters are not accepted, and `${env:}` references are not supported in the address. Addresses are limited to 4096 characters after normalization.
+
+| Config Item | Description | Default |
+|-------------|-------------|---------|
+| **Connection address** | Single `host:port`; bracket IPv6; no URI, userinfo, or query parameters | - |
+| **Username / Password** | Authentication credentials; must be configured together; supports `${env:NAME}` references; literal password is not echoed after saving | - |
+| **Authentication database** | Database used for authentication | `admin` |
+| **Timeout (milliseconds)** | Connection timeout | `3000` |
+| **TLS** | Whether TLS is enabled | Disabled |
+| **CA certificate** | PEM CA certificates or an `${env:NAME}` reference | - |
+| **Minimum / Maximum TLS version** | TLS 1.2 (default) or 1.3; the maximum must not be below the minimum | 1.2 / no constraint |
+| **Server name** | SNI / certificate hostname for the TLS handshake; defaults to the hostname in the connection address | - |
+| **Skip server certificate verification** | Skip server certificate verification when TLS is enabled | No |
+
+MongoDB does not support client certificate authentication (mTLS).
+
+### Kafka
+
+`kafka` is a diagnostic-only type and cannot evaluate alerts. The connection address holds 1–32 unique comma-separated `host:port` bootstrap addresses (e.g., `broker1:9092,broker2:9092`); the broker list lives in the connection address only — the payload does not contain a broker list. IPv6 addresses must be bracketed. URIs, userinfo, and query parameters are not accepted, and `${env:}` references are not supported in the address. Addresses are limited to 4096 characters after normalization.
+
+| Config Item | Description | Default |
+|-------------|-------------|---------|
+| **Connection address** | 1–32 unique `host:port` addresses, comma-separated | - |
+| **SASL mechanism** | `none` (credentials not accepted), `plain`, `scram-sha-256`, `scram-sha-512` (the last three require username and password) | `none` |
+| **Username / Password** | SASL credentials; supports `${env:NAME}` references; literal password is not echoed after saving | - |
+| **Timeout (milliseconds)** | Connection timeout | `5000` |
+| **TLS** | Whether TLS is enabled | Disabled |
+| **CA certificate** | PEM CA certificates or an `${env:NAME}` reference | - |
+| **Client certificate / key** | PEM format; must be configured as a pair; the literal key is not echoed after saving; supports `${env:NAME}` references | - |
+| **Minimum / Maximum TLS version** | TLS 1.2 (default) or 1.3; the maximum must not be below the minimum | 1.2 / no constraint |
+| **Server name** | SNI / certificate hostname for the TLS handshake; defaults to the hostname in the connection address | - |
+| **Skip server certificate verification** | Skip server certificate verification when TLS is enabled | No |
+
+### Credential save semantics
+
+As with Tencent CLS, these 5 diagnostic types treat passwords (and the Kafka client private key) as write-only fields: after saving, neither the list nor the detail returns the literal value. Values saved as `${env:}` references are not secrets and are shown as-is. When updating, omitting the field preserves the saved value; sending an explicit empty string clears it.
 
 ## Reference credentials locally in Edge
 

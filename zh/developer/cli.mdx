@@ -264,7 +264,22 @@ flashduty status-page list                                             # 列出�
 flashduty status-page change-active-list <page-id>                    # 列出活跃的变更事件
 flashduty status-page change-create <page-id> [flags]                 # 创建状态页事件
 flashduty status-page change-timeline-create [flags]                  # 追加时间线更新
+flashduty status-page draft-create [flags]                            # 创建状态页事件草稿（人工审阅后从控制台发布）
 ```
+
+#### 事件草稿（draft-create）
+
+`draft-create` 保存一份状态页事件草稿（故障事件或维护窗口），供人工在控制台审阅后发布——草稿本身不会对外发布：
+
+```bash
+flashduty status-page draft-create \
+  --source 'ai_sre:sess_xxx' \
+  --data '{"draft":{"page_id":5750613685214,"type":"incident","name":"Web Console Degraded Performance","message":"We are investigating degraded performance affecting the web console.","status":"investigating","affected_components":[{"component_id":"01KC3GAZ6ZJE40H55GM31RPWZE","status":"degraded"}]}}'
+```
+
+- `--source`：起草来源的不透明标记（如 `ai_sre:sess_xxx`），最多 64 字符。
+- `--data` 中的 `draft` 对象（必填，序列化后最多 64 KB，原样存储）。必填字段：`page_id`、`type`（`incident` 或 `maintenance`）、`name`、`message`；可选 `change_id`（大于 0 时表示向已有事件追加更新）、`status`、`affected_components`、`start_time`/`end_time`（Unix 秒，仅新建维护窗口使用）。
+- 响应返回 `draft_id`（形如 `draft_[A-Za-z0-9]{22}`）与 `created_at`，控制台审阅链接携带 `draft_id`。
 
 #### 从 Atlassian Statuspage 迁移
 
@@ -290,7 +305,7 @@ flashduty status-page migrate-email-subscribers \
 flashduty status-page migration-cancel <job-id>
 ```
 
-其他可用子命令：`change-delete`、`change-info`、`change-list`、`change-timeline-delete`、`change-timeline-update`、`change-update`、`component-upsert`、`component-delete`、`section-upsert`、`section-delete`、`info`、`subscriber-list`、`subscriber-import`、`subscriber-export`、`template-list`、`template-upsert`、`template-delete`。
+其他可用子命令：`draft-create`、`change-delete`、`change-info`、`change-list`、`change-timeline-delete`、`change-timeline-update`、`change-update`、`component-upsert`、`component-delete`、`section-upsert`、`section-delete`、`info`、`subscriber-list`、`subscriber-import`、`subscriber-export`、`template-list`、`template-upsert`、`template-delete`。
 
 ### rum — RUM 应用与会话回放
 
@@ -429,7 +444,7 @@ flashduty session export <session_id>     # 以 NDJSON 流式导出单个会话�
 | `--since` | 仅保留在该时间窗口内有更新的会话（客户端过滤），如 `30d`、`24h`、`2026-05-01` | - |
 | `--limit` | 最多拉取的会话数 | `200` |
 | `--page` | 起始页码（1 开始） | `1` |
-| `--output-format` | 输出格式：`jsonl`（默认，每行一个会话对象，可直接管道给 `jq`）、`json`（完整信封）、`toon`（紧凑编码） | `jsonl` |
+| `--output-format` | 输出格式：`jsonl`（默认，每行一个会话对象，可直接管道给 `jq`）、`json`（完整信封；受 16 KiB 输出上限约束，见「输出格式」）、`toon`（紧凑编码） | `jsonl` |
 
 <Note>
 服务端 `/safari/session/list` 单页上限为 100 条，超出 `--limit` 时 CLI 会自动向服务端翻页拉取，无需手动分页。API 本身没有时间窗口过滤，`--since` 是在拉取后于客户端按会话的 `updated_at` 进行过滤的。
@@ -446,38 +461,39 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 |------|------|
 | `--include-subagents` | 在每条 `subagent_dispatch` 之后递归内联该子智能体自身的完整事件流 |
 
-### monit-agent — 主机/数据库在线诊断
+### monit-agent — 主机在线诊断
 
-通过 flashmonit 代理对目标主机或数据源执行在线诊断，无需登录目标机器。
+通过 flashmonit 代理对**主机**执行在线诊断，无需登录目标机器。数据库/中间件诊断请改用 `monit datasource-tools-invoke`（见下文），数据库服务端点不是 Agent 目标。
 
 ```bash
-flashduty monit-agent catalog --target-locator <host>    # 列出该目标可用的诊断工具
+flashduty monit-agent catalog --target-locator <host>    # 列出该主机可用的诊断工具
 flashduty monit-agent invoke  --target-locator <host> --data '<json>'  # 并发执行最多 8 个诊断工具
 ```
 
-`catalog` 和 `invoke` 均需要 `--target-locator`（内网 IP、主机名或数据源名称）。`--target-kind` 可选（`host`、`mysql`、`redis` 等），不填时由代理自动推断。
+- `--target-locator`（必填）：**已注册主机的内网 IP 或主机名**。
+- `--target-kind`：仅接受 `host`，省略时按主机路由；传入其它取值（如 `mysql`、`redis`）会被拒绝：`monit-agent supports host targets only; use monit datasource-tools-invoke for datasource diagnostics`。
 
-`invoke` 通过 `--data` 指定要运行的工具列表，最多 8 个并发：
+`invoke` 通过 `--data` 指定要运行的工具列表（`params` 可省略，默认 `{}`），最多 8 个并发；`--target-locator` / `--target-kind` 会覆盖 `--data` 中的同名字段：
 
 ```bash
 flashduty monit-agent invoke --target-locator '10.0.0.1' \
   --data '{"tools":[{"tool":"os.overview"},{"tool":"os.top_processes","params":{"top_n":10}}]}'
 ```
 
-对于包含引号或逗号的 SQL 参数，推荐用 heredoc 通过 stdin 传入（`--data -`）：
+对于包含引号或逗号的参数 JSON，推荐用 heredoc 通过 stdin 传入（`--data -`）：
 
 ```bash
-flashduty monit-agent invoke --target-locator 'db-host' --data - <<'FDUTY'
-{"tools":[{"tool":"mysql.query","params":{"sql":"SELECT a, b FROM t WHERE s='RUNNING'","max_rows":50}}]}
+flashduty monit-agent invoke --target-locator 'web-01' --data - <<'FDUTY'
+{"tools":[{"tool":"os.overview"}]}
 FDUTY
 ```
 
 ### monit-query — 监控数据源查询
 
-直接探测监控后端数据源，无需经过告警规则层。`data` 子命令支持 9 种数据源类型（Prometheus、VictoriaLogs、Loki、MySQL、SLS、Elasticsearch、PostgreSQL、Oracle、ClickHouse）；`diagnose` 支持 `prometheus`（指标趋势）、`victorialogs` 和 `loki`（日志模式）。
+直接探测监控后端数据源，无需经过告警规则层。`data` 子命令支持 9 种数据源类型（Prometheus、VictoriaLogs、Loki、MySQL、SLS、Elasticsearch、PostgreSQL、Oracle、ClickHouse）；`diagnose` 为**遗留接口**（log_patterns / metric_trends 证据已迁移到 `monit datasource-tools-invoke`），支持 `prometheus`（指标趋势）、`victorialogs` 和 `loki`（日志模式）。
 
 ```bash
-flashduty monit-query diagnose [flags]   # 预聚合 RCA 分析（日志模式或指标趋势）
+flashduty monit-query diagnose [flags]   # 遗留接口：预聚合 RCA 分析（日志模式或指标趋势；新场景请用 monit datasource-tools-invoke）
 flashduty monit-query data [flags]       # 结构化数据源查询
 ```
 
@@ -491,6 +507,8 @@ flashduty monit-query data [flags]       # 结构化数据源查询
 | `--time-start` | 窗口起始时间（默认 `15m`）。支持相对时长（`15m`、`1h`）、`now`、日期/RFC3339 时间戳，或 Unix 秒/毫秒时间戳 |
 | `--time-end` | 窗口截止时间（默认 `now`），格式与 `--time-start` 相同；时间窗口最长 6 小时 |
 | `--operation` | `log_patterns`（`loki` / `victorialogs`）或 `metric_trends`（`prometheus`）；省略时根据 `--ds-type` 自动推断 |
+
+`diagnose` 是遗留接口（等价于 SDK 中已弃用的 `QueryDiagnose`）：新场景请改用 `monit datasource-tools-invoke` 的 `prometheus.metric_trends`、`loki.log_patterns`、`victorialogs.log_patterns` 工具，见下文。
 
 `data` 常用参数：
 
@@ -506,7 +524,34 @@ flashduty monit-query data [flags]       # 结构化数据源查询
 
 `rows` 常用参数：`--ds-type`、`--ds-name`（均必填）、`--expr`（查询表达式，必填）、`--args KEY=VALUE`（可重复）。**`rows` 已弃用**，请改用 `monit-query data`。`rows` 原始模式（`loki` / `victorialogs`）可通过 `--args <ds-type>.start=<t>` 与 `--args <ds-type>.end=<t>` 指定时间窗口，取值格式与 `diagnose` 的 `--time-start`/`--time-end` 相同（相对时长、`now`、日期/RFC3339、Unix 秒或毫秒），CLI 会统一归一化为数据源要求的 Unix 秒。
 
-### monit — 监控规则表达式预览
+### monit datasource-tools-invoke — 数据源诊断工具
+
+`monit datasource-tools-invoke` 对已配置的数据源执行**一次确定性的只读工具调用**，是结构化数据源诊断的现行路径（取代 `monit-query diagnose` 与 Agent 的诊断角色）。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
+
+```bash
+flashduty monit datasource-list --type redis_node --json | jq '.[] | {id, name, type_ident, address}'
+flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowlog' \
+  --data '{"params":{}}'
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--datasource-id` | 数据源 ID（必填，来自 `monit datasource-list`，最小 1） |
+| `--tool` | 工具名（必填），以数据源类型为前缀，如 `mysql.overview`、`postgres.activity`、`redis_node.slowlog`、`kafka.consumer_lag`、`elasticsearch.cat`、`prometheus.metric_trends`、`loki.log_patterns`、`victorialogs.log_patterns`；1–128 字符 |
+| `--data` | 工具参数 JSON（`{"params":{...}}`，可省略，省略即 `{}`；显式 `null` 不合法） |
+| `--account-id` | 可选一致性校验，必须等于当前认证账户 |
+
+语义与限制：
+
+- **无工具目录、无自动重试、无回退**：一次调用只执行一个命名工具，参数需按各数据源工具约定填写，不要从命令行列表猜测。`mysql.query` / `postgres.query` 工具已移除——自由 SQL 请用 `monit-query data`。
+- 要求所选集群内**全部**当前在线可路由的 Edge 会话支持 v0.71.0 基础调用协议（个别工具可能要求更新的实现）；普通数据源查询不受此版本限制。
+- 请求体 ≤128 KiB；完整成功响应 ≤1 MiB；工具超时 ≤25 秒。
+- 需要数据源 `enabled=true`；`alerting_enabled=false` 不阻塞诊断。
+- 返回值：`data`（工具特定的 JSON 证据，原样保留、永不为 null，不含旧 diagnose 信封）、`tool`、`datasource_id`、可选 `summary`，以及 `truncated` 对象（含 `reason`，存在即表示结果被截断）。
+
+错误按原样返回，常见错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合）、`no_active_edge`（无可用在线 Edge）、`tool_not_supported`（工具不支持）、`invalid_request`（修正参数）、`source_too_large` / `result_too_large`（收窄请求范围）。出现 Edge 版本问题时不要轮换 Edge 或回退到 Agent/旧 diagnose。
+
+### monit — 监控数据源与规则表达式预览
 
 如果你想在保存规则前直接验证某条数据源表达式，可以使用 `preview-sync` 走一条同步预览请求，拿到原始结果。
 
@@ -523,6 +568,41 @@ flashduty monit preview-sync [flags]
 | `--expr` | 预览查询表达式（必填） |
 | `--delay-seconds` | 将查询窗口整体向前平移若干秒，用于补偿采集延迟 |
 | `--data` | 可补充 `args` 等数据源特定参数 |
+
+#### 数据源管理（datasource-*）
+
+`monit datasource-*` 命令族管理监控数据源（由 OpenAPI 生成命令提供）：
+
+```bash
+flashduty monit datasource-list [--type <type-ident>]   # 列出数据源（--type 按类型过滤，省略返回全部）
+flashduty monit datasource-info --id <datasource-id>    # 查看单个数据源
+flashduty monit datasource-create [flags]               # 创建数据源（payload 经 --data 传入）
+flashduty monit datasource-update [flags]               # 更新数据源（--id 必填）
+flashduty monit datasource-delete --id <datasource-id>  # 删除数据源（引用它的告警规则不被阻断，规则自动移出监控范围并关闭相关告警）
+```
+
+`datasource-create` / `datasource-update` 核心字段：
+
+| 参数 | 说明 |
+|------|------|
+| `--name` | 数据源显示名（必填）；查询/诊断 API 中的 `ds_name` 引用该名称 |
+| `--type-ident` | 数据源类型（必填）：`prometheus`、`loki`、`mysql`、`oracle`、`postgres`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls`、`victorialogs`，以及 5 个**仅诊断**类型：`redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka` |
+| `--address` | 连接地址。除 `elasticsearch` 且 `deployment: cloud` 外必填。Prometheus/Loki/VictoriaLogs 为 HTTP URL；MySQL/Oracle/Postgres/ClickHouse 为 `host:port`；SLS 为不含 `http(s)://` 前缀的 endpoint。**Redis/MongoDB 诊断类型**：单个 `host:port`，IPv6 需加方括号，不接受 URI/userinfo/query；**Kafka**：1–32 个逗号分隔的唯一 `host:port` bootstrap 地址（payload 中不含 broker 列表）。规范化后最多 4096 字符 |
+| `--edge-cluster-name` | 负责用该数据源评估规则的 Edge 集群名（必填） |
+| `--note` | 可选备注 |
+| `--enabled` | **业务执行**开关。创建时省略默认 `true`；更新时省略保留当前值；显式 `false` 停用（停用后业务查询与工具被拒绝）；`null` 不合法。**不影响 `alerting_enabled`** |
+| `--alerting-enabled` | 是否允许该数据源评估告警。创建时省略：告警类类型默认 `true`，仅诊断类型默认 `false`；更新时省略保留当前值；`null` 不合法。5 个诊断类型拒绝 `true`；已有启用规则引用该数据源时关闭会以冲突错误拒绝 |
+| `--data` | `payload` 配置块（必填），必须包含与 `type_ident` 同名的键，如 `{"payload":{"redis_node":{"database":0,"password":"..."}}}` |
+
+`enabled` 与 `alerting_enabled` 相互独立：告警评估同时要求 `enabled=true` 与类型支持告警；`alerting_enabled=false` 不阻塞非告警查询与诊断工具，`monit datasource-list` 返回的 `alerting_enabled` 对仅诊断类型恒为 `false`。
+
+**诊断类型 payload 与密钥处理**：
+
+- `redis_node`：`database`（Redis 库号，默认 0）、`username` / `password`、`timeout_ms`（默认 3000，范围 1000–10000）。
+- `redis_sentinel`：`username` / `password`、`timeout_ms`（默认 3000）。
+- `mongodb_mongod` / `mongodb_mongos`：`auth_source`（认证库，默认 `admin`；用户名与密码须成对配置）、`username` / `password`、`timeout_ms`（默认 3000）、TLS 字段；不支持客户端证书。
+- `kafka`：`sasl_mechanism`（`none` 默认 / `plain` / `scram-sha-256` / `scram-sha-512`，后三者需用户名与密码）、`username` / `password`、`timeout_ms`（默认 5000）、TLS 字段（`tls_min_version` 默认 1.2，最高 1.3）。
+- 密码与 `kafka.tls_key` 支持 `${env:NAME}` 引用（在 Edge 上解析）；字面值不会出现在响应中，仅 `${env:...}` 引用会回显。**更新时省略这些字段以保留已存密钥，显式传空字符串表示清除**。
 
 ### monit servicemap — 服务拓扑（Beta）
 
@@ -587,11 +667,36 @@ flashduty automation fire <trigger_id>            # 经 HTTP POST 触发器触�
 **时区语义**：`--at` 与 `--cron-expr` 均按**规则时区**的本地挂钟时间理解——规则时区在创建时默认为调用者的成员时区，成员未设置时回退到账户时区。请直接传用户的本地时间，**不要**预先换算成 UTC。CLI 的 `create` / `update` 都没有 `--timezone` 参数：创建时如需固定其它时区，请改用生成命令 `flashduty safari automation-rule-create --timezone`；已创建规则的时区在 `update` 中不可更改。
 </Warning>
 
+### insight — 洞察查询
+
+`insight` 命令族按时间窗口查询聚合的故障指标（响应时间、通知数等）：
+
+```bash
+flashduty insight incidents [flags]          # 列出带性能指标的故障（MTTA、MTTR、通知数）
+flashduty insight top-alerts [flags]         # 按标签维度统计最吵的告警来源
+flashduty insight incident-export [flags]    # 导出筛选后的故障列表为 CSV（重定向到文件）
+```
+
+`insight incidents` 常用参数：
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--since` / `--until` | 时间窗口（与 `incident list` 相同的人性化格式） | `7d` / `now` |
+| `--limit` | 最大结果数（上限 100） | `20` |
+| `--page` | 页码 | `1` |
+| `--fields` | `json`/`toon` 输出时的字段投影（逗号分隔，如 `incident_id,title,severity`）；表格模式忽略；至少指定一个字段 | 默认紧凑投影 |
+
+`json`/`toon` 模式默认按紧凑字段投影：`incident_id`、`title`、`severity`、`channel_name`、`seconds_to_ack`、`seconds_to_close`、`notifications`（默认投影时 stderr 会提示可用 `--fields` 更换），输出受 16 KiB 上限约束，超出时行会被丢弃或单行截短，提示只写 stderr（详见下文「输出格式」的「结构化输出的字段投影」）。
+
+`insight top-alerts`：`--label` 必填（`check` 或 `resource`），`--since`/`--until` 同前，`--limit` 默认 `10`（Top-K），返回每个标签值的告警数与事件数。
+
+`insight incident-export`：按当前筛选条件输出一行 CSV（重定向到文件；`--start-time`/`--end-time` 为 Unix 秒）。导出端点单次返回且服务端会静默截断行数，因此命令写完后会核对 CSV 数据行数与同筛选条件 `incident-list` 的总数：不足时 CSV 仍会写出（stderr 打印 `rows=N`），并以非零退出码提示实际写出 vs 总数——请收窄时间窗口后重试。
+
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **337 个 API 操作**，CLI 为其中 336 个操作生成对应命令（`session-read-export` 以手工实现的 `session export` / `safari session-export` 命令提供），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **348 个 API 操作**，CLI 为其中 **345 个** 生成对应命令，其余操作（如 `session-read-export`）以手工实现命令提供（`session export` / `safari session-export`），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
-- **AI SRE（`safari`）**：a2a-agents、automations、knowledge、mcp-servers、sessions、skills 等
+- **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
@@ -636,6 +741,31 @@ flashduty safari knowledge-file-delete --rel-path <path> [--force]  # 删除知�
 
 `knowledge-file-put` 的 `--content-b64` 必须是合法 UTF-8 文本的 Base64 编码，`--content-type` 省略时按文件扩展名推断。`knowledge-file-delete` 默认在文件仍被其他知识文件引用时阻止删除；加 `--force` 可强制执行，此时引用方会以警告形式返回。
 
+#### artifacts — AI SRE 产物库
+
+`safari artifact-*` 命令族管理 AI SRE 会话产出的**产物**（Artifact）——发布到产物库、共享与签名下载，产品功能见[产物](/zh/ai-sre/artifacts)：
+
+```bash
+flashduty safari artifact-gallery-list [flags]                                  # 列出产物（--scope all|personal|team、--query 标题搜索、--orderby created_at|updated_at、--limit 默认 20 上限 100、--page、--team-ids、--asc）
+flashduty safari artifact-gallery-get <artifact-id>                             # 查看产物详情（含公开分享状态）
+flashduty safari artifact-gallery-publish-from-file <file-id> --title <t>       # 将会话内产出的文件（pf_ 前缀）发布为产物
+flashduty safari artifact-gallery-file-state <file-id> [<id2>...]               # 检查哪些文件已存在活跃产物（单次最多 50 个）
+flashduty safari artifact-gallery-update <artifact-id> [flags]                  # 重命名（--title）或转移范围（--team-id：0 转个人，正数转团队）
+flashduty safari artifact-gallery-delete <artifact-id>                          # 从产物库移除（源文件仍留在会话中）
+flashduty safari artifact-sign <file-id> [--share-token <t>]                    # 为文件生成短时签名 URL（下载/预览，5 分钟有效）
+flashduty safari artifact-stream --t <token> [--mode download|preview]          # 用签名 token 下载或预览文件字节（--mode 其它取值回退到 download）
+flashduty safari artifact-gallery-share-enable <artifact-id>                    # 开启匿名公开分享，返回 public_url
+flashduty safari artifact-gallery-share-revoke <artifact-id>                    # 关闭公开分享（链接立即不可访问）
+flashduty safari artifact-gallery-share-sync <artifact-id>                      # 用最新内容刷新公开快照
+```
+
+公开分享与签名语义：
+
+- `public_url` 是控制台 `/share/artifact/<artifact-id>` 页面，**完全由 CDN 提供**；仅在分享期间存在，任何拿到链接的人无需登录即可查看。
+- 公开快照按产物当前的 `file_id` 物化：当 `share_enabled=true` 且响应中 `share_file_id` 与 `file_id` 不一致时，公开快照已过期——调用 `artifact-gallery-share-sync` 刷新后再对外引用。
+- `artifact-sign` 的签名 token 绑定调用账户与成员，有效期 5 分钟（响应 `expires_in`）；`download_url` / `preview_url` 是相对路径（`/safari/artifact/stream?...`），使用时需拼接 API base（`https://api.flashcat.cloud`）。
+- 产物初始作用域继承来源会话（个人会话的产物归创建者个人，绑定团队的会话的产物归团队）；`can_edit` 决定调用者能否重命名/转移/删除/分享（创建者、所属团队成员或源会话管理者）。
+
 ### 工具命令
 
 ```bash
@@ -676,7 +806,7 @@ Showing 2 results (page 1, total 2).
 </Tab>
 
 <Tab title="JSON（--json / --output-format json）">
-机器可解析。除下方列出的默认紧凑字段命令外，返回命令的完整响应数据；表格列截断不适用于 JSON。适合脚本、CI/CD 流水线消费。
+机器可解析。除下方列出的默认紧凑字段命令外，返回命令的完整响应数据；表格列截断不适用于 JSON。适合脚本、CI/CD 流水线消费。注意生成命令的**列表形态**响应在 `json` 模式下同样受 16 KiB 上限约束（见下方「生成命令的输出上限」）。
 
 ```bash
 flashduty incident list --json | jq '.[].title'
@@ -684,7 +814,7 @@ flashduty incident list --json | jq '.[].title'
 </Tab>
 
 <Tab title="TOON（--output-format toon）">
-TOON（Token-Oriented Object Notation）对同构数组省去了 JSON 中每行重复的字段名，列表输出可显著减少 token 消耗，更适合喂给 AI / 智能体消费。下方列出的默认紧凑字段命令会按其字段投影输出，并受大小限制。
+TOON（Token-Oriented Object Notation）对同构数组省去了 JSON 中每行重复的字段名，列表输出可显著减少 token 消耗，更适合喂给 AI / 智能体消费。下方列出的默认紧凑字段命令会按其字段投影输出，并受大小限制；生成命令的列表形态输出同样受 16 KiB 上限约束（见下方「生成命令的输出上限」）。
 
 ```bash
 flashduty incident list --output-format toon
@@ -700,6 +830,16 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 </Tab>
 </Tabs>
 
+#### 生成命令的输出上限
+
+由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari session-list`、`monit datasource-list`、`safari a2a-agent-list` 等），其 `json` / `toon` 输出对**列表形态**的响应同样按 16 KiB 上限处理（与精选命令的两级行为一致，提示只写 stderr、不改写 stdout）：
+
+1. **整页超限**：只输出能完整放下的前几行，每个值保持原样，stderr 提示实际输出了 N/M 行、其余行未输出。
+2. **单行本身超限**：该行的字符串值以 `...` 截短，stderr 点名被截字段；标识符字段（以 `_id` / `_key` 结尾）不会被截短。
+3. **行无法缩减到上限以内**：命令报错并点名字节数最大的字段（最多 3 个），请调低 `--limit` 或减少输出字段后重试。
+
+**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令大多没有 `--fields`，需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
+
 ### 结构化输出的字段投影
 
 以下命令在 `json` 或 `toon` 输出时支持 `--fields`。用逗号分隔顶层响应字段；未知字段会直接报错，表格输出会忽略此参数。
@@ -711,6 +851,7 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 | `flashduty incident detail <id>` | 不指定 `--fields` 时返回完整详情；指定后只返回所选字段 | 仅投影输出为 8 KiB |
 | `flashduty alert-event list` | `event_id`、`alert_id`、`event_severity`、`event_status`、`event_time`、`title` | 16 KiB |
 | `flashduty channel escalate-rule-list <channel-id>` | `rule_id`、`rule_name`、`status`、`priority`、`filters` | 16 KiB |
+| `flashduty insight incidents` | `incident_id`、`title`、`severity`、`channel_name`、`seconds_to_ack`、`seconds_to_close`、`notifications` | 16 KiB |
 
 例如，只导出故障编号、标题和处理进度：
 
@@ -718,7 +859,7 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 flashduty incident list --json --fields incident_id,title,progress
 ```
 
-列表投影（`incident list`、`incident similar`、`alert-event list`、`channel escalate-rule-list`）超过 16 KiB 上限时，CLI 按三级行为处理，所有提示只写 stderr、不改写 stdout：
+列表投影（`incident list`、`incident similar`、`alert-event list`、`channel escalate-rule-list`、`insight incidents`）超过 16 KiB 上限时，CLI 按三级行为处理，所有提示只写 stderr、不改写 stdout：
 
 1. **整页超限**：只输出能完整放下的前 N 行，每个值保持原样、不再截短，stderr 提示实际输出了 N/M 行、其余行未输出；收窄 `--fields` 或调低 `--limit` 可让每页容纳更多行。
 2. **单行本身超预算**：截短该行的字符串值并以 `...` 标记，stderr 点名被截短的字段；在被截短过的字段上匹配或过滤会漏数据，需要原始值时请收窄 `--fields` 或 `--limit`。标识符字段（以 `_id` 或 `_key` 结尾）在任何一级都不会被截短。
