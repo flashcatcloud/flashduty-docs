@@ -1,0 +1,189 @@
+---
+title: "Datadog 告警集成"
+description: "通过 Webhook 将 Datadog Monitor 告警同步到 Flashduty On-call，并正确关联告警触发、更新和恢复。"
+keywords: ["告警集成", "Datadog", "Webhook", "Monitor", "告警恢复"]
+---
+
+通过 Datadog Webhook 将 Monitor 告警同步到 Flashduty On-call。Flashduty 使用 Datadog 的 `$ALERT_CYCLE_KEY` 关联同一次告警周期中的触发、重复通知和恢复事件。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警路由到不同的协作空间时，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+  2. 选择 **集成数据**，点击 **添加一个集成**
+  3. 选择 **Datadog**，点击 **保存**
+  4. 打开生成的集成卡片，复制 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据 Payload 将告警路由到不同的协作空间时，选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+  2. 选择 **Datadog**，填写集成名称
+  3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+  4. 点击 **保存**，复制生成的 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## 在 Datadog 中配置 Webhook
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+1. 登录 Datadog，进入 **Integrations → Webhooks**
+2. 点击 **New Webhook**
+3. 填写一个便于识别的名称，例如 `flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 **URL**
+5. 不要启用 **Encode as form**
+
+<Frame>
+  <img src="/images/integrations/datadog/webhooks-integration-catalog.jpg" alt="在 Datadog 集成目录中搜索并配置 Webhooks" />
+</Frame>
+
+</Step>
+
+<Step title="配置默认 Payload">
+
+启用自定义 Payload，并粘贴以下 JSON：
+
+```json
+{
+  "alert_cycle_key": "$ALERT_CYCLE_KEY",
+  "alert_id": "$ALERT_ID",
+  "alert_transition": "$ALERT_TRANSITION",
+  "alert_type": "$ALERT_TYPE",
+  "alert_priority": "$ALERT_PRIORITY",
+
+  "title": "$ALERT_TITLE",
+  "message": "$EVENT_MSG",
+  "alert_status": "$ALERT_STATUS",
+  "alert_metric": "$ALERT_METRIC",
+  "alert_query": "$ALERT_QUERY",
+  "alert_scope": "$ALERT_SCOPE",
+
+  "event_id": "$ID",
+  "event_type": "$EVENT_TYPE",
+  "date_posix": "$DATE_POSIX",
+  "last_updated_posix": "$LAST_UPDATED_POSIX",
+  "hostname": "$HOSTNAME",
+  "link": "$LINK",
+
+  "tags": "$TAGS",
+  "env": "$TAGS[env]",
+  "service": "$TAGS[service]",
+  "team": "$TAGS[team]",
+  "region": "$TAGS[region]",
+
+  "org_id": "$ORG_ID",
+  "org_name": "$ORG_NAME"
+}
+```
+
+<Note>
+不同 Monitor 类型提供的上下文不同，部分变量可能为空。Flashduty 会忽略空标签。若不希望保留 Datadog 消息中的 Markdown，可将 `$EVENT_MSG` 替换为 `$TEXT_ONLY_MSG`。
+</Note>
+
+</Step>
+
+<Step title="关联 Monitor">
+
+编辑需要发送告警的 Monitor，在通知消息中添加：
+
+```text
+@webhook-flashduty
+```
+
+如果 Webhook 使用了其他名称，请将 `flashduty` 替换为实际名称。保存 Monitor 后，Datadog 会在告警状态变化时调用 Flashduty 推送地址。
+
+</Step>
+
+<Step title="验证触发和恢复">
+
+让 Monitor 进入告警状态，确认 Flashduty 收到一条活动告警；随后恢复 Monitor，确认同一条 Flashduty 告警变为恢复状态。
+
+Datadog 的测试通知可以验证 Webhook 是否可达，但只有真实触发和恢复才能验证完整的告警生命周期。
+
+</Step>
+</Steps>
+
+## 增加自定义标签
+---
+
+默认 Payload 已包含常用的环境、服务、团队和地域标签。如果还需要传递其他 Datadog 变量，请在 Payload 顶层增加 `custom_labels` 对象：
+
+```json
+{
+  "alert_cycle_key": "$ALERT_CYCLE_KEY",
+  "alert_transition": "$ALERT_TRANSITION",
+  "alert_type": "$ALERT_TYPE",
+  "custom_labels": {
+    "kube_cluster": "$TAGS[kube_cluster_name]",
+    "kube_namespace": "$TAGS[kube_namespace]",
+    "metric_namespace": "$METRIC_NAMESPACE",
+    "custom_dimension": "$TAGS[custom_dimension]"
+  }
+}
+```
+
+- `custom_labels` 最多包含 50 个条目；key 将作为 Flashduty 标签名称，建议使用 snake_case
+- 空值不会生成标签
+- 基础字段优先；同名自定义标签不能覆盖 `service`、`check` 等非空基础标签
+- 单次请求包含基础标签在内，最多生成 50 个标签
+- 不要传递 API Key、Token、密码、Cookie 或其他敏感信息
+
+<Warning>
+不要使用逗号拼接多个自定义标签。标签值本身可能包含逗号或冒号，使用 JSON 对象才能避免解析歧义。
+</Warning>
+
+## Alert Key
+---
+
+Flashduty 只使用 `$ALERT_CYCLE_KEY` 作为 Alert Key。Datadog 将该字段定义为从告警触发到恢复期间关联事件的 ID，因此重复通知和恢复事件会更新同一条 Flashduty 告警。
+
+如果 Payload 缺少 `alert_cycle_key`，Flashduty 会拒绝该请求，不会生成随机 Alert Key。`$ID`、`$ALERT_ID`、`$AGGREG_KEY`、标题、等级、时间和自定义标签都不会参与 Alert Key 计算。
+
+## 状态和告警等级
+---
+
+恢复状态只根据 `$ALERT_TRANSITION` 判断，与等级映射相互独立。
+
+| Datadog 值 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `alert_transition = Recovered` | 恢复 |
+| `Triggered`、`Re-Triggered`、`No Data`、`Re-No Data`、`Warn`、`Re-Warn`、`Renotify` | 活动告警 |
+| `alert_type = error` | Critical |
+| `alert_type = warning` | Warning |
+| `alert_type = info` | Info |
+| `alert_type = success`、空值或未知值 | Warning |
+
+如需调整等级，可通过[告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines)重新映射。
+
+## 排查问题
+---
+
+- **Datadog 没有发送请求**：确认 Monitor 通知消息包含正确的 `@webhook-<name>`
+- **Flashduty 返回参数错误**：确认 Payload 是有效 JSON，并且包含非空的 `alert_cycle_key` 和 `alert_transition`
+- **告警没有恢复**：确认触发和恢复 Payload 使用相同的 `$ALERT_CYCLE_KEY`
+- **标签为空**：该 Monitor 或恢复事件可能没有对应上下文；可通过 `$TAGS[key]` 选择当前 Monitor 确实存在的标签
+
+Datadog Webhook 的完整变量列表请参阅 [Datadog Webhooks](https://docs.datadoghq.com/integrations/webhooks/)。
