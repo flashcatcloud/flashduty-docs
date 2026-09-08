@@ -158,6 +158,16 @@ While a turn is running, **the Send button changes to a Stop button**. Clicking 
 
 The input box remains active while a turn is running: you can keep typing and send messages, which are queued and executed in order after the current turn completes. Queued messages appear in a collapsible card above the input box, with a header showing the queue count (e.g. "3 queued"); each queued message can be edited or removed individually, and when more than one message is queued, the card also offers a **Clear all** action in its top-right corner.
 
+The queue is authoritative server-side: messages you have sent but the agent (actor) has not read yet live in the server-side session queue, projected by the `pending_messages` field of the `POST /safari/session/get` response (in execution order). Before the agent starts processing one, you can **withdraw** it — the endpoint is `POST /safari/session/message/cancel`, whose request body carries `session_id` and `invocation_id` (the call ID the 202 ack / `user_message_enqueued` frame handed you when the message was sent); the response's `result` field tells you what happened:
+
+| Result | Meaning |
+|---|---|
+| `removed` | The message was removed from the queue and will **never be executed**; the server pushes a `user_message_cancelled` frame to every subscriber, and clients drop the corresponding pending bubble |
+| `consumed` | The actor had already read the message — it belongs to the running turn; the withdrawal does not take effect and that turn still executes ("too late") |
+| `forbidden` | Only the message's author may withdraw it; a call by anyone else returns `ErrAccessDenied` |
+
+Withdrawal only touches the waiting queue: an envelope the actor has already read can no longer be withdrawn (it returns `consumed`) — to interrupt a turn that is actually executing, use **Stop**. Only plain human messages can be withdrawn — question answers (`function_response`) and internal-producer envelopes (automation, child-session notifications, parent initial messages) are not included. The capability also applies to queued messages sent through API integration. The caller needs **participate permission** on the session (the same gate as sending a message or interrupting), and only the message's author can actually withdraw it — both conditions must hold for the result to be `removed`.
+
 ### Environment Initialization
 
 The first time a session runs, an **environment initialization** card appears in the chat stream and steps through how the runtime environment (the sandbox) becomes ready: **set up a cloud container → start the runtime**; if the cloud template carries a setup script, init and reclaim runs add a third phase, **run the setup script** (resuming an existing sandbox never reruns it). The phases run serially, showing only the step currently in progress; once everything is done, the card collapses into a single result line that reflects whether this run created, resumed, or rebuilt the sandbox:
@@ -190,9 +200,15 @@ Tools the agent invokes during a turn (reading and writing files, querying monit
 
 For multi-step tasks, the agent places a clickable progress badge in the chat stream (shaped like "Step X / N," with a ring progress indicator); clicking it expands into a task plan list, with each step carrying a status icon (Pending / In progress / Completed / Cancelled) and a priority tag (High / Medium / Low). If the agent ends its turn while a step is still "In progress," that step is shown as "Paused," signaling that you need to send a new message before it can proceed — it is not still running in the background.
 
+The task plan is maintained only on surfaces that actually have someone watching it: `write_todos` (the built-in tool that maintains the list) is available only in console (`web`) and IM sessions — the web panel renders the TodoList card, and the IM side renders it as a progress card. **Automation (`automation`) and API (`api`) sessions do not get the tool**: the agent cannot call `write_todos` there and receives no "keep your todo list current" nudge, so multi-step work runs directly without producing a progress list (an automation run can still be opened in the console to see the full messages and tool calls, but there is no checklist). Dispatched child sessions (Subagent / A2A) are excluded as well — todo state is per-session, and a child writing todos would clobber the parent's list.
+
+A list is only created when the task genuinely is multi-step: **three or more distinct steps** (previously judged as "2+ tool calls," now tightened). Single-step lookups and pure conversation with no investigation behind it produce no list. Session entry kinds are described under "Session entry kind" above.
+
 ### Agent Questions
 
 While troubleshooting, the agent may need you to clarify something, in which case it inserts an interactive question card into the chat stream: single-select (picking an option automatically advances to the next question), multi-select (after checking options you must click **Confirm** / **Next** to proceed), or free-text input (press Enter to submit). The **✕** button in the top-right corner of the card skips the whole question (not shown for required questions); a multi-question batch also shows a "Question i of N" pager, which you can navigate with the ←→ keys or by clicking, and returning to an already-answered question preserves your previous selection. Keyboard shortcuts: ↑↓ to move between options, Enter to confirm, Esc to skip.
+
+**A parked question is auto-skipped by a new message**: when the model is parked on a question card waiting for your answer, sending a new message marks the parked question as skipped — the server writes a `function_response` (`reason=user_replied_with_message`, one entry per question in a batch) **without driving the model**; your new message runs immediately as the next turn, and the model in that turn sees "question skipped + what you said" instead of being blocked by the parked question. Conversely, **a late answer never resumes that question branch**: submitting an answer to a question that already has a user-side response (auto-skipped, or answered from another device) converts the answer into a plain message (rendered as the answer text — e.g. "(skipped)") that joins the next turn — the same question is never resumed twice.
 
 ### When Authorization Is Required
 
@@ -489,12 +505,42 @@ Every session determines a **reply language** at creation time. The agent replie
 The response `Content-Type` is `application/x-ndjson`. The **first line is always** a `session_meta` envelope containing the session's metadata; subsequent lines are session events. When `include_subagents=true`, each `subagent_dispatch` line is immediately followed by the complete event stream of the child session, which also begins with its own `session_meta` line.
 
 ```
-{"type":"session_meta","session_id":"...","app_name":"..."}   // first line: session metadata
-{"type":"message","..."}                                       // subsequent: event lines (type varies)
-{"type":"subagent_dispatch","child_session_id":"..."}          // subagent dispatch marker
-{"type":"session_meta","session_id":"<child>","..."}           // child session metadata
-{"type":"message","..."}                                       // child session events
+{"type":"session_meta","session_id":"s_...","app_name":"ai-sre","entry_kind":"web","started_at":"2026-09-08T08:00:00Z","ended_at":"2026-09-08T08:05:00Z","model":"deepseek-v4-pro"}   // first line: session metadata (has no seq)
+{"type":"user_message","seq":1,"session_id":"s_...","content":"help me investigate this incident","ts":"2026-09-08T08:00:01Z"}   // user message
+{"type":"tool_call","seq":2,"session_id":"s_...","name":"bash","input":{"command":"..."},"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:02Z"}   // tool call (model request side)
+{"type":"tool_call","seq":3,"session_id":"s_...","name":"bash","output":"...","output_bytes":123,"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:03Z"}   // tool call (runtime response side)
+{"type":"subagent_dispatch","seq":4,"session_id":"s_...","agent_name":"explore","call_id":"call_def","ts":"2026-09-08T08:00:04Z"}   // subagent dispatch
+{"type":"session_meta","session_id":"sub-tsk_...","parent_session_id":"s_...","app_name":"ai-sre","entry_kind":"web","model":"deepseek-v4-pro"}   // child session metadata (inlined when include_subagents=true)
+{"type":"user_message","seq":1,"session_id":"sub-tsk_...","content":"...","ts":"..."}   // child session events
+{"type":"final_answer","seq":5,"session_id":"s_...","content":"...","usage":{"input_tokens":0,"output_tokens":0,"cache_read":0,"cache_creation":0},"ts":"2026-09-08T08:05:00Z"}   // turn-final answer
 ```
+
+#### Line types
+
+The export stream contains only the line types below (the `type` field); no other types occur:
+
+| Line type | When it appears | Key fields |
+|---|---|---|
+| `session_meta` | **First line of every session** (both the main session and inlined child sessions) | `session_id`, `account_id`, `app_name`, `parent_session_id` (child sessions), `entry_kind` (`web` / `im` / `api` / `automation`; empty normalized to `web`), `started_at` / `ended_at` (session created / updated time), `model` |
+| `user_message` | User message events | `content` (extracted text: multiple text parts joined with `\n`; reasoning / thought parts skipped; user rows never carry `usage`) |
+| `system_reminder` | User rows whose text starts with `<system-reminder>` | `content` (harness context injected by the system — locale / env / knowledge / memory / channel-guide / mount — not something you typed) |
+| `tool_call` | Model tool request (`function_call` part) or runtime response (`function_response` part), **one line per part** | Request side: `name`, `input` (args object), `status` (optimistically `ok`), `call_id`; response side: `name`, `output` (response JSON serialized to a string), `output_bytes`, `status` (`ok` / `error`; a row-level error also carries `error`), `call_id` |
+| `subagent_dispatch` | Model initiates an `agent_dispatch` call (one line per call) | `agent_name`, `call_id`; with `include_subagents=true` the child's full event stream is inlined right after this line |
+| `final_answer` | Turn-complete assistant event (takes priority over `llm_call`) | `content`, `usage` |
+| `llm_call` | Text-only model response that carries token usage | `content`, `usage`, `model`, `ended_at` |
+| `agent_text` | Assistant prose with no usage and not turn-complete (fallback type) | `content` |
+| `session_fork` | The "Forked from conversation" divider row | `content` |
+| `error` | Appended at the end of the stream when an error occurs after streaming started, or inlined when a child session is unavailable under `include_subagents` | `content` (error text; consumers must inspect this line to tell whether the stream completed — see the Warning below) |
+
+#### Fields and behavioral conventions
+
+- **`seq`**: a monotonic counter over **lines emitted**, starting at 1 (reset per child session; never reset across pages). When one DB event yields several lines (see below), the lines are numbered consecutively in part order. `session_meta` lines carry no `seq`.
+- **`call_id` (the pairing key)**: the ADK `function_call` / `function_response` id (both sides of a call share the same `id`). A single model response can bundle several tool calls into **one DB event** (e.g. 2 `agent_dispatch` calls + 1 `bash` call in the same event); the export emits one line per part, in the original part order, and `call_id` lets a consumer re-pair a response line with its call line without relying on emission order.
+- **`usage` (token counts)**: per-event totals (`input_tokens` / `output_tokens` / `cache_read` / `cache_creation`), emitted as `0` rather than omitted when absent. It is **stamped on the first line of the event only** — the lines of a batched dispatch share one usage figure, so a consumer that sums per line is not over-counted N times.
+- **`model`**: the model on `session_meta` and `llm_call` lines is the **session's own bound chatmodel** (set on the first turn's weighted pool draw and on any later failover rebind), which can and does disagree with the app's static config default (e.g. config default qwen, the session's actual model deepseek); sessions that never bound one fall back to the app config default, and unregistered apps get an empty value.
+- **Timing**: `ts` is the event's write time (RFC 3339). `llm_call` and `tool_call` lines use it as an approximation of the **end time** (`ended_at`); start times and durations (`started_at` / `duration_ms`) are not provided (empty / 0).
+- **`include_subagents=true`**: each `subagent_dispatch` line is immediately followed by the child session's complete export stream, recursively (every dispatch line of a batch is inlined, not just the first); the child's `seq` restarts at 1 and its `session_meta` carries `parent_session_id`. If a child session is missing or fails to export, the parent stream is not interrupted — an inlined `error` line is emitted and the stream continues.
+- Some bookkeeping rows produce no export line (e.g. OAuth-authorized markers), so the line count can be lower than the session's event count.
 
 <Warning>
 If an error occurs after streaming has already begun, the server cannot switch to a standard JSON error envelope. Instead, a JSON-encoded error object is appended as the final line of the stream. Consumers must inspect this last line to determine whether the stream completed successfully.

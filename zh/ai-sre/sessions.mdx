@@ -158,6 +158,16 @@ Subagent / A2A 子会话本身也不能单独开启分享——分享只能在**
 
 回合运行期间输入框依然可用：您可以继续输入并发送，消息会进入队列，在当前回合结束后依次执行。排队消息以一张可折叠的卡片展示在输入框上方，标题显示排队条数（如「3 条排队」）；队列中的消息可逐条编辑或移除，超过一条时卡片右上角还提供 **全部清空** 一键清空整个队列。
 
+队列以服务端为准：已发送但 Agent（Actor）尚未读取的消息保存在服务端队列中，`POST /safari/session/get` 响应的 `pending_messages` 字段就是它的投影（按执行顺序排列）。在 Agent 开始处理前，您可以**撤回**一条这样的消息——撤回接口为 `POST /safari/session/message/cancel`，请求体携带 `session_id` 与 `invocation_id`（即发送消息时 202 回执 / `user_message_enqueued` 帧下发的调用 ID），响应中的 `result` 字段给出结果：
+
+| 结果 | 含义 |
+|---|---|
+| `removed` | 消息已从队列移除，**永远不会执行**；服务端向所有订阅方推送 `user_message_cancelled` 帧，各客户端据此丢弃对应的待处理（pending）气泡 |
+| `consumed` | Agent 已读取该消息，它属于运行中的回合——撤回不生效，该回合照常执行（「来不及了」） |
+| `forbidden` | 只有消息作者本人可以撤回；非作者调用返回 `ErrAccessDenied` |
+
+撤回只触碰等待队列：Agent 已读取的信封不再可撤回（返回 `consumed`），想中断正在执行的回合请使用**停止**。只有「普通人类消息」可撤回——提问作答（`function_response`）、内部生产者（自动化、子会话通知、父会话初启消息等）的信封不在其列。该能力同样适用于 API 集成发送的排队消息。调用方需要具备该会话的**参与权限**（与发送消息、中断同一门控），并且只有消息作者本人能成功撤回——两个条件都满足才是 `removed`。
+
 ### 运行环境初始化
 
 会话首次运行时，对话流中会出现一张 **运行环境初始化** 卡片，分步展示运行环境（沙箱）的就绪过程：**建立云端容器 → 启动运行时**；若云端模板本身带有启动脚本，新建或重建时还会追加第三个阶段 **运行 setup 脚本**（恢复已有沙箱时不会重跑该脚本）。各阶段串行推进，每次只显示当前正在进行的一步；全部完成后卡片折叠为一行结果，按本次是新建、恢复还是重建分别显示：
@@ -190,9 +200,15 @@ Agent 在回合中调用的工具（读写文件、查询监控、执行命令�
 
 执行多步骤任务时，Agent 会在对话流中放置一枚可点击的进度徽标（形如「第 X / N 步」，带环形进度指示），点击展开为任务计划清单：每一步都带状态图标（未开始 / 执行中 / 已完成 / 已取消）与优先级标签（高 / 中 / 低）。当 Agent 结束回合但某一步仍处于「执行中」时，该步会呈现为「已暂停」，提示您需要发送新消息才能推进，而不是仍在后台运行。
 
+任务计划只在**确实有人看清单**的渠道维护：`write_todos`（维护清单的内置工具）仅在控制台（`web`）与 IM 渠道会话中提供——web 面板渲染 TodoList 卡片，IM 侧渲染为进度卡。**自动化（`automation`）与 API（`api`）会话没有该工具**：Agent 在这些会话中调用不到 `write_todos`，也收不到「请维护待办清单」的提醒，多步任务直接执行、不产出进度清单（自动化运行仍可在控制台查看完整消息与工具调用记录，但没有清单）。被派发的子会话（Subagent / A2A）同样不提供该工具——待办状态按会话隔离，子会话写入会覆盖父会话的清单。
+
+清单只在任务确实多步时才建立：**三个及以上独立步骤**的任务才会触发（此前按「2 次及以上工具调用」判定，已收紧）。单步查询、以及没有排查性质的纯对话不会生成清单。会话入口类型见上文「会话入口类型（entry_kind）」。
+
 ### Agent 提问
 
 排障过程中，Agent 可能需要您澄清信息，这时会在对话流中插入一张交互式提问卡片：单选（点击选项即自动进入下一题）、多选（勾选后需点击 **确认** / **下一步** 才继续）或自定义文本输入（回车提交）。卡片右上角的 **✕** 按钮可跳过整卡提问（必答题不显示该按钮）；多题批次时会额外显示「第 i / N 题」的翻页控件，可用键盘 ←→ 或点击翻页在题目间切换，切换回已答过的题目会保留之前的选择。支持键盘操作：↑↓ 移动选项、Enter 确认、Esc 跳过。
+
+**挂起中的提问会被新消息自动跳过**：当模型停在提问卡片上等待回答（卡片挂起）时，您直接发送一条新消息，挂起的提问会被自动标记为跳过——服务端写入一条 `function_response`（`reason=user_replied_with_message`，多题批次按题逐条标记），**不驱动模型**；您的新消息作为下一回合立即执行，该回合模型同时看到「提问已跳过 + 你说的话」，不会被挂起的问题挡住。反过来，**迟到的作答不会恢复该提问分支**：对已经有过用户侧响应（已被自动跳过，或已在其它设备作答）的提问，再提交答案会被转换为一条普通消息（按「（已跳过）」或答案文本方式渲染）参与下一回合——同一个提问绝不会被恢复执行两次。
 
 ### 需要授权时
 
@@ -489,12 +505,42 @@ Fork 会话会清理只属于运行中的临时状态，例如当前回合缓存
 响应的 `Content-Type` 为 `application/x-ndjson`，**第一行始终**是 `session_meta` 类型的会话元数据信封，后续各行为会话事件。启用 `include_subagents=true` 时，每遇到一条 `subagent_dispatch` 类型的行，其后紧跟该子会话的完整事件流，子会话同样以自己的 `session_meta` 行作为起始。
 
 ```
-{"type":"session_meta","session_id":"...","app_name":"..."}   // 第一行：会话元数据
-{"type":"message","..."}                                       // 后续：事件行（类型依内容而异）
-{"type":"subagent_dispatch","child_session_id":"..."}          // 子 Agent 派发标记
-{"type":"session_meta","session_id":"<child>","..."}           // 子会话元数据
-{"type":"message","..."}                                       // 子会话事件
+{"type":"session_meta","session_id":"s_...","app_name":"ai-sre","entry_kind":"web","started_at":"2026-09-08T08:00:00Z","ended_at":"2026-09-08T08:05:00Z","model":"deepseek-v4-pro"}   // 第一行：会话元数据（不携带 seq）
+{"type":"user_message","seq":1,"session_id":"s_...","content":"帮我排查一下这个故障","ts":"2026-09-08T08:00:01Z"}   // 用户消息
+{"type":"tool_call","seq":2,"session_id":"s_...","name":"bash","input":{"command":"..."},"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:02Z"}   // 工具调用（模型请求侧）
+{"type":"tool_call","seq":3,"session_id":"s_...","name":"bash","output":"...","output_bytes":123,"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:03Z"}   // 工具调用（运行时回执侧）
+{"type":"subagent_dispatch","seq":4,"session_id":"s_...","agent_name":"explore","call_id":"call_def","ts":"2026-09-08T08:00:04Z"}   // 子 Agent 派发
+{"type":"session_meta","session_id":"sub-tsk_...","parent_session_id":"s_...","app_name":"ai-sre","entry_kind":"web","model":"deepseek-v4-pro"}   // 子会话元数据（include_subagents=true 时内联）
+{"type":"user_message","seq":1,"session_id":"sub-tsk_...","content":"...","ts":"..."}   // 子会话事件
+{"type":"final_answer","seq":5,"session_id":"s_...","content":"...","usage":{"input_tokens":0,"output_tokens":0,"cache_read":0,"cache_creation":0},"ts":"2026-09-08T08:05:00Z"}   // 回合结束的最终回答
 ```
+
+#### 行类型
+
+导出流只包含以下行类型（`type` 字段），不会出现其它类型：
+
+| 行类型 | 出现时机 | 关键字段 |
+|---|---|---|
+| `session_meta` | **每个会话的第一行**（主会话与内联子会话都有） | `session_id`、`account_id`、`app_name`、`parent_session_id`（子会话时）、`entry_kind`（`web` / `im` / `api` / `automation`，空值归一为 `web`）、`started_at` / `ended_at`（会话创建 / 更新时间）、`model` |
+| `user_message` | 用户消息事件 | `content`（提取的文本：多个 text part 按 `\n` 连接，推理 / thought part 跳过；用户消息不携带 `usage`） |
+| `system_reminder` | 以 `<system-reminder>` 开头的用户行 | `content`（locale / env / knowledge / memory / channel-guide / mount 等系统注入的上下文，不是用户输入） |
+| `tool_call` | 模型请求工具（`function_call` part）或运行时回执（`function_response` part），**每个 part 一行** | 请求侧：`name`、`input`（参数对象）、`status`（乐观标记 `ok`）、`call_id`；回执侧：`name`、`output`（回执 JSON 序列化为字符串）、`output_bytes`、`status`（`ok` / `error`；行级错误时另带 `error` 信息）、`call_id` |
+| `subagent_dispatch` | 模型发起 `agent_dispatch` 调用（每个调用一行） | `agent_name`、`call_id`；`include_subagents=true` 时该行之后内联子会话的完整事件流 |
+| `final_answer` | 回合结束的 assistant 事件（优先于 `llm_call`） | `content`、`usage` |
+| `llm_call` | 纯文本模型响应且携带 token 用量 | `content`、`usage`、`model`、`ended_at` |
+| `agent_text` | 无用量、非回合结束的助手文本（兜底类型） | `content` |
+| `session_fork` | 「Fork 新对话」分隔线行 | `content` |
+| `error` | 流已开始后出错时追加在流末尾；或 `include_subagents` 下子会话不可用时内联 | `content`（错误文本；消费方需检测该行以判断流是否完整，见下方 Warning） |
+
+#### 字段与行为约定
+
+- **`seq`**：从 1 开始、按**输出行**计数的单调序号（按子会话重置；跨分页不重置）。一个 DB 事件产生多行时（见下），多行按 part 顺序连续编号。`session_meta` 行不携带 `seq`。
+- **`call_id`（配对依据）**：ADK `function_call` / `function_response` 的 ID（两侧共用同一个 `id`）。一个模型响应可以把多次工具调用**合并进一个 DB 事件**（例如同一事件里 2 个 `agent_dispatch` + 1 个 `bash`）；导出按 part 各输出一行（顺序与原事件一致），`call_id` 让消费方把回执行与对应的调用行重新配对，而不依赖输出顺序。
+- **`usage`（token 用量）**：事件级计数（`input_tokens` / `output_tokens` / `cache_read` / `cache_creation`），无值时输出 `0` 而非省略。**只在事件的首行盖章**——一次批处理派发的多条行共享同一份用量，按行累计的消费方不会被多算 N 倍。
+- **`model`**：`session_meta` 与 `llm_call` 行的模型取自**会话自身绑定的 chatmodel**（首次回合加权池抽取、以及后续故障切换重绑定的结果），可能与应用的配置默认不同（例如配置默认 qwen、会话实际 deepseek）；未绑定模型的会话回退到应用配置默认，应用未注册时为空。
+- **时间与耗时**：`ts` 为事件写入时间（RFC 3339）。`llm_call` 与 `tool_call` 行以该时间近似**结束时间**（`ended_at`）；开始时间与耗时（`started_at` / `duration_ms`）当前不提供（为空 / 0）。
+- **`include_subagents=true`**：每个 `subagent_dispatch` 行之后立即递归内联该子会话的完整导出流（批量派发的每个 dispatch 行都会内联一次）；子会话的 `seq` 从 1 重新计数，其 `session_meta` 携带 `parent_session_id`。子会话不存在或导出失败时不中断父流，输出一条内联的 `error` 行继续。
+- 部分簿记行不产生导出行（例如 OAuth 授权成功标记），因此事件行数可能少于会话事件数。
 
 <Warning>
 若流式传输已开始后发生错误，服务器**无法**切换回标准 JSON 错误包。此时会在流末尾追加一行 JSON 编码的错误对象，消费方需检测该行以判断流是否完整。
