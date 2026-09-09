@@ -478,7 +478,22 @@ flashduty monit-query data [flags]       # 结构化数据源查询
 | `--ds-name` | 数据源名称（必填，与控制台配置一致） |
 | `--expr` | 查询表达式（必填） |
 | `--delay-seconds` | 查询时间点的回溯偏移秒数，用于点对点查询（默认 `0`） |
-| `--args KEY=VALUE` | 附加参数，可重复（值须为字符串）。`loki` / `victorialogs` 原始模式下，`<ds-type>.start` 与 `<ds-type>.end` 接受相对时长（`15m`）、`now`、日期/RFC3339 时间戳或 Unix 秒/毫秒，CLI 会统一归一化为数据源要求的 Unix 秒 |
+| `--args KEY=VALUE` | 附加参数，可重复（值须为字符串）。`loki` / `victorialogs` 原始模式下，`<ds-type>.start` 与 `<ds-type>.end` 接受相对时长（`15m`）、`now`、日期/RFC3339 时间戳或 Unix 秒/毫秒，CLI 会统一归一化为数据源要求的 Unix 秒。`prometheus.time` / `loki.time` / `victorialogs.time` 用于固定查询时刻，见下文「固定查询时刻」 |
+
+**固定查询时刻**：`--args` 支持三个按数据源类型命名的绝对时间参数，取值非负 Unix 秒，把即时查询钉在指定时刻：
+
+| 参数 | 说明 |
+|------|------|
+| `prometheus.time` | Prometheus 即时查询的时间点，仅 `--ds-type prometheus` 可用 |
+| `loki.time` | Loki 统计（stats）查询的时间点，仅 `--ds-type loki` 且 `loki.type` 为空或 `stats` 时可用 |
+| `victorialogs.time` | VictoriaLogs 统计（stats）查询的时间点，仅 `--ds-type victorialogs` 且 `victorialogs.type` 为空或 `stats` 时可用 |
+
+- 只对同名数据源类型生效：查询 `loki` 时传 `prometheus.time`，会报错 `prometheus.time is only supported for prometheus queries`。
+- `loki` / `victorialogs` 的原始（raw）模式不接受 `.time`，请继续用 `<ds-type>.start` / `<ds-type>.end` 指定窗口，否则报错 `... is only supported in stats mode; use <ds-type>.start/end for raw queries`。
+- 取值必须是纯数字的非负 Unix 秒：带符号、小数或相对时长（如 `15m`）会被拒（`... must be non-negative Unix integer seconds`），CLI 不做格式归一化；上限 `253402300799`（UTC 9999-12-31 23:59:59），超限报 `... is outside the supported Unix seconds range`。
+- 不接受未来时刻：WebAPI 按自身时钟校验，未来时间报 `<ds-type>.time must not be in the future`。
+- 指定 `.time` 后该时刻即为查询时间点，同时传入的 `--delay-seconds` 不再生效。
+- 目标 Edge 版本低于 v0.74.0 时，WebAPI 只能把它退化为 `--delay-seconds` 偏移（结果会含传输耗时与两端时钟偏差），且只接受最近 86400 秒内的时刻，超限报 `target edge only supports absolute query time within the last 86400 seconds; upgrade to v0.74.0 or later`。
 
 `data` 返回稳定的 `query_result.v1` 结构化结果：`format` 固定为 `query_result.v1`，`result.kind` 为 `frames`（类型化表格/时序帧）、`records`（字段灵活的记录，可含嵌套 JSON 或 null）或 `samples`（带完整标签集的即时样本）三者之一，不再把结果强制压平为旧版行结构。
 
@@ -640,10 +655,10 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **340 个 API 操作**，CLI 为其中 **337 个** 生成对应命令，其余操作（如 `session-read-export`）以手工实现命令提供（`session export` / `safari session-export`），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **333 个 API 操作**，CLI 为其中 **330 个** 生成对应命令，其余操作（如 `session-read-export`）以手工实现命令提供（`session export` / `safari session-export`），并按资源组织为顶层命令组。这两个数字随 CLI 所依赖的 OpenAPI 规范版本变化。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
 - **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等
-- **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
+- **告警与降噪**：alert、alert-event、enrichment（alert-rules）、route
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
 - **监控与 RUM**：monit、rum、sourcemap
