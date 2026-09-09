@@ -63,6 +63,7 @@ export const docMap = {
   Nagios: `${alertBase}/nagios.mdx`,
   JDCloudMonitor: `${alertBase}/jdcloud.mdx`,
   KSCloudMonitor: `${alertBase}/kscloud-monitor.mdx`,
+  Datadog: `${alertBase}/datadog.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
   DbPull: `${alertBase}/db-pull.mdx`,
@@ -95,6 +96,5 @@ export const optionalMissingKeys = [
   // These keys are referenced defensively by fc-saas-web but were not present
   // in the old published knowledge-base package either.
   'Emqx',
-  'Rizhiyi',
-  'Datadog'
+  'Rizhiyi'
 ];

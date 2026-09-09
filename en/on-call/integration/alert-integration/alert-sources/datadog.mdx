@@ -1,0 +1,187 @@
+---
+title: "Datadog alert integration"
+description: "Send Datadog Monitor alerts to Flashduty On-call through webhooks and correlate firing, update, and recovery events correctly."
+keywords: ["alert integration", "Datadog", "webhook", "Monitor", "alert recovery"]
+---
+
+Use a Datadog webhook to send Monitor alerts to Flashduty On-call. Flashduty primarily uses Datadog's `$ALERT_CYCLE_KEY` to correlate firing, repeat notification, and recovery events from the same alert cycle.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+Choose this method when you do not need to route alerts to different channels.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Channel** and open a channel
+  2. Select **Integrations**, then click **Add integration**
+  3. Select **Datadog**, then click **Save**
+  4. Open the generated integration card and copy the **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+### Use a shared integration
+
+Choose this method when you need to route alerts to different channels based on the payload.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Integration Center → Alert Events**
+  2. Select **Datadog** and enter an integration name
+  3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+  4. Click **Save** and copy the generated **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## Configure a webhook in Datadog
+---
+
+<Steps>
+<Step title="Create the webhook">
+
+1. Sign in to Datadog and go to **Integrations → Webhooks**
+2. Click **New Webhook**
+3. Enter a recognizable name, such as `flashduty`
+4. Paste the complete Flashduty integration push URL into **URL**
+5. Do not enable **Encode as form**
+
+</Step>
+
+<Step title="Configure the default payload">
+
+Enable the custom payload and paste the following JSON:
+
+```json
+{
+  "alert_cycle_key": "$ALERT_CYCLE_KEY",
+  "alert_id": "$ALERT_ID",
+  "alert_transition": "$ALERT_TRANSITION",
+  "alert_type": "$ALERT_TYPE",
+  "alert_priority": "$ALERT_PRIORITY",
+
+  "title": "$ALERT_TITLE",
+  "message": "$EVENT_MSG",
+  "alert_status": "$ALERT_STATUS",
+  "alert_metric": "$ALERT_METRIC",
+  "alert_query": "$ALERT_QUERY",
+  "alert_scope": "$ALERT_SCOPE",
+
+  "event_id": "$ID",
+  "event_type": "$EVENT_TYPE",
+  "date_posix": "$DATE_POSIX",
+  "last_updated_posix": "$LAST_UPDATED_POSIX",
+  "hostname": "$HOSTNAME",
+  "link": "$LINK",
+
+  "tags": "$TAGS",
+  "env": "$TAGS[env]",
+  "service": "$TAGS[service]",
+  "team": "$TAGS[team]",
+  "region": "$TAGS[region]",
+
+  "org_id": "$ORG_ID",
+  "org_name": "$ORG_NAME"
+}
+```
+
+<Note>
+The available context depends on the Monitor type, so some variables may be empty. Flashduty discards empty labels. To remove Markdown from the Datadog message, replace `$EVENT_MSG` with `$TEXT_ONLY_MSG`.
+</Note>
+
+</Step>
+
+<Step title="Connect a Monitor">
+
+Edit the Monitor that should send alerts and add the following recipient to its notification message:
+
+```text
+@webhook-flashduty
+```
+
+If you used a different webhook name, replace `flashduty` with that name. After you save the Monitor, Datadog calls the Flashduty push URL when the alert state changes.
+
+</Step>
+
+<Step title="Verify firing and recovery">
+
+Drive the Monitor into an alert state and confirm that Flashduty receives an active alert. Then recover the Monitor and confirm that the same Flashduty alert changes to the recovered state.
+
+A Datadog test notification can verify webhook connectivity, but only a real firing and recovery cycle validates the complete alert lifecycle.
+
+</Step>
+</Steps>
+
+## Add custom labels
+---
+
+The default payload includes common environment, service, team, and region labels. To send additional Datadog variables, add a `custom_labels` object at the top level of the payload:
+
+```json
+{
+  "alert_cycle_key": "$ALERT_CYCLE_KEY",
+  "alert_transition": "$ALERT_TRANSITION",
+  "alert_type": "$ALERT_TYPE",
+  "custom_labels": {
+    "kube_cluster": "$TAGS[kube_cluster_name]",
+    "kube_namespace": "$TAGS[kube_namespace]",
+    "metric_namespace": "$METRIC_NAMESPACE",
+    "custom_dimension": "$TAGS[custom_dimension]"
+  }
+}
+```
+
+- `custom_labels` accepts at most 50 entries; each key becomes a Flashduty label name, so use snake_case
+- Empty values do not create labels
+- Built-in fields take precedence, so a custom label cannot overwrite a non-empty built-in label such as `service` or `check`
+- One request can generate at most 50 labels in total, including built-in labels
+- Do not send API keys, tokens, passwords, cookies, or other sensitive information
+
+<Warning>
+Do not encode multiple custom labels in a comma-separated string. Label values can contain commas or colons, so a JSON object is required to avoid parsing ambiguity.
+</Warning>
+
+## Alert Key
+---
+
+Flashduty primarily uses `$ALERT_CYCLE_KEY` as the Alert Key. Datadog defines this value as the ID that links events from the time an alert triggers until it resolves, so repeat notifications and recovery events update the same Flashduty alert.
+
+If `alert_cycle_key` is missing or empty, Flashduty generates a random Alert Key for that request instead of rejecting it. The generated value applies only to the current request. If a repeat notification or recovery event also omits the same `$ALERT_CYCLE_KEY`, it generates another alert and cannot automatically update or resolve the original alert. Keep `$ALERT_CYCLE_KEY` in the default payload and treat the random value only as a compatibility fallback.
+
+`$ID`, `$ALERT_ID`, `$AGGREG_KEY`, the title, severity, timestamps, and custom labels do not participate in Alert Key generation.
+
+## Status and Severity
+---
+
+Recovery is determined only from `$ALERT_TRANSITION` and is independent of severity mapping.
+
+| Datadog value | Flashduty status or severity |
+| :--- | :--- |
+| `alert_transition = Recovered` | Recovered |
+| `Triggered`, `Re-Triggered`, `No Data`, `Re-No Data`, `Warn`, `Re-Warn`, `Renotify` | Active alert |
+| `alert_type = error` | Critical |
+| `alert_type = warning` | Warning |
+| `alert_type = info` | Info |
+| `alert_type = success`, empty, or unknown | Warning |
+
+To change the severity, remap it with an [Alert Processing Pipeline](/en/on-call/integration/alert-integration/alert-pipelines).
+
+## Troubleshooting
+---
+
+- **Datadog does not send a request**: Confirm that the Monitor notification message contains the correct `@webhook-<name>` recipient
+- **Flashduty returns an invalid parameter error**: Confirm that the payload is valid JSON and contains a non-empty `alert_transition` value
+- **The alert does not recover**: Confirm that the firing and recovery payloads contain the same `$ALERT_CYCLE_KEY`
+- **A label is empty**: The Monitor or recovery event might not provide that context; select a tag that exists for the Monitor with `$TAGS[key]`
+
+For the complete variable list, see [Datadog Webhooks](https://docs.datadoghq.com/integrations/webhooks/).
