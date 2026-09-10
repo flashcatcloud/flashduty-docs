@@ -910,6 +910,85 @@ Sample rate range: **0.0 - 100.0**
 Sampled-out sessions collect no page views and none of the related telemetry data.
 </Warning>
 
+### Remote configuration: adjust the sample rate from the console
+
+Since **0.7.0**, the session sample rate can be changed on the Remote configuration page of the Flashcat console without shipping a new release of your app. The feature is off by default; turn it on at initialization:
+
+<Tabs>
+<Tab title="Kotlin">
+```kotlin
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(90.0f)          // Used until the console's settings arrive
+    .setRemoteConfigurationEnabled(true)  // Let the console set the session sample rate
+    .build()
+```
+</Tab>
+
+<Tab title="Java">
+```java
+RumConfiguration rumConfig = new RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(90.0f)          // Used until the console's settings arrive
+    .setRemoteConfigurationEnabled(true)  // Let the console set the session sample rate
+    .build();
+```
+</Tab>
+</Tabs>
+
+How a change takes effect:
+
+- The SDK asks the console for the configuration once at startup and once whenever a new session starts. What it receives is used to draw the **next** session; a session already under way is never redrawn.
+- The exception is a rate that **crosses zero** (from 0 to non-zero, or from non-zero to 0): the running session ends immediately and the next one is drawn under the new rate, so an emergency stop or a restart does not wait for sessions to rotate.
+- When the request fails, times out or returns an unreadable response, the SDK keeps the values already in use; before the first configuration ever arrives, the value passed to `setSessionSampleRate` applies. The configuration is cached on the device, so the first session of the next cold start already uses it.
+- The request carries only the client token, the environment, the app version and the SDK version, never user data, so it is not gated by the [tracking consent](#user-tracking-consent) state.
+- In a private deployment the configuration endpoint sits beside the RUM intake under `/config` (for an intake of `https://host/api/v2/rum`, it is `https://host/api/v2/rum/config`). When you use `useCustomEndpoint`, make sure your gateway lets that path through.
+
+#### Override the draw from your app
+
+To guarantee that certain users are always collected (internal testers, a user whose issue you are investigating), `setBeforeSampling` lets the app have the last word before each draw. Return `null` to keep the incoming rate. A value outside 0..100, or a callback that throws, also leaves the incoming rate in place and never disrupts collection.
+
+<Tabs>
+<Tab title="Kotlin">
+```kotlin
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setRemoteConfigurationEnabled(true)
+    .setBeforeSampling { context ->
+        // context.sessionSampleRate is the rate from the console (or from init)
+        // context.custom holds the key-values published under "Custom configuration"
+        if (isInternalTester()) 100f else null
+    }
+    .build()
+```
+</Tab>
+
+<Tab title="Java">
+```java
+RumConfiguration rumConfig = new RumConfiguration.Builder(applicationId)
+    .setRemoteConfigurationEnabled(true)
+    .setBeforeSampling(context -> isInternalTester() ? 100f : null)
+    .build();
+```
+</Tab>
+</Tabs>
+
+While the app is running you can also call `setForcedSession()` at any time to collect every session of this user from now until the process ends:
+
+```kotlin
+GlobalRumMonitor.get().setForcedSession()
+```
+
+#### Read the console's custom configuration
+
+The values published under "Custom configuration" on the Remote configuration page are delivered to the SDK verbatim and can be read with `getRemoteConfig()`. The SDK never interprets them; what they mean is entirely up to your app. It returns `null` when nothing is published or remote configuration is off.
+
+```kotlin
+val custom = GlobalRumMonitor.get().getRemoteConfig()
+val debugUsers = custom?.get("debugUsers") as? List<*>
+```
+
+<Warning>
+Custom configuration is visible to every client running the SDK. Never put secrets, tokens or personal data in it.
+</Warning>
+
 ## User Tracking Consent
 
 To comply with privacy regulations such as GDPR and CCPA, RUM lets you set the user tracking consent state at initialization.

@@ -910,6 +910,85 @@ RumConfiguration rumConfig = new RumConfiguration.Builder(applicationId)
 被采样丢弃的会话将不收集任何页面视图及其相关遥测数据。
 </Warning>
 
+### 远程配置：在控制台调整采样率
+
+自 **0.7.0** 起，会话采样率可以在 Flashcat 控制台的「远程配置」页里调整，无需发布新版本 App。该能力默认关闭，初始化时打开：
+
+<Tabs>
+<Tab title="Kotlin">
+```kotlin
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(90.0f)          // 拿到控制台配置之前使用的值
+    .setRemoteConfigurationEnabled(true)  // 允许控制台调整会话采样率
+    .build()
+```
+</Tab>
+
+<Tab title="Java">
+```java
+RumConfiguration rumConfig = new RumConfiguration.Builder(applicationId)
+    .setSessionSampleRate(90.0f)          // 拿到控制台配置之前使用的值
+    .setRemoteConfigurationEnabled(true)  // 允许控制台调整会话采样率
+    .build();
+```
+</Tab>
+</Tabs>
+
+生效规则：
+
+- SDK 在启动时和每个新会话开始时各向控制台请求一次配置，拿到的配置用于**下一个会话**的抽样；正在进行的会话不会被重新抽样。
+- 例外是采样率**跨过 0**（从 0 调到非 0，或从非 0 调到 0）：当前会话会立即结束，下一个会话按新采样率抽样，这样紧急关停或重新开启不必等会话自然轮换。
+- 请求失败、超时或响应不可读时，SDK 继续使用当前值；从未拿到过配置时，使用 `setSessionSampleRate` 设置的初始化值。配置会缓存在本地，下次冷启动的第一个会话就能用上。
+- 配置请求只携带 client token、环境、应用版本和 SDK 版本，不包含任何用户数据，因此不受[用户跟踪同意](#用户跟踪同意)状态限制。
+- 私有化部署时，配置接口位于 RUM 上报地址旁的 `/config` 路径（例如上报地址是 `https://host/api/v2/rum`，配置接口就是 `https://host/api/v2/rum/config`）。使用 `useCustomEndpoint` 时，请确认网关放行了该路径。
+
+#### 在应用内覆盖抽样结果
+
+如果需要保证某些用户的会话一定被采集（例如内部测试账号、正在排查问题的用户），可以通过 `setBeforeSampling` 在每次抽样前给出最终采样率。回调返回 `null` 表示沿用传入的值；返回值不在 0 到 100 之间或回调抛出异常时，同样沿用传入的值，不会影响采集。
+
+<Tabs>
+<Tab title="Kotlin">
+```kotlin
+val rumConfig = RumConfiguration.Builder(applicationId)
+    .setRemoteConfigurationEnabled(true)
+    .setBeforeSampling { context ->
+        // context.sessionSampleRate 是控制台（或初始化）给出的采样率
+        // context.custom 是控制台「自定义配置」里发布的键值
+        if (isInternalTester()) 100f else null
+    }
+    .build()
+```
+</Tab>
+
+<Tab title="Java">
+```java
+RumConfiguration rumConfig = new RumConfiguration.Builder(applicationId)
+    .setRemoteConfigurationEnabled(true)
+    .setBeforeSampling(context -> isInternalTester() ? 100f : null)
+    .build();
+```
+</Tab>
+</Tabs>
+
+对于已经在运行的应用，也可以随时调用 `setForcedSession()`，从当前会话起强制采集该用户的所有会话，直到进程结束：
+
+```kotlin
+GlobalRumMonitor.get().setForcedSession()
+```
+
+#### 读取控制台的自定义配置
+
+控制台「远程配置」页中的「自定义配置」会原样下发到 SDK，可通过 `getRemoteConfig()` 读取。SDK 不会解释这些值，含义完全由应用自己定义；没有发布配置或远程配置未开启时返回 `null`。
+
+```kotlin
+val custom = GlobalRumMonitor.get().getRemoteConfig()
+val debugUsers = custom?.get("debugUsers") as? List<*>
+```
+
+<Warning>
+自定义配置对所有安装了 SDK 的客户端可见，请勿放入密钥、Token 或个人敏感信息。
+</Warning>
+
 ## 用户跟踪同意
 
 为遵守 GDPR、CCPA 等隐私法规，RUM 允许在初始化时设置用户跟踪同意状态。
