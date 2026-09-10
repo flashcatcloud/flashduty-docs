@@ -188,9 +188,72 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 
 `client.DataSources.ToolsInvoke`（`POST /monit/datasource/tools/invoke`，`monit-datasource-tools-invoke`）在某个已配置数据源上执行一个确定性工具：`tool` 名称由数据源类型前缀修饰（如 `mysql.overview`），`params` 为工具专属 JSON 参数（省略视为 `{}`，显式 `null` 非法）；除诊断工具外，入口支持 `<type>.query` 查询工具（`prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`），`/monit/query/data` 入口保持不变。该接口要求集群中所有在线可路由的 Edge 会话都支持 v0.71.0 基础调用协议（单个工具可能要求更新的实现），无工具目录、无自动重放、也不会回退到旧版 diagnose。请求体上限 128 KiB，完整成功响应上限 10 MiB，单工具超时至多 25 秒；响应为 `DatasourceToolResult`（`data` 为工具专属 JSON、永不为 null，`summary` 可选，出现 `truncated` 时其 `reason` 说明截断原因）。
 
+`<type>.query` 查询工具的 `params` 在 Go 侧有对应的请求参数类型，用 `flashduty.NewDatasourceQueryInvokeRequest(datasourceID, tool, params)` 构造请求：它把参数结构体序列化进 `DatasourceToolInvokeRequest.Params`，`params` 为 `nil` 时直接返回错误，查询工具不允许省略参数。
+
+这些参数类型的可选字段一律为指针：留 `nil` 时该键不出现在请求里，服务端沿用默认值；显式传 `null` 会被服务端拒绝，因此没有发送 null 的方式。要显式送出零值（例如 `powersql` 的 `false`），用 `flashduty.Bool` / `flashduty.Int64` / `flashduty.String` 取指针。
+
+| 工具 | 参数类型 | 类型专属字段 |
+|------|----------|--------------|
+| `prometheus.query` | `flashduty.PrometheusQueryParams` | 无 |
+| `mysql.query` | `flashduty.MySQLQueryParams` | 无 |
+| `postgres.query` | `flashduty.PostgresQueryParams` | 无 |
+| `oracle.query` | `flashduty.OracleQueryParams` | 无 |
+| `clickhouse.query` | `flashduty.ClickHouseQueryParams` | 无 |
+| `elasticsearch.query` | `flashduty.ElasticsearchQueryParams` | 无 |
+| `loki.query` | `flashduty.LokiQueryParams` | `Limit`、`Direction` |
+| `victorialogs.query` | `flashduty.VictoriaLogsQueryParams` | `Limit`、`Direction` |
+| `sls.query` | `flashduty.SLSQueryParams` | `Project`、`Logstore`、`PowerSQL`、`Limit`、`Direction` |
+| `tencent_cls.query` | `flashduty.TencentCLSQueryParams` | `Region`、`TopicID`、`Syntax`、`Limit`、`Direction` |
+
+每个参数类型都由 `Expr` 与 `Execution`（`flashduty.DatasourceQueryExecution`）组成。`Expr` 的方言随数据源类型而定：`prometheus` 为 PromQL，`loki` 为 LogQL，`victorialogs` 为 LogsQL，`mysql` / `postgres` / `oracle` / `clickhouse` 为单条只读 SQL，`elasticsearch` 为单条 SQL（不支持 ES DSL 查询），`sls` / `tencent_cls` 为各自的检索语法（CLS 的 `Syntax` 取 `cql` 或 `lucene`）。
+
+```go
+req, err := flashduty.NewDatasourceQueryInvokeRequest(
+	12345, "prometheus.query",
+	&flashduty.PrometheusQueryParams{
+		Expr: `sum(rate(http_requests_total[5m]))`,
+		Execution: flashduty.DatasourceQueryExecution{
+			Kind: "instant",
+			ToMS: flashduty.Int64(1779514631000),
+		},
+	},
+)
+if err != nil {
+	return err
+}
+
+res, _, err := client.DataSources.ToolsInvoke(ctx, req)
+if err != nil {
+	return err
+}
+
+// res.Data 为工具专属 JSON，res.Summary 可选。
+fmt.Println(string(res.Data))
+```
+
+`DatasourceQueryExecution.Kind` 决定求值方式：
+
+| `kind` | 含义 | 时间字段 |
+|--------|------|----------|
+| `instant` | 在单个时间点求值 | `ToMS` 为求值时刻；`FromMS` 只有 Loki 可选（`instant` 保留完整时间上下文，便于 `$__auto` 范围解析），Prometheus 拒绝该字段 |
+| `range` | 在 `[FromMS, ToMS]` 上按步长求值时间序列 | `FromMS`、`ToMS` 必填；`MaxDataPoints` 必填，服务端据此计算实际步长；`MinStepSeconds` 为步长的正数下限，可选 |
+| `window` | 在单个有界窗口内求值 | `FromMS`、`ToMS` 必填 |
+
+各类型接受的 `kind` 不同：`prometheus` 与 `loki` 接受 `instant` / `range`；`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls` 只接受 `window`；`victorialogs` 用 `window` 取原始日志（可用 `Limit` / `Direction`），用 `instant` / `range` 做统计查询时必须带 `FromMS`，且拒绝 `Limit` / `Direction`。`Limit` 与 `Direction`（`latest` / `earliest`）只作用于原始日志结果，不限制 SQL 行数或扫描量：`loki`、`victorialogs`、`tencent_cls` 为 1–1000，`sls` 为 1–100。`step_seconds` 是保留字段，SDK 未建模，请勿发送。
+
+这些类型是手写的、不参与代码生成：`params` 以原始 JSON 承载，它们不在任何 requestBody 的可达范围内，生成器只能把它们当作响应侧类型（epoch 毫秒会变成序列化成 RFC3339 字符串的 `TimestampMilli`，可选字段也会丢掉 `omitempty`）。
+
+`client.Applications`（RUM 应用）的 remote-config 方法组用于读写 RUM 应用的远程配置：`RemoteConfigReadGet`（取当前生效的远程配置及其存储版本）、`RemoteConfigReadHistoryList`（列出已发布的配置版本）、`RemoteConfigReadPreview`（在给定客户端上下文里评估一份草稿配置，不发布）、`RemoteConfigWriteUpdate`（发布一个完整的新版本）、`RemoteConfigWriteHistoryRevert`（把更早版本的内容作为新版本重新发布）。
+
+`client.Schedules.ByPerson`（`POST /schedule/by-person`）返回某个成员的当前与下一次值班，以及他参与的全部已启用排班。
+
 `client.DataSources` 的 `payload` 按 `type_ident` 选择类型专属配置块。当前允许的 `type_ident` 共 15 种：`prometheus`、`loki`、`mysql`、`oracle`、`postgres`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls`、`victorialogs`，以及新增的诊断专用类型 `redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka`——诊断专用类型的 `alerting_enabled` 恒为 false（不阻止非告警查询与工具调用），且拒绝传 true。连接地址规则：Redis/MongoDB 诊断类型为单个 `host:port`（IPv6 需加方括号），不接受 URI、userinfo 或 query；`kafka` 为 1–32 个以逗号分隔、互不重复的 `host:port` bootstrap 地址（规范化后至多 4096 字符，`payload` 中不再有 broker 列表）；`mongodb_mongod` / `mongodb_mongos` 的配置块中 `auth_source` 默认为 `admin`，用户名与密码必须成对配置，不支持客户端证书；Redis 节点配置的 `database` 默认为 0。诊断类型的 `password` 与 Kafka 的 `tls_key` 等敏感字段支持 `${env:NAME}` 引用：响应中字面值会被省略（仅当存储值本身就是 `${env:...}` 引用时才回显），更新时省略这些字段即保留原值，显式传空字符串则清除。
 
 `enabled` 与 `alerting_enabled` 相互独立：`enabled`（业务执行开关）创建时默认 true，`alerting_enabled`（是否允许参与告警评估；告警还要求 `enabled` 为 true 且类型支持告警）创建时对告警类型默认 true、对诊断专用类型默认 false；二者更新时省略均保留当前值，显式传 `null` 非法；当有启用的告警规则引用该数据源时，将其 `enabled` 置为 false 会以 conflict 拒绝。另外 `/monit/datasource/list` 响应中 `payload` 恒为 `null`（列表查询不读 payload 列），create/update/info 响应中才会填充。
+
+`client.AlertRules` 的规则读写已切到 V2：取详情用 `ReadInfoV2`、创建用 `WriteCreateV2`、更新用 `WriteUpdateV2`，三者都收发 `*flashduty.AlertRuleV2`（含 V2 的恢复与结束模式）；若只想拿规则基础信息，`ReadList` 仍足够，需要完整配置再调 `ReadInfoV2`。旧的非 V2 `ReadInfo` / `WriteCreate` / `WriteUpdate` 已从 SDK 移除，`ReadCounterNode`、`ReadDstypes` 也一并删除，升级 SDK 时按此改名。
+
+另外，请求类型上的可选数组字段是按「是否存在」生效的：留 `nil` 时该键不出现在请求里，服务端保留已存储的值；传空切片则发送 `[]`，清掉该字段。目前此类字段只有 `AlertRuleV2.InvestigationTargets`（至多 20 项），即要清空下钻入口必须显式传一个空切片。
 
 <Note>
 所有标识符、服务字段名与方法名均与生成代码保持一致。具体每个服务有哪些方法、请求与响应类型,请以 `services_gen.go` 与各服务文件,以及 [Open API 参考](/zh/openapi/introduction) 为准。

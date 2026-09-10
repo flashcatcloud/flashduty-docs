@@ -1,7 +1,7 @@
 ---
 title: "查询工作台"
 description: "在 Flashduty Monitors 中对 Prometheus、Loki、VictoriaLogs、SLS、CLS 及 SQL 数据源执行即时查询，支持图表、原始数据、日志时间分布等多种结果形态。"
-keywords: ["查询工作台", "Explore", "即时查询", "Prometheus", "Loki", "数据源"]
+keywords: ["查询工作台", "Explore", "即时查询", "Prometheus", "Loki", "数据源", "AI 生成查询", "数据源工具"]
 ---
 
 查询工作台（Explore）是 Flashduty Monitors 中的即席查询界面，用于在不创建告警规则的前提下对数据源执行临时查询。支持 Prometheus、Loki、VictoriaLogs、阿里云 SLS、腾讯云 CLS 以及 MySQL、PostgreSQL、Oracle、ClickHouse、Elasticsearch 等数据源。
@@ -73,6 +73,61 @@ keywords: ["查询工作台", "Explore", "即时查询", "Prometheus", "Loki", "
 | 地域 / 日志主题 / 语法 | 腾讯云 CLS | 必填 |
 | PowerSQL | SLS | 开启 PowerSQL 模式 |
 | 时间宏 | SQL 数据源 | `$__timeFilter(列名)`、`$__timeFrom()`、`$__timeTo()` 让时间范围生效 |
+
+## AI 生成查询
+
+查询语句输入框的右上角有一颗 AI 按钮，鼠标悬停或聚焦输入框时显示。点开后在对话面板里用自然语言描述你要查什么，助手会给出**一条**可直接使用的语句，并说明这条语句的含义、以及仍需你自己决定的部分。
+
+助手在回答前先读当前编辑器：所在场景、数据源类型、数据源私有参数、你正在写的那条语句草稿，以及工作台当前的时间范围——对话过程中你改了数据源或查询类型，它读到的也会跟着变。它还可以先探测真实数据（列出可用的指标名、试跑一次查询看返回的标签）再落笔，并对最终给出的语句做一次语法校验；校验不通过的语句不会交付。
+
+回填时整条查询一起落位：**语句、数据源私有参数、查询类型，必要时还包括数据源**——如果生成的语句是给另一个数据源写的，回填会先切到那个数据源再写入，你也可以选择回填后直接执行。
+
+同一颗按钮出现在各个 QL 编辑器的语句输入框上，助手按场景理解你的意图：
+
+| 场景 | 入口 |
+|------|------|
+| 查询工作台（`scene=explore`） | 本页的查询语句输入框 |
+| 告警规则查询（`scene=rule_query`） | 告警规则的查询语句输入框（含查询预览弹窗） |
+| 恢复条件（`scene=rule_recover`） | 恢复条件语句输入框 |
+| 关联查询（`scene=rule_relate`） | 关联查询语句输入框 |
+| 实体类别配置（`scene=entity_def`） | 实体类别的发现 PromQL 输入框 |
+| 实体告警规则（`scene=entity_rule`） | 实体告警规则的告警条件 PromQL 输入框 |
+
+该能力由 AI 后端应用 `query-assistant` 提供；它创建的会话默认为 incognito，不会出现在会话历史列表中。
+
+## 用数据源工具以编程方式查询
+
+工作台的查询能力同时也是数据源工具入口上的查询工具：`POST /monit/datasource/tools/invoke` 的 `tool` 取 `<type>.query`，`type` 与工作台支持的数据源类型一致（`prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`）。查询走的是工作台同一条执行路径，所以语法校验、结果结构和 Edge 版本要求都与工作台一致；工具的 `type` 前缀必须与所选数据源的类型相同，不一致返回 `invalid_request`。
+
+参数为 `expr` 加 `execution`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `expr` | string | 查询语句，语法与工作台一致 |
+| `execution` | object | 必填，说明这次查询怎么跑 |
+
+`execution` 的字段与模式约束：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `kind` | string | `instant`（即时，只接受 `to_ms`）、`range`（区间，需 `from_ms`、`to_ms`、`max_data_points`，可选 `min_step_seconds`）、`window`（窗口，需 `from_ms`、`to_ms`） |
+| `from_ms` / `to_ms` | number | 毫秒时间戳 |
+| `max_data_points` | number | 区间查询的数据点上限，2–5000，`range` 模式必填 |
+| `min_step_seconds` | number | 自动 step 的下限（秒），`range` 模式可选 |
+
+区间查询下发给 Edge 的 `step_seconds` 由服务端按 `from_ms`、`to_ms`、`max_data_points`（以及可选的 `min_step_seconds`）推导，不需要也不应自己传。
+
+各数据源类型的 `kind` 与额外字段：
+
+| 数据源类型 | 可用 `kind` | 额外要求 |
+|-----------|------------|----------|
+| `prometheus`、`loki` | `instant` 或 `range` | Prometheus 的 `instant` 只接受 `to_ms` |
+| `victorialogs` | 三种都可用，字段必须齐全 | 必须带 `from_ms`；`limit`、`direction` 只在 `window` 模式下有效。工作台的映射：原始日志用 `window`、即时统计用 `instant`、趋势统计用 `range` |
+| `mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls` | 仅 `window` | SLS 必填 `project`、`logstore`，可选 `powersql`；腾讯云 CLS 必填 `region`、`topic_id`、`syntax`（`cql` 或 `lucene`） |
+
+日志类数据源还可以带 `limit` 与 `direction`，语义同工作台的 返回条数 / 检索方向（`direction` 取 `latest` 或 `earliest`；`limit` 对 SLS 上限 100，其余日志类上限 1000）。参数中未列出的字段会被忽略，已知字段显式传 `null` 会被拒绝。结果外层为 `datasource_id`、`tool`、`data`，其中 `data` 与工作台返回的 `explore_result.v1` 结构相同（`samples`、`frames` 或 `logs`）。与工作台一样，该入口要求数据源 `enabled=true`。
+
+完整参数清单、错误码与请求示例见 [数据源工具调用](/zh/api-reference/monitors/data-sources/monit-datasource-tools-invoke)；命令行对应 `flashduty monit-query <datasource-id> --tool '<type>.query'`，用法见 [CLI](/zh/developer/cli)。
 
 ## 查询历史
 

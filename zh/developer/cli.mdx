@@ -181,7 +181,7 @@ flashduty member info-reset [flags] # 更新成员资料
 flashduty member invite [flags]     # 邀请新成员（单次最多 20 人）
 ```
 
-`member list` 支持 `--query`（姓名/邮箱关键字搜索）、`--role-id`、`--page`、`--limit`、`--orderby`、`--asc`。
+`member list` 支持 `--query`（姓名/邮箱关键字搜索）、`--member-id`（按成员 ID 精确过滤，只返回该成员）、`--role-id`、`--page`、`--limit`、`--orderby`、`--asc`。
 
 `member info-reset` 通过 `--member-id`、`--member-name`、`--email`、`--phone` 或 `--ref-id` 之一定位成员，要修改的字段经 `--data '{"updates":{...}}'` 传入（必填）；`--from api` 在账户关闭成员邀请时，可将更新后的邮箱/手机号直接标记为已验证。
 
@@ -366,6 +366,24 @@ flashduty rum session-replay-segments <session-id> # 读取会话回放分片
 | `--url-mode` | 设为 `true` 时返回包含预签名下载 URL 的 JSON；默认 `false`，直接流式返回分片字节。URL 有效期为 1 小时。 |
 | `--view-id` | 只读取指定 View 的分片；省略时遍历整个会话。 |
 
+#### 远程配置（application-remote-config-*）
+
+远程配置按应用在线下发采集与隐私参数（采样率、Session Replay 隐私级别、自定义配置项等），无需改代码或重新发版。五条命令覆盖读取、发布、回滚与预演；配置项清单与生效语义见 [应用管理 · 远程配置](/zh/rum/quickstart/app-management#远程配置)。
+
+```bash
+flashduty rum application-remote-config-get <application-id>              # 查看当前生效配置及其版本
+flashduty rum application-remote-config-history-list <application-id>    # 列出版本历史
+flashduty rum application-remote-config-preview <application-id> [flags] # 用草稿配置模拟一次下发（不发布）
+flashduty rum application-remote-config-update <application-id> [flags]  # 发布一版完整配置
+flashduty rum application-remote-config-history-revert <application-id> --version <v>  # 把历史版本内容重新发布为新版本
+```
+
+- `get` 返回 `config`（完整配置对象）、`version`（当前生效版本，`0` 表示从未配置）与 `updated_at`。
+- `history-list` 返回 `{items, has_next_page, total}` 分页信封，`items` 元素含 `version`、`content_hash`、`updated_by_name`、`reason`、`updated_at`；分页用 `--page`（0 开始）、`--limit`（默认 20，上限 100），排序用 `--orderby`（`updated_at`/`version`）与 `--asc`。
+- `preview` 用 `--env`、`--app-version`、`--sdk` 描述模拟客户端（`--sdk` 形如 `web@2.4.1`），草稿 `config` 经 `--data` 传入；返回命中的规则下标 `hit_rule_index`（`-1` 表示只命中默认值）与实际下发值 `values`；只做评估，不发布、不改变线上配置。
+- `update` 的 `config` 必填（经 `--data` 传入），发布一版完整配置；`history-revert` 的 `--version` 必填（最小 1）。
+- `update` 与 `history-revert` 都接受 `--reason`（发布者备注，≤255 字符），返回新版本号。
+
 #### 错误摄入规则（error-ingestion-rules-*）
 
 错误摄入规则按过滤条件筛除或改写应用上报的错误事件：
@@ -478,8 +496,17 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `<datasource-id>` | 数据源 ID（位置参数，必填，来自 `monit datasource-list`，最小 1） |
 | `--tool` | 工具名（必填），以数据源类型为前缀，如 `prometheus.query`、`mysql.overview`、`redis_node.slowlog`；1–128 字符 |
 | `--params` | 工具参数 JSON（可省略，省略即 `{}`；参数较长时传 `-` 从标准输入读取；显式 `null` 不合法） |
+| `--account-id` | 可选一致性校验，必须等于当前认证账户；省略时不发送该字段 |
 
-查询工具返回完整的 `explore_result.v1` 结构化结果：`format` 固定为 `explore_result.v1`，`result.kind` 为 `samples`（带完整标签集的即时样本）、`frames`（类型化表格/时序帧）或 `logs`（原始日志，含 `applied_limit` 与 `has_more`）三者之一。诊断工具的返回结构见下文 `monit datasource-tools-invoke`。
+查询工具的参数按数据源类型各自定义，但都以 `expr` 加 `execution` 为骨架：
+
+- `execution.kind` 取 `instant`（即时求值）、`range`（区间求值）或 `window`（窗口执行）；`execution.from_ms` / `execution.to_ms` 为 Unix **毫秒**时间戳，`range` 还需 `max_data_points`。
+- 类型附加项：日志类数据源可另传 `limit`、`direction`（仅原始日志读取时生效）；`sls` 必填 `project`、`logstore`；`tencent_cls` 必填 `region`、`topic_id`、`syntax`；SQL 类（`mysql`、`postgres`、`oracle`、`clickhouse`）传单条只读语句并以 `window` 执行。
+- CLI 只负责组装请求与渲染结果，工具名与参数合法性由服务端校验；请按各数据源类型的实际 schema 填写，不要从命令行列表猜测参数。
+
+查询工具要求所选集群的 Edge 支持 Explore 协议 v0.68.0；版本不满足时原样返回 `edge_upgrade_required`、`mixed_edge_versions` 或 `edge_version_unknown`，CLI 不会自动轮换 Edge 或回退到其他端点。
+
+查询工具返回完整的 `explore_result.v1` 结构化结果：`format` 固定为 `explore_result.v1`，`result.kind` 为 `samples`（带完整标签集的即时样本）、`frames`（类型化表格/时序帧）或 `logs`（原始日志，含 `applied_limit` 与 `has_more`）三者之一；查询工具不会合成 `summary` 与 `truncated`（诊断工具可能有）。诊断工具的返回结构见下文 `monit datasource-tools-invoke`。
 
 ### monit datasource-tools-invoke — 数据源诊断工具
 
@@ -637,7 +664,7 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **340 个 API 操作**，CLI 为其中 **337 个** 生成对应命令，其余操作（如 `session-read-export`）以手工实现命令提供（`session export` / `safari session-export`），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。CLI 当前锁定的 OpenAPI 规范（go-flashduty v0.15.2）含 **337 个 API 操作**，分布在 **37 个 tag** 下；生成器为其中 **334 个** operationId 生成了命令，组织为 **37 个** 生成命令组，其余操作（如 `session-read-export`）以手工实现命令提供（`session export` / `safari session-export`），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
 - **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
