@@ -65,3 +65,7 @@ MEILI_ENDPOINT=... MEILI_API_KEY=... MEILI_INDEX=... bash scripts/upload.sh
 3. Use **translate-zh-to-en** to translate to `en/`
 4. Update navigation in `docs.json`
 5. Run `mint broken-links` to validate
+
+## Retired Monitors Features
+
+- The monitor targets feature and monit-agent integration are retired. Do not recreate `zh/monitors/targets/*` or `en/monitors/targets/*`, restore their navigation, or describe target lists and per-row AI analysis as available. Residual routes or components in source code are not evidence of a supported feature. Preserve the overview URL redirects to the Monitors quickstart.
