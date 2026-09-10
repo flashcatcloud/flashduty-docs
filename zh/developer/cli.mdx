@@ -462,31 +462,28 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 | `--include-subagents` | 在每条 `subagent_dispatch` 之后递归内联该子智能体自身的完整事件流 |
 
 
-### monit-query — 监控数据源查询
+### monit-query — 监控数据源统一工具调用
 
-直接查询监控后端数据源，无需经过告警规则层。`data` 子命令支持 9 种数据源类型（Prometheus、VictoriaLogs、Loki、MySQL、SLS、Elasticsearch、PostgreSQL、Oracle、ClickHouse）。指标趋势和日志模式分析使用下文的 `monit datasource-tools-invoke` 命名工具。
+`monit-query` 对已配置的数据源执行**单个命名工具**，是查询与诊断的统一入口：查询工具（`<type>.query`，覆盖 `prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`）与诊断工具（如 `mysql.overview`、`redis_node.slowlog`）都走它，无需经过告警规则层。旧 `monit-query data` 子命令已退役。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
 
 ```bash
-flashduty monit-query data [flags]       # 结构化数据源查询
+flashduty monit datasource-list --type prometheus --json | jq '.[] | {id, name, type_ident, address}'
+flashduty monit-query <datasource-id> --tool 'prometheus.query' \
+  --params '{"expr":"sum(rate(http_requests_total[5m]))","execution":{"kind":"instant","to_ms":1789000000000}}'
+flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 ```
-
-`data` 常用参数：
 
 | 参数 | 说明 |
 |------|------|
-| `--ds-type` | 数据源类型（必填）：`prometheus`、`victorialogs`、`loki`、`mysql`、`sls`、`elasticsearch`、`postgres`、`oracle`、`clickhouse` |
-| `--ds-name` | 数据源名称（必填，与控制台配置一致） |
-| `--expr` | 查询表达式（必填） |
-| `--delay-seconds` | 查询时间点的回溯偏移秒数，用于点对点查询（默认 `0`） |
-| `--args KEY=VALUE` | 附加参数，可重复（值须为字符串）。`loki` / `victorialogs` 原始模式下，`<ds-type>.start` 与 `<ds-type>.end` 接受相对时长（`15m`）、`now`、日期/RFC3339 时间戳或 Unix 秒/毫秒，CLI 会统一归一化为数据源要求的 Unix 秒 |
+| `<datasource-id>` | 数据源 ID（位置参数，必填，来自 `monit datasource-list`，最小 1） |
+| `--tool` | 工具名（必填），以数据源类型为前缀，如 `prometheus.query`、`mysql.overview`、`redis_node.slowlog`；1–128 字符 |
+| `--params` | 工具参数 JSON（可省略，省略即 `{}`；参数较长时传 `-` 从标准输入读取；显式 `null` 不合法） |
 
-`data` 返回稳定的 `query_result.v1` 结构化结果：`format` 固定为 `query_result.v1`，`result.kind` 为 `frames`（类型化表格/时序帧）、`records`（字段灵活的记录，可含嵌套 JSON 或 null）或 `samples`（带完整标签集的即时样本）三者之一，不再把结果强制压平为旧版行结构。
-
-`rows` 常用参数：`--ds-type`、`--ds-name`（均必填）、`--expr`（查询表达式，必填）、`--args KEY=VALUE`（可重复）。**`rows` 已弃用**，请改用 `monit-query data`。`rows` 原始模式（`loki` / `victorialogs`）可通过 `--args <ds-type>.start=<t>` 与 `--args <ds-type>.end=<t>` 指定时间窗口，支持相对时长、`now`、日期/RFC3339、Unix 秒或毫秒，CLI 会统一归一化为数据源要求的 Unix 秒。
+查询工具返回完整的 `explore_result.v1` 结构化结果：`format` 固定为 `explore_result.v1`，`result.kind` 为 `samples`（带完整标签集的即时样本）、`frames`（类型化表格/时序帧）或 `logs`（原始日志，含 `applied_limit` 与 `has_more`）三者之一。诊断工具的返回结构见下文 `monit datasource-tools-invoke`。
 
 ### monit datasource-tools-invoke — 数据源诊断工具
 
-`monit datasource-tools-invoke` 对已配置的数据源执行**一次确定性的只读工具调用**，是结构化数据源诊断的现行路径（取代 `monit-query diagnose`）。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
+`monit datasource-tools-invoke` 对已配置的数据源执行**一次确定性的只读工具调用**，是结构化数据源诊断的现行路径（取代 `monit-query diagnose`），与上文 `monit-query` 命令等价，`monit-query` 为推荐路径。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
 
 ```bash
 flashduty monit datasource-list --type redis_node --json | jq '.[] | {id, name, type_ident, address}'
@@ -503,7 +500,7 @@ flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowl
 
 语义与限制：
 
-- **无工具目录、无自动重试、无回退**：一次调用只执行一个命名工具，参数需按各数据源工具约定填写，不要从命令行列表猜测。除诊断工具外，入口还支持 `<type>.query` 查询工具（`prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`），`monit-query data` 入口保持不变。
+- **无工具目录、无自动重试、无回退**：一次调用只执行一个命名工具，参数需按各数据源工具约定填写，不要从命令行列表猜测。除诊断工具外，入口还支持 `<type>.query` 查询工具（`prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`）。
 - 要求所选集群内**全部**当前在线可路由的 Edge 会话支持 v0.71.0 基础调用协议（个别工具可能要求更新的实现）；普通数据源查询不受此版本限制。
 - 请求体 ≤128 KiB；完整成功响应 ≤10 MiB；工具超时 ≤25 秒。
 - 需要数据源 `enabled=true`；`alerting_enabled=false` 不阻塞诊断。

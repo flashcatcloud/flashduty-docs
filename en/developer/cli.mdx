@@ -462,31 +462,28 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 | `--include-subagents` | After each `subagent_dispatch`, recursively inline that subagent's own full event stream |
 
 
-### monit-query — Monitoring datasource queries
+### monit-query — Unified datasource tool invocation
 
-Query monitoring back-end datasources directly, bypassing the alert-rule layer. The `data` subcommand supports 9 datasource types (Prometheus, VictoriaLogs, Loki, MySQL, SLS, Elasticsearch, PostgreSQL, Oracle, ClickHouse). For metric trends and log patterns, use the named tools of `monit datasource-tools-invoke` below.
+`monit-query` executes **a single named tool** against a configured datasource — the unified entry for both query tools (`<type>.query`, covering `prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`) and diagnostic tools (e.g. `mysql.overview`, `redis_node.slowlog`), bypassing the alert-rule layer. The legacy `monit-query data` subcommand is retired. Get the datasource ID from the `id` field of `monit datasource-list`:
 
 ```bash
-flashduty monit-query data [flags]       # Structured datasource query
+flashduty monit datasource-list --type prometheus --json | jq '.[] | {id, name, type_ident, address}'
+flashduty monit-query <datasource-id> --tool 'prometheus.query' \
+  --params '{"expr":"sum(rate(http_requests_total[5m]))","execution":{"kind":"instant","to_ms":1789000000000}}'
+flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 ```
-
-Common flags for `data`:
 
 | Flag | Description |
 |------|-------------|
-| `--ds-type` | Datasource type (required): `prometheus`, `victorialogs`, `loki`, `mysql`, `sls`, `elasticsearch`, `postgres`, `oracle`, `clickhouse` |
-| `--ds-name` | Datasource name as configured in the console (required) |
-| `--expr` | Query expression (required) |
-| `--delay-seconds` | Look-back offset in seconds for point-in-time queries (default `0`) |
-| `--args KEY=VALUE` | Additional arguments, repeatable (values must be strings). In raw mode (`loki` / `victorialogs`), `<ds-type>.start` and `<ds-type>.end` accept a relative duration (`15m`), `now`, a date/RFC3339 timestamp, or unix seconds/milliseconds; the CLI normalizes them to the unix-seconds form the datasource requires |
+| `<datasource-id>` | Datasource ID (positional, required, from `monit datasource-list`, min 1) |
+| `--tool` | Tool name (required), prefixed by the datasource type, e.g. `prometheus.query`, `mysql.overview`, `redis_node.slowlog`; 1–128 chars |
+| `--params` | Tool parameters JSON (may be omitted, meaning `{}`; pass `-` to read a larger payload from standard input; an explicit `null` is invalid) |
 
-`data` returns a stable `query_result.v1` structured result: `format` is always `query_result.v1`, and `result.kind` is one of `frames` (typed table/time-series frames), `records` (schema-flexible records, may contain nested JSON or null), or `samples` (instant samples with complete label sets) — results are no longer flattened into the legacy rows shape.
-
-`rows` requires `--ds-type`, `--ds-name`, and `--expr` (query expression). Use `--args KEY=VALUE` (repeatable) for parameterized queries. **`rows` is deprecated** — use `monit-query data` instead. In raw mode (`loki` / `victorialogs`), `rows` accepts time-window arguments `--args <ds-type>.start=<t>` and `--args <ds-type>.end=<t>` as a relative duration, `now`, date/RFC3339, or Unix seconds or milliseconds; the CLI normalizes them to the unix-seconds form the datasource requires.
+Query tools return a complete `explore_result.v1` structured result: `format` is always `explore_result.v1`, and `result.kind` is one of `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
 
 ### monit datasource-tools-invoke — Datasource diagnostics
 
-`monit datasource-tools-invoke` executes **one deterministic read-only tool** against a configured datasource — the current path for structured datasource diagnostics (replacing `monit-query diagnose`). Get the datasource ID from the `id` field of `monit datasource-list`:
+`monit datasource-tools-invoke` executes **one deterministic read-only tool** against a configured datasource — the current path for structured datasource diagnostics (replacing `monit-query diagnose`). It is equivalent to the `monit-query` command above, which is the recommended path. Get the datasource ID from the `id` field of `monit datasource-list`:
 
 ```bash
 flashduty monit datasource-list --type redis_node --json | jq '.[] | {id, name, type_ident, address}'
@@ -503,7 +500,7 @@ flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowl
 
 Semantics and limits:
 
-- **No tool catalog, no auto-replay, no fallback**: one call runs exactly one named tool; fill parameters according to the datasource tool's contract rather than guessing from the command list. Alongside diagnostic tools, the entry also supports `<type>.query` query tools (`prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`); the `monit-query data` entry stays unchanged.
+- **No tool catalog, no auto-replay, no fallback**: one call runs exactly one named tool; fill parameters according to the datasource tool's contract rather than guessing from the command list. Alongside diagnostic tools, the entry also supports `<type>.query` query tools (`prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`).
 - Requires **all** currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation); normal datasource queries retain their existing version compatibility.
 - Request body limit 128 KiB; complete success response limit 10 MiB; tool timeout at most 25 seconds.
 - The datasource must have `enabled=true`; `alerting_enabled=false` does not block diagnostics.
