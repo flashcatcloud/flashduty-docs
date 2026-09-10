@@ -1,7 +1,7 @@
 ---
 title: "Query Workbench"
 description: "Run ad-hoc queries against Prometheus, Loki, VictoriaLogs, SLS, CLS, and SQL data sources in Flashduty Monitors. Supports graph, raw, and log volume views."
-keywords: ["Explore", "Query Workbench", "ad-hoc query", "Prometheus", "Loki", "data source"]
+keywords: ["Explore", "Query Workbench", "ad-hoc query", "Prometheus", "Loki", "data source", "AI query generation", "data source tools"]
 ---
 
 The Query Workbench (Explore) is an ad-hoc query interface in Flashduty Monitors for running temporary queries against data sources without creating alert rules. It supports Prometheus, Loki, VictoriaLogs, Alibaba Cloud SLS, Tencent Cloud CLS, and MySQL, PostgreSQL, Oracle, ClickHouse, Elasticsearch data sources.
@@ -73,6 +73,61 @@ In addition to the query expression, some data sources support private parameter
 | Region / Topic / Syntax | Tencent CLS | Required |
 | PowerSQL | SLS | Enables PowerSQL mode |
 | Time macros | SQL data sources | `$__timeFilter(column)`, `$__timeFrom()`, `$__timeTo()` make the time range take effect |
+
+## AI Query Generation
+
+An AI button sits in the top-right corner of the query statement input and appears when you hover or focus the input. Open it, describe in plain language what you want to query, and the assistant returns **one** ready-to-use statement together with an explanation of what it does and what is still yours to decide.
+
+Before answering, the assistant reads the current editor: the scene, the data source type, the data source's private parameters, the draft statement you are writing, and the workbench's current time range — if you change the data source or query type mid-conversation, what it reads changes too. It can also inspect real data first (list available metric names, run one probe query to see the returned labels) and then validate the finished statement; a statement that fails validation is never delivered.
+
+Applying a statement places the whole query at once: **the statement, the data source's private parameters, the query type, and when needed the data source itself** — if the statement was written for another data source, applying it switches to that data source first, and you can choose to run it right away.
+
+The same button sits on the statement input of every QL editor, and the assistant understands your intent from the scene:
+
+| Scene | Entry point |
+|-------|-------------|
+| Query Workbench (`scene=explore`) | The statement input on this page |
+| Alert rule query (`scene=rule_query`) | The alert rule's query statement input (including the query preview dialog) |
+| Recovery condition (`scene=rule_recover`) | The recovery condition statement input |
+| Related query (`scene=rule_relate`) | The related query statement input |
+| Entity category configuration (`scene=entity_def`) | The entity category's discovery PromQL input |
+| Entity alert rule (`scene=entity_rule`) | The entity alert rule's alert condition PromQL input |
+
+The capability is provided by the AI backend app `query-assistant`; the sessions it creates are incognito by default and do not appear in the session history list.
+
+## Querying Programmatically Through Data Source Tools
+
+The workbench query capability is also a query tool on the data source tool entry: for `POST /monit/datasource/tools/invoke`, `tool` takes `<type>.query`, where `type` matches the data source types the workbench supports (`prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`). The query runs on the same execution path as the workbench, so syntax validation, result structure, and Edge version requirements are identical; the tool's `type` prefix must match the selected data source's type, otherwise you get `invalid_request`.
+
+Parameters are `expr` plus `execution`:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `expr` | string | The query statement, same syntax as the workbench |
+| `execution` | object | Required; describes how the query runs |
+
+`execution` fields and mode constraints:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `kind` | string | `instant` (instant; accepts only `to_ms`), `range` (range; requires `from_ms`, `to_ms`, `max_data_points`, optional `min_step_seconds`), `window` (window; requires `from_ms`, `to_ms`) |
+| `from_ms` / `to_ms` | number | Millisecond timestamps |
+| `max_data_points` | number | Data point cap for range queries, 2–5000, required in `range` mode |
+| `min_step_seconds` | number | Lower bound for the auto step (seconds), optional in `range` mode |
+
+For range queries the `step_seconds` sent to Edge is derived server-side from `from_ms`, `to_ms`, `max_data_points` (and the optional `min_step_seconds`) — you neither need nor should pass it yourself.
+
+`kind` and extra fields per data source type:
+
+| Data Source Type | Allowed `kind` | Extra requirements |
+|------------------|----------------|--------------------|
+| `prometheus`, `loki` | `instant` or `range` | Prometheus `instant` accepts only `to_ms` |
+| `victorialogs` | All three, with their fields complete | `from_ms` is required; `limit` and `direction` apply only to `window` mode. Workbench mapping: raw logs use `window`, instant stats use `instant`, range stats use `range` |
+| `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `sls`, `tencent_cls` | `window` only | SLS requires `project` and `logstore`, `powersql` optional; Tencent CLS requires `region`, `topic_id`, and `syntax` (`cql` or `lucene`) |
+
+Log-type data sources also accept `limit` and `direction`, with the same meaning as the workbench's Limit / Direction (the `direction` is `latest` or `earliest`; `limit` caps at 100 for SLS and 1000 for the other log types). Fields not listed here are ignored; passing an explicit `null` for a known field is rejected. The outer result carries `datasource_id`, `tool`, and `data`, where `data` has the same `explore_result.v1` structure the workbench returns (`samples`, `frames`, or `logs`). As in the workbench, the entry requires the data source to be `enabled=true`.
+
+For the full parameter list, error codes, and request examples, see [data source tools invoke](/en/api-reference/monitors/data-sources/monit-datasource-tools-invoke); the CLI equivalent is `flashduty monit-query <datasource-id> --tool '<type>.query'`, documented in the [CLI](/en/developer/cli) reference.
 
 ## Query History
 

@@ -1,0 +1,195 @@
+---
+title: AI SRE Credits and Billing
+sidebarTitle: Credits and Billing
+description: The billing entry point for AI SRE, what each field in the credits overview means, the three pay-as-you-go states and who may change them, plus the server-side block and the automatic SMS reminder when credits run low.
+keywords: ["AI SRE", "credits", "billing", "pay-as-you-go", "credit package", "allowance", "monthly cap", "low balance reminder", "blocked"]
+---
+
+<Info>
+  AI SRE is metered in credits for model usage, sandbox online time, and web search. This page explains what each column on the billing page means, how to configure pay-as-you-go, who is allowed to change it, and how the system blocks and warns you when credits run low. The metered items and unit prices, credit package tiers, deduction order, validity, and refund rules are governed by the [AI SRE credit package purchase agreement](/en/compliance/ai-sre-credit-package-purchase-agreement).
+</Info>
+
+## Where the billing entry lives
+
+---
+
+AI SRE's allowance and pay-as-you-go settings all live under **Payment Center → Subscriptions** in the console, on the **AI SRE** tab (direct link `/wallet/plan?product=ai-sre`). The tab has three parts:
+
+| Section | Contents |
+| --- | --- |
+| Activation status | Whether the account is **Enabled** or **Not enabled**, plus the **current period** (start and end of this period, shown as local midnights in the account's billing timezone). When the account is not enabled, this is where the enable button appears |
+| Credits overview | Trial credits remaining, package credits remaining (with the earliest expiry), and pay-as-you-go used this period |
+| Pay-as-you-go | The three monthly cap states and the save button — **shown only once the account is enabled** |
+
+<Note>
+The console's credits card renders credits as 「积分」 in the Chinese UI; the English UI calls the same number "credits". They are the same unit, and this page uses "credits" throughout.
+</Note>
+
+Two visibility limits apply:
+
+- **Rolled out per account**: the billing entry is opened up account by account, and the verdict rides the credits overview response's `visible` field. Accounts that are not included yet do not see the AI SRE tab, and opening the link above falls back to the On-call tab.
+- **Never on on-premises deployments**: on-premises is not metered and not charged, so it has no billing entry and is never blocked on credits.
+
+## What the credits overview shows
+
+---
+
+| Console field | Meaning |
+| --- | --- |
+| Credit balance (total) | Trial credits remaining + package credits remaining |
+| Trial credits remaining | The balance of the trial credits Flashduty grants. Granted at most once per billing period, and only to accounts with no other funding source; they expire with the period, do not carry over, and are zeroed when AI SRE is terminated for the account |
+| Package credits remaining | The combined balance of unexpired purchased credit packages. With several packages, the **earliest expiry** is shown ("Earliest expiry YYYY-MM-DD"). The deduction order is trial credits → the package expiring soonest → pay-as-you-go |
+| Current period | The start and end dates of this period. Pay-as-you-go usage and the cap are both settled per this period, and usage resets when the period rolls over |
+| Used this period (pay-as-you-go) | What has been settled pay-as-you-go this period (¥). With a monthly cap set, this renders as a "used / cap" progress bar |
+
+<Warning>
+The billing pages show credits and money amounts only — never model token detail. For how credits are metered, settled, and deducted, see the [AI SRE credit package purchase agreement](/en/compliance/ai-sre-credit-package-purchase-agreement).
+</Warning>
+
+## The three pay-as-you-go states
+
+---
+
+"Pay-as-you-go" (PAYG) is how usage is settled from the account's general wallet once trial credits and packages are exhausted. Enabling AI SRE authorizes PAYG, and its ceiling is a **money amount** (¥) with three states that are not equivalent:
+
+| State | Console option | Meaning | API value (`monthly_limit_amount`) |
+| --- | --- | --- | --- |
+| Unlimited | **Unlimited** (default) | Once packages run out, PAYG continues with no ceiling | field omitted or JSON `null` |
+| Monthly cap | **Set a monthly cap** plus an amount | This period's PAYG spends at most that amount | a positive amount |
+| PAYG forbidden | **Forbid pay-as-you-go (stop running once packages are exhausted)** | No PAYG at all; AI SRE stops running when your packages run out | `0` |
+
+<Note>
+`null` and `0` are two different states, never to be treated as equivalent: `null` means "no ceiling", `0` means "PAYG not allowed". The console rounds amounts to two decimal places for display; internal settlement keeps a much higher precision.
+</Note>
+
+Once the cap is reached (or PAYG is forbidden), **new runs are no longer admitted, while the run already in progress can finish**. Any overage that run produces is absorbed by Flashduty and is not billed to you, and trial or package balances are never drawn below zero — PAYG can never be charged beyond the cap you set. For details, see the [purchase agreement](/en/compliance/ai-sre-credit-package-purchase-agreement).
+
+To set a monthly cap:
+
+<Steps>
+  <Step title="Open the billing page">
+    Go to **Payment Center → Subscriptions → AI SRE** (`/wallet/plan?product=ai-sre`). The pay-as-you-go card only appears once the account has **enabled** AI SRE.
+  </Step>
+  <Step title="Pick a state">
+    Under "Monthly cap", choose **Unlimited**, **Set a monthly cap** (enter an amount greater than 0), or **Forbid pay-as-you-go**.
+  </Step>
+  <Step title="Save">
+    Click **Save**. On success the page refreshes with the overview the server returns and shows "Pay-as-you-go cap saved"; the server refreshes the admission verdict at the same time, so the next runs are judged against the new cap.
+  </Step>
+</Steps>
+
+<Warning>
+The cap is expressed as a money amount (¥), but it is the ceiling on this period's pay-as-you-go spend — not the threshold of the wallet low balance alert. They are different features; see [Difference from the wallet low balance alert](#difference-from-the-wallet-low-balance-alert).
+</Warning>
+
+## Permissions: who can view, who can change
+
+---
+
+| Action | Endpoint | Permission required |
+| --- | --- | --- |
+| View the credits overview | `POST /safari/credits/overview` | **Any member**. The allowance is account-wide, and when it runs out every member hits the block, so reading is deliberately not admin-gated; it maps to the permission point `credits:read:overview`, in the Payment Center's read permission |
+| Change the pay-as-you-go cap | `POST /safari/credits/limit` | **Account owner / admins only**. A non-admin call is refused server-side with `Only account admins can change the pay-as-you-go credits cap.`; it maps to the permission point `credits:write:limit`, in the Payment Center's manage permission |
+
+The console additionally requires the **wallet purchase permission** (`wallet:buy`, shown on the page as "Wallet purchase permission required") for the **Enable AI SRE**, **Buy credit packages**, and **Save** buttons. For how roles map to permission points, see [Permission design](/en/platform/permission-design).
+
+If AI SRE has never been enabled for the account, changing the cap returns 404 with `AI SRE credits has not been enabled for this account yet.` — enabling is a separate action, and setting a cap never enables the account as a side effect.
+
+## When credits run out: the block
+
+---
+
+At admission time the server decides whether the account can start a new unit of AI SRE work. All three conditions refuse new runs, each carrying a sentence that already names the remedy and is localized in the caller's language:
+
+| `blocked_reason` | Condition | Server message (English console) |
+| --- | --- | --- |
+| `not_enabled` | AI SRE is not enabled for the account | AI SRE is not enabled for this account. Enable it to continue. |
+| `balance_exhausted` | Trial credits, packages, and PAYG allowance (or cap) are all used up | This account has used its full AI SRE credits allowance for this period. Buy a credit package or raise the usage limit to continue. |
+| `wallet_insufficient` | The turn would be funded by PAYG alone, and the general wallet balance is insufficient | The account balance is insufficient. Top up the wallet to continue using AI SRE on pay-as-you-go; a recent top-up may take a few minutes to take effect. |
+
+Both fields also come back on the credits overview response (`blocked_reason` / `blocked_message`), and the console uses them to pin a **non-dismissible** alert banner above the composer and disable the send button, with a **Go to AI SRE billing** button that opens the billing page. For the banner's behavior in detail, see [Console → Account-level billing block](/en/ai-sre/sessions).
+
+## Low balance reminder (automatic SMS)
+
+---
+
+Besides that sentence when a run is refused, the system also sends an SMS proactively while credits are **nearly but not yet** exhausted. It is automatic — there is no switch and no threshold to configure:
+
+| Item | Rule |
+| --- | --- |
+| Trigger | Remaining usable allowance falls to **20%** of total allowance |
+| How total allowance is measured | Trial credits + unexpired package credits + this period's remaining PAYG allowance (cap minus used), **combined**. With PAYG as the only funding source this is equivalent to "PAYG usage has reached 80% of the cap" |
+| Near expiry | Package credits **expiring within 7 days** count as already gone: they still count toward total allowance, but not toward the remaining figure. A package about to expire therefore triggers the reminder early |
+| Who gets it | Only accounts that have enabled AI SRE (trial-mode accounts, never-enabled accounts, and on-premises deployments are all excluded). An account with no usable allowance at all — already blocked — is not told "you're about to run out" |
+| Channel | **SMS**, to the phone number on the account record; no phone number means no message |
+| Frequency | At most **one per billing period**. Buying a credit package raises total allowance, which re-arms the reminder — so a second message in the same period is possible |
+| When it is checked | Alongside the hourly usage settlement, so expect up to about an hour's delay from crossing the threshold to receiving the SMS; a failed send is retried on the next hour |
+| Wording | **Credits only, never a ¥ amount**, and it names the two remedies: buy a credit package, or raise the usage limit — the same actions the block table above names |
+
+The message reads (with `XXX` standing in for the account name and remaining credits, rounded to two decimals):
+
+> Your account (XXX) has only 416.19 AI SRE credits left for this period — under 20% of its allowance. AI SRE stops running once it is used up; buy a credit package or raise the usage limit in the console.
+
+### Difference from the wallet low balance alert
+
+---
+
+Flashduty also has a **wallet**-level balance alert. The two watch different things, use different units, and go out on different channels:
+
+| | AI SRE low balance reminder | Wallet low balance alert |
+| --- | --- | --- |
+| Watches | AI SRE's usable allowance for this period (trial + package + PAYG remaining) | The account's general wallet available balance |
+| Unit | credits, **never a money amount** | a money amount (¥), with a threshold you set (at least ¥1) |
+| How to enable | Automatic, no switch | Turn on **Available balance → Automation → Low balance alert** and set the threshold; requires the **Payment management** permission |
+| Channel | SMS | SMS + email |
+
+The wallet alert is documented in full under [Pricing → Low balance alert](/en/platform/pricing#low-balance-alert).
+
+## Endpoints and fields
+
+---
+
+These are the two endpoints the console's billing page calls. Both require an authenticated member, and neither ever writes anything for an account that has not been enabled.
+
+### `POST /safari/credits/overview`
+
+Takes an empty body. Returns the account's current credits state:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `enabled` | boolean | Whether AI SRE is enabled for the account. For an account that has never been enabled it keeps its default along with the allowance fields below: `false`, empty period, zero balances, `payg_cap_amount` `null` |
+| `free_mode` | boolean | Trial mode: usage is metered but never charged |
+| `visible` | boolean | Whether the billing entry (the subscription tab's AI SRE tab, the purchase page) is open for this account |
+| `period_id` | string | Identifier of the current billing period |
+| `period_start_sec` / `period_end_sec` | integer (Unix seconds) | Start and end of the current period. The bounds are local midnights in `timezone`, so they must be formatted in that zone |
+| `timezone` | string | The IANA zone the period was computed in |
+| `gift_remaining_nano` | integer | Trial credits remaining, in nano-credits: `1 credit = 1,000,000,000` |
+| `package_remaining_nano` | integer | Combined unexpired package credits remaining, same unit |
+| `package_earliest_expires_at_sec` | integer (Unix seconds) | Earliest expiry among those packages; 0 when there are none |
+| `payg_used_amount` | money (¥) | Pay-as-you-go spend so far this period |
+| `payg_cap_amount` | money (¥) or `null` | This period's pay-as-you-go cap. `null` = unlimited, `0` = PAYG forbidden, positive = the monthly cap; the field is never omitted, and `null` and `0` are two different values on the wire |
+| `blocked_reason` | string | The server's admission verdict: `not_enabled` / `balance_exhausted` / `wallet_insufficient`; empty means nothing is blocking the account |
+| `blocked_message` | string | The user-facing sentence for that verdict — the same one a genuinely refused run returns |
+
+### `POST /safari/credits/limit`
+
+The body carries a single field, `monthly_limit_amount`: a positive amount sets the monthly cap, `0` forbids pay-as-you-go, and omitting the field or sending `null` means unlimited (a negative amount is rejected by request validation). These map one-to-one onto the three states of `payg_cap_amount`. It **sets** the cap outright rather than patching one field of a larger object, so "field omitted" and "explicit null" mean the same thing. On success it returns the resulting overview, in the same shape as above.
+
+## Related pages
+
+---
+
+<CardGroup cols={2}>
+  <Card title="AI SRE credit package purchase agreement" icon="file-contract" href="/en/compliance/ai-sre-credit-package-purchase-agreement">
+    The formal terms: package tiers and prices, metered items, deduction order, validity, and refunds.
+  </Card>
+  <Card title="Console" icon="comments" href="/en/ai-sre/sessions">
+    How the account-level billing block banner behaves, and what the console shows when a run is refused.
+  </Card>
+  <Card title="Pricing" icon="tags" href="/en/platform/pricing">
+    Account top-up and available balance, the wallet low balance alert, and auto-charge.
+  </Card>
+  <Card title="Permission design" icon="user-shield" href="/en/platform/permission-design">
+    How permission points such as Payment Read, Payment Manage, and the wallet purchase permission map to roles.
+  </Card>
+</CardGroup>

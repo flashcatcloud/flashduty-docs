@@ -188,9 +188,72 @@ Endpoints are grouped by service and hang off the client: the call convention is
 
 `client.DataSources.ToolsInvoke` (`POST /monit/datasource/tools/invoke`, `monit-datasource-tools-invoke`) executes one deterministic tool against a configured datasource: `tool` is a single tool name prefixed by the datasource type (e.g. `mysql.overview`), and `params` is the tool-specific JSON parameters (omitted means `{}`; an explicit `null` is invalid). Alongside diagnostic tools, the entry supports `<type>.query` query tools (`prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`); the `/monit/query/data` entry stays unchanged. It requires all currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation), and there is no tool catalog, no automatic replay, and no fallback to legacy diagnose. The request body limit is 128 KiB, the complete success response limit is 10 MiB, and the tool timeout is at most 25 seconds; the response is a `DatasourceToolResult` (`data` is tool-specific JSON, never null, `summary` is optional, and a `truncated` object with `reason` indicates truncation).
 
+`<type>.query` query tools have dedicated request-parameter types on the Go side; build the request with `flashduty.NewDatasourceQueryInvokeRequest(datasourceID, tool, params)`, which marshals the params struct into `DatasourceToolInvokeRequest.Params` and returns an error when `params` is nil — query tools must not omit their params.
+
+Optional fields on these types are always pointers: leave one nil and the key is omitted from the request entirely, so the server applies its default; an explicit `null` is rejected by the server, so there is no way to send one. To send a zero value explicitly (for example `powersql` false), take a pointer with `flashduty.Bool` / `flashduty.Int64` / `flashduty.String`.
+
+| Tool | Params type | Type-specific fields |
+|------|-------------|----------------------|
+| `prometheus.query` | `flashduty.PrometheusQueryParams` | none |
+| `mysql.query` | `flashduty.MySQLQueryParams` | none |
+| `postgres.query` | `flashduty.PostgresQueryParams` | none |
+| `oracle.query` | `flashduty.OracleQueryParams` | none |
+| `clickhouse.query` | `flashduty.ClickHouseQueryParams` | none |
+| `elasticsearch.query` | `flashduty.ElasticsearchQueryParams` | none |
+| `loki.query` | `flashduty.LokiQueryParams` | `Limit`, `Direction` |
+| `victorialogs.query` | `flashduty.VictoriaLogsQueryParams` | `Limit`, `Direction` |
+| `sls.query` | `flashduty.SLSQueryParams` | `Project`, `Logstore`, `PowerSQL`, `Limit`, `Direction` |
+| `tencent_cls.query` | `flashduty.TencentCLSQueryParams` | `Region`, `TopicID`, `Syntax`, `Limit`, `Direction` |
+
+Every params type consists of `Expr` plus `Execution` (`flashduty.DatasourceQueryExecution`). The `Expr` dialect depends on the datasource type: PromQL for `prometheus`, LogQL for `loki`, LogsQL for `victorialogs`, a single read-only SQL statement for `mysql` / `postgres` / `oracle` / `clickhouse`, a single SQL statement for `elasticsearch` (ES DSL queries are not supported), and each platform's own search syntax for `sls` / `tencent_cls` (CLS's `Syntax` is `cql` or `lucene`).
+
+```go
+req, err := flashduty.NewDatasourceQueryInvokeRequest(
+	12345, "prometheus.query",
+	&flashduty.PrometheusQueryParams{
+		Expr: `sum(rate(http_requests_total[5m]))`,
+		Execution: flashduty.DatasourceQueryExecution{
+			Kind: "instant",
+			ToMS: flashduty.Int64(1779514631000),
+		},
+	},
+)
+if err != nil {
+	return err
+}
+
+res, _, err := client.DataSources.ToolsInvoke(ctx, req)
+if err != nil {
+	return err
+}
+
+// res.Data is the tool-specific JSON; res.Summary is optional.
+fmt.Println(string(res.Data))
+```
+
+`DatasourceQueryExecution.Kind` selects the evaluation mode:
+
+| `kind` | Meaning | Time fields |
+|--------|---------|-------------|
+| `instant` | evaluate once at a single point in time | `ToMS` is the evaluation timestamp; `FromMS` is optional for Loki only (`instant` keeps the full time context so `$__auto` ranges resolve) and is rejected by Prometheus |
+| `range` | evaluate a stepped series over `[FromMS, ToMS]` | `FromMS` and `ToMS` are required; `MaxDataPoints` is required and bounds the returned points (the server computes the step); `MinStepSeconds` is an optional positive lower bound for the computed step |
+| `window` | evaluate one bounded window | `FromMS` and `ToMS` are required |
+
+The accepted `kind` values differ by type: `prometheus` and `loki` accept `instant` / `range`; `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `sls`, and `tencent_cls` accept `window` only; `victorialogs` uses `window` for raw logs (where `Limit` / `Direction` are allowed) and `instant` / `range` for stats queries, which require `FromMS` and reject `Limit` / `Direction`. `Limit` and `Direction` (`latest` / `earliest`) only bound raw-log results, not SQL rows or scanned data: 1–1000 for `loki`, `victorialogs`, and `tencent_cls`, and 1–100 for `sls`. `step_seconds` is a reserved field the SDK does not model — do not send it.
+
+These types are hand-written and do not take part in code generation: `params` travels as raw JSON, so they are not reachable from any requestBody and the generator would treat them as response-side types (epoch millis would become `TimestampMilli` marshaling to RFC 3339 strings, and optional fields would lose `omitempty`).
+
+`client.Applications` (RUM applications) adds a remote-config method group for reading and writing a RUM application's remote configuration: `RemoteConfigReadGet` (the live remote configuration and the version it is stored under), `RemoteConfigReadHistoryList` (the published configuration versions), `RemoteConfigReadPreview` (evaluate a draft configuration against a client context without publishing it), `RemoteConfigWriteUpdate` (publish a complete new version), and `RemoteConfigWriteHistoryRevert` (republish an earlier version's content as a new version).
+
+`client.Schedules.ByPerson` (`POST /schedule/by-person`) returns a member's current and next on-call shifts plus every enabled schedule they participate in.
+
 For `client.DataSources`, the `payload` selects a type-specific configuration block by `type_ident`. Fifteen `type_ident` values are allowed: `prometheus`, `loki`, `mysql`, `oracle`, `postgres`, `clickhouse`, `elasticsearch`, `sls`, `tencent_cls`, `victorialogs`, plus the new diagnostic-only types `redis_node`, `redis_sentinel`, `mongodb_mongod`, `mongodb_mongos`, and `kafka` — diagnostic-only types always have `alerting_enabled` false (which does not block non-alerting queries or tools) and reject true. Connection address rules: Redis/MongoDB diagnostic types take a single `host:port` (bracket IPv6), with no URI, userinfo, or query; `kafka` takes 1–32 unique comma-separated `host:port` bootstrap addresses (at most 4096 characters after normalization, and the payload has no broker list); for `mongodb_mongod` / `mongodb_mongos` the configuration block's `auth_source` defaults to `admin`, username and password must be configured together, and client certificates are unsupported; the Redis node configuration's `database` defaults to 0. Sensitive fields such as the diagnostic types' `password` and Kafka's `tls_key` support `${env:NAME}` references: literal values are omitted from responses (only `${env:...}` references are echoed back), omitting the fields on update preserves the stored values, and explicitly sending an empty string clears them.
 
 `enabled` and `alerting_enabled` are independent: `enabled` (whether business execution is enabled) defaults to true on create; `alerting_enabled` (whether alert evaluation is allowed; alerting also requires `enabled` true and an alerting-capable type) defaults to true for alerting types and false for diagnostic-only types on create. On update, omitting either preserves the current value and an explicit `null` is invalid; disabling (`enabled` false) is rejected with a conflict when enabled rules reference the datasource. Also note that `payload` is always `null` in `/monit/datasource/list` responses (the list query does not read the payload column); it is populated in create/update/info responses.
+
+The alert-rule read and write methods on `client.AlertRules` are now the V2 ones: `ReadInfoV2` for detail, `WriteCreateV2` to create, and `WriteUpdateV2` to update — all take and return `*flashduty.AlertRuleV2` (which carries the v2 recovery and ending modes). `ReadList` still returns basic rule information only; call `ReadInfoV2` when you need the full configuration. The earlier non-V2 `ReadInfo` / `WriteCreate` / `WriteUpdate` no longer exist in the SDK, and `ReadCounterNode` / `ReadDstypes` were dropped as well, so rename accordingly when you upgrade.
+
+Also note that optional array fields on request types are presence-based: leave the slice nil and the key is omitted, so the server keeps the stored value; pass an empty slice and `[]` is sent, clearing the field. `AlertRuleV2.InvestigationTargets` (at most 20 entries) is currently the only such field, so clearing the drill-down entries means passing an explicitly empty slice.
 
 <Note>
 All identifiers, service field names, and method names match the generated code. For exactly which methods each service has and their request and response types, rely on `services_gen.go` and the per-service files, plus the [Open API reference](/en/openapi/introduction).

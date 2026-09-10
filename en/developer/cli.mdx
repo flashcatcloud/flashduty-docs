@@ -181,7 +181,7 @@ flashduty member info-reset [flags] # Update a member's profile
 flashduty member invite [flags]     # Invite new members (up to 20 per call)
 ```
 
-`member list` supports `--query` (free-text search by name or email), `--role-id`, `--page`, `--limit`, `--orderby`, `--asc`.
+`member list` supports `--query` (free-text search by name or email), `--member-id` (exact match on member ID — returns only that member), `--role-id`, `--page`, `--limit`, `--orderby`, `--asc`.
 
 `member info-reset` identifies the member by exactly one of `--member-id`, `--member-name`, `--email`, `--phone`, or `--ref-id`; the fields to change go into the required body via `--data '{"updates":{...}}'`. With `--from api`, an updated email or phone is marked verified directly when the account has member invites disabled.
 
@@ -366,6 +366,24 @@ Common `session-replay-segments` flags:
 | `--url-mode` | When `true`, return JSON containing presigned download URLs. By default it is `false` and streams segment bytes directly. URLs are valid for one hour. |
 | `--view-id` | Return segments for one view only; omit it to page through the whole session. |
 
+#### Remote configuration (application-remote-config-*)
+
+Remote configuration pushes collection and privacy parameters (sampling rates, Session Replay privacy level, custom values) to an application over the air, with no code change or redeploy. Five commands cover reading, publishing, reverting, and previewing; the list of settings and the rules for when a version takes effect live in [Application Management · Remote Configuration](/en/rum/quickstart/app-management#remote-configuration).
+
+```bash
+flashduty rum application-remote-config-get <application-id>              # Get the live configuration and the version it is stored under
+flashduty rum application-remote-config-history-list <application-id>    # List published versions
+flashduty rum application-remote-config-preview <application-id> [flags] # Evaluate a draft configuration against a simulated client (publishes nothing)
+flashduty rum application-remote-config-update <application-id> [flags]  # Publish a complete new configuration
+flashduty rum application-remote-config-history-revert <application-id> --version <v>  # Republish an earlier version's content as a new version
+```
+
+- `get` returns `config` (the whole per-application configuration), `version` (the version the live configuration is stored under — `0` means the application has never been configured), and `updated_at`.
+- `history-list` returns a `{items, has_next_page, total}` envelope whose `items` carry `version`, `content_hash`, `updated_by_name`, `reason`, and `updated_at`; page with `--page` (0-based) and `--limit` (default 20, max 100), and sort with `--orderby` (`updated_at`/`version`) plus `--asc`.
+- `preview` describes the simulated client with `--env`, `--app-version`, and `--sdk` (`--sdk` looks like `web@2.4.1`), and takes the draft `config` via `--data`; it returns `hit_rule_index` (the 0-based index of the rule that decided the result, or `-1` when only the default applied) and `values` (the knobs actually sent). It only evaluates — nothing is published and the live configuration is unchanged.
+- `update` requires `config` (passed via `--data`) and publishes a complete new configuration; `history-revert` requires `--version` (min 1).
+- Both `update` and `history-revert` accept `--reason` (the operator's note, ≤255 characters) and return the new version number.
+
 #### Error ingestion rules (error-ingestion-rules-*)
 
 Error ingestion rules filter or rewrite the error events an application reports:
@@ -478,8 +496,17 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `<datasource-id>` | Datasource ID (positional, required, from `monit datasource-list`, min 1) |
 | `--tool` | Tool name (required), prefixed by the datasource type, e.g. `prometheus.query`, `mysql.overview`, `redis_node.slowlog`; 1–128 chars |
 | `--params` | Tool parameters JSON (may be omitted, meaning `{}`; pass `-` to read a larger payload from standard input; an explicit `null` is invalid) |
+| `--account-id` | Optional consistency check; must equal the authenticated account. Omitted means the field is not sent |
 
-Query tools return a complete `explore_result.v1` structured result: `format` is always `explore_result.v1`, and `result.kind` is one of `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
+Query-tool parameters are defined per datasource type, but they all share an `expr` plus `execution` skeleton:
+
+- `execution.kind` is `instant`, `range`, or `window`; `execution.from_ms` / `execution.to_ms` are Unix **millisecond** timestamps, and `range` additionally needs `max_data_points`.
+- Per-type extras: log datasources can add `limit` and `direction` (which apply to raw-log retrieval only); `sls` requires `project` and `logstore`; `tencent_cls` requires `region`, `topic_id`, and `syntax`; SQL types (`mysql`, `postgres`, `oracle`, `clickhouse`) take a single read-only statement executed with `window`.
+- The CLI only assembles the request and renders the result — the server validates the tool name and the parameters. Fill them according to the datasource type's actual schema rather than guessing from the command list.
+
+Query tools require Edge Explore support (protocol v0.68.0); when no edge satisfies it, the CLI reports `edge_upgrade_required`, `mixed_edge_versions`, or `edge_version_unknown` as returned and never rotates edges or falls back to another endpoint.
+
+Query tools return a complete `explore_result.v1` structured result: `format` is always `explore_result.v1`, and `result.kind` is one of `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`); query tools never synthesize `summary` or `truncated` (diagnostic tools may carry both). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
 
 ### monit datasource-tools-invoke — Datasource diagnostics
 
@@ -637,7 +664,7 @@ In `json`/`toon` mode the rows default to the compact fields `incident_id`, `tit
 
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **340 API operations**, and the CLI generates resource-organized commands for **337** of them; the remaining operations (e.g. `session-read-export`) are provided by hand-written commands (`session export` / `safari session-export`). In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The OpenAPI spec the CLI currently pins (go-flashduty v0.15.2) contains **337 API operations** across **37 tags**; the generator emits commands for **334** of those operationIds and organizes them into the **37** generated command groups, while the remaining operations (e.g. `session-read-export`) are provided by hand-written commands (`session export` / `safari session-export`) grouped by resource at the top level. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
 - **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
