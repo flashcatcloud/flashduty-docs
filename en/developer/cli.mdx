@@ -181,7 +181,7 @@ flashduty member info-reset [flags] # Update a member's profile
 flashduty member invite [flags]     # Invite new members (up to 20 per call)
 ```
 
-`member list` supports `--query` (free-text search by name or email), `--role-id`, `--page`, `--limit`, `--orderby`, `--asc`.
+`member list` supports `--query` (free-text search by name or email), `--role-id`, `--member-id` (return only the member with this ID), `--page`, `--limit`, `--orderby`, `--asc`.
 
 `member info-reset` identifies the member by exactly one of `--member-id`, `--member-name`, `--email`, `--phone`, or `--ref-id`; the fields to change go into the required body via `--data '{"updates":{...}}'`. With `--from api`, an updated email or phone is marked verified directly when the account has member invites disabled.
 
@@ -347,6 +347,30 @@ Core fields for `application-create` / `application-update`:
 `application-webhook-test` returns `ok`, `status_code`, and `message`, which makes it suitable for verifying that a RUM alert webhook really accepts a sample delivery from Flashduty.
 </Note>
 
+#### Remote configuration (application-remote-config-*)
+
+Remote configuration holds per-application collection and privacy parameters; once published, an SDK picks it up on its next new session. For what each setting means and how publishing and activation work in the console, see [Application Management · Remote Configuration](/en/rum/quickstart/app-management#remote-configuration):
+
+```bash
+flashduty rum application-remote-config-get <application-id>             # Read the live configuration and its version
+flashduty rum application-remote-config-history-list <application-id>    # List published history versions
+flashduty rum application-remote-config-preview <application-id> [flags] # Preview the outcome for a simulated client, without publishing
+flashduty rum application-remote-config-history-revert <application-id> --version <v>  # Revert to a history version
+flashduty rum application-remote-config-update <application-id> [flags]  # Publish a complete new configuration
+```
+
+The complete configuration (a `config` object with `enabled`, `activation`, `default`, `rules`, `custom`, and `refresh_on_foreground`) goes in via `--data`; `--data` may also carry the whole request body, and positional arguments and typed flags override fields of the same name in it.
+
+| Command | Key arguments |
+|---------|---------------|
+| `application-remote-config-get` | None (`<application-id>` is positional); returns the live configuration plus `version` and `updated_at`, where a `version` of 0 means the application has never been configured |
+| `application-remote-config-history-list` | `--page` (0-based page index), `--limit` (default 20, max 100), `--orderby` (`updated_at`, the default, or `version`), `--asc` |
+| `application-remote-config-preview` | `--env`, `--app-version`, and `--sdk` describe the simulated client; the draft `config` goes in via `--data` and, when omitted, the live configuration is previewed instead. Returns the index of the rule that decided the result (`hit_rule_index`, `-1` when only the default applied) and the `values` finally delivered |
+| `application-remote-config-history-revert` | `--version` (required, the history version to republish, min 1); `--reason` (optional note, up to 255 characters — the console fills in `rolled back to vN` when it is empty) |
+| `application-remote-config-update` | `config` in `--data` (required, a full replacement rather than a patch); `--reason` (optional note on why, up to 255 characters, stored verbatim) |
+
+Both a publish and a revert allocate a new version number (a revert never reuses the old one). A change lands on new sessions: with `activation` set to `next_session` (the default), running sessions are untouched, while `immediate` makes a client end its current session as soon as the change arrives so a new session starts under the new configuration; publishing `enabled: false` turns configuration delivery off, and clients fall back to their SDK initialization settings.
+
 #### Session replay
 
 ```bash
@@ -479,6 +503,8 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `--tool` | Tool name (required), prefixed by the datasource type, e.g. `prometheus.query`, `mysql.overview`, `redis_node.slowlog`; 1–128 chars |
 | `--params` | Tool parameters JSON (may be omitted, meaning `{}`; pass `-` to read a larger payload from standard input; an explicit `null` is invalid) |
 
+Query tools and diagnostic tools sit behind different Edge version gates: query tools submit through the Explore execution path and require **all** currently online routable Edge sessions in the cluster to support the Explore query protocol **v0.68.0**, while diagnostic tools submit through the base invoke protocol and require **v0.71.0** (see `monit datasource-tools-invoke` below). When the versions do not qualify, the command fails with an error code: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed versions in the cluster, with only some sessions qualifying), `edge_version_unknown` (an Edge session reports a version the platform cannot recognize), or `no_active_edge` (no routable online Edge). On any of these, do not rotate Edges or fall back to the legacy entry point.
+
 Query tools return a complete `explore_result.v1` structured result: `format` is always `explore_result.v1`, and `result.kind` is one of `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
 
 ### monit datasource-tools-invoke — Datasource diagnostics
@@ -501,12 +527,12 @@ flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowl
 Semantics and limits:
 
 - **No tool catalog, no auto-replay, no fallback**: one call runs exactly one named tool; fill parameters according to the datasource tool's contract rather than guessing from the command list. Alongside diagnostic tools, the entry also supports `<type>.query` query tools (`prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`).
-- Requires **all** currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation); normal datasource queries retain their existing version compatibility.
+- Requires **all** currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation); query tools (`<type>.query`) go through the Explore execution path instead and carry an additional floor of the Explore query protocol v0.68.0 — a cluster that only supports older versions fails the query tool too, with no fallback.
 - Request body limit 128 KiB; complete success response limit 10 MiB; tool timeout at most 25 seconds.
 - The datasource must have `enabled=true`; `alerting_enabled=false` does not block diagnostics.
 - Response: `data` (tool-specific JSON evidence, preserved without conversion, never null, no legacy diagnose envelope), `tool`, `datasource_id`, optional `summary`, and a `truncated` object (with `reason`; its presence indicates truncation).
 
-Errors are returned as-is; common codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `no_active_edge` (no routable online Edge), `tool_not_supported` (tool unavailable), `invalid_request` (fix the parameters), `source_too_large` / `result_too_large` (narrow the request). On Edge version issues, do not rotate Edges or fall back to the legacy diagnose.
+Errors are returned as-is; common codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `edge_version_unknown` (an Edge session reports an unrecognized version; returned on the query-tool path), `no_active_edge` (no routable online Edge), `tool_not_supported` (tool unavailable), `invalid_request` (fix the parameters), `source_too_large` / `result_too_large` (narrow the request). On Edge version issues, do not rotate Edges or fall back to the legacy diagnose.
 
 ### monit — Datasource and alert-expression preview
 
@@ -637,7 +663,7 @@ In `json`/`toon` mode the rows default to the compact fields `incident_id`, `tit
 
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **340 API operations**, and the CLI generates resource-organized commands for **337** of them; the remaining operations (e.g. `session-read-export`) are provided by hand-written commands (`session export` / `safari session-export`). In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The current OpenAPI contains **337 API operations**, and the CLI generates resource-organized commands for **334** of them; the remaining three — the streaming export `session-read-export` and the multipart uploads `mapping-data-write-upload` and `skill-write-upload` — are provided by hand-written commands (`session export`, `enrichment mapping-data-upload`, `safari skill-upload`). In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
 - **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
@@ -775,13 +801,20 @@ Table view with no column truncation — useful for copy-paste or wide terminals
 
 #### Generated-command output bound
 
-Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply the same 16 KiB bound to **list-shaped** responses in `json`/`toon` mode, mirroring the curated commands' behavior, with every note going only to stderr and stdout left untouched:
+Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply a 16 KiB bound to **list-shaped** responses in `json`/`toon` mode. The reduction has three tiers, plus a machine-readable marker:
 
 1. **The whole page overflows**: only the leading rows that fit are emitted, with every value intact, and a stderr note reports how many of the N/M rows were emitted.
 2. **A single row alone overflows the budget**: that row's string values are shortened and end with `...`; a stderr note names the clipped fields. Identifier fields (keys ending in `_id` or `_key`) are never shortened.
 3. **A row cannot be reduced enough to fit**: the command fails and names the largest fields (up to 3, with their byte sizes); lower `--limit` or reduce the output fields and retry.
 
-**Detail-shaped single objects** (e.g. `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands mostly have no `--fields`; for complete JSON lower `--limit` and page through with `--page` (e.g. `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
+**A reduced list envelope is rebuilt with the reduction written into the payload.** A list envelope is a response whose row array is named `items`, `docs`, or `list` and whose siblings are all scalars (`total`, `has_next_page`, `search_after_ctx`, …) — `monit datasource-list` and `safari session-list` are examples. Once a reduction happens, the CLI rebuilds that envelope and adds fields to the payload, so a script sees the reduction without parsing stderr:
+
+- **Rows withheld**: the payload carries `truncated: true` together with `emitted_rows: N` (N is the number of rows actually emitted). The envelope's `total`, `has_next_page`, and `search_after_ctx` still echo the page as the server returned it, so they **cannot** tell you whether you got everything — a page cut to 7 of 100 rows keeps the original pagination fields. To collect all rows, re-request with a `--limit` no larger than the rows you actually received, then follow the returned cursor.
+- **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or switch to a curated command that supports field projections.
+
+**Bare top-level arrays** (such as the curated `incident list` and `insight incidents`) have nowhere to carry the marker, so a reduction is announced on stderr only.
+
+**Detail-shaped single objects** (e.g. `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands mostly expose no flag that narrows their output (the occasional `--fields` is a request-body write selector, not an output projection); for complete JSON lower `--limit` and page through with `--page` (e.g. `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
 
 ### Field projections for structured output
 
