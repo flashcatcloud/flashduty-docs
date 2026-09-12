@@ -181,7 +181,7 @@ flashduty member info-reset [flags] # 更新成员资料
 flashduty member invite [flags]     # 邀请新成员（单次最多 20 人）
 ```
 
-`member list` 支持 `--query`（姓名/邮箱关键字搜索）、`--role-id`、`--page`、`--limit`、`--orderby`、`--asc`。
+`member list` 支持 `--query`（姓名/邮箱关键字搜索）、`--role-id`、`--member-id`（按成员 ID 过滤，只返回该成员）、`--page`、`--limit`、`--orderby`、`--asc`。
 
 `member info-reset` 通过 `--member-id`、`--member-name`、`--email`、`--phone` 或 `--ref-id` 之一定位成员，要修改的字段经 `--data '{"updates":{...}}'` 传入（必填）；`--from api` 在账户关闭成员邀请时，可将更新后的邮箱/手机号直接标记为已验证。
 
@@ -347,6 +347,30 @@ flashduty rum application-delete <application-id>         # 删除应用
 `application-webhook-test` 会返回 `ok`、`status_code` 和 `message`，可用于验证 RUM 告警 Webhook 是否真正收到了平台发出的测试事件。
 </Note>
 
+#### 远程配置（application-remote-config-*）
+
+远程配置按应用维护一份采集与隐私参数，发布后由 SDK 在下一个新会话生效。控制台侧的配置项含义、发布与生效方式见 [应用管理 · 远程配置](/zh/rum/quickstart/app-management)：
+
+```bash
+flashduty rum application-remote-config-get <application-id>             # 读取当前生效的配置与版本号
+flashduty rum application-remote-config-history-list <application-id>    # 列出已发布的历史版本
+flashduty rum application-remote-config-preview <application-id> [flags] # 用模拟客户端上下文预览命中结果，不发布
+flashduty rum application-remote-config-history-revert <application-id> --version <v>  # 回滚到历史版本
+flashduty rum application-remote-config-update <application-id> [flags]  # 发布一份完整的新配置
+```
+
+完整配置（`config` 对象：`enabled`、`activation`、`default`、`rules`、`custom`、`refresh_on_foreground`）经 `--data` 传入；`--data` 也可携带整个请求体，位置参数与具名标志会覆盖其中的同名字段。
+
+| 命令 | 关键参数 |
+|------|----------|
+| `application-remote-config-get` | 无参数（`<application-id>` 为位置参数）；返回当前配置、`version` 与 `updated_at`，`version` 为 0 表示从未配置过 |
+| `application-remote-config-history-list` | `--page`（从 0 开始的页码）、`--limit`（默认 20，上限 100）、`--orderby`（`updated_at`（默认）或 `version`）、`--asc` |
+| `application-remote-config-preview` | `--env`、`--app-version`、`--sdk` 描述模拟客户端上报的上下文；待评估的草稿 `config` 经 `--data` 传入，省略时预览当前生效的配置。返回命中的规则序号 `hit_rule_index`（仅默认配置生效时为 `-1`）与最终下发的 `values` |
+| `application-remote-config-history-revert` | `--version`（必填，要重新发布的历史版本号，最小 1）；`--reason`（可选备注，最长 255 字符，省略时由控制台填入 `rolled back to vN`） |
+| `application-remote-config-update` | `--data` 中的 `config`（必填，整体覆盖，不是增量补丁）；`--reason`（可选备注，最长 255 字符，原样存储） |
+
+发布与回滚都会分配一个新版本号（回滚不会复现旧版本号）。配置变更对新会话生效：`activation` 为 `next_session`（默认）时运行中的会话不受影响，为 `immediate` 时客户端收到配置后结束当前会话、由新会话按新配置运行；发布 `enabled: false` 可关闭配置下发，各端回落到 SDK 初始化设置。
+
 #### 会话回放
 
 ```bash
@@ -479,6 +503,8 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `--tool` | 工具名（必填），以数据源类型为前缀，如 `prometheus.query`、`mysql.overview`、`redis_node.slowlog`；1–128 字符 |
 | `--params` | 工具参数 JSON（可省略，省略即 `{}`；参数较长时传 `-` 从标准输入读取；显式 `null` 不合法） |
 
+查询工具与诊断工具的 Edge 版本门禁不同：查询工具经 Explore 执行路径提交，要求所选集群内**全部**当前在线可路由的 Edge 会话支持 Explore 查询协议 **v0.68.0**；诊断工具经基础调用协议提交，要求 **v0.71.0**（详见下文 `monit datasource-tools-invoke`）。版本不满足时命令直接失败并返回错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合，只有部分会话支持）、`edge_version_unknown`（集群内存在版本无法识别的 Edge）、`no_active_edge`（没有可用的在线 Edge）；收到这些错误时不要轮换 Edge、也不要回退到旧版入口。
+
 查询工具返回完整的 `explore_result.v1` 结构化结果：`format` 固定为 `explore_result.v1`，`result.kind` 为 `samples`（带完整标签集的即时样本）、`frames`（类型化表格/时序帧）或 `logs`（原始日志，含 `applied_limit` 与 `has_more`）三者之一。诊断工具的返回结构见下文 `monit datasource-tools-invoke`。
 
 ### monit datasource-tools-invoke — 数据源诊断工具
@@ -501,12 +527,12 @@ flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowl
 语义与限制：
 
 - **无工具目录、无自动重试、无回退**：一次调用只执行一个命名工具，参数需按各数据源工具约定填写，不要从命令行列表猜测。除诊断工具外，入口还支持 `<type>.query` 查询工具（`prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`）。
-- 要求所选集群内**全部**当前在线可路由的 Edge 会话支持 v0.71.0 基础调用协议（个别工具可能要求更新的实现）；普通数据源查询不受此版本限制。
+- 要求所选集群内**全部**当前在线可路由的 Edge 会话支持 v0.71.0 基础调用协议（个别工具可能要求更新的实现）；查询工具（`<type>.query`）走 Explore 执行路径，另有 Explore 查询协议 v0.68.0 的下限——集群只支持旧版时查询工具同样失败，不会回退到旧入口。
 - 请求体 ≤128 KiB；完整成功响应 ≤10 MiB；工具超时 ≤25 秒。
 - 需要数据源 `enabled=true`；`alerting_enabled=false` 不阻塞诊断。
 - 返回值：`data`（工具特定的 JSON 证据，原样保留、永不为 null，不含旧 diagnose 信封）、`tool`、`datasource_id`、可选 `summary`，以及 `truncated` 对象（含 `reason`，存在即表示结果被截断）。
 
-错误按原样返回，常见错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合）、`no_active_edge`（无可用在线 Edge）、`tool_not_supported`（工具不支持）、`invalid_request`（修正参数）、`source_too_large` / `result_too_large`（收窄请求范围）。出现 Edge 版本问题时不要轮换 Edge 或回退到旧版 diagnose。
+错误按原样返回，常见错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合）、`edge_version_unknown`（集群内存在版本无法识别的 Edge，查询工具路径返回）、`no_active_edge`（无可用在线 Edge）、`tool_not_supported`（工具不支持）、`invalid_request`（修正参数）、`source_too_large` / `result_too_large`（收窄请求范围）。出现 Edge 版本问题时不要轮换 Edge 或回退到旧版 diagnose。
 
 ### monit — 监控数据源与规则表达式预览
 
@@ -637,7 +663,7 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **340 个 API 操作**，CLI 为其中 **337 个** 生成对应命令，其余操作（如 `session-read-export`）以手工实现命令提供（`session export` / `safari session-export`），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。当前 OpenAPI 含 **337 个 API 操作**，CLI 为其中 **334 个** 生成对应命令，其余 3 个——流式导出的 `session-read-export` 与 multipart 表单上传的 `mapping-data-write-upload`、`skill-write-upload`——以手工实现命令提供（`session export`、`enrichment mapping-data-upload`、`safari skill-upload`），并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
 - **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
@@ -775,13 +801,20 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 
 #### 生成命令的输出上限
 
-由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari session-list`、`monit datasource-list`、`safari a2a-agent-list` 等），其 `json` / `toon` 输出对**列表形态**的响应同样按 16 KiB 上限处理（与精选命令的两级行为一致，提示只写 stderr、不改写 stdout）：
+由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari session-list`、`monit datasource-list`、`safari a2a-agent-list` 等），其 `json` / `toon` 输出对**列表形态**的响应按 16 KiB 上限处理。缩减分三级，另外会有一个机读标记：
 
 1. **整页超限**：只输出能完整放下的前几行，每个值保持原样，stderr 提示实际输出了 N/M 行、其余行未输出。
 2. **单行本身超限**：该行的字符串值以 `...` 截短，stderr 点名被截字段；标识符字段（以 `_id` / `_key` 结尾）不会被截短。
 3. **行无法缩减到上限以内**：命令报错并点名字节数最大的字段（最多 3 个），请调低 `--limit` 或减少输出字段后重试。
 
-**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令大多没有 `--fields`，需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
+**列表信封会被重建并写入缩减标记**。列表信封指行数组名为 `items` / `docs` / `list`、同级只有 `total`、`has_next_page`、`search_after_ctx` 等标量字段的响应（如 `monit datasource-list`、`safari session-list`）；一旦发生缩减，CLI 会重建该信封并在 payload 中补写字段，脚本无需解析 stderr 也能发现缩减：
+
+- **整行被丢弃**：写入 `truncated: true` 与 `emitted_rows: N`（N 为实际输出的行数）。此时信封中的 `total`、`has_next_page`、`search_after_ctx` 仍是服务端原始分页的原样回显，**不能**用来判断是否已取全——被截成「100 行中前 7 行」的一页照样带着原来的分页字段。要取全请按实际收到的行数收窄 `--limit` 重新请求，再沿返回的游标继续翻页。
+- **只有长值被截短**（没有丢行）：只写 `truncated: true`，stderr 会点名被截字段。重新请求无法找回这些值，请收窄筛选条件、减少每页行数，或改用支持字段投影的精选命令。
+
+**顶层数组形态**的响应（如精选命令 `incident list`、`insight incidents`）没有信封可承载标记，缩减仍只写 stderr。
+
+**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令大多没有可收窄输出的标志（个别命令的 `--fields` 是请求体的字段选择器，不作用于输出）；需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
 
 ### 结构化输出的字段投影
 

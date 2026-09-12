@@ -119,7 +119,7 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 
 | Option | 说明 |
 |--------|------|
-| `WithBaseURL(raw string)` | 覆盖 API 基础地址（默认 `https://api.flashcat.cloud`）。私有化部署用它指向自有网关；非法 URL 会在 `NewClient` 阶段报错 |
+| `WithBaseURL(raw string)` | 覆盖 API 基础地址（默认 `https://api.flashcat.cloud`）。私有化部署用它指向自有网关；地址可带路径前缀（如 `https://gateway.example.com/api`，请求会打到 `/api/<endpoint>`，结尾带不带 `/` 均可）；非法 URL 会在 `NewClient` 阶段报错 |
 | `WithTimeout(d time.Duration)` | 设置底层 HTTP 客户端的整体超时 |
 | `WithUserAgent(ua string)` | 设置每个请求携带的 `User-Agent` 头 |
 | `WithHTTPClient(hc *http.Client)` | 替换底层 `*http.Client`;传入 `nil` 时忽略 |
@@ -143,7 +143,7 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 | `client.Incidents` | 故障 |
 | `client.Alerts` | 告警 |
 | `client.Channels` | 协作空间 |
-| `client.Schedules` | 排班 |
+| `client.Schedules` | 排班；`ByPerson` 按成员（`ScheduleByPersonRequest.person_id`）查询当前与下一次值班区间（`MemberOncallInterval`，起止时间为 `Timestamp`）及所属启用值班表 |
 | `client.Licenses` | On-call 许可证 |
 | `client.Calendars` | 日历 |
 | `client.StatusPages` | 状态页 |
@@ -186,7 +186,26 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 
 `client.Diagnostics.QueryData` 通过 `POST /monit/query/data` 执行同步查询，返回稳定的 `query_result.v1` 结构化结果（`result.kind` 为 `frames` / `records` / `samples` 之一），要求 monit-edge v0.65.0 及以上版本。日志模式和指标趋势分析统一使用 `client.DataSources.ToolsInvoke`，工具名称为 `prometheus.metric_trends`、`loki.log_patterns` 或 `victorialogs.log_patterns`。
 
+`client.Applications`（RUM 应用）除应用管理外还覆盖 **RUM 远程配置**的 5 个方法：`RemoteConfigReadGet`（`POST /rum/application/remote-config/get`，读取当前生效的配置与 `version`）、`RemoteConfigReadHistoryList`（`/rum/application/remote-config/history/list`，分页列出已发布的历史版本）、`RemoteConfigReadPreview`（`/rum/application/remote-config/preview`，用模拟客户端的 `env` / `app_version` / `sdk` 上下文评估一份草稿配置，返回命中的 `hit_rule_index` 与最终下发的 `values`，不发布）、`RemoteConfigWriteUpdate`（`/rum/application/remote-config/update`，发布一份完整的新配置）、`RemoteConfigWriteHistoryRevert`（`/rum/application/remote-config/history/revert`，把历史版本的内容重新发布为新版本）。主要类型：`RemoteConfig`（`enabled`、`activation`、`default`、`rules`、`custom`、`refresh_on_foreground`）、`RemoteConfigValues`（四个可下调的 SDK 开关）、`RemoteConfigRule`（`match` 条件加 `set` 取值）、`RemoteConfigHistoryItem`（含 `version`、`reason`、`content_hash`、`updated_by`），以及 `GetRemoteConfigRequest` / `ListRemoteConfigHistoryRequest` / `PreviewRemoteConfigRequest` / `UpdateRemoteConfigRequest` / `RevertRemoteConfigRequest` 与各自的 `*Response`。
+
 `client.DataSources.ToolsInvoke`（`POST /monit/datasource/tools/invoke`，`monit-datasource-tools-invoke`）在某个已配置数据源上执行一个确定性工具：`tool` 名称由数据源类型前缀修饰（如 `mysql.overview`），`params` 为工具专属 JSON 参数（省略视为 `{}`，显式 `null` 非法）；除诊断工具外，入口支持 `<type>.query` 查询工具（`prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`），`/monit/query/data` 入口保持不变。该接口要求集群中所有在线可路由的 Edge 会话都支持 v0.71.0 基础调用协议（单个工具可能要求更新的实现），无工具目录、无自动重放、也不会回退到旧版 diagnose。请求体上限 128 KiB，完整成功响应上限 10 MiB，单工具超时至多 25 秒；响应为 `DatasourceToolResult`（`data` 为工具专属 JSON、永不为 null，`summary` 可选，出现 `truncated` 时其 `reason` 说明截断原因）。
+
+调用 `<type>.query` 查询工具时用 `NewDatasourceQueryInvokeRequest(datasourceID, tool, params)` 构造请求，`params` 传对应的类型化结构（每个工具一种）：`PrometheusQueryParams`、`MySQLQueryParams`、`PostgresQueryParams`、`OracleQueryParams`、`ClickHouseQueryParams`、`ElasticsearchQueryParams`、`LokiQueryParams`、`VictoriaLogsQueryParams`、`SLSQueryParams`、`TencentCLSQueryParams`。这些结构都由 `expr` 加 `execution` 组成（`DatasourceQueryExecution`：`kind` 取 `instant` / `range` / `window`，`from_ms` / `to_ms` 为 Unix 毫秒的 `*int64`；`range` 还要求 `max_data_points`，可选 `min_step_seconds` 抬高计算步长），可选字段都是指针——nil 时不发送该键，由服务端取默认值。查询工具的 `params` 不可为空：`NewDatasourceQueryInvokeRequest(..., nil)` 直接返回错误，与通用请求「省略即 `{}`」的规则不同。执行模式受数据源类型约束：Prometheus 与 Loki 用 `instant` / `range`（`instant` 只带 `to_ms`），SQL 类型（MySQL、Postgres、Oracle、ClickHouse 以及走 SQL 的 Elasticsearch）与 SLS、Tencent CLS 用 `window`，VictoriaLogs 原始日志用 `window`、统计查询用 `instant` / `range`；Loki、VictoriaLogs、SLS、Tencent CLS 的 `limit` / `direction` 只作用于原始日志检索，`SLSQueryParams` 另需 `project` / `logstore`，`TencentCLSQueryParams` 另需 `region` / `topic_id` / `syntax`。
+
+```go
+req, err := flashduty.NewDatasourceQueryInvokeRequest(12345, "prometheus.query",
+	flashduty.PrometheusQueryParams{
+		Expr: "sum by (job) (rate(http_requests_total[5m]))",
+		Execution: flashduty.DatasourceQueryExecution{
+			Kind: "instant",
+			ToMS: flashduty.Int64(1789000000000),
+		},
+	})
+if err != nil {
+	log.Fatal(err)
+}
+out, _, err := client.DataSources.ToolsInvoke(ctx, req)
+```
 
 `client.DataSources` 的 `payload` 按 `type_ident` 选择类型专属配置块。当前允许的 `type_ident` 共 15 种：`prometheus`、`loki`、`mysql`、`oracle`、`postgres`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls`、`victorialogs`，以及新增的诊断专用类型 `redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka`——诊断专用类型的 `alerting_enabled` 恒为 false（不阻止非告警查询与工具调用），且拒绝传 true。连接地址规则：Redis/MongoDB 诊断类型为单个 `host:port`（IPv6 需加方括号），不接受 URI、userinfo 或 query；`kafka` 为 1–32 个以逗号分隔、互不重复的 `host:port` bootstrap 地址（规范化后至多 4096 字符，`payload` 中不再有 broker 列表）；`mongodb_mongod` / `mongodb_mongos` 的配置块中 `auth_source` 默认为 `admin`，用户名与密码必须成对配置，不支持客户端证书；Redis 节点配置的 `database` 默认为 0。诊断类型的 `password` 与 Kafka 的 `tls_key` 等敏感字段支持 `${env:NAME}` 引用：响应中字面值会被省略（仅当存储值本身就是 `${env:...}` 引用时才回显），更新时省略这些字段即保留原值，显式传空字符串则清除。
 
@@ -200,7 +219,7 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 
 ---
 
-响应中的时间字段不再是裸整数,而是自描述的 `Timestamp`（Unix 秒）或 `TimestampMilli`（毫秒）类型。它们序列化为本地时区的 RFC3339 字符串,因此 JSON、日志以及面向 LLM 的输出都直接可读;原始 epoch 仍只需一次方法调用即可取到。
+响应中的时间字段不再是裸整数,而是自描述的 `Timestamp`（Unix 秒）或 `TimestampMilli`（毫秒）类型（请求与响应共用的类型是例外,见下方警告）。它们序列化为本地时区的 RFC3339 字符串,因此 JSON、日志以及面向 LLM 的输出都直接可读;原始 epoch 仍只需一次方法调用即可取到。
 
 - **序列化（出站）**：非零值序列化为带引号的 RFC3339 字符串（`TimestampMilli` 用 RFC3339Nano 以保留毫秒精度）。零值序列化为裸整数 `0`——一个"未设置"哨兵,而非 1970 年的日期,并被 `json:",omitempty"` 丢弃。
 - **反序列化（入站）**：既兼容数字 epoch（线上原始形态),也兼容 RFC3339 字符串(使序列化后的值可无损往返),还接受 `null`（→ 0）。
@@ -224,6 +243,8 @@ zero := inc.StartTime.IsZero()        // 是否为未设置哨兵
 
 <Warning>
 **请求侧时间字段仍为 `int64`**,API 在 wire 上要求数字 epoch。注意:多数接口取**秒**,但 RUM 与 webhook 历史相关接口取**毫秒**。
+
+**请求与响应共用的类型同样如此**:`AlertRuleV2`（`AlertRules.ReadInfoV2` / `WriteCreateV2` / `WriteUpdateV2` 的返回类型，对应 `POST /monit/rule/v2/info`、`/v2/create`、`/v2/update`）的 `created_at` / `updated_at` 在 SDK 中仍是裸 `int64`（Unix 秒，带 `omitempty`），而不是 `Timestamp`。这类字段不支持 `Unix()` / `String()` / `IsZero()`,需要自行把秒值转成时间;按 `Timestamp` 示例写 `rule.UpdatedAt.Unix()` 会编译不过。
 </Warning>
 
 ## 分页
