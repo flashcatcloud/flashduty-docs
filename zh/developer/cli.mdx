@@ -468,7 +468,7 @@ flashduty session export <session_id>     # 以 NDJSON 流式导出单个会话�
 | `--since` | 仅保留在该时间窗口内有更新的会话（客户端过滤），如 `30d`、`24h`、`2026-05-01` | - |
 | `--limit` | 最多拉取的会话数 | `200` |
 | `--page` | 起始页码（1 开始） | `1` |
-| `--output-format` | 输出格式：`jsonl`（默认，每行一个会话对象，可直接管道给 `jq`）、`json`（完整信封；受 16 KiB 输出上限约束，见「输出格式」）、`toon`（紧凑编码） | `jsonl` |
+| `--output-format` | 输出格式：`jsonl`（默认，每行一个会话对象，可直接管道给 `jq`）、`json`（完整信封，**不**受 16 KiB 列表输出上限约束；需要更少的行请自行用 `--limit` / `--since` 收窄，见「输出格式」）、`toon`（紧凑编码） | `jsonl` |
 
 <Note>
 服务端 `/safari/session/list` 单页上限为 100 条，超出 `--limit` 时 CLI 会自动向服务端翻页拉取，无需手动分页。API 本身没有时间窗口过滤，`--since` 是在拉取后于客户端按会话的 `updated_at` 进行过滤的。
@@ -801,18 +801,20 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 
 #### 生成命令的输出上限
 
-由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari session-list`、`monit datasource-list`、`safari a2a-agent-list` 等），其 `json` / `toon` 输出对**列表形态**的响应按 16 KiB 上限处理。缩减分三级，另外会有一个机读标记：
+由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari a2a-agent-list`、`alert event-list <alert-id>`、`insight incident-list` 等），其 `json` / `toon` 输出对**列表形态**的响应按 16 KiB 上限处理。缩减分三级；当响应是**列表信封**形态时，CLI 还会在 payload 中补写一个机读标记：
 
 1. **整页超限**：只输出能完整放下的前几行，每个值保持原样，stderr 提示实际输出了 N/M 行、其余行未输出。
 2. **单行本身超限**：该行的字符串值以 `...` 截短，stderr 点名被截字段；标识符字段（以 `_id` / `_key` 结尾）不会被截短。
 3. **行无法缩减到上限以内**：命令报错并点名字节数最大的字段（最多 3 个），请调低 `--limit` 或减少输出字段后重试。
 
-**列表信封会被重建并写入缩减标记**。列表信封指行数组名为 `items` / `docs` / `list`、同级只有 `total`、`has_next_page`、`search_after_ctx` 等标量字段的响应（如 `monit datasource-list`、`safari session-list`）；一旦发生缩减，CLI 会重建该信封并在 payload 中补写字段，脚本无需解析 stderr 也能发现缩减：
+**列表信封会被重建并写入缩减标记**。列表信封指行数组名为 `items` / `docs` / `list`、同级只有 `total`、`has_next_page`、`search_after_ctx` 等标量字段的响应（如 `safari a2a-agent-list`、`alert event-list <alert-id>`、`insight incident-list`）；一旦发生缩减，CLI 会重建该信封并在 payload 中补写字段，脚本无需解析 stderr 也能发现缩减：
 
 - **整行被丢弃**：写入 `truncated: true` 与 `emitted_rows: N`（N 为实际输出的行数）。此时信封中的 `total`、`has_next_page`、`search_after_ctx` 仍是服务端原始分页的原样回显，**不能**用来判断是否已取全——被截成「100 行中前 7 行」的一页照样带着原来的分页字段。要取全请按实际收到的行数收窄 `--limit` 重新请求，再沿返回的游标继续翻页。
 - **只有长值被截短**（没有丢行）：只写 `truncated: true`，stderr 会点名被截字段。重新请求无法找回这些值，请收窄筛选条件、减少每页行数，或改用支持字段投影的精选命令。
 
-**顶层数组形态**的响应（如精选命令 `incident list`、`insight incidents`）没有信封可承载标记，缩减仍只写 stderr。
+**顶层数组形态**的响应（如生成命令 `monit datasource-list`，或精选命令 `incident list`、`insight incidents`）没有信封可承载标记：生成命令的列表形态输出同样可能是顶层数组，它同样按 16 KiB 上限缩减，但缩减只写在 stderr 上，脚本必须读 stderr 才能发现。
+
+行数组不叫 `items` / `docs` / `list`（或同级存在非标量字段）的列表响应不会被识别为列表信封——生成命令 `safari session-list` 与精选命令 `session list` 都把行放在 `sessions[]` 下，同级还有 `suggest_init`、`total`。这类响应既不缩减、也不会补写 `truncated` / `emitted_rows`，完整输出原样打印。
 
 **明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令大多没有可收窄输出的标志（个别命令的 `--fields` 是请求体的字段选择器，不作用于输出）；需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
 

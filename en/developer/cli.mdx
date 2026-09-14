@@ -468,7 +468,7 @@ Common flags for `session list`:
 | `--since` | Keep only sessions updated within the window (client-side filter), e.g. `30d`, `24h`, `2026-05-01` | - |
 | `--limit` | Max sessions to fetch | `200` |
 | `--page` | Start page (1-based) | `1` |
-| `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope; subject to the 16 KiB output bound — see "Output formats"), `toon` (compact) | `jsonl` |
+| `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope, **not** subject to the 16 KiB list output bound; use `--limit` / `--since` yourself to fetch fewer rows — see "Output formats"), `toon` (compact) | `jsonl` |
 
 <Note>
 The server endpoint `/safari/session/list` caps each page at 100 rows; when `--limit` exceeds that, the CLI paginates automatically — no manual paging required. The API has no time-window filter, so `--since` is applied client-side against each session's `updated_at` after fetching.
@@ -801,18 +801,20 @@ Table view with no column truncation — useful for copy-paste or wide terminals
 
 #### Generated-command output bound
 
-Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply a 16 KiB bound to **list-shaped** responses in `json`/`toon` mode. The reduction has three tiers, plus a machine-readable marker:
+Generated commands (the ones covering the OpenAPI through the code generator, such as `safari a2a-agent-list`, `alert event-list <alert-id>`, `insight incident-list`) apply a 16 KiB bound to **list-shaped** responses in `json`/`toon` mode. The reduction has three tiers; when the response is a **list envelope**, the CLI also writes a machine-readable marker into the payload:
 
 1. **The whole page overflows**: only the leading rows that fit are emitted, with every value intact, and a stderr note reports how many of the N/M rows were emitted.
 2. **A single row alone overflows the budget**: that row's string values are shortened and end with `...`; a stderr note names the clipped fields. Identifier fields (keys ending in `_id` or `_key`) are never shortened.
 3. **A row cannot be reduced enough to fit**: the command fails and names the largest fields (up to 3, with their byte sizes); lower `--limit` or reduce the output fields and retry.
 
-**A reduced list envelope is rebuilt with the reduction written into the payload.** A list envelope is a response whose row array is named `items`, `docs`, or `list` and whose siblings are all scalars (`total`, `has_next_page`, `search_after_ctx`, …) — `monit datasource-list` and `safari session-list` are examples. Once a reduction happens, the CLI rebuilds that envelope and adds fields to the payload, so a script sees the reduction without parsing stderr:
+**A reduced list envelope is rebuilt with the reduction written into the payload.** A list envelope is a response whose row array is named `items`, `docs`, or `list` and whose siblings are all scalars (`total`, `has_next_page`, `search_after_ctx`, …) — `safari a2a-agent-list`, `alert event-list <alert-id>`, and `insight incident-list` are examples. Once a reduction happens, the CLI rebuilds that envelope and adds fields to the payload, so a script sees the reduction without parsing stderr:
 
 - **Rows withheld**: the payload carries `truncated: true` together with `emitted_rows: N` (N is the number of rows actually emitted). The envelope's `total`, `has_next_page`, and `search_after_ctx` still echo the page as the server returned it, so they **cannot** tell you whether you got everything — a page cut to 7 of 100 rows keeps the original pagination fields. To collect all rows, re-request with a `--limit` no larger than the rows you actually received, then follow the returned cursor.
 - **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or switch to a curated command that supports field projections.
 
-**Bare top-level arrays** (such as the curated `incident list` and `insight incidents`) have nowhere to carry the marker, so a reduction is announced on stderr only.
+**Bare top-level arrays** (such as the generated `monit datasource-list`, or the curated `incident list` and `insight incidents`) have nowhere to carry the marker: a generated command's list-shaped output can be a bare array too, and it is reduced to the same 16 KiB bound, but the reduction is announced on stderr only — a script has to read stderr to see it.
+
+A list response whose row array is not named `items` / `docs` / `list` (or that has a non-scalar sibling) is not recognized as a list envelope — the generated `safari session-list` and the curated `session list` both put their rows under `sessions[]`, next to `suggest_init` and `total`. Such responses are neither reduced nor given `truncated` / `emitted_rows`; the complete output prints untouched.
 
 **Detail-shaped single objects** (e.g. `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands mostly expose no flag that narrows their output (the occasional `--fields` is a request-body write selector, not an output projection); for complete JSON lower `--limit` and page through with `--page` (e.g. `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
 
