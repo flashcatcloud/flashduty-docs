@@ -64,6 +64,7 @@ export const docMap = {
   JDCloudMonitor: `${alertBase}/jdcloud.mdx`,
   KSCloudMonitor: `${alertBase}/kscloud-monitor.mdx`,
   Datadog: `${alertBase}/datadog.mdx`,
+  NewRelic: `${alertBase}/new-relic.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
   DbPull: `${alertBase}/db-pull.mdx`,
