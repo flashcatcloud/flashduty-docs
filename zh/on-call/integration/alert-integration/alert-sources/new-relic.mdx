@@ -1,0 +1,154 @@
+---
+title: "New Relic 告警集成"
+description: "通过 Workflow Webhook 将 New Relic Issue 同步到 Flashduty On-call，并关联激活、更新和关闭事件。"
+keywords: ["告警集成", "New Relic", "Workflow", "Webhook", "Issue"]
+---
+
+通过 New Relic Workflow Webhook 将 Issue 同步到 Flashduty On-call。一个 New Relic Issue 对应一条 Flashduty 告警；同一 Issue 后续发生等级变化、Alert Event 加入或关闭、Issue 合并、关闭时，会继续更新这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **集成数据**，点击 **添加一个集成**
+3. 选择 **New Relic**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **New Relic**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 New Relic 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook Destination">
+
+1. 登录 New Relic，进入 **Alerts → Enrich and Notify → Destinations**
+2. 创建一个 **Webhook** Destination
+3. 名称可填写 `Flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 Endpoint URL
+
+</Step>
+
+<Step title="创建 Workflow">
+
+1. 进入 **Alerts → Enrich and Notify → Workflows**，点击创建 Workflow
+2. 设置 Issue 过滤条件，选择需要发送到 Flashduty 的 Policy、Condition、实体或标签
+3. 添加刚创建的 Webhook Destination
+4. 在通知触发器中至少启用 **Activated** 和 **Closed**
+5. 建议同时启用 **Priority changed** 和 **Other updates**，以同步等级变化、Alert Event 增减及 Issue 合并后的最新快照
+
+</Step>
+
+<Step title="配置 Payload">
+
+将 Webhook 的自定义 Payload 替换为：
+
+```json
+{
+  "issue_id": "{{issueId}}",
+  "issue_url": {{json issuePageUrl}},
+  "title": {{json issueTitle}},
+  "description": {{json accumulations.conditionDescription.[0]}},
+  "priority": "{{priority}}",
+  "state": "{{state}}",
+  "trigger_event": "{{triggerEvent}}",
+  "is_correlated": {{isCorrelated}},
+  "account_id": {{nrAccountId}},
+  "incident_ids": {{json incidentIds}},
+  "sources": {{json accumulations.sources}},
+  "policy_names": {{json accumulations.policyName}},
+  "condition_names": {{json accumulations.conditionName}},
+  "entity_names": {{json entitiesData.names}},
+  "entity_ids": {{json entitiesData.ids}},
+  "workflow_name": {{json workflowName}}
+}
+```
+
+<Warning>
+请保留 `issue_id`、`state` 和 `priority`。缺少 `issue_id` 时 Flashduty 会拒绝请求，因为随机 Key 无法保证后续更新和关闭命中同一条告警。
+</Warning>
+
+</Step>
+
+<Step title="验证生命周期">
+
+让 Alert Condition 进入阈值，确认 Flashduty 收到活动告警；提高优先级或产生新的 Alert Event，确认同一条告警收到更新；最后让 Issue 关闭，确认原告警恢复。
+
+New Relic 的测试通知只能验证 Webhook 可达。Alert Key、更新和恢复必须通过真实 Issue 生命周期验证。
+
+</Step>
+</Steps>
+
+## Alert Key 与 Issue 合并
+---
+
+Flashduty 直接使用 `issue_id`（New Relic 变量 `issueId`）作为 Alert Key。标题、优先级、Policy、Condition、实体和 `incident_ids` 的变化都不会改变 Alert Key。
+
+`incident_ids` 是当前 Issue 聚合的 Alert Event ID 列表，只作为详情标签。它不能作为 Alert Key，否则一个 Alert Event 加入、关闭或相关性计算变化时会拆出新告警。
+
+当 `trigger_event=MERGE_REQUEST` 时，Flashduty 将请求视为合并后目标 Issue 的一次普通更新，并继续使用 Payload 中的 `issue_id`。当前版本不调用 Flashduty 内部的告警合并能力，也不会推断或关闭来源 Issue。
+
+## 状态和告警等级
+---
+
+恢复只根据 `state` 判断，与 `trigger_event` 和等级映射相互独立。
+
+| New Relic 值 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `state = CLOSED` | 恢复 |
+| `state = CREATED`、`ACTIVATED` | 活动告警 |
+| `priority = CRITICAL` | Critical |
+| `priority = HIGH` | Warning |
+| `priority = MEDIUM`、`LOW` | Info |
+| `priority` 为空或未知 | Warning |
+
+New Relic 的 Warning 阈值会生成 `HIGH` 优先级 Alert Event，因此 `HIGH` 映射为 Flashduty Warning。如需其他映射，可通过[告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines)调整。
+
+## 增加自定义标签
+---
+
+如果需要传递更多 Workflow 变量，在默认 Payload 顶层增加 `custom_labels`：
+
+```json
+{
+  "issue_id": "{{issueId}}",
+  "title": {{json issueTitle}},
+  "priority": "{{priority}}",
+  "state": "{{state}}",
+  "custom_labels": {
+    "team": {{json accumulations.tag.team.[0]}},
+    "environment": {{json accumulations.tag.environment.[0]}},
+    "muting_state": "{{mutingState}}",
+    "open_alert_events": {{openIncidentsCount}}
+  }
+}
+```
+
+- `custom_labels` 最多包含 50 个条目，key 建议使用 snake_case
+- 字符串、数字、布尔值、数组和对象都可接收；数组和对象会保存为 JSON 字符串
+- 空值不会生成标签；基础字段优先，同名自定义标签不能覆盖基础标签
+- 单次请求包含基础标签在内，最多生成 50 个标签
+- 不要传递 API Key、Token、密码、Cookie 或其他敏感信息
+
+## 排查问题
+---
+
+- **只收到测试通知，真实告警没有通知**：确认 Workflow 已启用，并且过滤条件能够命中真实 Issue
+- **Flashduty 返回参数错误**：确认 Payload 是有效 JSON，且包含非空的 `issue_id` 和支持的 `state`
+- **告警没有恢复**：确认 Destination 启用了 **Closed**，关闭 Payload 仍携带与激活时相同的 `issue_id`
+- **等级或合并变化没有更新**：启用 **Priority changed** 和 **Other updates**
+- **部分列表为空**：不同 Condition 和 Issue 类型提供的上下文不同，Flashduty 会忽略空标签
+
+字段含义和可用变量请参阅 [New Relic Workflow variables](https://docs.newrelic.com/docs/alerts/get-notified/custom-variables-alert-event-workflows/)。
