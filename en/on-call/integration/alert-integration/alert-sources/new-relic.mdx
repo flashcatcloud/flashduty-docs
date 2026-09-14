@@ -1,0 +1,112 @@
+---
+title: "New Relic alert integration"
+description: "Send New Relic Issues to Flashduty On-call through Workflow webhooks and correlate activation, update, and closure notifications."
+keywords: ["alert integration", "New Relic", "Workflow", "webhook", "Issue"]
+---
+
+Use a New Relic Workflow webhook to send Issues to Flashduty On-call. One New Relic Issue maps to one Flashduty alert. Priority changes, Alert Event additions or closures, Issue merges, and closure notifications update that alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **New Relic** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure New Relic
+---
+
+<Steps>
+<Step title="Create a webhook destination">
+
+1. In New Relic, go to **Alerts → Enrich and Notify → Destinations**
+2. Create a **Webhook** destination named `Flashduty`
+3. Paste the complete Flashduty integration Push URL into Endpoint URL
+
+</Step>
+
+<Step title="Create a workflow">
+
+Create a Workflow whose Issue filters select the required policies, conditions, entities, or tags. Add the webhook destination. Enable at least **Activated** and **Closed**. Also enable **Priority changed** and **Other updates** to receive priority changes, Alert Event membership changes, and post-merge snapshots.
+
+</Step>
+
+<Step title="Configure the payload">
+
+```json
+{
+  "issue_id": "{{issueId}}",
+  "issue_url": {{json issuePageUrl}},
+  "title": {{json issueTitle}},
+  "description": {{json accumulations.conditionDescription.[0]}},
+  "priority": "{{priority}}",
+  "state": "{{state}}",
+  "trigger_event": "{{triggerEvent}}",
+  "is_correlated": {{isCorrelated}},
+  "account_id": {{nrAccountId}},
+  "incident_ids": {{json incidentIds}},
+  "sources": {{json accumulations.sources}},
+  "policy_names": {{json accumulations.policyName}},
+  "condition_names": {{json accumulations.conditionName}},
+  "entity_names": {{json entitiesData.names}},
+  "entity_ids": {{json entitiesData.ids}},
+  "workflow_name": {{json workflowName}}
+}
+```
+
+Keep `issue_id`, `state`, and `priority`. Flashduty rejects a missing `issue_id` because a random key cannot correlate later updates and closure.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Open a real Issue and confirm an active Flashduty alert. Change its priority or add another Alert Event and confirm an update on the same alert. Finally close the Issue and confirm the original alert recovers. A test notification proves connectivity only, not lifecycle correlation.
+
+</Step>
+</Steps>
+
+## Alert Key and Issue merges
+---
+
+Flashduty uses `issue_id` (`issueId`) directly as the Alert Key. Titles, priorities, policies, conditions, entities, and `incident_ids` do not affect it. `incident_ids` is the list of Alert Events aggregated into the Issue and is stored only as context.
+
+For `trigger_event=MERGE_REQUEST`, Flashduty updates the surviving Issue identified by the payload's `issue_id`. This version does not invoke Flashduty's internal alert merge operation or infer and close a source Issue.
+
+## Status and severity
+---
+
+| New Relic value | Flashduty status or severity |
+| :--- | :--- |
+| `state = CLOSED` | Recovered |
+| `state = CREATED` or `ACTIVATED` | Active alert |
+| `priority = CRITICAL` | Critical |
+| `priority = HIGH` | Warning |
+| `priority = MEDIUM` or `LOW` | Info |
+| Empty or unknown priority | Warning |
+
+New Relic warning thresholds create `HIGH` priority Alert Events, so `HIGH` maps to Flashduty Warning. Use an [Alert Processing Pipeline](/en/on-call/integration/alert-integration/alert-pipelines) for a different mapping.
+
+## Add custom labels
+---
+
+Add a top-level `custom_labels` object to send more Workflow variables:
+
+```json
+{
+  "issue_id": "{{issueId}}",
+  "priority": "{{priority}}",
+  "state": "{{state}}",
+  "custom_labels": {
+    "team": {{json accumulations.tag.team.[0]}},
+    "environment": {{json accumulations.tag.environment.[0]}},
+    "muting_state": "{{mutingState}}",
+    "open_alert_events": {{openIncidentsCount}}
+  }
+}
+```
+
+`custom_labels` accepts at most 50 entries. Use snake_case keys. Strings, numbers, booleans, arrays, and objects are accepted; arrays and objects are stored as JSON strings. Empty values are discarded, built-in labels win collisions, and the final event may contain at most 50 labels. Never send secrets.
+
+For the complete variable list, see [New Relic Workflow variables](https://docs.newrelic.com/docs/alerts/get-notified/custom-variables-alert-event-workflows/).
