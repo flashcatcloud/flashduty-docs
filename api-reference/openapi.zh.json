@@ -3494,7 +3494,8 @@
           },
           "limit": {
             "default": 20,
-            "description": "每页数量。",
+            "description": "每页数量。小于 1 时回退为 20，大于 200 时按 200 处理。",
+            "maximum": 200,
             "type": "integer"
           },
           "p": {
@@ -28641,6 +28642,7 @@
             "items": {
               "$ref": "#/components/schemas/InvestigationTarget"
             },
+            "maxItems": 20,
             "description": "告警事件详情页关联的排障入口列表，最多 20 项，不允许重复。更新接口中该字段按 presence 处理：省略时保留原配置，传 `[]` 清空。",
             "x-flashduty-preserve-absence": true
           },
@@ -28941,14 +28943,23 @@
       },
       "InvestigationTarget": {
         "type": "object",
-        "description": "告警事件的关联排障入口，为封闭的 tagged union：新增类型需服务端显式支持。",
+        "description": "告警事件的关联排障入口，为封闭的 tagged union：新增类型需服务端显式支持，入口内出现未知字段会被拒绝。",
         "properties": {
           "kind": {
             "type": "string",
             "enum": [
-              "dashboard"
+              "dashboard",
+              "query"
             ],
-            "description": "排障入口类型，目前仅支持 `dashboard`。"
+            "description": "入口类型：`dashboard` 打开仪表盘面板，`query` 打开 Explore 查询。它决定必须提供 `dashboard` 还是 `query`，提供另一个会被拒绝。"
+          },
+          "time_range": {
+            "$ref": "#/components/schemas/InvestigationTimeRange",
+            "description": "事件时间前后的取数窗口，每个已保存的入口都必填。长度为 0 的窗口会被拒绝；默认值由前端编辑器提供。"
+          },
+          "query": {
+            "$ref": "#/components/schemas/QueryInvestigationTarget",
+            "description": "`query` 类型的入口配置；`kind` 为 `query` 时必填，`kind` 为 `dashboard` 时不允许出现。"
           },
           "dashboard": {
             "$ref": "#/components/schemas/DashboardInvestigationTarget",
@@ -28956,7 +28967,8 @@
           }
         },
         "required": [
-          "kind"
+          "kind",
+          "time_range"
         ]
       },
       "DashboardInvestigationTarget": {
@@ -28971,37 +28983,103 @@
             "type": "string",
             "description": "仪表盘内目标面板 ID，须为规范的 UUIDv7；可选。"
           },
-          "variable_bindings": {
+          "variables": {
             "type": "object",
             "additionalProperties": {
-              "$ref": "#/components/schemas/InvestigationVariableBinding"
+              "type": "string"
             },
-            "description": "仪表盘变量绑定，键为仪表盘变量名。"
+            "description": "仪表盘变量取值，键为变量名。值可通过 `{{ }}` 模板引用事件标签；默认空对象。"
           }
         },
         "required": [
-          "dashboard_id"
+          "dashboard_id",
+          "variables"
         ]
       },
-      "InvestigationVariableBinding": {
+      "InvestigationTimeRange": {
         "type": "object",
-        "description": "仪表盘变量与告警事件数据的绑定。",
+        "description": "以两个偏移量表示告警事件时间前后的取数窗口。两个方向都必须非负，且至少一个大于 0，因此入口不会解析出空窗口。",
         "properties": {
-          "source": {
-            "type": "string",
-            "enum": [
-              "event_label"
-            ],
-            "description": "绑定值来源，目前仅支持 `event_label`（取告警事件的标签值）。"
+          "before_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9007199254740,
+            "description": "相对事件时间向前回溯的秒数。"
           },
-          "key": {
-            "type": "string",
-            "description": "告警事件标签名，须符合 Prometheus 标签命名规则，且不能使用保留标签。"
+          "after_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9007199254740,
+            "description": "相对事件时间向后延伸的秒数，用于保留事件发生后的表现。"
           }
         },
         "required": [
-          "source",
-          "key"
+          "before_seconds",
+          "after_seconds"
+        ]
+      },
+      "QueryInvestigationTarget": {
+        "type": "object",
+        "description": "`query` 类型入口使用的 Explore 查询。表达式可通过 `{{ }}` 模板引用事件标签，`args` 的值不允许包含模板。",
+        "properties": {
+          "datasource_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "查询所用的数据源。"
+          },
+          "query": {
+            "$ref": "#/components/schemas/DashboardQuery",
+            "description": "查询内容。"
+          }
+        },
+        "required": [
+          "datasource_id",
+          "query"
+        ]
+      },
+      "DashboardQuery": {
+        "type": "object",
+        "description": "仪表盘与排障入口共用的查询内容。",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "instant",
+              "range",
+              "window"
+            ],
+            "description": "求值模式：`instant` 在单个时间点求值，`range` 求值一条按步长采样的曲线，`window` 返回时间窗口内的原始数据。"
+          },
+          "expr": {
+            "type": "string",
+            "description": "目标数据源语法下的查询表达式，可通过 `{{ }}` 模板引用事件标签。"
+          },
+          "args": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "命名查询参数，默认空对象。值按原样透传，不允许包含 `{{ }}` 模板。"
+          },
+          "min_step_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740,
+            "description": "最小步长（秒）。仅在 `mode` 为 `range` 时可用，且必须大于 0；省略或传 null 由服务端决定。"
+          }
+        },
+        "required": [
+          "mode",
+          "expr",
+          "args"
         ]
       },
       "MemberNotifyRequest": {

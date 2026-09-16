@@ -5923,6 +5923,7 @@
             "items": {
               "$ref": "#/components/schemas/InvestigationTarget"
             },
+            "maxItems": 20,
             "description": "Drill-down entries linked from the alert event detail page; at most 20 items, duplicates rejected. On update the field is presence-based: omit it to keep the current value, pass `[]` to clear.",
             "x-flashduty-preserve-absence": true
           },
@@ -6223,14 +6224,23 @@
       },
       "InvestigationTarget": {
         "type": "object",
-        "description": "Drill-down entry linked to alert events. A deliberately closed tagged union: new kinds require explicit server support.",
+        "description": "Alert-event drill-down entry. A deliberately closed tagged union: new kinds require explicit server support, and unknown fields inside a target are rejected.",
         "properties": {
           "kind": {
             "type": "string",
             "enum": [
-              "dashboard"
+              "dashboard",
+              "query"
             ],
-            "description": "Entry type; currently only `dashboard` is supported."
+            "description": "Entry kind: `dashboard` opens a dashboard panel, `query` opens an Explore query. It decides whether `dashboard` or `query` must be supplied; supplying the other one is rejected."
+          },
+          "time_range": {
+            "$ref": "#/components/schemas/InvestigationTimeRange",
+            "description": "Window around the event time, required on every saved entry. A zero-length window is rejected; defaults belong to the editor."
+          },
+          "query": {
+            "$ref": "#/components/schemas/QueryInvestigationTarget",
+            "description": "Configuration for the `query` kind; required when `kind` is `query`, and rejected when `kind` is `dashboard`."
           },
           "dashboard": {
             "$ref": "#/components/schemas/DashboardInvestigationTarget",
@@ -6238,7 +6248,8 @@
           }
         },
         "required": [
-          "kind"
+          "kind",
+          "time_range"
         ]
       },
       "DashboardInvestigationTarget": {
@@ -6253,37 +6264,103 @@
             "type": "string",
             "description": "Panel ID inside the dashboard; must be a canonical UUIDv7. Optional."
           },
-          "variable_bindings": {
+          "variables": {
             "type": "object",
             "additionalProperties": {
-              "$ref": "#/components/schemas/InvestigationVariableBinding"
+              "type": "string"
             },
-            "description": "Dashboard variable bindings, keyed by dashboard variable name."
+            "description": "Dashboard variable values, keyed by variable name. Values may reference event labels through `{{ }}` templates; defaults to an empty object."
           }
         },
         "required": [
-          "dashboard_id"
+          "dashboard_id",
+          "variables"
         ]
       },
-      "InvestigationVariableBinding": {
+      "InvestigationTimeRange": {
         "type": "object",
-        "description": "Binding between a dashboard variable and alert event data.",
+        "description": "Window around the alert event time, expressed as two offsets. Both directions must be non-negative and at least one must be greater than zero, so an entry never resolves to an empty window.",
         "properties": {
-          "source": {
-            "type": "string",
-            "enum": [
-              "event_label"
-            ],
-            "description": "Where the bound value comes from; currently only `event_label` (the alert event's label value) is supported."
+          "before_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9007199254740,
+            "description": "Seconds to look back from the event time."
           },
-          "key": {
-            "type": "string",
-            "description": "Alert event label name; must follow Prometheus label naming rules and must not be a reserved label."
+          "after_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9007199254740,
+            "description": "Seconds to look forward from the event time, so behaviour after the event stays visible."
           }
         },
         "required": [
-          "source",
-          "key"
+          "before_seconds",
+          "after_seconds"
+        ]
+      },
+      "QueryInvestigationTarget": {
+        "type": "object",
+        "description": "Explore query used by a `query` drill-down entry. The expression may reference event labels through `{{ }}` templates, while `args` values may not.",
+        "properties": {
+          "datasource_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Data source the query runs against."
+          },
+          "query": {
+            "$ref": "#/components/schemas/DashboardQuery",
+            "description": "Query payload."
+          }
+        },
+        "required": [
+          "datasource_id",
+          "query"
+        ]
+      },
+      "DashboardQuery": {
+        "type": "object",
+        "description": "Query payload shared by dashboards and drill-down entries.",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "instant",
+              "range",
+              "window"
+            ],
+            "description": "Evaluation mode: `instant` evaluates at a single timestamp, `range` evaluates a stepped series, `window` returns raw rows inside a time window."
+          },
+          "expr": {
+            "type": "string",
+            "description": "Query expression in the target data source's language. May reference event labels through `{{ }}` templates."
+          },
+          "args": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Named query arguments; defaults to an empty object. Values are passed through verbatim and must not contain `{{ }}` templates."
+          },
+          "min_step_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 1,
+            "maximum": 9007199254740,
+            "description": "Minimum step, in seconds. Only accepted when `mode` is `range`, and must be greater than zero; omit or pass null to let the server decide."
+          }
+        },
+        "required": [
+          "mode",
+          "expr",
+          "args"
         ]
       }
     }
