@@ -1,0 +1,179 @@
+---
+title: "Alibaba Cloud DataWorks Integration"
+description: "Sync alert events from Alibaba Cloud DataWorks Intelligent Monitoring (Operation Center) to Flashduty On-call through a custom webhook, with automated alert noise reduction"
+keywords: ["alert integration", "Alibaba Cloud DataWorks", "DataWorks Intelligent Monitoring", "Operation Center", "monitoring alerts", "data ingestion"]
+---
+
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+You can obtain an integration push URL in either of the following two ways.
+
+### Use an exclusive integration
+
+Choose this option when you do not need to route alert events to different collaboration spaces. It is simpler.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+  
+  1. Go to the Flashduty console, select **Collaboration Spaces**, and open a space's detail page
+  2. Select the **Integrated Data** tab, click **Add an integration**, and open the add-integration page
+  3. Select the **Alibaba Cloud DataWorks** integration and click **Save** to generate a card
+  4. Click the card to view the **push URL**, copy it for later use, and you are done
+  
+    
+</Accordion>
+</AccordionGroup>
+
+### Use a shared integration
+
+Choose this option when you need to route alerts to different collaboration spaces based on the alert payload.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+  
+  1. Go to the Flashduty console and select **Integration Center => Alert Events** to open the integration selection page
+  2. Select the **Alibaba Cloud DataWorks** integration:
+        - **Integration name**: define a name for this integration
+  3. Configure the default route and select the corresponding collaboration space (after creation, you can go to `Routing` to configure more routing rules)
+  4. Click **Save**, then copy the newly generated **push URL** on the current page for later use
+  5. Done
+    
+</Accordion>
+</AccordionGroup>
+</div>
+
+## In Alibaba Cloud DataWorks
+---
+**Step 1: Create a custom webhook**
+
+<div className="md-block">
+
+1. Log in to the Alibaba Cloud console and open the **DataWorks** product
+2. Go to **DataStudio** or **Operation Center** and open the **Intelligent Monitoring** page
+3. Open the alarm receiver configuration (the custom webhook entry) and create a new webhook
+4. Set the request URL to the Flashduty integration push URL copied above; the request method is POST
+5. After saving, you can click **Send test message**. DataWorks pushes a connectivity test message (`message.content`); Flashduty returns success without creating an alert event
+
+</div>
+
+**Step 2: Enable the webhook in monitoring rules**
+
+<div className="md-block">
+
+1. In **Intelligent Monitoring**, open the **custom rules** (instance status alerts, resource group alerts), **baseline management**, or **event management** page
+2. Create or edit a rule, and select the custom webhook created above as an alarm channel
+3. Save the rule. Alerts triggered by this rule are pushed to Flashduty in real time
+
+</div>
+
+## Supported alert types
+---
+<div className="md-block">
+
+DataWorks Intelligent Monitoring wraps every custom webhook message in a `message` field, distinguished by `message.title`. This integration supports the following three alert families:
+
+| message.title | Alert family | Description |
+| ------------- | ------------ | ----------- |
+| `DataWorks_Remind` | Custom alert | Instance status alerts (remind_unit: Task, Baseline, Project, BizProcess) and resource group alerts (ScheduleResourceGroup, DiResourceGroup) |
+| `DataWorks_Baseline_Alert` | Baseline alert | Baseline warning (dangerous) and SLA breach (overSla) |
+| `DataWorks_Event_Remind` | Event alert | Task error (ERROR) and task slowdown (SLOW) |
+
+The connectivity test message (`message.content`) is used only to verify the push URL and never creates an alert event.
+
+</div>
+
+## Severity mapping
+---
+<div className="md-block">
+
+Mapping from custom alert `remind_type` to Flashduty severity:
+
+| DataWorks remind_type | Flashduty | State |
+| --------------------- | --------- | ----- |
+| error | Critical | Critical |
+| exhausted error | Critical | Critical |
+| uncompleted | Warning | Warning |
+| cycle uncompleted | Warning | Warning |
+| run over time | Warning | Warning |
+| resGroup use ratio | Warning | Warning |
+| the number of waiting task in resGroup | Warning | Warning |
+| completed | Info | Info |
+| empty or unknown value | Warning | Warning |
+
+Mapping from baseline alert `status`:
+
+| DataWorks status | Flashduty | State |
+| ---------------- | --------- | ----- |
+| overSla (SLA breach) | Critical | Critical |
+| dangerous (warning) | Warning | Warning |
+| empty or unknown value | Warning | Warning |
+
+Mapping from event alert `event_type`:
+
+| DataWorks event_type | Flashduty | State |
+| -------------------- | --------- | ----- |
+| ERROR | Critical | Critical |
+| SLOW | Warning | Warning |
+| empty or unknown value | Warning | Warning |
+
+</div>
+
+## Alert Key and alert merging
+---
+<div className="md-block">
+
+DataWorks Intelligent Monitoring webhooks are **one-shot events**: the official protocol defines alert notifications only, with **no recovery** or update semantics, and it provides no vendor-level deduplication ID or fingerprint field. Therefore this integration never automatically recovers (closes) any alert; every event is delivered in a triggered state.
+
+So that repeated triggers from the same rule and the same monitored object can be merged for noise reduction, Flashduty derives the Alert Key from immutable identity fields in the message:
+
+| Alert family | Alert Key components |
+| ------------ | -------------------- |
+| Custom alert (task-based) | title + remind_name + node_id_list |
+| Custom alert (resource group) | title + remind_name + resource_group_name |
+| Baseline alert | title + baseline_name + key_instance |
+| Event alert | title + task_name + event_type |
+
+Note: `event_name` contains the business date and cycle ID (different every cycle), so it is excluded from the Alert Key; consecutive failures of the same task across cycles merge into one alert. Fields that change on every delivery, such as `occur_time` and `number_of_alerts`, are excluded as well.
+
+</div>
+
+## Field label mapping
+---
+<div className="md-block">
+
+Key fields from the push message are preserved as labels on the alert event and can be used for routing, silencing, and template rendering:
+
+| Label | Source field | Description |
+| ----- | ------------ | ----------- |
+| alert_type | title | Alert family (DataWorks_Remind, etc.) |
+| remind_name | remind_name | Rule name |
+| remind_unit | remind_unit | Monitoring granularity (Task, ScheduleResourceGroup, etc.) |
+| remind_type | remind_type | Raw trigger condition |
+| occur_time | occur_time | Raw occurrence time string |
+| remind_founder | remind_founder | Rule creator |
+| more_information | more_information | Operation Center instance URL |
+| task_size / number_of_alerts | same-name fields | Task count / nth alert notification |
+| node_id_list / node_name_list / node_owner_list | same-name fields | Node IDs / names / owners (comma-separated, up to 5) |
+| resource_group_name / threshold / duration | same-name fields | Resource group name / threshold / duration (minutes), resource group monitoring only |
+| baseline_name / baseline_owners | same-name fields | Baseline name / baseline owners |
+| cycle_number / key_instance / sla_time / buffer / status | same-name fields | Cycle number / key instance / SLA time / buffer (minutes) / baseline status |
+| task_name / task_owner_name / event_type / event_name | same-name fields | Task name / owner / event type / event name |
+
+</div>
+
+## FAQ
+---
+<div className="md-block">
+
+**Why are alerts never automatically recovered?**
+
+The DataWorks Intelligent Monitoring webhook protocol defines no resolve message; it is a one-shot notification with no recovery semantics. To close an alert, handle it manually in the Flashduty console or configure alert convergence policies for the rule.
+
+**Why is no alert visible after sending a test message?**
+
+The DataWorks connectivity test message (`message.content`) only verifies that the push URL is reachable. Flashduty returns success without creating an alert event. Trigger a real rule to verify the end-to-end flow.
+
+</div>
