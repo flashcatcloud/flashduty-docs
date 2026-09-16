@@ -66,7 +66,7 @@ For an engine cluster composed of multiple instances, as long as at least one in
 
 There may be many alert rules. Monitors provides a tree-structured grouping for categorized management. Each alert rule must belong to a group. You can create groups first, then create alert rules under the groups.
 
-The create/edit alert rule page is a single-page form divided into five numbered sections — **Basic Configuration**, **Data Sources**, **Query Detection Method**, **Detection Frequency & Effective Time**, and **Event Configuration** — arranged top to bottom, so you fill them in by scrolling a single page; there is no step wizard.
+The create/edit alert rule page is a single-page form divided into five numbered sections — **Basic Configuration**, **Data Sources and Queries**, **Alert Conditions**, **Detection Frequency & Effective Time**, and **Event Configuration** — arranged top to bottom, so you fill them in by scrolling a single page; there is no step wizard.
 
 ### Basic Configuration
 
@@ -78,9 +78,15 @@ The create/edit alert rule page is a single-page form divided into five numbered
 | **Rule Name** | Name of the alert rule; does not support variable references (fixed names facilitate filtering and grouping operations). It must be unique within its group; imports, edits, and moves fail if the target group already contains that name |
 | **Additional Labels** | Similar to `labels` in Prometheus; attached to all alert events for filtering, routing, and inhibition |
 
-### Data Source Selection
+### Data Sources and Queries
+
+Section 2 has two parts: **Data Sources** decides which data sources the rule applies to, and **Query Statements** decides what to query and how.
+
+#### Data Sources
 
 ![Data source selection](https://docs-cdn.flashcat.cloud/imges/mon/9971af45b4bc19bfe807898bf1bf10a0.png)
+
+To the right of the sub-heading there is a hint icon explaining the scope of the binding, plus a **Go to Data Source Management** entry — it opens in a new tab so unsaved edits in the current form are not lost.
 
 First choose a **data source type**. Only types that **already have at least one configured data source** are listed here — types with none don't appear, so you can't end up picking a type with no data sources to query. When you're editing an existing rule, its current type always stays visible, even if all the data sources under that type have since been deleted.
 
@@ -97,11 +103,11 @@ Both methods can be used together, and at least one must be specified. The rule 
 If you need stable rule bindings that are unaffected by data source renames, prefer exact match. See [Data Source Management](/en/monitors/data-sources/data-sources) for details.
 </Tip>
 
-### Query Detection Method
+#### Query Statements
 
-![Query detection method](https://docs-cdn.flashcat.cloud/imges/mon/4e38b46952d6cbbfb97c2d28843dcdbe.png)
+![Query statements](https://docs-cdn.flashcat.cloud/imges/mon/4e38b46952d6cbbfb97c2d28843dcdbe.png)
 
-Configure how to query data sources and how to evaluate alert conditions. Please read the usage instructions on the right side of **Query Detection Method** on the page.
+Under the **Query Statements** sub-heading you configure the query type and the statements themselves. To the right of the sub-heading is the **Usage guide** entry, which opens a drawer titled "Query Statements" with the guide to writing statements. For how value fields, label fields, and additional information are mapped from tabular query results, see [Query result field mapping](/en/monitors/alert-rules/query-result-fields).
 
 #### AI Query Assistant
 
@@ -111,9 +117,56 @@ Every query statement input has a rainbow **Write with AI** button in its top-ri
 - The entry is available on the main query, the recovery queries for threshold and data-exists modes, related queries, the query preview dialog, and the entity tree's rule PromQL and entity-category discovery PromQL. In the entity tree, the assistant only writes back the statement and never switches the data source.
 - Applying a statement changes the current form only; the rule is not saved automatically. Confirm that the statement matches the alert thresholds before saving.
 
+### Alert Conditions
+
+Section 3 offers three check modes, presented as tabs: **Threshold evaluation**, **Missing data**, and **Data exists**. Each tab has an enable switch; an enabled tab shows a check mark after its title.
+
+| Tab | What it evaluates |
+|-----|-------------------|
+| **Threshold evaluation** | Set a threshold expression per level; once a condition is met for the required number of checks, an alert of that level fires. When a higher-level threshold triggers, lower-level thresholds are skipped. With this tab enabled, at least one of Critical, Warning, and Info must be filled in |
+| **Missing data** | Evaluates "alert if previously found data is now missing" or "alert when all queries return no data"; the two cards can be enabled independently |
+| **Data exists** | Any returned data counts as a match; once the trigger count is reached, an alert of the configured level fires |
+
+The settings are grouped into cards: except on the **Missing data** tab, each tab has an **Alert fired** card and an **Alert recovered** card; the **Missing data** tab merges both into a single **Trigger & recovery conditions** card that applies to all enabled conditions above. The rows inside these cards are:
+
+| Field | Description |
+|-------|-------------|
+| **Trigger mode** | `Consecutive` or `Cumulative`; see the next section |
+| **Trigger condition** | The sentence matching the trigger mode. On the **Threshold evaluation** tab, the level expression rows (`Critical` / `Warning` / `Info`) sit above the trigger mode and are the trigger condition itself |
+| **Alert level** | `Critical`, `Warning`, or `Info`; defaults to `Critical`. The **Threshold evaluation** tab has no such row — the level comes from whichever expression row matched; on the **Data exists** and **Missing data** tabs it is set per condition |
+| **Recovery mode** | Sits in the **Alert recovered** card; on the **Missing data** tab it is set per condition — see the end of this section |
+| **Recovery condition** | **N consecutive normal checks to recover**, defaults to 1. At 1, a single check that meets the recovery condition produces a recovery event; above 1, several consecutive normal checks are required |
+
+#### Trigger mode: consecutive vs cumulative
+
+| Trigger mode | Meaning | Trigger condition sentence |
+|--------------|---------|----------------------------|
+| **Consecutive** (default) | Alerts after the set number of consecutive matches | `alert after N consecutive checks all match` — the rule alerts only after N consecutive checks meet the condition, where N is the **Matches** count, default 3 |
+| **Cumulative** | Alerts when enough of the last checks match, even if not consecutive | `alert once N of the last M checks match` — the rule alerts when N of the last M checks meet the condition, where M is the **Checks** count, defaulting to `max(Matches, 5)` when you switch to cumulative |
+
+- Under **Cumulative**, the match count cannot exceed the check count, and the check count cannot be lower than the match count. Neither can exceed 10000; going over is reported as a validation error rather than being silently clamped to the maximum
+- The two modes are mutually exclusive: after switching back to **Consecutive**, the check count is no longer submitted with the rule (the server tells the modes apart by whether that field is present), so the "N of the last M checks" semantics cannot linger
+- The underlying rule fields: match count `alerting_check_times`, check count `alerting_window_size`, recovery condition `recovery_check_times`
+
+<Note>
+**Cumulative matching requires alert engine ≥ `v0.69.0`.** When you select **Cumulative**, a "Supported in v0.69.0+" badge appears next to the option. Older engines fall back to consecutive matches, which may delay or miss alerts, but never fires earlier than the new semantics.
+</Note>
+
+#### Alert recovery
+
+The available recovery modes depend on the check mode:
+
+| Tab | Recovery mode |
+|-----|---------------|
+| **Threshold evaluation** | `Recovery when no thresholds are triggered` (default), `Recovery only when conditions are met` (requires an extra recovery expression), `Recovery when expression finds data` (requires a recovery query statement), `Keep the alert active until it is closed manually` |
+| **Data exists** | `Recover if no data` (default), `Recover when results found` (requires a recovery query statement), `Keep the alert active until it is closed manually` |
+| **Missing data** | For `Alert when all queries return no data` the recovery mode is fixed to "Recovers automatically once any query returns data again"; for `Alert if previously found data is now missing` you can choose `End automatically when data reappears` (default), `End when data reappears or the timeout expires` (requires an **Automatic close timeout** in seconds, minimum 1), or `Manual close only` |
+
 ### Detection Frequency and Effective Time
 
-This section is collapsed by default and only shows a one-line summary in the format detection frequency · rule timezone · effective time, e.g. `@every 15s · Asia/Shanghai · Always active`. Click **Expand** on the right to edit the settings, then click **Collapse** to fold it again. When you click save, if the detection frequency, rule timezone, effective time, or query time offset has a validation error, the section automatically expands and scrolls to the first error.
+This section is always visible: there is no one-line summary and no expand/collapse control — the detection frequency, query time offset, rule timezone, and effective time fields are laid out directly in the section.
+
+When you click save, if a field fails validation the page scrolls to and highlights the first invalid field: if the error is inside a tab of **Alert Conditions**, that tab is activated first, and if it is inside **Custom Fields & Related Queries** in **Event Configuration**, that area is expanded first.
 
 ![Detection frequency & effective time](https://docs-cdn.flashcat.cloud/imges/mon/0980d71a653985a1706243fc6795685e.png)
 
@@ -142,6 +195,8 @@ Saving a rule also validates its runtime configuration: the repeat notification 
 </Note>
 
 ### Event Configuration
+
+Section 5 contains, in order, **Custom Fields & Related Queries** (collapsed by default, with Expand / Collapse on the right; while collapsed the summary line shows how many custom fields and related queries are configured, or a hint line when there are none), the notes description, and the repeat notification settings.
 
 | Config Item | Description |
 |--------|------|
