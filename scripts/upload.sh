@@ -1,19 +1,17 @@
 #!/usr/bin/env bash
 #
-# Upload documentation to Meilisearch for AI Q&A bot indexing.
+# Sync documentation to Meilisearch for AI Q&A bot indexing.
 #
-# Supports two modes:
-#   - Incremental (default): uses git diff to upload only changed docs and
-#     delete removed ones from the index.
-#   - Full: scans all docs in zh/ and en/ and uploads everything.
+# Every run makes the index match the docs in zh/ and en/: all docs are
+# upserted (Meilisearch only re-embeds documents whose content changed) and
+# index documents whose source file no longer exists are deleted.
 #
 # Required env vars: MEILI_ENDPOINT, MEILI_API_KEY, MEILI_INDEX
 # Optional:
-#   FULL_UPLOAD  - set to "true" for full re-upload (default: false)
-#   BASE_URL     - docs base URL (default: https://docs.flashduty.com)
+#   BASE_URL  - docs base URL (default: https://docs.flashduty.com)
 #
 # Usage:
-#   sh scripts/upload.sh [--full] [--dry-run] [--help]
+#   bash scripts/upload.sh [--dry-run] [--help]
 #
 # License: Same as the repository
 
@@ -25,29 +23,28 @@ cd "$REPO_ROOT"
 
 SCRIPT_NAME=$(basename "$0")
 BASE_URL="${BASE_URL:-https://docs.flashduty.com}"
-FULL_UPLOAD="${FULL_UPLOAD:-false}"
 DRY_RUN=false
 BATCH_SIZE=5
 # DashScope text-embedding-v4 accepts up to 8192 tokens per input.
 # Truncate content to stay safely within this limit after cleanup.
 MAX_CONTENT_CHARS=6000
+LIST_PAGE_SIZE=1000
 
 usage() {
   cat <<EOF
 Usage: $SCRIPT_NAME [OPTIONS]
 
-Upload documentation (zh/, en/) to Meilisearch for AI Q&A bot indexing.
+Sync documentation (zh/, en/) to Meilisearch for AI Q&A bot indexing:
+upload every doc and delete index documents whose source file is gone.
 
 Options:
-  --full       Re-upload all docs (overrides FULL_UPLOAD env var)
-  --dry-run    Validate and list files without uploading
+  --dry-run    List what would be uploaded and deleted without writing
   -h, --help   Show this help
 
 Environment variables:
   MEILI_ENDPOINT   Meilisearch instance URL (required)
-  MEILI_API_KEY    API key with documents write permission (required)
+  MEILI_API_KEY    API key with documents read/write permission (required)
   MEILI_INDEX      Target index name (required)
-  FULL_UPLOAD      Set to "true" for full re-upload (default: false)
   BASE_URL         Docs base URL (default: $BASE_URL)
 EOF
 }
@@ -55,17 +52,14 @@ EOF
 for arg in "$@"; do
   case "$arg" in
     -h|--help) usage; exit 0 ;;
-    --full) FULL_UPLOAD=true ;;
     --dry-run) DRY_RUN=true ;;
     *) echo "Unknown option: $arg" >&2; usage >&2; exit 1 ;;
   esac
 done
 
-if [[ "$DRY_RUN" != true ]]; then
-  if [[ -z "${MEILI_ENDPOINT:-}" || -z "${MEILI_API_KEY:-}" || -z "${MEILI_INDEX:-}" ]]; then
-    echo "Error: MEILI_ENDPOINT, MEILI_API_KEY, and MEILI_INDEX must be set." >&2
-    exit 1
-  fi
+if [[ -z "${MEILI_ENDPOINT:-}" || -z "${MEILI_API_KEY:-}" || -z "${MEILI_INDEX:-}" ]]; then
+  echo "Error: MEILI_ENDPOINT, MEILI_API_KEY, and MEILI_INDEX must be set." >&2
+  exit 1
 fi
 
 if ! command -v jq &> /dev/null; then
@@ -139,27 +133,16 @@ dir_for_file() {
   fi
 }
 
-is_doc_file() {
-  local file=$1
-  [[ "$file" == zh/*.md || "$file" == zh/*.mdx || "$file" == en/*.md || "$file" == en/*.mdx ]] || return 1
-  local base
-  base=$(basename "$file")
-  [[ "$base" != "index.md" && "$base" != "index.mdx" ]] || return 1
-  # Exclude api-reference/: auto-generated OpenAPI JSON served via Mintlify's
-  # native OpenAPI integration; it should not be indexed for the AI Q&A bot.
-  [[ "$file" != api-reference/* ]] || return 1
-  return 0
-}
-
-# Clean raw MDX content for embedding: strip frontmatter, HTML/MDX tags,
-# import statements, and collapse whitespace, then truncate.
+# Clean raw MDX content for embedding: strip frontmatter, import statements and
+# HTML/MDX tags, collapse whitespace, then truncate. Tags are stripped after
+# lines are joined so a tag whose attributes span several lines goes too; a tag
+# must start with a letter or '/', which keeps comparisons like "a < b" intact.
 clean_content() {
   local file=$1
   awk 'BEGIN{skip=0} NR==1 && /^---$/{skip=1;next} skip && /^---$/{skip=0;next} !skip' "$file" \
     | grep -v '^import ' \
-    | sed 's/<[^>]*>//g' \
     | tr '\n' ' ' \
-    | sed 's/  */ /g' \
+    | sed -E 's/<[A-Za-z/][^<>]*>//g; s/ +/ /g' \
     | cut -c1-"$MAX_CONTENT_CHARS"
 }
 
@@ -181,6 +164,45 @@ build_doc_json() {
     --arg locale "$locale" \
     --arg url "$doc_url" \
     '{id: $id, title: $title, content: $content, locale: $locale, url: $url}' 2>/dev/null
+}
+
+# Write "id<TAB>url" for every document in the index to $1. Fails unless the
+# pages add up to exactly the total the index reports, so an incomplete
+# listing can never drive deletions.
+list_index_docs() {
+  local out=$1
+  local offset=0
+  local total=""
+  local page page_total listed
+
+  while :; do
+    if ! page=$(curl -sS --fail-with-body --connect-timeout 30 --max-time 60 \
+      -H "Authorization: Bearer $MEILI_API_KEY" \
+      "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents?fields=id,url&limit=$LIST_PAGE_SIZE&offset=$offset"); then
+      echo "Listing index documents failed: $page" >&2
+      return 1
+    fi
+    if ! page_total=$(jq -er '.total' <<<"$page"); then
+      echo "Unexpected listing response: $page" >&2
+      return 1
+    fi
+    if [[ -z "$total" ]]; then
+      total=$page_total
+    elif [[ "$page_total" != "$total" ]]; then
+      echo "Index changed while listing (total $total -> $page_total)" >&2
+      return 1
+    fi
+    jq -r '.results[] | [.id, (.url // "")] | @tsv' <<<"$page" >> "$out" || return 1
+
+    offset=$((offset + LIST_PAGE_SIZE))
+    [[ $offset -lt $total ]] || break
+  done
+
+  listed=$(cut -f1 "$out" | sort -u | wc -l | xargs)
+  if [[ "$listed" -ne "$total" ]]; then
+    echo "Listed $listed unique documents but the index reports $total" >&2
+    return 1
+  fi
 }
 
 # Upload a batch of documents (JSON array) to Meilisearch
@@ -300,98 +322,58 @@ upload_files() {
 
 # --- Main ---
 
-echo "=== Meilisearch Doc Upload ==="
-echo "Index: ${MEILI_INDEX:-<not set>}"
+echo "=== Meilisearch Doc Sync ==="
+echo "Index: $MEILI_INDEX"
 echo "Base URL: $BASE_URL"
-echo "Mode: $([ "$FULL_UPLOAD" = "true" ] && echo "full" || echo "incremental")"
-[[ "$DRY_RUN" == true ]] && echo "(dry-run mode — no uploads)"
+[[ "$DRY_RUN" == true ]] && echo "(dry-run mode — no writes)"
 echo ""
 
-if [[ "$FULL_UPLOAD" == "true" ]]; then
-  # Full mode: scan all docs
-  echo "Scanning all documentation files..."
-  temp_files=$(mktemp)
-  {
-    [[ -d "zh" ]] && find zh -type f \( -name "*.md" -o -name "*.mdx" \) ! -name "index.md" ! -name "index.mdx"
-    [[ -d "en" ]] && find en -type f \( -name "*.md" -o -name "*.mdx" \) ! -name "index.md" ! -name "index.mdx"
-  } | sort > "$temp_files"
+work_dir=$(mktemp -d)
+trap 'rm -rf "$work_dir"' EXIT
 
-  file_count=$(wc -l < "$temp_files" | xargs)
-  echo "Found $file_count documentation files"
-  echo ""
-
-  upload_files "$temp_files"
-  result=$?
-  rm -f "$temp_files"
-  exit $result
+echo "Scanning all documentation files..."
+find zh en -type f \( -name "*.md" -o -name "*.mdx" \) ! -name "index.md" ! -name "index.mdx" \
+  | sort > "$work_dir/files"
+file_count=$(wc -l < "$work_dir/files" | xargs)
+echo "Found $file_count documentation files"
+if [[ $file_count -eq 0 ]]; then
+  echo "Error: no documentation files found; refusing to sync an empty doc set." >&2
+  exit 1
 fi
 
-# Incremental mode: use git diff to find changed files
-if ! git rev-parse HEAD~1 > /dev/null 2>&1; then
-  echo "No previous commit found — falling back to full upload"
-  FULL_UPLOAD=true
-  exec bash "$0" --full $([ "$DRY_RUN" = true ] && echo "--dry-run")
+while IFS= read -r file; do
+  file_to_id "$file"
+done < "$work_dir/files" | LC_ALL=C sort -u > "$work_dir/current_ids"
+
+echo "Listing documents in index..."
+if ! list_index_docs "$work_dir/index_docs"; then
+  echo "Error: could not list the whole index; nothing was written." >&2
+  exit 1
 fi
-
-echo "Detecting changed files since last commit..."
-
-# Files added or modified
-changed_files=$(mktemp)
-git diff --name-only --diff-filter=ACMR HEAD~1 -- zh/ en/ | while IFS= read -r file; do
-  is_doc_file "$file" && echo "$file"
-done > "$changed_files" || true
-
-# Files deleted
-deleted_files=$(mktemp)
-git diff --name-only --diff-filter=D HEAD~1 -- zh/ en/ | while IFS= read -r file; do
-  is_doc_file "$file" && echo "$file"
-done > "$deleted_files" || true
-
-changed_count=$(wc -l < "$changed_files" | xargs)
-deleted_count=$(wc -l < "$deleted_files" | xargs)
-
-echo "Changed/added: $changed_count files"
-echo "Deleted: $deleted_count files"
+echo "Index has $(wc -l < "$work_dir/index_docs" | xargs) documents"
 echo ""
 
-if [[ $changed_count -eq 0 && $deleted_count -eq 0 ]]; then
-  echo "No documentation changes detected. Nothing to do."
-  rm -f "$changed_files" "$deleted_files"
-  exit 0
-fi
+# Index documents with no source file in the current doc set
+LC_ALL=C sort "$work_dir/index_docs" \
+  | LC_ALL=C join -t $'\t' -v 1 - "$work_dir/current_ids" > "$work_dir/stale_docs"
+stale_count=$(wc -l < "$work_dir/stale_docs" | xargs)
 
 result=0
 
-# Upload changed files
-if [[ $changed_count -gt 0 ]]; then
-  echo "--- Uploading changed documents ---"
-  upload_files "$changed_files" || result=1
+echo "--- Uploading documents ---"
+upload_files "$work_dir/files" || result=1
+
+echo ""
+echo "--- Removing documents with no source file ---"
+if [[ $stale_count -eq 0 ]]; then
+  echo "None."
+else
+  while IFS=$'\t' read -r id url; do
+    echo "Will delete: $url (id: $id)"
+  done < "$work_dir/stale_docs"
+  ids_json=$(cut -f1 "$work_dir/stale_docs" | jq -Rn '[inputs]')
+  delete_documents "$ids_json" "$stale_count" || result=1
 fi
-
-# Delete removed files from index
-if [[ $deleted_count -gt 0 ]]; then
-  echo ""
-  echo "--- Removing deleted documents ---"
-
-  ids_json="["
-  first=true
-  while IFS= read -r file; do
-    [[ -z "$file" ]] && continue
-    id=$(file_to_id "$file")
-    if [[ "$first" == true ]]; then
-      first=false
-    else
-      ids_json="${ids_json},"
-    fi
-    ids_json="${ids_json}\"${id}\""
-    echo "Will delete: $file (id: $id)"
-  done < "$deleted_files"
-  ids_json="${ids_json}]"
-
-  delete_documents "$ids_json" "$deleted_count" || result=1
-fi
-
-rm -f "$changed_files" "$deleted_files"
 
 echo ""
 echo "All done."
