@@ -30,11 +30,11 @@ Monitors supports the following 15 data source types:
 | **MongoDB Mongos** (`mongodb_mongos`) | MongoDB sharded cluster router, diagnostic-only |
 | **Kafka** (`kafka`) | Apache Kafka cluster, diagnostic-only |
 
-Of these, the 5 **diagnostic-only types** — Redis Node, Redis Sentinel, MongoDB (mongod/mongos) and Kafka — are used for database and middleware diagnostics and cannot evaluate alerts: `alerting_enabled` cannot be enabled (always `false`), so they cannot participate in alert rule queries and evaluation. Connection address requirements are covered in [Data source type configuration](#data-source-type-configuration).
+Of these, the 5 **diagnostic-only types** — Redis Node, Redis Sentinel, MongoDB (mongod/mongos) and Kafka — are used for database and middleware diagnostics and cannot evaluate alerts: `alerting_enabled` cannot be enabled (always `false`), so they cannot participate in alert rule queries and evaluation. They cannot enter the query workbench either — they are used from AI SRE through diagnostic tools only (see the "Data source row actions: query and AI analysis" section below). Connection address requirements are covered in [Data source type configuration](#data-source-type-configuration).
 
 ## Data source list
 
-The data source list displays all configured data sources with the following information:
+The data source list shows only the data sources you are allowed to query, with the following information:
 
 - **Name**: The identifier for the data source
 - **Type**: Data source type with icon
@@ -42,6 +42,8 @@ The data source list displays all configured data sources with the following inf
 - **Associated Alert Engine**: The bound alert engine cluster name, with engine online status indicator
 - **Enable datasource**: An inline switch controlling whether the data source takes part in business queries and diagnostics — this column is where you enable or disable a data source in the console
 - **Notes**: Supplementary description
+
+The list is filtered by query permission: when you have no query (readonly) permission on a data source, the whole row is absent from the response — you can neither see it nor find it with the search box — so the list may hold fewer rows than the account actually has. The owner account, the Admin role, the creator, and members of the managing team or the readonly teams always see it. See the "Data source permissions (team authorization)" section below for the authorization model.
 
 You can filter data sources by name or type using the search box. The list auto-refreshes every 5 seconds to reflect real-time engine connection status.
 
@@ -54,9 +56,51 @@ The **Enable datasource** column on the right of the list is the console entry p
 | **On** | The data source takes part in business queries and data source diagnostics as usual. |
 | **Off** | No queries, diagnostics or alert evaluations run against it, but the configuration — connection parameters, credentials, associated alert engine — is kept in full and it can be re-enabled at any time; disabling does not change `alerting_enabled`. |
 
-- **Permission**: toggling the switch requires the data source edit permission (`MonitDatasourceUpdate`); without it the switch is disabled and the column is read-only.
+- **Permission**: whether this column is operable is decided by the data source edit permission (`MonitDatasourceUpdate`); without it the switch is disabled and the column is read-only. The switch itself calls the data source detail and update endpoints, which add an instance-level `manage` check on top: even with `MonitDatasourceUpdate`, if you are not the creator, not the owner account or an Admin, and not a member of the datasource's managing team, the toggle is rejected by the backend (`only the managing team can manage this datasource`). See the "Data source permissions (team authorization)" section below for the decision rules.
 - **New data sources are enabled by default**: they are always created with `enabled=true`, and the create/edit drawer has no such switch; to disable a data source, switch it off in the list after creating it.
-- **List badge**: the Name column no longer shows a separate "disabled" badge — the switch alone carries the enabled/disabled state. A "Not used for alerting" badge on the Name column means `alerting_enabled=false` and is unrelated to enabling or disabling.
+- **List badge**: the Name column no longer shows a separate "disabled" badge — the switch alone carries the enabled/disabled state. A "Not used for alerting" badge on the Name column means `alerting_enabled=false`, and it appears only when the data source is enabled and its type supports alert evaluation: a disabled data source carries no badge (the switch already expresses that state), and neither do the 5 diagnostic-only types (alert evaluation is simply not applicable to them).
+
+## Data source permissions (team authorization)
+
+A data source can restrict two kinds of operation by team: **query and reference** (readonly) and **management** (manage). With no authorization configured the behaviour is exactly the default — the whole tenant can read and write; existing data sources have both authorization fields set to `NULL` and need no action.
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| `manage_team_id` | A team ID, nullable | The single managing team of this data source. `NULL` means management is unrestricted |
+| `readonly_team_ids` | An array of team IDs, nullable | The teams allowed to query and reference this data source. `NULL` means query and reference are unrestricted |
+| `creator_id` | A member ID, nullable | The creator, written automatically on creation; when an existing row has `NULL`, management is decided by the managing team and administrators only |
+
+There are exactly three legal authorization configurations:
+
+| Configuration | Who can query / reference | Who can manage |
+|---------------|---------------------------|----------------|
+| Neither field configured (`NULL`) | The whole tenant | The whole tenant |
+| Only `manage_team_id` | The whole tenant | The creator, the owner account, the Admin role, and members of the managing team |
+| Both `manage_team_id` and `readonly_team_ids` | The creator, the owner account, the Admin role, and members of the managing and readonly teams | The creator, the owner account, the Admin role, and members of the managing team |
+
+`manage` always implies `readonly`: whoever can manage can also query. The team set comes from the current user's team membership; if that lookup fails the context fails closed to an empty team set rather than opening up permissions.
+
+**Validation and normalization**:
+
+- `readonly_team_ids` non-empty while `manage_team_id` is empty is rejected (HTTP 400, with an error naming the dependency between the two fields) — a data source with restricted query access must have an explicit responsible team.
+- Updates are validated against the merged final state of "old value + input", so clearing `manage_team_id` while `readonly_team_ids` stays non-empty is rejected too.
+- Values are normalized before writing: `manage_team_id` of `0` becomes `NULL`; `readonly_team_ids` is deduplicated, stripped of `0`, sorted, and an empty set becomes `NULL`. Teams are not checked for existence — dangling IDs simply stop matching (after a team is deleted, the creator or an administrator can take over and fix it).
+
+### What authorization changes
+
+- **List**: only data sources you are allowed to query are returned. A data source you may not query is absent from the response entirely; each row carries a `my_perm` field whose value is `manage` or `readonly`, plus the authorization fields (`manage_team_id`, `readonly_team_ids`, `creator_id`). The frontend only consumes these decisions; it never computes them.
+- **Management operations**: the data source detail (which returns connection credentials), edit, delete and the enable toggle all require `manage`, otherwise the request is rejected with an access-denied error (`only the managing team can manage this datasource`).
+- **Query and reference**: instant queries, data exploration, dashboard panel queries, datasource tool calls, and referencing the data source in an alert rule all require `readonly`; without it the request is refused explicitly, without exposing data source details.
+- **Saving alert rules**: saving a rule requires the author to hold `readonly` on every data source the rule references, including data sources matched by a name pattern at save time; otherwise the save is rejected and names the data source that may not be referenced. The only exemption is a pure disable (a field update that only sets `enabled` to `false`). Once saved, rules are executed under the system identity, so later changes to member permissions do not affect them.
+- **Audit**: changes to the authorization fields are written as a `datasource_auth_update` audit record.
+
+### How to configure it
+
+The authorization fields travel with the data source create and update requests (`POST /monit/datasource/create`, `POST /monit/datasource/update`): you can set them while creating a data source, and changing them on an existing data source is a management operation that requires `manage` on that data source. Omitting an authorization field in an update keeps the current value; passing an explicit `null` clears it. The console data source form does not offer inputs for these two fields yet, so they are set through the API.
+
+<Note>
+Authorization is granted at team granularity only; per-member authorization is not supported. To authorize an individual member, create a small team for them.
+</Note>
 
 ## Create a data source
 
@@ -94,6 +138,10 @@ Alert rules support two methods for binding data sources. Both can be used toget
 Wildcard by name stores name strings — if a data source is renamed, existing wildcard rules may no longer match. Exact match by ID stores the data source ID and is unaffected by renames. If stability is a priority, prefer exact match.
 </Warning>
 
+<Note>
+Saving a rule also requires the author to hold query (readonly) rights on every data source the rule references — both the ones picked by **exact match** and the ones matched by a **name pattern** at save time. If any of them fails the requirement, the save is rejected with a message that the data source may not be referenced. The only exception is a pure disable: a batch field update that only sets `enabled` to `false` is always allowed. See the "Data source permissions (team authorization)" section below.
+</Note>
+
 ## Enabled and alert evaluation switches
 
 Data sources have two independent switches, controlling business execution and alert evaluation respectively:
@@ -101,7 +149,7 @@ Data sources have two independent switches, controlling business execution and a
 | Switch | Field | Meaning |
 |--------|-------|---------|
 | **Enabled** | `enabled` | Whether business execution is enabled. When disabled, the data source rejects business queries and datasource tools, but `alerting_enabled` is unchanged |
-| **Alert evaluation** | `alerting_enabled` | Whether the data source may participate in alert rule queries and evaluation. Alert evaluation also requires `enabled=true` and an alerting-capable type; `false` does not block non-alerting queries and datasource tools |
+| **Use for alerting** | `alerting_enabled` | Whether the data source may participate in alert rule queries and evaluation; once off, the Name column in the list shows a "Not used for alerting" badge. Alert evaluation also requires `enabled=true` and an alerting-capable type; `false` does not block non-alerting queries and datasource tools |
 
 - **Console entry point**: the `enabled` switch is the **Enable datasource** column in the data source list (see [Enable datasource](#enable-datasource)); the create/edit drawer has no such switch. `alerting_enabled` is set in the create/edit drawer.
 - **Create defaults**: `enabled` defaults to `true`; `alerting_enabled` defaults to `true` for alerting-capable types and `false` for diagnostic-only types.
@@ -315,7 +363,7 @@ Alert rules of the Tencent CLS type can bind exactly one data source and do not 
 | **Timeout (milliseconds)** | Connection timeout; range 1000–10000 | `3000` |
 | **TLS** | Whether TLS is enabled | Disabled |
 | **CA certificate** | PEM CA certificates or an `${env:NAME}` reference | - |
-| **Minimum / Maximum TLS version** | TLS 1.2 (default) or 1.3; the maximum must not be below the minimum | 1.2 / no constraint |
+| **Minimum / Maximum TLS version** | The form offers TLS 1.0, 1.1, 1.2 and 1.3 with nothing preselected (both selects are clearable); the server requires a minimum of at least 1.2, so choosing 1.0 or 1.1 is rejected on save; the maximum must not be below the minimum | Empty means 1.2 / no constraint |
 | **Server name** | SNI / certificate hostname for the TLS handshake; defaults to the hostname in the connection address | - |
 | **Skip server certificate verification** | Skip server certificate verification when TLS is enabled | No |
 
@@ -334,7 +382,7 @@ MongoDB does not support client certificate authentication (mTLS).
 | **TLS** | Whether TLS is enabled | Disabled |
 | **CA certificate** | PEM CA certificates or an `${env:NAME}` reference | - |
 | **Client certificate / key** | PEM format; must be configured as a pair; the literal key is not echoed after saving; supports `${env:NAME}` references | - |
-| **Minimum / Maximum TLS version** | TLS 1.2 (default) or 1.3; the maximum must not be below the minimum | 1.2 / no constraint |
+| **Minimum / Maximum TLS version** | The form offers TLS 1.0, 1.1, 1.2 and 1.3 with nothing preselected (both selects are clearable); the server requires a minimum of at least 1.2, so choosing 1.0 or 1.1 is rejected on save; the maximum must not be below the minimum | Empty means 1.2 / no constraint |
 | **Server name** | SNI / certificate hostname for the TLS handshake; defaults to the hostname in the connection address | - |
 | **Skip server certificate verification** | Skip server certificate verification when TLS is enabled | No |
 
@@ -353,8 +401,8 @@ Set credentials in the environment of every Edge process that queries this data 
 <Step title="Enter references in the data-source form">
 When editing a data source, enter `${env:VARIABLE_NAME}` in a supported authentication or connection field. For example, enter `${env:SLS_ACCESS_KEY_ID}` for the SLS **AccessKey ID** and `${env:SLS_ACCESS_KEY_SECRET}` for the **AccessKey Secret**.
 </Step>
-<Step title="Save and test">
-Save the data source, then use **Test** to verify the connection. Each referenced variable must exist in the corresponding Edge process environment.
+<Step title="Save and verify">
+After saving the data source, verify the connection: for a queryable type click **Query** on the list row and run a query in the query workbench; for a diagnostic-only type click **AI analysis** on the row and let an AI SRE diagnostic tool connect once (see the "Data source row actions: query and AI analysis" section below). Each referenced variable must exist in the corresponding Edge process environment.
 </Step>
 </Steps>
 
@@ -364,14 +412,35 @@ Variable names must start with an uppercase letter or underscore and may then co
 Environment variable references are not supported in the data-source **address**. They are also not supported in **Params** for Prometheus, Loki, or VictoriaLogs. Use this syntax only in supported authentication and connection fields.
 </Warning>
 
-## Test a data source
+## Data source row actions: query and AI analysis
 
-In the data source list, click the **Test** button for the corresponding data source to open a query preview window, verify the connection, and preview query results.
+The operations column of the data source list holds a single primary action button, which branches by data source type:
+
+| Data source type | Primary action | What it does |
+|------------------|----------------|--------------|
+| Queryable types: Prometheus, Elasticsearch, Loki, ClickHouse, MySQL, Oracle, PostgreSQL, Aliyun SLS, Tencent CLS, VictoriaLogs | **Query** | Opens the [query workbench](/en/monitors/explore/explore) with this data source attached and an empty query; running one query there verifies the connection and previews results |
+| Diagnostic-only types: `redis_node`, `redis_sentinel`, `mongodb_mongod`, `mongodb_mongos`, `kafka` | **AI analysis** | Opens the AI SRE panel docked on the current page, with this data source passed as a context reference |
+
+### How diagnostic-only types verify their connection
+
+Diagnostic-only types cannot enter the query workbench, so the list offers no **Query** entry for them and there is no generic connection test button (the Tencent CLS form has its own connection test — see **Connection Test** in the Tencent CLS section above). To confirm such a data source is reachable, use the row's **AI analysis** to hand it to AI SRE and let a diagnostic tool connect once, for example `redis_node.overview`, `redis_sentinel.overview`, `mongodb_mongod.overview` or `kafka.overview`.
+
+### When "AI analysis" appears
+
+- It appears only for types that **cannot enter the query workbench** (the 5 diagnostic-only types listed above); queryable types show **Query** instead, never both.
+- The account must have AI SRE enabled, otherwise the row offers edit and delete only, with no primary action at all.
+- It requires the AI SRE chat permission (`AiSreChatVisit`): without it the button is visible but disabled.
+
+### The reverse entry in the Name column
+
+The Name column also carries an **Ask in AI SRE →** link that takes you from this data source straight into an AI SRE conversation with a prefilled question naming the data source and its type (prefilled only, never sent automatically). It appears only when the data source is enabled, the account has AI SRE enabled, and the current user holds both the AI SRE access permission and the chat permission (`AiSreChatVisit`) — AI SRE cannot query a disabled data source, so no entry is offered for one.
 
 ## Edit and delete
 
 - **Edit**: Click the **Edit** button in the data source list to modify the configuration and save.
 - **Delete**: Click the **Delete** button in the data source list and confirm to delete the data source.
+
+Both go through the data source `manage` check first: you must be the creator of the data source, the owner account or an Admin, or a member of its managing team; otherwise the request is rejected (`only the managing team can manage this datasource`). The edit drawer loads the data source detail, and the detail returns connection credentials — which is why viewing the connection configuration, editing, deleting and enabling all sit behind the same gate. See the "Data source permissions (team authorization)" section for the decision rules.
 
 <Warning>
 Before deleting a data source, ensure no alert rules reference it, otherwise the related alert rules will not execute properly.
