@@ -184,7 +184,11 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 
 `client.Artifacts`（AI SRE 产物）对应 `/safari/artifact/*` 的 11 个 API 操作：画廊读取侧 `ReadGet`（按 ID 获取单个已发布产物）、`ReadList`（分页列出调用方可见的产物，支持标题子串搜索、`scope`（`all` / `personal` / `team`）与 `team_ids` 过滤）、`ReadGetFileState`（批量探测会话展示文件（`pf_` 前缀）是否已有上线产物，单次至多 50 个 ID）；文件侧 `ReadSign`（为展示文件签发短期有效的下载/预览 URL，有效期 5 分钟，`expires_in` 固定 300 秒）与 `ReadStream`（凭签名 token 下载或预览文件，成功响应体是文件而非 JSON 信封，原始字节放在 `Response.Raw`）；写入侧 `WritePublish`（把会话产生的文件发布为画廊产物）、`WriteUpdate`（重命名或转移个人/团队作用域）、`WriteDelete`（从画廊移除，源文件仍保留在会话中）；公开分享 `WriteShareEnable`（开启匿名公开分享并返回公开链接，任何人凭链接即可查看、无需登录）、`WriteShareRevoke`（关闭分享，链接立即失效）、`WriteShareSync`（把公开快照刷新为最新内容——当 `share_enabled` 为 true 且 `share_file_id` 与 `file_id` 不一致时表示快照已过期，调用它刷新）。相关导出类型包括 `PublishedArtifactItem`、`ArtifactShareState`、`SignedUrLs` 以及各 `Artifact*Request` / `Artifact*Response`。
 
+`client.Members.MemberNotify`（`POST /member/notify`，`memberNotify`）以调用方身份向账户成员发送邮件，仅可使用 AI SRE 会话凭据调用——其他凭据（包括普通 `app_key`）一律以 `AccessDenied` 拒绝（用 `IsAccessDenied` / `ErrorCodeOf` 判定）。请求字段：`subject`（必填，1–200 字符）与 `html`（必填，收件人看到的完整邮件正文；服务端会清洗，移除 `script`、`style`、`iframe` 等标签以及全部 `on*` 事件属性，图片仅保留 `src` 为 `https` 的，链接仅允许 `http` / `https` / `mailto`），`person_ids` 可选（至多 20 个且不可重复，省略或为空时只发送给调用方本人）。发送前先把 `dry_run` 设为 `true` 调一次：此时不入队，响应中的 `html` 就是收件人将收到的完整邮件，可据此确认清洗没有删掉正文依赖的内容，也不占用每小时限额与同轮次去重。投递是异步的，`accepted` 只表示邮件已入队；响应按收件人逐条返回 `recipients[]`（`person_id` 与 `status`），`status` 为 `accepted` 或 `skipped`，后者带 `reason`：`not_member`、`no_email`、`email_disabled`、`duplicate`、`rate_limited`（同一收件人每小时最多 20 封）、`send_failed`。
+
 `client.Diagnostics.QueryData` 通过 `POST /monit/query/data` 执行同步查询，返回稳定的 `query_result.v1` 结构化结果（`result.kind` 为 `frames` / `records` / `samples` 之一），要求 monit-edge v0.65.0 及以上版本。日志模式和指标趋势分析统一使用 `client.DataSources.ToolsInvoke`，工具名称为 `prometheus.metric_trends`、`loki.log_patterns` 或 `victorialogs.log_patterns`。
+
+`client.Diagnostics.QueryExplore`（`POST /monit/query/explore`，`monit-read-query-explore`）对已配置的数据源执行探索查询，返回数据源原生形态的 `explore_result.v1`：`ExploreData.format` 恒为 `explore_result.v1`，`result.kind` 取 `frames`（列式表格或时序，见 `ExploreFrame` / `ExploreField`）、`samples`（带标签的瞬时值 `ExploreSample`）或 `logs`（日志条目 `ExploreLogEntry`，最多 1000 条，被截断时 `has_more` 为 true、`applied_limit` 给出实际生效的上限），`execution.effective_step_seconds` 回显应用 `max_data_points` 与 `min_step_seconds` 之后实际使用的步长。请求字段：`datasource_id`（取自 `/monit/datasource/list`，必须是当前账户下的数据源）、`expr`（数据源原生语言的查询表达式，如 PromQL、LogsQL、SQL）、`args`（Grafana 风格宏变量替换的字符串键值；请求中必填，没有宏变量时传空表 `map[string]string{}`——Go 的 `nil` map 会序列化为 `null`，不符合 schema）与 `execution`（`QueryExploreExecution`：`kind` 取 `instant` / `range` / `window`，`to_ms` 在三种模式下都必填，`range` 另需 `from_ms` 与 `max_data_points`，`window` 另需 `from_ms`，`min_step_seconds` 仅在 `range` 下接受）。与 `QueryData` 的分工：需要数据源原生结果形态（含原始日志）时用 `QueryExplore`，需要稳定的 `query_result.v1` 契约时用 `QueryData`。该接口需要「数据源查看」（`monit`）权限，并要求受支持的部署运行 monit-edge v0.68.0 及以上版本。
 
 `client.Applications`（RUM 应用）除应用管理外还覆盖 **RUM 远程配置**的 5 个方法：`RemoteConfigReadGet`（`POST /rum/application/remote-config/get`，读取当前生效的配置与 `version`）、`RemoteConfigReadHistoryList`（`/rum/application/remote-config/history/list`，分页列出已发布的历史版本）、`RemoteConfigReadPreview`（`/rum/application/remote-config/preview`，用模拟客户端的 `env` / `app_version` / `sdk` 上下文评估一份草稿配置，返回命中的 `hit_rule_index` 与最终下发的 `values`，不发布）、`RemoteConfigWriteUpdate`（`/rum/application/remote-config/update`，发布一份完整的新配置）、`RemoteConfigWriteHistoryRevert`（`/rum/application/remote-config/history/revert`，把历史版本的内容重新发布为新版本）。主要类型：`RemoteConfig`（`enabled`、`activation`、`default`、`rules`、`custom`、`refresh_on_foreground`）、`RemoteConfigValues`（四个可下调的 SDK 开关）、`RemoteConfigRule`（`match` 条件加 `set` 取值）、`RemoteConfigHistoryItem`（含 `version`、`reason`、`content_hash`、`updated_by`），以及 `GetRemoteConfigRequest` / `ListRemoteConfigHistoryRequest` / `PreviewRemoteConfigRequest` / `UpdateRemoteConfigRequest` / `RevertRemoteConfigRequest` 与各自的 `*Response`。
 
@@ -206,6 +210,8 @@ if err != nil {
 }
 out, _, err := client.DataSources.ToolsInvoke(ctx, req)
 ```
+
+`client.DataSources.ReadPrometheusLabelValues(ctx, dataSourceID, labelName)`（`GET /monit/prometheus/api/v1/label/{label_name}/values`，`monit-prometheus-read-label-values`）通过监控代理列出某个 Prometheus 兼容数据源上单个标签的全部取值：标签名放在 URL 路径上（SDK 会做路径转义），目标数据源由 `X-DSID` 请求头指定——SDK 用 `dataSourceID` 自动设置该头（传 `0` 或 `labelName` 为空都直接报错），ID 从 `/monit/datasource/list` 获取，必须是当前账户下 Prometheus 兼容类型的数据源。这是唯一一个成功响应体不是 Flashduty `{request_id, data}` 信封的方法：响应直接解码为 `PrometheusLabelValuesResponse`（`status` 为 `success` 时 `data` 是标签值字符串数组；为 `error` 时携带 `errorType` 与 `error`）。未到达数据源前的失败（`X-DSID` 缺失或非法、数据源不存在、数据源不是 Prometheus 类型）以 `text/plain` 返回，数据源自身的失败则用它自己的 JSON 错误形态；SDK 对两者一视同仁，把原始响应体原样放进 `*ErrorResponse.Message`。受支持的部署要求 monit-edge v0.35.0 及以上版本。
 
 `client.DataSources` 的 `payload` 按 `type_ident` 选择类型专属配置块。当前允许的 `type_ident` 共 15 种：`prometheus`、`loki`、`mysql`、`oracle`、`postgres`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls`、`victorialogs`，以及新增的诊断专用类型 `redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka`——诊断专用类型的 `alerting_enabled` 恒为 false（不阻止非告警查询与工具调用），且拒绝传 true。连接地址规则：Redis/MongoDB 诊断类型为单个 `host:port`（IPv6 需加方括号），不接受 URI、userinfo 或 query；`kafka` 为 1–32 个以逗号分隔、互不重复的 `host:port` bootstrap 地址（规范化后至多 4096 字符，`payload` 中不再有 broker 列表）；`mongodb_mongod` / `mongodb_mongos` 的配置块中 `auth_source` 默认为 `admin`，用户名与密码必须成对配置，不支持客户端证书；Redis 节点配置的 `database` 默认为 0。诊断类型的 `password` 与 Kafka 的 `tls_key` 等敏感字段支持 `${env:NAME}` 引用：响应中字面值会被省略（仅当存储值本身就是 `${env:...}` 引用时才回显），更新时省略这些字段即保留原值，显式传空字符串则清除。
 
@@ -294,7 +300,9 @@ Flashduty API 返回的未成功调用——无论是信封中携带了错误,�
 当 API 返回 429 时,错误被提升为 `*RateLimitError`：它内嵌 `*ErrorResponse`（所以 `errors.As` 取 `*ErrorResponse` 仍然成立),并额外带上 `RetryAfter` 提示。
 
 <Note>
-如果你收到的是带非 JSON 响应体的非 2xx 响应,SDK 会返回普通 `error`,而不是 `*ErrorResponse`。这表示响应来自网关、负载均衡器或代理等中间层,通常是请求超过了中间层超时。你可以重试请求,或将耗时较长的批量请求拆分为更小的批次；不要假定 `errors.As(err, &apiErr)` 能匹配此类错误。
+对于**生成接口**，如果你收到的是带非 JSON 响应体的非 2xx 响应,SDK 会返回普通 `error`,而不是 `*ErrorResponse`。这表示响应来自网关、负载均衡器或代理等中间层,通常是请求超过了中间层超时。你可以重试请求,或将耗时较长的批量请求拆分为更小的批次；不要假定 `errors.As(err, &apiErr)` 能匹配此类错误。
+
+手写方法 `client.DataSources.ReadPrometheusLabelValues` 是例外：它不解析信封，而是把非 2xx 的原始响应体按原文放进 `*ErrorResponse.Message` 返回——平台的 `text/plain` 4xx/5xx 与数据源自身的 JSON 错误形态一视同仁，429 仍提升为 `*RateLimitError`。因此在这个方法上 `errors.As(err, &apiErr)` 是成立的，只是 `Code` 通常为空，需要读 `Message` 与 `Response.StatusCode` 判断原因。
 </Note>
 
 ```go
