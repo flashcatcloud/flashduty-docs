@@ -1,0 +1,126 @@
+---
+title: "Sumo Logic 告警集成"
+description: "通过 Webhook 将 Sumo Logic Monitor 的触发和恢复事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Sumo Logic", "Monitor", "Webhook", "AlertResponseId"]
+---
+
+通过 Sumo Logic Webhook 将 Monitor 告警同步到 Flashduty On-call。每个 Sumo Logic 告警响应对应一条 Flashduty 告警；同一次生命周期中的触发、更新和恢复会持续更新这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **集成数据**，点击 **添加一个集成**
+3. 选择 **Sumo Logic**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Sumo Logic**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Sumo Logic 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook Connection">
+
+1. 在新版界面进入 **Monitoring → Connections**；经典界面进入 **Manage Data → Monitoring → Connections**
+2. 点击 **+ Add**，Connection Type 选择 **Webhook**
+3. 名称可填写 `Flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 **URL**
+
+</Step>
+
+<Step title="配置 Alert 和 Recovery Payload">
+
+把下面的 JSON 同时粘贴到 **Alert Payload** 和 **Recovery Payload**：
+
+```json
+{
+  "alert_response_id": "{{AlertResponseId}}",
+  "monitor_id": "{{Id}}",
+  "alert_name": "{{AlertName}}",
+  "name": "{{Name}}",
+  "description": "{{Description}}",
+  "monitor_type": "{{MonitorType}}",
+  "detection_method": "{{DetectionMethod}}",
+  "trigger_type": "{{TriggerType}}",
+  "trigger_time_start": "{{TriggerTimeStart}}",
+  "trigger_time_end": "{{TriggerTimeEnd}}",
+  "trigger_condition": "{{TriggerCondition}}",
+  "trigger_value": "{{TriggerValue}}",
+  "alert_group": "{{AlertGroup}}",
+  "query": "{{Query}}",
+  "query_url": "{{QueryURL}}",
+  "source_url": "{{SourceURL}}",
+  "alert_response_url": "{{AlertResponseUrl}}"
+}
+```
+
+<Warning>
+请保留 `alert_response_id` 和 `trigger_type`，并确保 Alert 与 Recovery 使用同一份 Payload。缺少 `alert_response_id` 时 Flashduty 会拒绝请求，因为无法可靠关联后续更新和恢复。
+</Warning>
+
+</Step>
+
+<Step title="关联 Connection 与 Monitor">
+
+编辑或创建 Monitor，在通知设置中选择刚创建的 `Flashduty` Connection，并同时启用告警与恢复通知。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让 Monitor 真正进入阈值，确认 Flashduty 收到活动告警；再让指标或日志结果恢复正常，确认原告警恢复。Connection 的测试按钮只验证 Webhook 可达，不能证明真实告警生命周期可以关联。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 直接使用 `AlertResponseId` 作为 Alert Key。Sumo Logic 官方将其定义为已触发告警的唯一标识；我们的真实 Monitor 验证也确认，`Critical` 触发与对应的 `ResolvedCritical` 恢复携带相同的 `AlertResponseId`。
+
+`Id` 是 Monitor ID，一个 Monitor 在告警分组启用时可以产生多个独立告警，因此 `Id` 只作为标签，不能单独作为 Alert Key。标题、等级、时间范围、触发值和 `AlertGroup` 的变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+| Sumo Logic `TriggerType` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Warning` | Warning |
+| `Missing Data` | Warning |
+| `Normal` | 恢复 |
+| `ResolvedCritical` | 恢复，原等级为 Critical |
+| `ResolvedWarning` | 恢复，原等级为 Warning |
+| `ResolvedMissingData` | 恢复，原等级为 Warning |
+
+空值或未知 `TriggerType` 会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 标签
+---
+
+Flashduty 会保存 Monitor ID、Monitor 类型、检测方法、`TriggerType`、触发时间范围、条件和值、`AlertGroup`、查询和 Sumo Logic 跳转链接。`ResultsJson` 默认不发送，避免把大体积、高基数查询结果写入标签。
+
+## 排查问题
+---
+
+- **Sumo Logic 返回非 2xx**：确认 Push URL 完整且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认 Payload 是有效 JSON，且 `alert_response_id`、`trigger_type` 非空
+- **告警没有恢复**：确认填写了 Recovery Payload，并在 Monitor 中启用了恢复通知
+- **多个分组互相覆盖**：确认 Payload 使用 `{{AlertResponseId}}`，不要改成 `{{Id}}`
+- **测试成功但真实告警没收到**：检查 Monitor 是否启用、阈值是否真实命中，以及 Monitor 是否关联了该 Connection
+
+更多字段含义请参阅 [Sumo Logic Alert Variables](https://www.sumologic.com/help/docs/alerts/monitors/alert-variables/) 和 [Webhook Connections](https://www.sumologic.com/help/docs/alerts/webhook-connections/set-up-webhook-connections/)。
