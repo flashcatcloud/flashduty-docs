@@ -2302,12 +2302,12 @@
       "post": {
         "operationId": "memberNotify",
         "summary": "Notify members",
-        "description": "Send an email to account members on behalf of the caller, with content the caller supplies. Only callable with a credential minted for an AI SRE session; any other credential is rejected with `AccessDenied`. Delivery is asynchronous — `accepted` means the email was queued, not that it was delivered. Call it with `dry_run` set to `true` before sending: `html` in the response is the email exactly as recipients will get it, so you can confirm the sanitizer kept everything the message depends on.",
+        "description": "Send an email to account members on behalf of the caller, with content the caller supplies. Only callable with a credential minted for an AI SRE session; any other credential is rejected with `AccessDenied`. Delivery is asynchronous — `accepted` means the email was queued, not that it was delivered.",
         "tags": [
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **200 requests/minute**; **10 requests/second** per account |\n| Permissions | None — callable only with an AI SRE session credential; any other credential is rejected with `AccessDenied` |\n\n## Usage\n\n- Recipients that are not active members of the caller's account, or that have no email address on file, are skipped rather than failing the whole request.\n- Whether email is included follows each recipient's own notification preferences for this kind of message; a recipient with no preference set defaults to receiving it.\n- Recipients receive exactly the sanitized `html` as the email body, with nothing added around it. The sender name shows the caller's name followed by \"(via AI SRE)\".\n- Set `dry_run` to `true` to run every check and get the exact email back in `html` without sending: nothing is queued, and neither the hourly limit nor the per-turn duplicate check is consumed.\n- At most 20 emails are delivered to the same recipient through this endpoint per hour; further deliveries to that recipient in the same window are skipped with `rate_limited`.\n- Retrying the same call within the same AI SRE session turn does not send a duplicate email to a recipient who already received one; the repeat is skipped with `duplicate`.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **200 requests/minute**; **10 requests/second** per account |\n| Permissions | None — callable only with an AI SRE session credential; any other credential is rejected with `AccessDenied` |\n\n## Usage\n\n- Recipients that are not active members of the caller's account, or that have no email address on file, are skipped rather than failing the whole request.\n- Whether email is included follows each recipient's own notification preferences for this kind of message; a recipient with no preference set defaults to receiving it.\n- Recipients receive exactly the sanitized `html` as the email body, with nothing added around it. The sender name shows the caller's name followed by \"(via AI SRE)\".\n- Before sending, the server inspects the submitted `html` and rejects the request with `400` / `InvalidParameter` when it contains constructs whose removal would change what recipients see (`<style>`, `<svg>`, `<iframe>`, `<object>`, `<embed>`, `<form>`, `<input>`, `<button>`, an `<img>` with a missing or non-`https` `src`, or an `<a>` whose href scheme is not `http`, `https`, or `mailto`); the error message names each construct and what to change, and nothing is queued — neither the hourly limit nor the per-turn duplicate check is consumed. Tags whose removal does not change rendering (`<script>`, `<meta>`, `<link>`, `<base>`, `on*` handlers) are still sanitized silently and never trigger a rejection.\n- At most 20 emails are delivered to the same recipient through this endpoint per hour; further deliveries to that recipient in the same window are skipped with `rate_limited`.\n- Retrying the same call within the same AI SRE session turn does not send a duplicate email to a recipient who already received one; the repeat is skipped with `duplicate`.",
           "href": "/en/api-reference/platform/members/member-notify",
           "metadata": {
             "sidebarTitle": "Notify members"
@@ -2353,7 +2353,21 @@
             }
           },
           "400": {
-            "$ref": "#/components/responses/BadRequest"
+            "description": "The submitted `html` contains a construct that the sanitizer would otherwise remove and that would change what recipients see (see the `html` field description for the full list); the request is rejected instead, and nothing is queued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "error": {
+                    "code": "InvalidParameter",
+                    "message": "email html contains 2 construct(s) the sanitizer removes, which would change what recipients see. Fix and send again: <style> x2 - move these rules into inline style=\"...\" attributes; <img> without an https src x3 - host the image over https, or drop it"
+                  }
+                }
+              }
+            }
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -4558,12 +4572,7 @@
           "html": {
             "type": "string",
             "maxLength": 102400,
-            "description": "Email body as an HTML fragment (no `<html>`/`<head>`/`<body>` wrapper needed); recipients receive it as the whole email body. Required, up to 102,400 bytes of raw UTF-8 input (larger messages are clipped by common email clients), and must be non-empty after sanitization. Sanitized server-side: `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`, `<form>`, `<input>`, `<button>`, `<svg>`, `<meta>`, `<link>`, and `<base>` tags and all `on*` event handlers are removed; images are kept only when their `src` is `https` — images with any other or no `src`, including `data:`, are removed; links are restricted to `http`, `https`, and `mailto`. Inline `style` attributes are kept as written."
-          },
-          "dry_run": {
-            "type": "boolean",
-            "default": false,
-            "description": "Check without sending. When `true`, every check runs and the response returns the exact email in `html`, but nothing is queued and neither the hourly limit nor the per-turn duplicate check is consumed. Defaults to `false`."
+            "description": "Email body as an HTML fragment (no `<html>`/`<head>`/`<body>` wrapper needed); recipients receive it as the whole email body. Required, up to 102,400 bytes of raw UTF-8 input (larger messages are clipped by common email clients), and must be non-empty after sanitization. `<script>`, `<meta>`, `<link>`, and `<base>` tags and all `on*` event handlers are silently removed before sending, since email clients never execute them; inline `style` attributes are kept as written. `<style>`, `<svg>`, `<iframe>`, `<object>`, `<embed>`, `<form>`, `<input>`, and `<button>` tags, an `<img>` with a missing or non-`https` `src` (including `data:`), or an `<a>` whose href scheme is not `http`, `https`, or `mailto` are rejected instead of stripped: the request fails with `400` rather than silently changing what recipients see."
           }
         }
       },
@@ -4576,15 +4585,11 @@
             "items": {
               "$ref": "#/components/schemas/MemberNotifyResultItem"
             },
-            "description": "One result per resolved recipient, in the same order as the resolved recipient list. With `dry_run`, each result is what a real send would return."
-          },
-          "html": {
-            "type": "string",
-            "description": "Only present when `dry_run` is `true`: the complete email HTML exactly as recipients would receive it, after sanitization."
+            "description": "One result per resolved recipient, in the same order as the resolved recipient list."
           },
           "agent_instructions": {
             "type": "string",
-            "description": "Present when the submitted HTML body does not follow the default email layout (no `max-width:600px` wrapper table): guidance telling the calling AI SRE agent how to conform. Advisory only — a format the caller deliberately chose needs no change. Returned on dry runs and real sends alike."
+            "description": "Present when the submitted HTML body does not follow the default email layout (no `max-width:600px` wrapper table): guidance telling the calling AI SRE agent how to conform. Advisory only — a format the caller deliberately chose needs no change."
           }
         }
       },
