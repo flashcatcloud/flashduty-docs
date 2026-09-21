@@ -1,0 +1,133 @@
+---
+title: "Checkly alert integration"
+description: "Send Checkly failure, degradation, recovery, and SSL certificate alerts to Flashduty On-call through a Webhook Alert Channel."
+keywords: ["alert integration", "Checkly", "webhook", "synthetic monitoring", "API monitoring"]
+---
+
+Use a Checkly Webhook Alert Channel to send check-state changes to Flashduty On-call. Failure, degradation, continued failure, and recovery notifications for one Check update the same Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **Checkly** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure Checkly
+---
+
+<Steps>
+<Step title="Create a Webhook Alert Channel">
+
+1. In Checkly, open **Alert Settings**
+2. Click **Add more channels** and select **Webhook**
+3. Enter `Flashduty` as the name
+4. Select `POST` as the method
+5. Paste the complete Flashduty integration Push URL into URL
+6. Add `Content-Type: application/json` under Headers
+
+</Step>
+
+<Step title="Choose notifications and subscriptions">
+
+1. Enable **Failure**, **Degradation**, and **Recovery** under **Notification events**
+2. Optionally enable **SSL certificate expirations**
+3. Subscribe the Checks or Check Groups that should send notifications to Flashduty
+
+Recovery must be enabled. Otherwise, a recovered Check cannot recover its existing Flashduty alert.
+
+</Step>
+
+<Step title="Configure the payload">
+
+Replace Body with this complete JSON template:
+
+```json
+{
+  "alert_type": "{{ALERT_TYPE}}",
+  "alert_title": "{{ALERT_TITLE}}",
+  "check_id": "{{CHECK_ID}}",
+  "check_result_id": "{{CHECK_RESULT_ID}}",
+  "check_name": "{{CHECK_NAME}}",
+  "check_type": "{{CHECK_TYPE}}",
+  "group_name": "{{GROUP_NAME}}",
+  "is_reminder": "{{IS_REMINDER}}",
+  "reminder_sequence": "{{REMINDER_SEQUENCE}}",
+  "region": "{{REGION}}",
+  "run_location": "{{RUN_LOCATION}}",
+  "started_at": "{{STARTED_AT}}",
+  "response_time": "{{RESPONSE_TIME}}",
+  "response_status_code": "{{API_CHECK_RESPONSE_STATUS_CODE}}",
+  "response_status_text": "{{API_CHECK_RESPONSE_STATUS_TEXT}}",
+  "result_link": "{{RESULT_LINK}}",
+  "error_message": "{{CHECK_ERROR_MESSAGE}}",
+  "tags": [{{#each TAGS}}"{{this}}"{{#unless @last}},{{/unless}}{{/each}}]
+}
+```
+
+Keep `alert_type` and `check_id`. Never add API keys, tokens, passwords, cookies, or other secrets to the payload.
+
+</Step>
+
+<Step title="Verify a real lifecycle">
+
+Move one subscribed Check through failure, degradation, and recovery. Confirm that one Flashduty alert is triggered, updated, and recovered.
+
+A Checkly test notification or webhook HTTP 200 proves connectivity only. Use real Check state changes to verify Alert Key correlation and recovery.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Normal check-state notifications use the trimmed `check_id` (Checkly variable `CHECK_ID`) as the Alert Key. Titles, errors, run locations, response times, result IDs, and alert-state changes do not affect it.
+
+<Warning>
+If `check_id` is missing or empty, Flashduty accepts the request and generates a random UUID for that notification. These notifications cannot correlate: a later update or recovery without `check_id` cannot find the earlier alert.
+</Warning>
+
+`ALERT_SSL` is an independent one-shot Warning event. It always receives a new random UUID, even when the payload includes `check_id`, and does not update or recover the Check's normal state alert.
+
+## Status and severity
+---
+
+| Checkly `ALERT_TYPE` | Flashduty status | Flashduty severity |
+| :--- | :--- | :--- |
+| `ALERT_FAILURE`, `ALERT_FAILURE_REMAIN`, `ALERT_DEGRADED_FAILURE` | Active | Critical |
+| `ALERT_DEGRADED`, `ALERT_DEGRADED_REMAIN`, `ALERT_FAILURE_DEGRADED` | Active | Warning |
+| `ALERT_RECOVERY` | Recovered | Critical |
+| `ALERT_DEGRADED_RECOVERY` | Recovered | Warning |
+| `ALERT_SSL` | Active, one-shot | Warning |
+| `NO_ALERT` | Ignored; no event is created | - |
+
+An empty or unknown `alert_type` returns an invalid-parameter response. Recovery is determined only by `alert_type`, not by the title or error text.
+
+## Labels and description
+---
+
+Flashduty creates these labels:
+
+- `check` and `source=checkly`
+- `check_id` and `checkly_alert_type`
+- `check_name`, `check_type`, and `group_name`
+- `region` and `run_location`
+- `is_reminder` and `reminder_sequence`
+- JSON-encoded `tags`
+
+`check_result_id` is a high-cardinality per-run value and is not stored as a label. The bounded alert description contains the error, response status, response time, start time, and result link.
+
+## Delivery and troubleshooting
+---
+
+Checkly retries a failed webhook delivery up to five times at approximately 20-second intervals. Use Checkly's Alert Notification Log to inspect the final delivery result.
+
+- **Flashduty returns an invalid-parameter error**: verify that Body is valid JSON, matches the complete template, and contains a supported `alert_type`
+- **One Check creates multiple alerts**: confirm that every notification carries the same non-empty `check_id`
+- **The alert does not recover**: enable Recovery and confirm that the recovery payload has the same `check_id` as the trigger
+- **No degradation alert arrives**: enable Degradation and configure a degradation condition on the Check
+- **No notification arrives**: confirm that the Check or Check Group subscribes to this Webhook Channel, then inspect the Alert Notification Log
+
+See [Alerting With Checkly](https://www.checklyhq.com/docs/alerting-and-retries/custom-alerts/) for Checkly's state-transition model.
