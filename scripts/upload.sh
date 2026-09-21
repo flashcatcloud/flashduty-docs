@@ -2,9 +2,10 @@
 #
 # Sync documentation to Meilisearch for AI Q&A bot indexing.
 #
-# Every run makes the index match the docs in zh/ and en/: all docs are
-# upserted (Meilisearch only re-embeds documents whose content changed) and
-# index documents whose source file no longer exists are deleted.
+# Every run makes the index match the docs in zh/ and en/: every page is split
+# into chunks by scripts/build_index_docs.py, all chunks are upserted
+# (Meilisearch only re-embeds documents whose content changed), and index
+# documents that are no longer produced are deleted.
 #
 # Required env vars: MEILI_ENDPOINT, MEILI_API_KEY, MEILI_INDEX
 # Optional:
@@ -24,10 +25,7 @@ cd "$REPO_ROOT"
 SCRIPT_NAME=$(basename "$0")
 BASE_URL="${BASE_URL:-https://docs.flashduty.com}"
 DRY_RUN=false
-BATCH_SIZE=5
-# DashScope text-embedding-v4 accepts up to 8192 tokens per input.
-# Truncate content to stay safely within this limit after cleanup.
-MAX_CONTENT_CHARS=6000
+BATCH_SIZE=20
 LIST_PAGE_SIZE=1000
 
 usage() {
@@ -35,7 +33,7 @@ usage() {
 Usage: $SCRIPT_NAME [OPTIONS]
 
 Sync documentation (zh/, en/) to Meilisearch for AI Q&A bot indexing:
-upload every doc and delete index documents whose source file is gone.
+upload every doc chunk and delete index documents no longer produced.
 
 Options:
   --dry-run    List what would be uploaded and deleted without writing
@@ -62,109 +60,14 @@ if [[ -z "${MEILI_ENDPOINT:-}" || -z "${MEILI_API_KEY:-}" || -z "${MEILI_INDEX:-
   exit 1
 fi
 
-if ! command -v jq &> /dev/null; then
-  echo "Error: jq is required. Install it first (e.g. brew install jq on macOS)." >&2
-  exit 1
-fi
+for tool in jq python3; do
+  if ! command -v "$tool" &> /dev/null; then
+    echo "Error: $tool is required. Install it first." >&2
+    exit 1
+  fi
+done
 
 # --- Helpers ---
-
-# Generate a stable document ID from a file path (relative to repo root)
-file_to_id() {
-  local file=$1
-  local rel="${file%.mdx}"
-  rel="${rel%.md}"
-  echo -n "$rel" | openssl md5 | awk '{print $NF}'
-}
-
-extract_title() {
-  local file=$1
-  local title
-  title=$(grep -m 1 '^title:' "$file" 2>/dev/null | sed -n 's/title: *"\(.*\)"/\1/p') || true
-  if [[ -z "${title:-}" ]]; then
-    title=$(grep -m 1 '^title:' "$file" 2>/dev/null | sed -n 's/title: *\(.*\)$/\1/p' | xargs) || true
-  fi
-  if [[ -z "${title:-}" ]]; then
-    local base
-    base=$(basename "$file")
-    title="${base%.mdx}"
-    title="${title%.md}"
-    title=$(echo "$title" | sed 's/^[0-9.]*[[:space:]]*//')
-  fi
-  echo "$title"
-}
-
-extract_url() {
-  local file=$1
-  local dir=$2
-  local locale=$3
-  local doc_url
-  doc_url=$(grep -m 1 '^url:' "$file" 2>/dev/null | sed -n 's/url: *"\(.*\)"/\1/p') || true
-  if [[ -z "${doc_url:-}" ]]; then
-    doc_url=$(grep -m 1 '^url:' "$file" 2>/dev/null | sed -n 's/url: *\(.*\)$/\1/p' | xargs) || true
-  fi
-  if [[ -z "${doc_url:-}" ]]; then
-    local rel_path
-    rel_path="${file#$dir/}"
-    rel_path="${rel_path%.mdx}"
-    rel_path="${rel_path%.md}"
-    local locale_prefix
-    [[ "$locale" == "zh-CN" ]] && locale_prefix="zh" || locale_prefix="en"
-    doc_url="${BASE_URL}/${locale_prefix}/${rel_path}"
-  fi
-  echo "$doc_url"
-}
-
-locale_for_file() {
-  local file=$1
-  if [[ "$file" == zh/* ]]; then
-    echo "zh-CN"
-  else
-    echo "en-US"
-  fi
-}
-
-dir_for_file() {
-  local file=$1
-  if [[ "$file" == zh/* ]]; then
-    echo "zh"
-  else
-    echo "en"
-  fi
-}
-
-# Clean raw MDX content for embedding: strip frontmatter, import statements and
-# HTML/MDX tags, collapse whitespace, then truncate. Tags are stripped after
-# lines are joined so a tag whose attributes span several lines goes too; a tag
-# must start with a letter or '/', which keeps comparisons like "a < b" intact.
-clean_content() {
-  local file=$1
-  awk 'BEGIN{skip=0} NR==1 && /^---$/{skip=1;next} skip && /^---$/{skip=0;next} !skip' "$file" \
-    | grep -v '^import ' \
-    | tr '\n' ' ' \
-    | sed -E 's/<[A-Za-z/][^<>]*>//g; s/ +/ /g' \
-    | cut -c1-"$MAX_CONTENT_CHARS"
-}
-
-# Build a JSON document for a single file
-build_doc_json() {
-  local file=$1
-  local dir locale title doc_url id content
-  dir=$(dir_for_file "$file")
-  locale=$(locale_for_file "$file")
-  title=$(extract_title "$file")
-  doc_url=$(extract_url "$file" "$dir" "$locale")
-  id=$(file_to_id "$file")
-  content=$(clean_content "$file")
-
-  jq -n \
-    --arg id "$id" \
-    --arg title "$title" \
-    --arg content "$content" \
-    --arg locale "$locale" \
-    --arg url "$doc_url" \
-    '{id: $id, title: $title, content: $content, locale: $locale, url: $url}' 2>/dev/null
-}
 
 # Write "id<TAB>url" for every document in the index to $1. Fails unless the
 # pages add up to exactly the total the index reports, so an incomplete
@@ -269,55 +172,29 @@ delete_documents() {
   fi
 }
 
-# Collect files into batched JSON arrays and upload
-upload_files() {
-  local file_list=$1
-  local total_files=0
-  local total_success=0
-  local batch_json="["
-  local batch_count=0
+# Upload the documents of a JSON-lines file in batches
+upload_docs() {
+  local docs=$1
+  local total=0
+  local uploaded=0
+  local batch count
 
-  while IFS= read -r file; do
-    [[ -z "$file" ]] && continue
-    total_files=$((total_files + 1))
-
-    local doc_json
-    if ! doc_json=$(build_doc_json "$file"); then
-      echo "JSON error: $file" >&2
-      continue
+  split -l "$BATCH_SIZE" "$docs" "$work_dir/batch_"
+  for batch in "$work_dir"/batch_*; do
+    count=$(wc -l < "$batch" | xargs)
+    total=$((total + count))
+    if upload_batch "$(jq -cs . "$batch")" "$count"; then
+      uploaded=$((uploaded + count))
     fi
-
-    if [[ $batch_count -gt 0 ]]; then
-      batch_json="${batch_json},"
-    fi
-    batch_json="${batch_json}${doc_json}"
-    batch_count=$((batch_count + 1))
-
-    if [[ $batch_count -ge $BATCH_SIZE ]]; then
-      batch_json="${batch_json}]"
-      if upload_batch "$batch_json" "$batch_count"; then
-        total_success=$((total_success + batch_count))
-      fi
-      batch_json="["
-      batch_count=0
-    fi
-  done < "$file_list"
-
-  # Upload remaining
-  if [[ $batch_count -gt 0 ]]; then
-    batch_json="${batch_json}]"
-    if upload_batch "$batch_json" "$batch_count"; then
-      total_success=$((total_success + batch_count))
-    fi
-  fi
+  done
 
   echo ""
   echo "=== Upload Summary ==="
-  echo "Total files: $total_files"
-  echo "Uploaded: $total_success"
-  echo "Failed: $((total_files - total_success))"
+  echo "Total documents: $total"
+  echo "Uploaded: $uploaded"
+  echo "Failed: $((total - uploaded))"
 
-  [[ $total_success -eq $total_files ]] || return 1
+  [[ $uploaded -eq $total ]] || return 1
 }
 
 # --- Main ---
@@ -331,19 +208,20 @@ echo ""
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
 
-echo "Scanning all documentation files..."
-find zh en -type f \( -name "*.md" -o -name "*.mdx" \) ! -name "index.md" ! -name "index.mdx" \
-  | sort > "$work_dir/files"
-file_count=$(wc -l < "$work_dir/files" | xargs)
-echo "Found $file_count documentation files"
-if [[ $file_count -eq 0 ]]; then
-  echo "Error: no documentation files found; refusing to sync an empty doc set." >&2
+echo "Building index documents..."
+BASE_URL="$BASE_URL" python3 scripts/build_index_docs.py > "$work_dir/docs.jsonl"
+doc_count=$(wc -l < "$work_dir/docs.jsonl" | xargs)
+echo "Built $doc_count documents from $(jq -r '.url' "$work_dir/docs.jsonl" | sort -u | wc -l | xargs) pages"
+if [[ $doc_count -eq 0 ]]; then
+  echo "Error: no documents built; refusing to sync an empty doc set." >&2
   exit 1
 fi
 
-while IFS= read -r file; do
-  file_to_id "$file"
-done < "$work_dir/files" | LC_ALL=C sort -u > "$work_dir/current_ids"
+jq -r '.id' "$work_dir/docs.jsonl" | LC_ALL=C sort -u > "$work_dir/current_ids"
+if [[ $(wc -l < "$work_dir/current_ids" | xargs) -ne $doc_count ]]; then
+  echo "Error: duplicate document ids in the build output." >&2
+  exit 1
+fi
 
 echo "Listing documents in index..."
 if ! list_index_docs "$work_dir/index_docs"; then
@@ -353,7 +231,7 @@ fi
 echo "Index has $(wc -l < "$work_dir/index_docs" | xargs) documents"
 echo ""
 
-# Index documents with no source file in the current doc set
+# Index documents the current build no longer produces
 LC_ALL=C sort "$work_dir/index_docs" \
   | LC_ALL=C join -t $'\t' -v 1 - "$work_dir/current_ids" > "$work_dir/stale_docs"
 stale_count=$(wc -l < "$work_dir/stale_docs" | xargs)
@@ -361,10 +239,10 @@ stale_count=$(wc -l < "$work_dir/stale_docs" | xargs)
 result=0
 
 echo "--- Uploading documents ---"
-upload_files "$work_dir/files" || result=1
+upload_docs "$work_dir/docs.jsonl" || result=1
 
 echo ""
-echo "--- Removing documents with no source file ---"
+echo "--- Removing documents no longer produced ---"
 if [[ $stale_count -eq 0 ]]; then
   echo "None."
 else
