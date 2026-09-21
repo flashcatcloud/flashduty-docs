@@ -135,8 +135,9 @@ dir_for_file() {
 # so a tag whose attributes span several lines goes too; a tag must start with
 # a letter or '/', which keeps comparisons like "a < b" intact.
 # The whole page is indexed so keyword search sees all of it. The index's
-# embedder reads only its first documentTemplateMaxBytes, so nothing here has
-# to fit the embedding model's input limit.
+# embedder cuts its own input in its documentTemplate
+# ({{doc.content | truncate: 6000}}), so nothing here has to fit the embedding
+# model's input limit.
 clean_content() {
   local file=$1
   awk 'BEGIN{skip=0} NR==1 && /^---$/{skip=1;next} skip && /^---$/{skip=0;next} !skip' "$file" \
