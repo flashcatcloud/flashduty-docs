@@ -1,0 +1,147 @@
+---
+title: "Checkly 告警集成"
+description: "通过 Webhook Alert Channel 将 Checkly 的失败、性能降级、恢复和 SSL 证书告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Checkly", "Webhook", "合成监控", "API 监控"]
+---
+
+通过 Checkly Webhook Alert Channel 将检查状态同步到 Flashduty On-call。同一个 Check 的失败、降级、持续异常和恢复通知会更新同一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **集成数据**，点击 **添加一个集成**
+3. 选择 **Checkly**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Checkly**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Checkly 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook Alert Channel">
+
+1. 登录 Checkly，进入 **Alert Settings**
+2. 点击 **Add more channels**，选择 **Webhook**
+3. 名称填写 `Flashduty`
+4. Method 选择 `POST`
+5. 将 Flashduty 集成的完整推送地址粘贴到 URL
+6. 在 Headers 中增加 `Content-Type: application/json`
+
+</Step>
+
+<Step title="配置通知范围">
+
+1. 在 **Notification events** 中启用 **Failure**、**Degradation** 和 **Recovery**
+2. 如需接收证书到期提醒，再启用 **SSL certificate expirations**
+3. 在订阅范围中选择需要发送到 Flashduty 的 Checks 或 Check Groups
+
+必须启用 Recovery，否则 Checkly 恢复后，Flashduty 中的原告警不会自动恢复。
+
+</Step>
+
+<Step title="配置 Payload">
+
+将 Body 替换为以下完整 JSON 模板：
+
+```json
+{
+  "alert_type": "{{ALERT_TYPE}}",
+  "alert_title": "{{ALERT_TITLE}}",
+  "check_id": "{{CHECK_ID}}",
+  "check_result_id": "{{CHECK_RESULT_ID}}",
+  "check_name": "{{CHECK_NAME}}",
+  "check_type": "{{CHECK_TYPE}}",
+  "group_name": "{{GROUP_NAME}}",
+  "is_reminder": "{{IS_REMINDER}}",
+  "reminder_sequence": "{{REMINDER_SEQUENCE}}",
+  "region": "{{REGION}}",
+  "run_location": "{{RUN_LOCATION}}",
+  "started_at": "{{STARTED_AT}}",
+  "response_time": "{{RESPONSE_TIME}}",
+  "response_status_code": "{{API_CHECK_RESPONSE_STATUS_CODE}}",
+  "response_status_text": "{{API_CHECK_RESPONSE_STATUS_TEXT}}",
+  "result_link": "{{RESULT_LINK}}",
+  "error_message": "{{CHECK_ERROR_MESSAGE}}",
+  "tags": [{{#each TAGS}}"{{this}}"{{#unless @last}},{{/unless}}{{/each}}]
+}
+```
+
+请保留 `alert_type` 和 `check_id`。不要在 Payload 中加入 API Key、Token、密码、Cookie 或其他敏感信息。
+
+</Step>
+
+<Step title="验证真实生命周期">
+
+让一个已订阅的 Check 依次进入失败、降级和恢复状态，确认 Flashduty 中同一条告警依次触发、更新并恢复。
+
+Checkly 的测试发送或 Webhook HTTP 200 只能证明地址可达，不能证明 Alert Key 关联和恢复行为。请使用真实 Check 状态变化完成验证。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+普通检查状态通知使用去除首尾空格后的 `check_id`（Checkly 变量 `CHECK_ID`）作为 Alert Key。标题、错误、执行区域、响应时间、结果 ID 和告警状态变化都不会改变 Alert Key。
+
+<Warning>
+当 `check_id` 缺失或为空时，Flashduty 不会拒绝请求，而是为本次通知生成随机 UUID。此时不同通知无法关联：后续更新或恢复不能命中之前同样缺少 `check_id` 的告警。
+</Warning>
+
+`ALERT_SSL` 是独立的单次 Warning 事件，即使 Payload 中有 `check_id`，也会使用新的随机 UUID。它不会更新或恢复该 Check 的普通状态告警。
+
+## 状态和告警等级
+---
+
+| Checkly `ALERT_TYPE` | Flashduty 状态 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `ALERT_FAILURE`、`ALERT_FAILURE_REMAIN`、`ALERT_DEGRADED_FAILURE` | 活动 | Critical |
+| `ALERT_DEGRADED`、`ALERT_DEGRADED_REMAIN`、`ALERT_FAILURE_DEGRADED` | 活动 | Warning |
+| `ALERT_RECOVERY` | 恢复 | Critical |
+| `ALERT_DEGRADED_RECOVERY` | 恢复 | Warning |
+| `ALERT_SSL` | 活动、单次事件 | Warning |
+| `NO_ALERT` | 忽略，不创建事件 | - |
+
+空值或未知的 `alert_type` 会返回参数错误。恢复只根据 `alert_type` 判断，与标题或错误文本无关。
+
+## 标签和描述
+---
+
+Flashduty 会生成以下标签：
+
+- `check`、`source=checkly`
+- `check_id`、`checkly_alert_type`
+- `check_name`、`check_type`、`group_name`
+- `region`、`run_location`
+- `is_reminder`、`reminder_sequence`
+- JSON 编码后的 `tags`
+
+`check_result_id` 是每次执行产生的高基数字段，不会写入标签。错误信息、响应状态、响应时间、开始时间和结果链接会进入有长度限制的告警描述。
+
+## 投递和排查
+---
+
+Checkly 对失败的 Webhook 投递最多重试 5 次，每次间隔约 20 秒。可在 Checkly 的 Alert Notification Log 中查看最终投递结果。
+
+- **Flashduty 返回参数错误**：确认 Body 是有效 JSON，并使用上面的完整模板；检查 `alert_type` 是否为支持值
+- **同一个 Check 产生多条告警**：确认每次通知都带有相同且非空的 `check_id`
+- **告警没有恢复**：确认 Notification events 已启用 Recovery，且恢复 Payload 的 `check_id` 与触发时一致
+- **没有降级告警**：确认已启用 Degradation，并为 Check 配置了降级条件
+- **没有收到通知**：确认目标 Check 或 Check Group 已订阅该 Webhook Channel，并在 Alert Notification Log 中检查投递状态
+
+Checkly 的状态转换说明请参阅 [Alerting With Checkly](https://www.checklyhq.com/docs/alerting-and-retries/custom-alerts/)。
