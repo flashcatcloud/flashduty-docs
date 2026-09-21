@@ -74,6 +74,6 @@ test('uploadDocsBundle uploads the tarball with gzip headers and refreshes the C
   assert.equal(uploaded[0].localFilePath, tarPath);
   assert.equal(uploaded[0].options.headers['Content-Type'], 'application/gzip');
   assert.equal(uploaded[0].options.headers['Cache-Control'], 'public, max-age=300');
-  assert.equal(uploaded[0].options.timeout, 10 * 60 * 1000);
+  assert.equal(uploaded[0].options.timeout, 30 * 60 * 1000);
   assert.deepEqual(refreshed, ['https://docs-cdn.flashcat.cloud/docs/flashduty-docs.tar.gz']);
 });

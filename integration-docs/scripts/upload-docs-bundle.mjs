@@ -21,9 +21,9 @@ export function buildOssFilePath(cdnDir) {
 }
 
 // ali-oss's timeout (default 60s) runs from socket connect until the response
-// arrives, so it also covers sending the body. The ~3 MB tarball does not
-// always reach OSS from a GitHub-hosted runner within 60s.
-const TAR_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+// arrives, so it also covers sending the body. From a GitHub-hosted runner the
+// ~3 MB tarball has taken 5.5 minutes to reach OSS (~9 KB/s).
+const TAR_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
 function buildTarUploadOptions() {
   return {
