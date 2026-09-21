@@ -51,3 +51,16 @@ export async function refreshCdnCache(cdnRuntime, url) {
   await cdnRuntime.client.refreshObjectCaches(request);
   console.log(`Refreshed CDN cache: ${url}`);
 }
+
+// Load .env for local runs. Tolerate 'dotenv' not being installed (e.g. a
+// pruned install) rather than failing scripts that get their env from CI.
+export async function loadDotenvIfAvailable() {
+  try {
+    const { default: dotenv } = await import('dotenv');
+    dotenv.config();
+  } catch (err) {
+    if (err.code !== 'ERR_MODULE_NOT_FOUND') {
+      throw err;
+    }
+  }
+}

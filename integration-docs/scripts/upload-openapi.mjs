@@ -5,9 +5,9 @@ import { buildCdnUrl } from './cdn-url.mjs';
 import {
   createCdnRuntime,
   createOssClient,
+  loadDotenvIfAvailable,
   normalizeCdnDir,
   refreshCdnCache,
-  requiredEnv,
   validateRequiredEnv
 } from './oss-cdn.mjs';
 
@@ -17,8 +17,6 @@ const repoRoot = path.resolve(packageRoot, '..');
 const defaultApiReferenceDir = path.join(repoRoot, 'api-reference');
 const docsBaseUrl = 'https://docs.flashcat.cloud';
 const httpMethods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
-
-export { requiredEnv, validateRequiredEnv };
 
 export function listOpenapiJsonFiles(apiReferenceDir = defaultApiReferenceDir) {
   if (!fs.existsSync(apiReferenceDir)) {
@@ -135,17 +133,6 @@ export async function uploadOpenapiJsonFiles({
   });
 
   console.log(`Uploaded ${files.length} OpenAPI JSON files and manifest from ${apiReferenceDir}`);
-}
-
-async function loadDotenvIfAvailable() {
-  try {
-    const { default: dotenv } = await import('dotenv');
-    dotenv.config();
-  } catch (err) {
-    if (err.code !== 'ERR_MODULE_NOT_FOUND') {
-      throw err;
-    }
-  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -4,12 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { validateRequiredEnv } from './oss-cdn.mjs';
 import {
   buildOpenapiReferenceIndex,
   buildOssFilePath,
   listOpenapiJsonFiles,
-  uploadOpenapiJsonFiles,
-  validateRequiredEnv
+  uploadOpenapiJsonFiles
 } from './upload-openapi.mjs';
 
 test('listOpenapiJsonFiles returns only direct JSON files sorted by name', () => {

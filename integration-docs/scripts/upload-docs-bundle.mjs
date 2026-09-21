@@ -5,6 +5,7 @@ import { buildCdnUrl } from './cdn-url.mjs';
 import {
   createCdnRuntime,
   createOssClient,
+  loadDotenvIfAvailable,
   normalizeCdnDir,
   refreshCdnCache,
   validateRequiredEnv
@@ -52,17 +53,6 @@ export async function uploadDocsBundle({
   await refreshCdnCache(resolvedCdnRuntime, cdnUrl);
 
   return cdnUrl;
-}
-
-async function loadDotenvIfAvailable() {
-  try {
-    const { default: dotenv } = await import('dotenv');
-    dotenv.config();
-  } catch (err) {
-    if (err.code !== 'ERR_MODULE_NOT_FOUND') {
-      throw err;
-    }
-  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
