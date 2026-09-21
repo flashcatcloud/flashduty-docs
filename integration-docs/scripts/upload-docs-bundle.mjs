@@ -20,8 +20,14 @@ export function buildOssFilePath(cdnDir) {
   return path.posix.join(normalizeCdnDir(cdnDir), 'flashduty-docs.tar.gz');
 }
 
+// ali-oss's timeout (default 60s) runs from socket connect until the response
+// arrives, so it also covers sending the body. The ~3 MB tarball does not
+// always reach OSS from a GitHub-hosted runner within 60s.
+const TAR_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
 function buildTarUploadOptions() {
   return {
+    timeout: TAR_UPLOAD_TIMEOUT_MS,
     headers: {
       'Content-Type': 'application/gzip',
       'Cache-Control': 'public, max-age=300'
