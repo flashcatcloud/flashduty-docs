@@ -1,7 +1,7 @@
 // Shared OSS upload + CDN refresh helpers for the publishing scripts
 // (upload-openapi.mjs, upload-docs-bundle.mjs). All of them read the same
-// CDN_* env vars and publish under CDN_URL + CDN_DIR; only upload-openapi.mjs
-// refreshes the CDN.
+// CDN_* env vars, publish under CDN_URL + CDN_DIR and refresh the CDN copy of
+// what they upload.
 
 export const requiredEnv = [
   'CDN_ACCESS_KEY',

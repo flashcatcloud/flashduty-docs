@@ -35,7 +35,7 @@ test('uploadDocsBundle rejects a tarball that was never built', async () => {
   );
 });
 
-test('uploadDocsBundle uploads the tarball with gzip and cache headers', async () => {
+test('uploadDocsBundle uploads the tarball with gzip headers and refreshes the CDN', async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'docs-bundle-upload-'));
   const tarPath = path.join(tempDir, 'flashduty-docs.tar.gz');
   fs.writeFileSync(tarPath, 'fake tarball');
@@ -51,14 +51,23 @@ test('uploadDocsBundle uploads the tarball with gzip and cache headers', async (
   };
 
   const uploaded = [];
+  const refreshed = [];
   const ossClient = {
     async put(ossFilePath, localFilePath, options) {
       uploaded.push({ ossFilePath, localFilePath, options });
       return { url: `https://flashduty-public.oss-cn-beijing.aliyuncs.com${ossFilePath}` };
     }
   };
+  const cdnRuntime = {
+    CDN: { RefreshObjectCachesRequest: class RefreshObjectCachesRequest {} },
+    client: {
+      async refreshObjectCaches(request) {
+        refreshed.push(request.objectPath);
+      }
+    }
+  };
 
-  const cdnUrl = await uploadDocsBundle({ tarPath, env, ossClient });
+  const cdnUrl = await uploadDocsBundle({ tarPath, env, ossClient, cdnRuntime });
 
   assert.equal(cdnUrl, 'https://static.flashcat.cloud/flashduty-docs/flashduty-docs.tar.gz');
   assert.deepEqual(uploaded.map((item) => item.ossFilePath), ['/flashduty-docs/flashduty-docs.tar.gz']);
@@ -66,4 +75,5 @@ test('uploadDocsBundle uploads the tarball with gzip and cache headers', async (
   assert.equal(uploaded[0].options.headers['Content-Type'], 'application/gzip');
   assert.equal(uploaded[0].options.headers['Cache-Control'], 'public, max-age=300');
   assert.equal(uploaded[0].options.timeout, 30 * 60 * 1000);
+  assert.deepEqual(refreshed, ['https://static.flashcat.cloud/flashduty-docs/flashduty-docs.tar.gz']);
 });
