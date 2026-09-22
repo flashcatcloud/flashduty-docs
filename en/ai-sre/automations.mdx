@@ -158,6 +158,9 @@ Add the **On-call incident** trigger when you want AI SRE to start automatically
   <Step title="Select severities">
     Select one or more severities from `Critical`, `Warning`, and `Info`. When this trigger is enabled, at least one channel and one severity are required.
   </Step>
+  <Step title="Set similar-incident merging">
+    **Merge similar incidents into one analysis** is on by default: a new incident from this rule is first compared with the incidents being analysed now (or analysed within the last 10 minutes), and one scoring at least 0.9 joins that analysis instead of starting a session of its own; with it off, every incident is analysed separately. See "Merging similar incidents into one analysis" below.
+  </Step>
 </Steps>
 
 If you create or update a rule through the API, use these fields:
@@ -167,10 +170,32 @@ If you create or update a rule through the API, use these fields:
 | `oncall_incident_trigger_enabled` | boolean | Whether the On-call incident trigger is enabled. |
 | `oncall_incident_channel_ids` | int64[] | On-call channel IDs to watch. Creating or enabling this trigger requires at least one valid ID. |
 | `oncall_incident_severities` | string[] | Incident severities to watch. Supported values are `Critical`, `Warning`, and `Info`; creating or enabling this trigger requires at least one value. |
+| `oncall_incident_merge_similar` | boolean | Whether **Merge similar incidents into one analysis** is on. On by default; omitting this field is treated as on. |
 
-When a matching event arrives, the system creates a run with `trigger_kind: "oncall_incident"` and passes event context such as `incident_id`, `channel_id`, and `severity` into the session. The same trigger and the same `incident_id` reuse the same run, avoiding duplicate hidden sessions for one incident.
+When a matching event arrives, the system creates a run with `trigger_kind: "oncall_incident"` and passes event context such as `incident_id`, `channel_id`, and `severity` into the session. The same incident — the same trigger and the same `incident_id` — always reuses the same run, avoiding duplicate hidden sessions for one incident; alongside that, when the switch is on, a **different** incident similar enough to one already under analysis also joins that run instead of starting a session of its own, as described under "Merging similar incidents into one analysis" below.
 
 When the run finishes, AI SRE writes one summary comment back to the incident that triggered it: conclusion first, body kept concise, with a link to the full session at the end. That write-back record also carries a persistent **Continue conversation** entry, so you can open that session straight from the conclusion on the incident timeline — see [Incident Timeline · AI SRE Action Records](/en/on-call/incident/search-view-incident#ai-sre-action-records). The comment travels through the incident's existing notification chain (for example, incident card refreshes and thread replies in IM), so whoever is watching the incident sees the analysis without opening the console. This applies to every rule with the On-call incident trigger enabled — including rules with custom prompts — with no extra configuration.
+
+#### Merging similar incidents into one analysis
+
+**Merge similar incidents into one analysis** (`oncall_incident_merge_similar`, on by default) decides whether an incident event starts a session of its own or joins an analysis already running under **the same rule**. When it is on, an incident that matches the trigger is first compared for similarity against that rule's runs:
+
+- At a similarity of **0.9 or above**, the incident joins the highest-scoring analysis instead of starting a hidden session of its own. 0.9 is a fixed platform value, the same bar [intelligent grouping](/en/on-call/channel/noise-reduction) uses by default, and it does not move with a channel's grouping configuration.
+- Below 0.9, the incident starts a run of its own as usual.
+- With the switch off, no similarity comparison happens and every incident is analysed separately.
+
+The candidates are the incident that analysis is working on plus the incidents already merged into it. The merge affects only AI SRE's run routing: **it does not combine the two incidents in Flashduty**, and the bound incident of the session does not change — both incidents still exist, notify, and escalate on their own. A merged-in incident has no session of its own, so it also gets no summary comment of its own; if the analysis judges that it shares the root cause, it leaves a cross-reference comment on that incident's timeline and covers it in the conclusion.
+
+In that analysis's chat, a merge renders as one process line: `Joined this analysis` + `#<num> <title>` (the merged incident's name, linking to that incident's own page in a new tab), labelled `Similarity <score>` (two decimal places). In run history, that run likewise shows which analysis took it.
+
+Two platform limits are fixed and not configurable:
+
+- **One analysis takes in at most 20 incidents.** Once it is full it stops receiving similar incidents, and later ones start a new run, which carries on absorbing.
+- **A finished run can only be joined within 10 minutes of finishing.** A run still `running` or `retrying` is always joinable; a run that finished well (`succeeded` / `partial`) stays joinable for 10 minutes after it completed, and after that a similar incident starts a new run. Failed, skipped, and abandoned runs are never joined.
+
+<Note>
+The similarity comparison depends on the account's AIOps capability and on a Pro or higher subscription: if AIOps is switched off or the account's edition does not qualify, no comparison runs and every incident starts a run of its own.
+</Note>
 
 ## Run History
 
@@ -182,7 +207,7 @@ Run history is shown as a table with these columns:
 
 | Column | Notes |
 |---|---|
-| Name | The hidden session behind this run. The backend batch-resolves each run's session title (`session_name`, the hidden session's auto-generated name); when it can't be resolved, the cell falls back to the session ID (`session_id`) |
+| Name | The hidden session behind this run. The backend batch-resolves each run's session title (`session_name`, the hidden session's auto-generated name); when it can't be resolved, the cell falls back to the session ID (`session_id`). A run merged into another analysis (see "Merging similar incidents into one analysis" above) has no session of its own, so this column shows the incident it is about (`#<num> <title>`) and names, on the line below, the analysis it joined |
 | Started at | The start time of the run |
 | Duration | How long the run took |
 | Triggers | The trigger type of the run, such as `Schedule`, `HTTP POST`, `On-call incident`, or `Run manually` |
@@ -197,7 +222,8 @@ Run status values:
 | `succeeded` | Succeeded |
 | `partial` | Partially succeeded |
 | `failed` | Failed |
-| `skipped` | Skipped |
+| `skipped` | Skipped. Two situations share this status: the trigger decided not to run (for example, the rule's owner is no longer active, or the schedule was stopped), or the incident was merged into another analysis already running (see "Merging similar incidents into one analysis" above) |
+| `blocked` | Blocked. The run produced real output but stopped on a connector waiting for a human — a connector that is not set up yet, or one that needs an admin to complete authorization in the console |
 | `abandoned` | Abandoned (terminated by the system after running too long without completing) |
 
 Three filters are available above the table:
@@ -206,9 +232,25 @@ Three filters are available above the table:
 - **Status**: filter by the run statuses above, or choose **All statuses**.
 - **Trigger type**: choose from `All trigger types` / `Run manually` / `Schedule` / `HTTP POST` / `On-call incident`.
 
-Run records returned by the API also include `trigger_kind`, which can be `schedule`, `manual`, `http_post`, `oncall_incident`, or `debug`. `manual` means the run was started through the run-now API, and `oncall_incident` means it was started by a matching On-call incident event.
+Run records returned by the API also include `trigger_kind`, which can be `schedule`, `manual`, `http_post`, `oncall_incident`, or `debug`. `manual` means the run was started through the run-now API, and `oncall_incident` means it was started by a matching On-call incident event. A run merged into another analysis carries no `session_id` of its own: it carries that analysis's session ID in `joined_session_id` and its session name in `joined_session_name`, and both being empty means the run has a hidden session of its own.
 
-Click any row to jump to the chat page of the hidden session for that run (`chat?session_id=<sessionID>`), where you can view the full messages, tool calls, and artifacts of that run.
+Click a row to jump to the chat page of the hidden session for that run (`chat?session_id=<sessionID>`), where you can view the full messages, tool calls, and artifacts of that run. A run merged into another analysis has no session of its own, so clicking it opens the analysis that took over the incident.
+
+### The reason line on an unsuccessful run
+
+When a run's status is `failed`, `blocked`, `abandoned`, or `skipped`, the **Name** cell shows one extra line under the session name: the **reason** — clamped to one line, with the full text on hover. If the run has no session name to show, the reason takes the cell instead. The reason line sometimes carries a link beside it, which opens in a new tab.
+
+Reasons the platform itself decides on have fixed wording:
+
+| `error_code` | Reason shown | Link |
+|---|---|---|
+| `BalanceNotEnough` | AI SRE is not enabled, or this period's credits or balance are used up. This run did not execute. | Go to AI SRE billing (`/wallet/plan?product=ai-sre`) |
+| `NoLicense` | The On-call subscription has expired or its plan does not include AI SRE. AI SRE is paused. | Go to On-Call subscription (`/wallet/plan?product=oncall`) |
+| `task_run_stale` | The run did not finish in time and was abandoned. | None |
+| `interrupted` | This run was interrupted. | None |
+| `no_final_response` | The run ended without a final reply. | None |
+| `similar_incident_fan_in` | Joined “`<analysis name>`”; shows “another analysis” when the name cannot be resolved | None |
+| Any other `error_code` | The reason text recorded by the backend, shown as is; if there is none, the `error_code` itself | None |
 
 <Note>
 Run history is embedded in the rule's detail page, and opening the detail page itself already requires edit permission on that rule — a rule you cannot edit cannot be opened at all (it shows "Automation rule not found or access denied"), so its run history is likewise unreachable.
