@@ -3,9 +3,11 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildCdnUrl } from './cdn-url.mjs';
 import {
+  createCdnRuntime,
   createOssClient,
   loadDotenvIfAvailable,
   normalizeCdnDir,
+  refreshCdnCache,
   validateRequiredEnv
 } from './oss-cdn.mjs';
 
@@ -23,8 +25,8 @@ export function buildOssFilePath(cdnDir) {
 // ~3 MB tarball has taken 5.5 minutes to reach OSS (~9 KB/s).
 const TAR_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
-// No CDN refresh after the upload: the static CDN follows the origin's
-// Cache-Control, so a new tarball reaches readers within max-age.
+// The static CDN caches by its own path TTL, not this Cache-Control, so
+// uploadDocsBundle refreshes the tarball URL after every upload.
 function buildTarUploadOptions() {
   return {
     timeout: TAR_UPLOAD_TIMEOUT_MS,
@@ -38,7 +40,8 @@ function buildTarUploadOptions() {
 export async function uploadDocsBundle({
   tarPath = defaultTarPath,
   env = process.env,
-  ossClient
+  ossClient,
+  cdnRuntime
 } = {}) {
   const missing = validateRequiredEnv(env);
   if (missing.length > 0) {
@@ -49,11 +52,13 @@ export async function uploadDocsBundle({
   }
 
   const resolvedOssClient = ossClient ?? await createOssClient(env);
+  const resolvedCdnRuntime = cdnRuntime ?? await createCdnRuntime(env);
 
   const ossFilePath = buildOssFilePath(env.CDN_DIR);
   const result = await resolvedOssClient.put(ossFilePath, tarPath, buildTarUploadOptions());
   const cdnUrl = buildCdnUrl(result.url, env.CDN_ENDPOINT, env.CDN_URL);
   console.log(`Uploaded ${path.basename(tarPath)} -> ${cdnUrl}`);
+  await refreshCdnCache(resolvedCdnRuntime, cdnUrl);
 
   return cdnUrl;
 }
