@@ -25,9 +25,6 @@ SCRIPT_NAME=$(basename "$0")
 BASE_URL="${BASE_URL:-https://docs.flashduty.com}"
 DRY_RUN=false
 BATCH_SIZE=5
-# DashScope text-embedding-v4 accepts up to 8192 tokens per input.
-# Truncate content to stay safely within this limit after cleanup.
-MAX_CONTENT_CHARS=6000
 LIST_PAGE_SIZE=1000
 
 usage() {
@@ -133,17 +130,20 @@ dir_for_file() {
   fi
 }
 
-# Clean raw MDX content for embedding: strip frontmatter, import statements and
-# HTML/MDX tags, collapse whitespace, then truncate. Tags are stripped after
-# lines are joined so a tag whose attributes span several lines goes too; a tag
-# must start with a letter or '/', which keeps comparisons like "a < b" intact.
+# Clean raw MDX content for indexing: strip frontmatter, import statements and
+# HTML/MDX tags, collapse whitespace. Tags are stripped after lines are joined
+# so a tag whose attributes span several lines goes too; a tag must start with
+# a letter or '/', which keeps comparisons like "a < b" intact.
+# The whole page is indexed so keyword search sees all of it. The index's
+# embedder cuts its own input in its documentTemplate
+# ({{doc.content | truncate: 6000}}), so nothing here has to fit the embedding
+# model's input limit.
 clean_content() {
   local file=$1
   awk 'BEGIN{skip=0} NR==1 && /^---$/{skip=1;next} skip && /^---$/{skip=0;next} !skip' "$file" \
     | grep -v '^import ' \
     | tr '\n' ' ' \
-    | sed -E 's/<[A-Za-z/][^<>]*>//g; s/ +/ /g' \
-    | cut -c1-"$MAX_CONTENT_CHARS"
+    | sed -E 's/<[A-Za-z/][^<>]*>//g; s/ +/ /g'
 }
 
 # Build a JSON document for a single file
@@ -157,13 +157,14 @@ build_doc_json() {
   id=$(file_to_id "$file")
   content=$(clean_content "$file")
 
-  jq -n \
+  # The content goes through stdin: as a --arg it would hit the kernel's
+  # 128 KiB limit on a single command-line argument for a long page.
+  printf '%s' "$content" | jq -Rs \
     --arg id "$id" \
     --arg title "$title" \
-    --arg content "$content" \
     --arg locale "$locale" \
     --arg url "$doc_url" \
-    '{id: $id, title: $title, content: $content, locale: $locale, url: $url}' 2>/dev/null
+    '{id: $id, title: $title, content: ., locale: $locale, url: $url}' 2>/dev/null
 }
 
 # Write "id<TAB>url" for every document in the index to $1. Fails unless the
