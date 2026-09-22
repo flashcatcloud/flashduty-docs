@@ -2,6 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildCdnUrl } from './cdn-url.mjs';
+import {
+  createCdnRuntime,
+  createOssClient,
+  loadDotenvIfAvailable,
+  normalizeCdnDir,
+  refreshCdnCache,
+  validateRequiredEnv
+} from './oss-cdn.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
@@ -9,20 +17,6 @@ const repoRoot = path.resolve(packageRoot, '..');
 const defaultApiReferenceDir = path.join(repoRoot, 'api-reference');
 const docsBaseUrl = 'https://docs.flashcat.cloud';
 const httpMethods = ['get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'];
-
-export const requiredEnv = [
-  'CDN_ACCESS_KEY',
-  'CDN_SECRET_KEY',
-  'CDN_BUCKET',
-  'CDN_REGION',
-  'CDN_ENDPOINT',
-  'CDN_URL',
-  'CDN_DIR'
-];
-
-export function validateRequiredEnv(env = process.env) {
-  return requiredEnv.filter((key) => !env[key]);
-}
 
 export function listOpenapiJsonFiles(apiReferenceDir = defaultApiReferenceDir) {
   if (!fs.existsSync(apiReferenceDir)) {
@@ -33,11 +27,6 @@ export function listOpenapiJsonFiles(apiReferenceDir = defaultApiReferenceDir) {
     .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
     .map((entry) => entry.name)
     .sort();
-}
-
-function normalizeCdnDir(cdnDir) {
-  const normalized = cdnDir.replace(/\/+$/g, '');
-  return normalized || '/';
 }
 
 export function buildOssFilePath(cdnDir, file) {
@@ -76,37 +65,6 @@ function buildJsonUploadOptions() {
       'Cache-Control': 'public, max-age=300'
     }
   };
-}
-
-async function createOssClient(env = process.env) {
-  const { default: OSS } = await import('ali-oss');
-  return new OSS({
-    region: env.CDN_REGION,
-    accessKeyId: env.CDN_ACCESS_KEY,
-    accessKeySecret: env.CDN_SECRET_KEY,
-    bucket: env.CDN_BUCKET
-  });
-}
-
-async function createCdnRuntime(env = process.env) {
-  const { default: CDN } = await import('@alicloud/cdn20180510');
-  const { default: OpenApi } = await import('@alicloud/openapi-client');
-  const client = new CDN.default(new OpenApi.Config({
-    accessKeyId: env.CDN_ACCESS_KEY,
-    accessKeySecret: env.CDN_SECRET_KEY,
-    endpoint: 'cdn.aliyuncs.com',
-    regionId: 'cn-beijing'
-  }));
-
-  return { CDN, client };
-}
-
-async function refreshCdnCache(cdnRuntime, url) {
-  const request = new cdnRuntime.CDN.RefreshObjectCachesRequest({});
-  request.objectPath = url;
-  request.objectType = 'File';
-  await cdnRuntime.client.refreshObjectCaches(request);
-  console.log(`Refreshed CDN cache: ${url}`);
 }
 
 async function uploadJsonAsset({
@@ -175,17 +133,6 @@ export async function uploadOpenapiJsonFiles({
   });
 
   console.log(`Uploaded ${files.length} OpenAPI JSON files and manifest from ${apiReferenceDir}`);
-}
-
-async function loadDotenvIfAvailable() {
-  try {
-    const { default: dotenv } = await import('dotenv');
-    dotenv.config();
-  } catch (err) {
-    if (err.code !== 'ERR_MODULE_NOT_FOUND') {
-      throw err;
-    }
-  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
