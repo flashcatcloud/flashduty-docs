@@ -25,6 +25,8 @@ export function buildOssFilePath(cdnDir) {
 // ~3 MB tarball has taken 5.5 minutes to reach OSS (~9 KB/s).
 const TAR_UPLOAD_TIMEOUT_MS = 30 * 60 * 1000;
 
+// The static CDN caches by its own path TTL, not this Cache-Control, so
+// uploadDocsBundle refreshes the tarball URL after every upload.
 function buildTarUploadOptions() {
   return {
     timeout: TAR_UPLOAD_TIMEOUT_MS,
