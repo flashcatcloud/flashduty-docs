@@ -36,7 +36,7 @@ Of these, the 5 **diagnostic-only types** — Redis Node, Redis Sentinel, MongoD
 
 The data source list shows only the data sources you are allowed to query, with the following information:
 
-- **Name**: The identifier for the data source
+- **Name**: The identifier for the data source; when the row carries a team authorization, the name is followed by **Managing team** and **Query-allowed team** tags (see [Authorization tags in the Name column](#authorization-tags-in-the-name-column))
 - **Type**: Data source type with icon
 - **Connection URL**: The access address of the data source
 - **Associated Alert Engine**: The bound alert engine cluster name, with engine online status indicator
@@ -45,7 +45,17 @@ The data source list shows only the data sources you are allowed to query, with 
 
 The list is filtered by query permission: when you have no query (readonly) permission on a data source, the whole row is absent from the response — you can neither see it nor find it with the search box — so the list may hold fewer rows than the account actually has. The owner account, the Admin role, the creator, and members of the managing team or the readonly teams always see it. See the "Data source permissions (team authorization)" section below for the authorization model.
 
-You can filter data sources by name or type using the search box. The list auto-refreshes every 5 seconds to reflect real-time engine connection status.
+You can filter data sources by name, type, connection address, or note using the search box. The list auto-refreshes every 5 seconds to reflect real-time engine connection status.
+
+### Authorization tags in the Name column
+
+The Name column states the authorization role of each data source, so a glance is enough to tell which ones have an owner:
+
+- A row with `manage_team_id` carries a green **Managing team** tag showing the team name.
+- Every team in `readonly_team_ids` gets its own grey **Query-allowed team** tag, also showing the team name.
+- Hovering a tag names the role it stands for (managing team or query-allowed team).
+- Rows with neither field set carry no tag at all — the whole tenant being able to query and manage is the norm and needs no label.
+- Team names are fetched asynchronously: while the managing team's name is still in flight the row shows a placeholder skeleton, so it never flashes a wrong "Deleted team", and a name that still cannot be resolved once the lookup settles renders as **Deleted team** — that authorization no longer matches anything (after a team is deleted, the creator or an administrator can take over and fix it; see "Validation and normalization" above).
 
 ### Enable datasource
 
@@ -89,14 +99,26 @@ There are exactly three legal authorization configurations:
 ### What authorization changes
 
 - **List**: only data sources you are allowed to query are returned. A data source you may not query is absent from the response entirely; each row carries a `my_perm` field whose value is `manage` or `readonly`, plus the authorization fields (`manage_team_id`, `readonly_team_ids`, `creator_id`). The frontend only consumes these decisions; it never computes them.
-- **Management operations**: the data source detail (which returns connection credentials), edit, delete and the enable toggle all require `manage`, otherwise the request is rejected with an access-denied error (`only the managing team can manage this datasource`).
+- **Management operations**: the data source detail (which returns connection credentials), edit, delete and the enable toggle all require `manage`, otherwise the request is rejected with an access-denied error (`only the managing team can manage this datasource`). For rows you lack `manage` on, the console offers a read-only view instead (see "Edit and delete"): it renders from the list row with every credential masked and does not change this server-side gate.
 - **Query and reference**: instant queries, data exploration, dashboard panel queries, datasource tool calls, and referencing the data source in an alert rule all require `readonly`; without it the request is refused explicitly, without exposing data source details.
 - **Saving alert rules**: saving a rule requires the author to hold `readonly` on every data source the rule references, including data sources matched by a name pattern at save time; otherwise the save is rejected and names the data source that may not be referenced. The only exemption is a pure disable (a field update that only sets `enabled` to `false`). Once saved, rules are executed under the system identity, so later changes to member permissions do not affect them.
 - **Audit**: changes to the authorization fields are written as a `datasource_auth_update` audit record.
 
 ### How to configure it
 
-The authorization fields travel with the data source create and update requests (`POST /monit/datasource/create`, `POST /monit/datasource/update`): you can set them while creating a data source, and changing them on an existing data source is a management operation that requires `manage` on that data source. Omitting an authorization field in an update keeps the current value; passing an explicit `null` clears it. The console data source form does not offer inputs for these two fields yet, so they are set through the API.
+The create and edit drawers each hold a team input per field, which takes effect once you save and leaves the scope unrestricted when left empty:
+
+| Form field | Field name | Selection | Effect |
+|------------|------------|-----------|--------|
+| **Managing team** | `manage_team_id` | Single select | Members of the managing team can edit, delete, enable or disable this data source. Leave empty to let everyone manage it; the creator and admins can always manage it |
+| **Query-allowed teams** | `readonly_team_ids` | Multi select | Restricts which teams can query and reference this data source. Leave empty to let everyone query it; the managing team can always query it |
+
+Both values travel with the data source create and update requests (`POST /monit/datasource/create`, `POST /monit/datasource/update`): you can set them while creating a data source, and changing the authorization fields of an existing data source is a management operation that requires `manage` on that data source. They are normalized before submission: clearing `manage_team_id` becomes an explicit `null`, and `readonly_team_ids` deduplicated to an empty list also becomes `null`. In an update request a missing key keeps the current value while `null` clears it, so **clearing the selection is what revokes that authorization**. You can also submit both fields straight through the API instead of using the console.
+
+Two constraints on the console side:
+
+- **A managing team is required once query-allowed teams are set**: if you pick query-allowed teams without a managing team, the form reports "A managing team is required when query-allowed teams are set" under **Managing team** before submitting, rather than letting the backend answer with a 400.
+- **You can only point the managing team at a team you belong to**: except for the owner account and the Admin role, the **Managing team** candidates are limited to the current user's own teams — pointing the managing team at a team you are not in costs you management of that data source the moment you save (the creator has a fallback, an ordinary managing-team member does not). A team you are not a member of that is already selected still shows its name normally.
 
 <Note>
 Authorization is granted at team granularity only; per-member authorization is not supported. To authorize an individual member, create a small team for them.
@@ -431,16 +453,23 @@ Diagnostic-only types cannot enter the query workbench, so the list offers no **
 - The account must have AI SRE enabled, otherwise the row offers edit and delete only, with no primary action at all.
 - It requires the AI SRE chat permission (`AiSreChatVisit`): without it the button is visible but disabled.
 
-### The reverse entry in the Name column
-
-The Name column also carries an **Ask in AI SRE →** link that takes you from this data source straight into an AI SRE conversation with a prefilled question naming the data source and its type (prefilled only, never sent automatically). It appears only when the data source is enabled, the account has AI SRE enabled, and the current user holds both the AI SRE access permission and the chat permission (`AiSreChatVisit`) — AI SRE cannot query a disabled data source, so no entry is offered for one.
-
 ## Edit and delete
 
 - **Edit**: Click the **Edit** button in the data source list to modify the configuration and save.
+- **View**: for a row where you hold readonly permission only, hovering that same edit entry reads **View** and opens a read-only drawer titled **View data source**.
 - **Delete**: Click the **Delete** button in the data source list and confirm to delete the data source.
 
-Both go through the data source `manage` check first: you must be the creator of the data source, the owner account or an Admin, or a member of its managing team; otherwise the request is rejected (`only the managing team can manage this datasource`). The edit drawer loads the data source detail, and the detail returns connection credentials — which is why viewing the connection configuration, editing, deleting and enabling all sit behind the same gate. See the "Data source permissions (team authorization)" section for the decision rules.
+Editing, deleting and toggling all go through the data source `manage` check first: you must be the creator of the data source, the owner account or an Admin, or a member of its managing team; otherwise the request is rejected (`only the managing team can manage this datasource`). The edit drawer loads the data source detail, and the detail returns connection credentials — which is why viewing the credentials, editing, deleting and enabling all sit behind the same gate. See the "Data source permissions (team authorization)" section for the decision rules.
+
+The edit entry itself carries no row-level gate, but it still requires the account permission to edit data sources (`MonitDatasourceUpdate`): without it the entry is disabled as well.
+
+### What the read-only view shows
+
+When you hold readonly permission only on a data source, the console does not drop the entry — it downgrades it to read-only:
+
+- The drawer is titled **View data source**, the whole form is non-editable, and the data source type picker plus the Tencent Cloud CLS connection test are disabled along with it.
+- The basic fields come from the list row; the connection settings render in their usual form layout, but every string field shows `******` (switch, numeric and enum fields are left empty). The read-only view deliberately never calls the data source detail endpoint (that endpoint is gated on `manage`), so real credentials are never sent to the browser.
+- The **OK** button is disabled and the submit path applies the same hard stop; the **Delete** button and the **Enable datasource** switch become disabled controls whose hover card lists who can operate instead (organization admin, creator, managing team).
 
 <Warning>
 Before deleting a data source, ensure no alert rules reference it, otherwise the related alert rules will not execute properly.
