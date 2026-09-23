@@ -74,6 +74,8 @@ export const docMap = {
   StatusCake: `${alertBase}/statuscake.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
   Checkly: `${alertBase}/checkly.mdx`,
+  SplunkObservability: `${alertBase}/splunk-observability.mdx`,
+  PRTG: `${alertBase}/prtg.mdx`,
   Netdata: `${alertBase}/netdata.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
