@@ -78,6 +78,7 @@ export const docMap = {
   SplunkObservability: `${alertBase}/splunk-observability.mdx`,
   PRTG: `${alertBase}/prtg.mdx`,
   Netdata: `${alertBase}/netdata.mdx`,
+  Honeycomb: `${alertBase}/honeycomb.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
