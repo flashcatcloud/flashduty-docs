@@ -68,6 +68,7 @@ export const docMap = {
   SumoLogic: `${alertBase}/sumo-logic.mdx`,
   Site24x7: `${alertBase}/site24x7.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
+  HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
