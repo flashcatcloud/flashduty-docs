@@ -75,6 +75,7 @@ export const docMap = {
   Elastic: `${alertBase}/elastic.mdx`,
   SplunkObservability: `${alertBase}/splunk-observability.mdx`,
   Honeycomb: `${alertBase}/honeycomb.mdx`,
+  MongodbAtlas: `${alertBase}/mongodb-atlas.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,

@@ -1,0 +1,125 @@
+---
+title: "MongoDB Atlas alert integration"
+description: "Send MongoDB Atlas project alerts to Flashduty On-call through a webhook. Alerts recover automatically when Atlas closes them."
+keywords: ["alert integration", "MongoDB", "MongoDB Atlas", "Atlas", "webhook"]
+---
+
+Use the webhook integration of a MongoDB Atlas project to send Atlas alerts to Flashduty On-call. Each Atlas alert maps to one Flashduty alert: it triggers when Atlas opens the alert and recovers automatically when Atlas closes or cancels it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **MongoDB Atlas** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **MongoDB Atlas** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure MongoDB Atlas
+---
+
+Configuring the webhook integration requires the `Project Owner` role on the project or the `Organization Owner` role. Editing alert settings requires `Project Owner` or `Project Alerts Manager`.
+
+<Steps>
+<Step title="Configure the project webhook integration">
+
+1. Sign in to Atlas and select the organization and project in the top navigation bar
+2. In the sidebar, click the icon next to **Project Overview** to open **Project Settings**
+3. Open the **Integrations** tab and click **Configure** under **Webhook Settings**
+4. Paste the full Flashduty push URL into **Webhook URL**
+5. Leave **Webhook Secret** empty if you like. Flashduty authenticates the request by the `integration_key` in the push URL and does not verify `X-MMS-Signature`
+6. Leave **Webhook Headers Template** and **Webhook Body Template** empty. Flashduty parses the default Atlas request body, and a custom template drops the fields it needs
+7. Click **Save**
+
+</Step>
+
+<Step title="Add the webhook to your alert settings">
+
+1. Click the alerts icon in the top right corner of Atlas, then select **Alerts** under **Project**
+2. To create an alert, click **Add** → **New Alert**. To change an existing one, edit it on the **Alert Settings** tab
+3. Select the alert category and condition
+4. In the **Add Notifier** drop-down menu, select **Webhook**. The URL defaults to the project webhook configured in the previous step
+5. Save the alert setting
+
+Add the webhook notifier to every alert setting that should reach Flashduty.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Atlas has no button that sends a test alert. Create a temporary alert setting that is easy to trigger, such as **Connections** above `1`, then connect to the cluster so the alert opens and confirm that Flashduty receives it. Disconnect, wait for Atlas to close the alert, and confirm that the Flashduty alert recovers. Delete the temporary alert setting afterwards.
+
+</Step>
+</Steps>
+
+<Tip>
+Atlas requires the webhook URL to be reachable from the internet and to return 2xx. After 24 hours of failed deliveries, Atlas disables the notification method and notifies the project owners. Delivery errors are listed in the Atlas **Activity Feed**.
+</Tip>
+
+## Alert Key
+---
+
+Flashduty uses the alert `id` in the request body as the Alert Key. The Atlas documentation defines `id` as the unique identifier of the alert. The open, update, acknowledge, close, and cancel notifications of one alert carry the same `id`, so they land on the same Flashduty alert.
+
+Changes to `status`, `currentValue`, `humanReadable`, or the timestamps do not change the Alert Key. Flashduty rejects a request without `id`, because it could not be matched to its recovery.
+
+## Status and severity
+---
+
+Atlas sets the alert state in the `X-MMS-Event` request header:
+
+| `X-MMS-Event` | Flashduty status |
+| :--- | :--- |
+| `alert.open` | Triggered |
+| `alert.update` | Triggered (merged into the same alert) |
+| `alert.acknowledge` | Triggered (merged into the same alert) |
+| `alert.close` | Recovered |
+| `alert.cancel` | Recovered |
+| `alert.inform` | Informational alert, never recovers |
+
+When a request has no `X-MMS-Event` header, Flashduty uses the body `status` instead: `OPEN` and `TRACKING` trigger, `CLOSED` and `CANCELLED` recover, and `INFORMATIONAL` is an informational alert. Other values are rejected.
+
+The Atlas webhook body does not include the severity configured in the alert setting, so the severity is fixed:
+
+| Alert type | Flashduty severity |
+| :--- | :--- |
+| Alerts that recover (`alert.open` and so on) | Warning |
+| Informational alerts (`alert.inform`, such as Primary Elected) | Info |
+
+A recovery event keeps the original severity. To set severity by alert type, use an [alert processing pipeline](/en/on-call/integration/alert-integration/alert-pipelines) on the `event_type` or `metric_name` label.
+
+An informational alert is a point-in-time event. Each notification carries a new `id`, and Atlas never sends a close notification for it. These alerts do not recover automatically in Flashduty: close them by hand, or turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit).
+
+## Alert content
+---
+
+- **Title**: `metricName`, or `eventTypeName` when it is empty, followed by ` on <resource>` when a resource is known, for example `CONNECTIONS on Cluster0`
+- **Description**: `humanReadable`, which contains the project name, organization name, and alert details
+- **Labels**: `alert_id`, `alert_config_id`, `group_id` (project ID), `event_type`, `type_name`, `mms_event`, `status`, `metric_name`, `current_value` (value and units), `cluster`, `replica_set`, `host`, `instance_name`, `processor_name`, `created`, `source` (always `mongodb-atlas`), and `resource` (the first non-empty value of `clusterName`, `replicaSetName`, `hostnameAndPort`, `instanceName`, `processorName`)
+
+The acknowledging user `acknowledgingUsername` and the acknowledgement comment are not written to labels.
+
+## Troubleshooting
+---
+
+- **The Atlas Activity Feed shows failed deliveries**: check that **Webhook URL** is the full push URL including `integration_key`
+- **Flashduty returns a parameter error**: check that no **Webhook Body Template** is set and that the body contains `id`
+- **No alerts arrive**: check that the alert setting has a **Webhook** notifier and that the alert appears on the Atlas **Open** alerts tab
+- **An alert does not recover**: check that Atlas has closed the alert. Informational alerts (`alert.inform`) never recover
+- **Every alert is Warning**: the Atlas webhook does not carry severity. See the severity section above
+
+For field definitions, see [MongoDB Atlas webhook integration](https://www.mongodb.com/docs/atlas/tutorial/webhook-integration/) and [Atlas alert settings](https://www.mongodb.com/docs/atlas/configure-alerts/).
