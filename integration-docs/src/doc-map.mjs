@@ -66,6 +66,7 @@ export const docMap = {
   Datadog: `${alertBase}/datadog.mdx`,
   NewRelic: `${alertBase}/new-relic.mdx`,
   SumoLogic: `${alertBase}/sumo-logic.mdx`,
+  UptimeRobot: `${alertBase}/uptimerobot.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
