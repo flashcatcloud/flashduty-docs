@@ -66,12 +66,22 @@ AI SRE 提供两类运行环境：
 | 名称 | 是 | 在账户范围内必须唯一，最长 128 字符。 |
 | 范围 | 是 | 共享范围的模板在整个账户内可见；团队范围的模板仅对该团队成员可见和可编辑。 |
 | 网络访问 | 否，默认「全部允许」 | 下拉框展示「默认允许列表」「自定义（你的域名列表）」「全部允许」三个选项，但目前只有**「全部允许」**可以选择——「默认允许列表」与「自定义」选项已在界面上展示但处于禁用状态，属于已知限制，尚未开放。也就是说，当前创建或编辑云端环境模板，都会让绑定它的 Sandbox 处于完全放开出网的状态。 |
-| 环境变量 | 否 | `.env` 格式（`KEY=value`，每行一条，支持带引号的多行值），最大 32 KB，界面会实时显示已用字节数。 |
+| 环境变量 | 否 | `.env` 格式（`KEY=value`，每行一条，支持带引号的多行值），最大 32 KB，界面会实时显示已用字节数。平台保留键不能在这里设置，见下方说明。 |
 | 启动脚本 | 否 | Bash 脚本，最大 64 KB，界面会实时显示已用字节数。 |
 
 <Warning>
 环境变量以明文形式对所有使用该云端环境模板的人可见——请勿在这里填写密钥或凭据。
 </Warning>
+
+<Note>
+**平台保留键不能设置**：下列变量由平台注入，写进模板会在保存时被拒绝。
+
+- 精确匹配：`FLASHDUTY_APP_KEY`、`FLASHDUTY_BASE_URL`、`FLASHDUTY_DOCS_URL`、`GH_TOKEN`、`GH_PROMPT_DISABLED`、`PATH`、`HOME`；
+- GitLab CLI（`glab`）会读取的认证 / 主机 / TLS 配置项：`GITLAB_TOKEN`、`GITLAB_ACCESS_TOKEN`、`OAUTH_TOKEN`、`GITLAB_HOST`、`GL_HOST`、`GITLAB_URI`、`GITLAB_API_HOST`、`GITLAB_SSH_HOST`、`GITLAB_SUBFOLDER`、`CA_CERT`、`SKIP_TLS_VERIFY`；
+- 前缀匹配：`GIT_CONFIG_`、`GLAB_`、`GH_TOKEN_`（最后一个覆盖 `GH_TOKEN_1`、`GH_TOKEN_2` 这类多安装的 GitHub 令牌）。
+
+名单以服务端实际返回的报错为准。其中 `FLASHDUTY_DOCS_URL` 由平台在**每次 bash 执行**时注入，指向产品文档压缩包的下载地址，供内置的 `flashduty-docs` 技能按需下载文档——它不由模板提供，也无法被模板覆盖。
+</Note>
 
 启动脚本在**全新沙箱（Ubuntu 24.04，以 root 身份运行）**内、**Agent 启动前**执行，典型用途是用 `apt` 安装 Agent 需要的软件包。
 
@@ -279,6 +289,17 @@ Runner 版本由服务端在心跳中比对。发现新版本时，Runner 会收
 - **Linux (systemd) / 手动安装**：安装脚本的 `--uninstall`（保留配置卸载）与 `--purge`（清除配置与数据）。
 - **Docker 安装**：卸载是容器命令，与安装脚本的参数无关——`docker rm -f flashduty-runner`（卸载，保留 `/var/flashduty/workspace` 数据）与 `docker rm -f flashduty-runner && rm -rf /var/flashduty/workspace`（彻底卸载，同时清除 workspace 数据）。
 
+### Runner 工具管理
+
+Runner 可以自己安装它用到的命令行工具，不需要您在主机上预先准备好：
+
+- **手动安装**：`flashduty-runner tool ensure gh`、`glab`、`uv`、`node`。如果 `PATH` 里已经有同名二进制，Runner 直接复用它、不覆盖；否则从上游下载固定版本的归档，校验内置的 SHA-256 后原子安装到 Runner 自己的 tools 目录。
+- **自动安装**：启动 stdio MCP 连接器之前，Runner 会先安装该连接器需要的运行时——`uv`（提供 `uvx`）或 `node`（提供 `npx`）——所以主机上没有这两个运行时也能使用这类连接器。
+
+两条路径都需要 Runner 所在主机**能够出网**下载归档。内网 / 离线环境可以设置 `FLASHDUTY_RUNNER_TOOL_MIRROR_URL` 指向私有镜像，镜像需与官方保持同样的 `<name>/<version>/<asset>` 目录结构；该变量一旦设置就只走镜像，不会回退到官方源。
+
+Runner 自己安装的工具在 `PATH` 中排在主机命令之前，因此同名命令优先使用 Runner 安装的版本，主机上的其他命令仍照常可用。
+
 ## 权限配置
 
 ---
@@ -413,6 +434,19 @@ permission:
 
 历史会话打开时，选择器会以只读形式展示这条会话当初锁定的环境及其当前状态。如果绑定的 Runner 已离线或被删除，该会话不能继续发送消息；请先恢复 Runner，或新建会话改用云端 Sandbox。
 
+<Note>
+这里有**两层规则**，别混在一起：
+
+1. **会话绑定不回退**（上面两条说的就是它）：一条会话首次发送时锁定的环境不再变化。绑定的 Runner 之后离线、被删除，AI SRE 都不会把这条会话偷偷改派到其他环境，只会如实提示并拒绝发送。
+2. **选择级回退会显式告知**：如果您是通过「让 AI SRE 在 Runner 上装好」这类入口带着一个**一次性固定的 Runner** 进入对话，而这个 Runner 在首轮发送前已经不可用（被删除，或已不在您的可选范围内）、属于您未加入的团队，或者无法确认它属于哪个团队，输入框的环境选择会**显式切回「自动环境」**，并弹出一条警告——而不是静默地落到您没选过的环境上。三种文案分别是：
+
+   - 「该 Runner 已不可用，已改为自动环境」
+   - 「该 Runner 属于团队 〈团队名〉，你不在其中，已改为自动环境」
+   - 「无法确认该 Runner 的团队，已改为自动环境」
+
+   同理，输入框里记住的环境选择如果与当前会话的团队不匹配，首轮发送时不会被带上，由服务端按「自动」决定落到哪里。
+</Note>
+
 ## 作用域
 
 ---
@@ -451,7 +485,7 @@ permission:
   私有化端点的证书未被 Runner 信任。优先把签发该证书的 CA 加入 Runner 所在系统或容器的信任库；如果端点使用自签证书且位于可信私有网络内，也可以按上文说明显式开启 `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY`。systemd 部署需要重启服务，Docker 部署需要用新的环境变量重新创建容器，手动运行的进程需要重新启动。
 </Accordion>
 <Accordion title="会话提示连接超时或无响应" icon="server">
-  如果会话固定到了某个离线 Runner，AI SRE 不会偷偷改派到其他环境。请先恢复该 Runner，或新建会话并选择“自动”或“云端 Sandbox”。如果 Runner 在线但任务失败，多半是 Runner 到目标资源这一段的网络或权限问题。
+  如果会话固定到了某个离线 Runner，AI SRE 不会偷偷改派到其他环境——这条规则针对的是**已经锁定环境**的会话，首次发送前的选择级回退见[在会话中选择环境](#在会话中选择环境)。请先恢复该 Runner，或新建会话并选择“自动”或“云端 Sandbox”。如果 Runner 在线但任务失败，多半是 Runner 到目标资源这一段的网络或权限问题。
 </Accordion>
 </AccordionGroup>
 
