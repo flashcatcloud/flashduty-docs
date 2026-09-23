@@ -76,6 +76,7 @@ export const docMap = {
   Checkly: `${alertBase}/checkly.mdx`,
   SplunkObservability: `${alertBase}/splunk-observability.mdx`,
   PRTG: `${alertBase}/prtg.mdx`,
+  Netdata: `${alertBase}/netdata.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
