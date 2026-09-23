@@ -1,0 +1,230 @@
+---
+title: "Netdata 告警集成"
+description: "通过 Netdata Agent 的自定义通知（custom_sender）将 Netdata 告警的触发、升级和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Netdata", "Netdata Agent", "health_alarm_notify.conf", "custom_sender", "Webhook"]
+---
+
+通过 Netdata Agent 自带的自定义通知方式（`custom_sender()`），把 Netdata 健康检查（health）产生的告警推送到 Flashduty On-call。同一台主机上同一个图表（chart）的同一条告警对应一条 Flashduty 告警：告警从 WARNING 升级到 CRITICAL 时合并到这条告警，Netdata 发出 CLEAR 后这条告警自动恢复。
+
+本集成适用于开源的 Netdata Agent（包括 Docker 部署和 Parent/Child 流式架构），不需要 Netdata Cloud 账号，也不需要付费订阅。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警路由到不同的协作空间时，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+  2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+  3. 选择 **Netdata**，点击 **保存**
+  4. 打开生成的集成卡片，复制 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据 Payload 将告警路由到不同的协作空间时，选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+  2. 选择 **Netdata**，填写集成名称
+  3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+  4. 点击 **保存**，复制生成的 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## 前提条件
+---
+
+- **网络**：运行 Netdata Agent 的主机需要能访问 Flashduty 推送地址（如 `https://api.flashcat.cloud`）。
+- **curl**：通知脚本使用 `curl` 发送请求。Netdata 的官方安装包和 Docker 镜像已自带 `curl`。
+- **权限**：需要能编辑 Netdata 配置目录（通常是 `/etc/netdata`）中的文件。
+
+## 在 Netdata 中配置
+---
+
+<Steps>
+<Step title="打开通知配置文件">
+
+进入 Netdata 配置目录，使用 `edit-config` 打开 `health_alarm_notify.conf`：
+
+```bash
+cd /etc/netdata
+sudo ./edit-config health_alarm_notify.conf
+```
+
+使用 Docker 部署时，先进入容器再执行同样的命令：
+
+```bash
+docker exec -it netdata bash
+cd /etc/netdata
+./edit-config health_alarm_notify.conf
+```
+
+<Tip>
+`edit-config` 会把默认配置复制到 `/etc/netdata` 再打开。使用 Docker 部署时，请确认 `/etc/netdata` 挂载了持久化卷，否则重建容器后配置会丢失。
+</Tip>
+
+</Step>
+
+<Step title="添加 Flashduty 通知">
+
+把下方模板追加到文件**末尾**，并把 `FLASHDUTY_PUSH_URL` 替换为 Flashduty 集成的完整推送地址（包含 `integration_key` 参数），然后保存文件。
+
+```bash
+SEND_CUSTOM="YES"
+DEFAULT_RECIPIENT_CUSTOM="flashduty"
+FLASHDUTY_PUSH_URL="https://api.flashcat.cloud/event/push/alert/netdata?integration_key=<集成密钥>"
+
+custom_sender() {
+  local httpcode
+  httpcode=$(docurl -X POST \
+    --data-urlencode "host=${host}" \
+    --data-urlencode "chart=${chart}" \
+    --data-urlencode "context=${context}" \
+    --data-urlencode "alarm=${name}" \
+    --data-urlencode "status=${status}" \
+    --data-urlencode "old_status=${old_status}" \
+    --data-urlencode "value=${value_string}" \
+    --data-urlencode "summary=${summary}" \
+    --data-urlencode "info=${info}" \
+    --data-urlencode "class=${classification}" \
+    --data-urlencode "component=${component}" \
+    --data-urlencode "type=${type}" \
+    --data-urlencode "duration=${duration}" \
+    --data-urlencode "goto_url=${goto_url}" \
+    "${FLASHDUTY_PUSH_URL}")
+  if [ "${httpcode}" = "200" ]; then
+    info "sent custom notification for ${status} of '${host}.${chart}.${name}' to Flashduty"
+    sent=$((sent + 1))
+  else
+    error "failed to send custom notification for ${status} of '${host}.${chart}.${name}' to Flashduty with HTTP error code ${httpcode}."
+  fi
+}
+```
+
+- 追加到文件末尾是为了覆盖默认配置中同名的 `custom_sender()` 函数和变量。
+- `DEFAULT_RECIPIENT_CUSTOM` 让所有角色（`sysadmin`、`webmaster`、`dba` 等）的告警都走这个通知；值本身不会发送给 Flashduty，可以是任意非空字符串。
+- 每个字段都用 `--data-urlencode` 单独编码，告警描述中的引号、空格和中文都不会破坏请求。
+
+Netdata 每次发送通知都会重新读取这个文件，保存后无需重启 Netdata。
+
+</Step>
+
+<Step title="发送测试通知">
+
+以 `netdata` 用户运行 Netdata 自带的测试命令：
+
+```bash
+sudo su -s /bin/bash netdata
+/usr/libexec/netdata/plugins.d/alarm-notify.sh test
+```
+
+使用 Docker 部署时：
+
+```bash
+docker exec -u netdata netdata /usr/libexec/netdata/plugins.d/alarm-notify.sh test
+```
+
+通过静态安装包（`/opt/netdata`）安装时，脚本路径为 `/opt/netdata/usr/libexec/netdata/plugins.d/alarm-notify.sh`。
+
+测试命令会依次发送 WARNING、CRITICAL、CLEAR 三条通知，每条都输出 `# OK` 即表示推送地址和集成密钥正确。Flashduty 识别出这是测试通知（告警名 `test_alarm`、图表 `test.chart`），只返回成功，不会创建告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `host`、`chart` 和 `alarm` 三个字段共同生成 Alert Key。
+
+- `host` 是产生告警的主机名。Parent 节点替 Child 节点检查告警时，`host` 是 Child 的主机名。
+- `chart` 是告警所在的图表实例，例如 `disk_space./`、`disk_space./data`。同一个告警模板（template）作用在不同挂载点、网卡或容器上时，`chart` 不同，会生成不同的告警。
+- `alarm` 是告警名称，即 `health.d` 配置中 `alarm` 或 `template` 的值。
+
+告警状态、数值、描述和持续时间的变化都不会改变 Alert Key。Netdata 重启后同一条告警再次触发时，Alert Key 也不变。
+
+Netdata 通知中的 `alarm_id` 只在单个 Agent 内唯一（例如测试命令发送的 `alarm_id` 在所有 Agent 上都是 `1`），因此 Flashduty 不使用它。
+
+## 状态和告警等级
+---
+
+Netdata 只对 WARNING、CRITICAL、CLEAR 三种状态发送通知。
+
+| Netdata `status` | Flashduty 状态 | Flashduty 告警等级 |
+| :--- | :--- | :--- |
+| `WARNING` | 触发 | Warning |
+| `CRITICAL` | 触发 | Critical |
+| `CLEAR` | 恢复 | 沿用恢复前的等级（取自 `old_status`） |
+
+告警从 WARNING 升到 CRITICAL 时，Flashduty 会新建一条 Critical 告警，原 Warning 告警保持触发；从 CRITICAL 降到 WARNING 时，事件合并到已有的 Critical 告警。CLEAR 通知会同时关闭这两条告警。
+
+Netdata 只在告警从 WARNING 或 CRITICAL 变为 CLEAR 时发送 CLEAR 通知。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `host` | 主机名 |
+| `alarm` | 告警名称 |
+| `chart` | 图表实例 |
+| `context` | 图表的 context，例如 `disk.space` |
+| `class`、`component`、`type` | 告警配置中的 `class`、`component`、`type` |
+| `status` | Netdata 状态 |
+| `value` | 带单位的当前值，例如 `81.2%` |
+| `goto_url` | 跳转到 Netdata 仪表盘的链接 |
+| `source` | 固定为 `netdata` |
+
+告警标题为 `<host>: <summary>`；较早版本的 Netdata 没有 `summary` 时，使用告警名称。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="支持 Netdata Cloud 的 Webhook 通知吗？">
+
+不支持。Netdata Cloud 的 Webhook 通知需要 Space 处于付费计划，且告警通知中没有节点（主机）字段，不同主机上同名、同图表的告警无法区分。Flashduty 会以 `missing host` 拒绝这类请求。请在各个 Agent（或 Parent 节点）上按本页配置自定义通知。
+
+</Accordion>
+
+<Accordion title="Parent 和 Child 都开启了健康检查，会收到重复告警吗？">
+
+Parent 和 Child 发送的同一条告警 `host`、`chart`、`alarm` 相同，会合并到同一条 Flashduty 告警，不会产生两条告警。如需减少通知次数，可以只在 Parent 上开启告警通知。
+
+</Accordion>
+
+<Accordion title="测试命令没有输出 # OK 怎么办？">
+
+- 输出 `HTTP error code 000`：主机无法连接 Flashduty，请检查 DNS、代理和防火墙
+- 输出 `HTTP error code 4xx`：检查 `FLASHDUTY_PUSH_URL` 是否完整、`integration_key` 是否正确，以及模板中的 `host`、`chart`、`alarm`、`status` 字段是否被修改
+- 输出 `custom_sender() is not configured`：模板没有追加到文件末尾，或文件不是 `/etc/netdata/health_alarm_notify.conf`
+
+在测试命令前设置 `NETDATA_ALARM_NOTIFY_DEBUG=1`，可以看到完整的 curl 命令和 Flashduty 的响应内容。
+
+</Accordion>
+
+<Accordion title="告警没有恢复怎么办？">
+
+确认模板中保留了 `status=${status}` 和 `old_status=${old_status}`，并且没有修改 `host`、`chart`、`alarm` 三个字段。Netdata 的告警配置中如果把角色设为 `silent`，该告警的所有通知（包括 CLEAR）都不会发送。
+
+执行 `netdatacli reload-health` 或重启 Netdata 后，告警会从 `UNINITIALIZED` 重新计算。如果此时告警条件已经不满足，Netdata 直接进入 CLEAR 且不发送通知，Flashduty 中对应的告警需要手动关闭。修改活跃告警的阈值时请注意这一点。
+
+</Accordion>
+</AccordionGroup>
+
+更多字段含义请参阅 Netdata 文档 [Agent notifications](https://learn.netdata.cloud/docs/alerts-&-notifications/notifications/agent-dispatched-notifications) 和 [Custom notifications](https://learn.netdata.cloud/docs/alerts-&-notifications/notifications/agent-dispatched-notifications/custom)。

@@ -1,0 +1,163 @@
+---
+title: "Healthchecks.io alert integration"
+description: "Send Healthchecks.io check down and up notifications to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Healthchecks.io", "cron", "heartbeat monitoring", "webhook"]
+---
+
+Use a Healthchecks.io webhook integration to send check down (`down`) and recovery (`up`) notifications to Flashduty On-call. Each check maps to one Flashduty alert: the alert triggers when the check misses its ping or receives a failure signal, and recovers when the check receives a ping again.
+
+Self-hosted Healthchecks needs v3.5 or later, because the template below uses the `$NAME_JSON`, `$BODY_JSON`, and `$SLUG` placeholders.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Healthchecks.io** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Healthchecks.io** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Healthchecks.io
+---
+
+<Steps>
+<Step title="Add a webhook integration">
+
+1. Sign in to Healthchecks.io, open the project to connect, and switch to the **Integrations** tab
+2. Find **Webhook** and click **Add Integration**
+3. Enter a recognizable **Name**, such as `Flashduty`
+
+</Step>
+
+<Step title="Configure down notifications">
+
+In the **Execute when a check goes down** section:
+
+1. Select **POST** as the method and paste the complete Flashduty push URL into **URL**
+2. Paste the following JSON into **Request Body** as is
+3. Leave **Request Headers** empty
+
+```json
+{
+  "code": "$CODE",
+  "status": "$STATUS",
+  "name": $NAME_JSON,
+  "slug": "$SLUG",
+  "tags": "$TAGS",
+  "now": "$NOW",
+  "exit_status": "$EXITSTATUS",
+  "last_ping_body": $BODY_JSON
+}
+```
+
+<Warning>
+Do not put quotes around `$NAME_JSON` and `$BODY_JSON`: Healthchecks renders them as quoted JSON strings. Keep `code` and `status`. If `code` is missing or `status` is not `down` or `up`, Flashduty rejects the request, because it cannot tell the event state or match the recovery to the original alert.
+</Warning>
+
+</Step>
+
+<Step title="Configure up notifications">
+
+Repeat the previous step in the **Execute when a check goes up** section: select **POST**, enter the same push URL, and paste the same JSON. `$STATUS` renders as `up` there, and Flashduty recovers the alert. If you configure only down notifications, Flashduty alerts do not recover automatically.
+
+Click **Save Integration**.
+
+</Step>
+
+<Step title="Connect checks">
+
+A new integration is enabled for all existing checks in the project, and checks created in the console are enabled for all of the project's integrations. If a check is not connected (for example, you turned the integration off earlier, or created the check through the API without `channels`), turn this webhook integration on under **Notification Methods** on the check's details page.
+
+</Step>
+
+<Step title="Verify">
+
+On the **Integrations** tab, click **Test!** for this integration. Healthchecks sends one down notification for a dummy check named `TEST`. Flashduty returns success without creating an alert, so you can use it to confirm the push URL and request body.
+
+To verify the full flow, make a check go down (for example, call `https://hc-ping.com/<uuid>/fail`) and confirm that Flashduty receives an active alert. Then send a success ping to `https://hc-ping.com/<uuid>` and confirm that the alert recovers.
+
+</Step>
+</Steps>
+
+## Payload fields
+---
+
+| Field | Placeholder | Description | Use in Flashduty |
+| :--- | :--- | :--- | :--- |
+| `code` | `$CODE` | Check UUID | Alert Key, label `check_code` |
+| `status` | `$STATUS` | New check status, `down` or `up` | Alert status, label `status` |
+| `name` | `$NAME_JSON` | Check name | Alert title, label `check` |
+| `slug` | `$SLUG` | Check slug | Label `check_slug` |
+| `tags` | `$TAGS` | Check tags, separated by spaces | Label `check_tags` |
+| `now` | `$NOW` | Time of the status change (UTC, ISO 8601) | Label `flipped_at` |
+| `exit_status` | `$EXITSTATUS` | Exit status reported by the latest ping, `-1` when none was reported | Label `exit_status` |
+| `last_ping_body` | `$BODY_JSON` | Request body of the latest ping, such as job output | Alert description, truncated beyond 8 KB |
+
+The alert title is the check name. When the name is empty, Flashduty uses the slug, then `Healthchecks.io check <code>`. Every alert also carries the label `source=healthchecks-io`.
+
+## Alert Key
+---
+
+Flashduty uses `$CODE` (`code`, the check UUID) as the Alert Key. The down and up notifications of a check carry the same UUID, so they land on the same alert. Different checks create different alerts even if they share a name. Renaming a check or changing its slug or tags does not change the Alert Key.
+
+A check that is deleted and created again gets a new UUID and is no longer linked to the old alert.
+
+## Status and severity
+---
+
+Healthchecks.io notifications have no severity. Flashduty maps them as follows:
+
+| Healthchecks `$STATUS` | Meaning | Flashduty status or severity |
+| :--- | :--- | :--- |
+| `down` | The check missed its ping or received a failure signal | Critical |
+| `up` | The check received a success ping again | Recovered, original severity Critical |
+
+An empty or any other `status` is rejected.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a check that stays down send repeated notifications?">
+
+No. Healthchecks.io sends one notification per status change: one when the check goes `down`, and one when it returns to `up`.
+
+</Accordion>
+
+<Accordion title="Why does the Test! button not create an alert?">
+
+The test notification comes from a dummy check named `TEST` with an empty slug and a new random UUID on every press. Such an alert would never receive a recovery, so Flashduty returns success without creating an alert. If you have a real check named `TEST`, keep its slug (Healthchecks generates one from the name by default); otherwise its notifications are also ignored as tests.
+
+</Accordion>
+
+<Accordion title="Are failed deliveries retried?">
+
+Yes. Each Healthchecks.io request times out after 30 seconds. On a connection failure or a status code other than 200, 201, 202, or 204, it makes up to 3 attempts in total. If all 3 fail, the notification is lost; if that was the up notification, close the alert manually.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid parameter error**: Confirm the method is POST, the request body is the JSON above, and `code` and `status` are unchanged
+- **JSON parsing fails**: Check whether a tag contains a double quote or backslash. `$TAGS` is inserted as is, and these characters make the body invalid JSON. Change the tag, or remove the `tags` line from the template
+- **The request body of a self-hosted Healthchecks contains `$NAME_JSON` or `$SLUG` literally**: The version is too old to support these placeholders. Upgrade to v3.5 or later
+- **Alerts do not recover**: Confirm that the **Execute when a check goes up** section also has the push URL and request body
+- **No notifications arrive**: Confirm the integration is on under the check's **Notification Methods**. For self-hosted Healthchecks, also confirm that `WEBHOOKS_ENABLED` is not turned off
+
+For more placeholders, see **Supported Placeholders** on the Healthchecks.io page for adding a webhook integration.

@@ -1,0 +1,137 @@
+---
+title: "Splunk Observability Cloud 告警集成"
+description: "通过 Webhook 将 Splunk Observability Cloud（原 SignalFx）探测器告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Splunk Observability Cloud", "SignalFx", "探测器", "Detector", "Webhook"]
+---
+
+通过 Splunk Observability Cloud 的 Webhook 集成，将探测器（Detector）告警同步到 Flashduty On-call。每个 Splunk 告警（incident）对应一条 Flashduty 告警：探测器触发时生成，告警清除时自动恢复。
+
+<Note>
+本集成对接 Splunk Observability Cloud（原 SignalFx）的指标、APM、RUM、Synthetics 等探测器告警。Splunk Enterprise 或 Splunk Cloud Platform 的搜索告警请使用 [Splunk 告警事件](/zh/on-call/integration/alert-integration/alert-sources/splunk) 集成。
+</Note>
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Splunk Observability Cloud**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Splunk Observability Cloud**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Splunk Observability Cloud 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 集成">
+
+创建 Webhook 集成需要 Splunk Observability Cloud 管理员权限。
+
+1. 登录 Splunk Observability Cloud，在左侧导航选择 **Data Management**
+2. 进入 **Available integrations** 标签页（或在 **Deployed integrations** 标签页点击 **Add Integration**），筛选条件选 **All**，搜索并选择 **Webhook**
+3. 进入创建向导的 **Summary** 页（如果先看到的是已有集成列表，点击 **New Integration**），点击 **Next**
+4. 在 **Configure connection** 页填写：
+   - **Name**：例如 `Flashduty`，之后在探测器中按此名称选择
+   - **URL**：粘贴 Flashduty 集成的完整推送地址
+   - **Method**：选择 `POST`
+   - **Shared secret**：选填，可留空。Flashduty 通过推送地址中的 `integration_key` 认证，不校验 `X-SFX-Signature` 签名
+   - **Headers**：无需填写
+5. 点击 **Next**，在 **Customize message** 页保留默认模板
+6. 点击 **Next**，确认信息后点击 **Save**
+
+保存后可以在集成详情页点击 **Run test**，选择日志级别后发送一条测试通知（`eventType` 为 `WEBHOOK_TEST`）。Flashduty 返回成功，不创建告警。
+
+</Step>
+
+<Step title="将 Webhook 添加为探测器的告警接收方">
+
+1. 创建或编辑需要推送的探测器
+2. 在 **Alert recipients** 步骤点击 **Add Recipient**，选择 **Webhook**，再选择上一步创建的集成（如 `Flashduty`）
+3. 激活并保存探测器
+
+探测器的每条规则各自配置接收方，需要推送的规则都要添加。探测器触发和清除告警时，Splunk Observability Cloud 都会向 Flashduty 发送通知。
+
+</Step>
+
+<Step title="验证生命周期">
+
+为测试探测器设置一个当前就会满足的阈值，确认 Flashduty 收到活动告警；再把阈值改回，或等待条件不再满足，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+如果在 **Customize message** 页修改了模板，请保留 `incidentId`、`statusExtended`（或 `status`）、`severity` 字段，且字段名不变。缺少 `incidentId` 或状态字段的请求会被拒绝。
+</Warning>
+
+## Alert Key
+---
+
+Flashduty 使用 `incidentId` 作为 Alert Key。Splunk 文档说明，同一个告警的触发通知和清除通知携带相同的 `incidentId`，因此两者会落在同一条 Flashduty 告警上。
+
+规则名称、严重程度、状态、时间、消息内容和维度取值的变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+Flashduty 读取 `statusExtended`；该字段为空时读取 `status`：
+
+| Splunk `statusExtended` | 含义 | Flashduty 状态 |
+| :--- | :--- | :--- |
+| `anomalous` | 探测条件满足，告警触发 | 触发 |
+| `ok` | 探测条件不再满足，或满足清除条件 | 恢复 |
+| `manually resolved` | 用户在界面或 API 中手动解决告警 | 恢复 |
+| `stopped` | 触发告警的探测器被编辑或删除 | 恢复 |
+
+空值或其他状态会被拒绝。
+
+告警被静音规则（Muting rule）覆盖期间，Splunk Observability Cloud 不发送通知；静音结束时如果告警仍在持续，会补发一条 `anomalous` 通知。
+
+告警等级来自规则的严重程度 `severity`：
+
+| Splunk `severity` | Flashduty 等级 |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Major` | Critical |
+| `Minor` | Warning |
+| `Warning` | Warning |
+| `Info` | Info |
+| 空值或其他值 | Warning |
+
+恢复事件保留原告警等级。
+
+## 告警内容
+---
+
+- **标题**：规则名称 `rule`，为空时使用探测器名称 `detector`
+- **描述**：`messageBody`，为空时使用 `description`
+- **标签**：
+  - `incident_id`、`detector_id`、`detector`、`detector_url`、`rule`、`severity`、`originating_metric`、`detect_on_condition`、`runbook_url`、`tip`
+  - `check`（同标题）、`resource`（告警来源 `src`，例如主机名或 Pod 名）、`source`（固定为 `splunk-observability`）
+  - `dimensions` 中的每个维度；键名中的 `.`、`-` 等字符替换为 `_`，例如 `k8s.pod.name` 变为 `k8s_pod_name`。以数字开头的键名会被丢弃。标签总数上限为 50 个，维度较多时按键名排序保留靠前的维度
+
+`orgId`、`imageUrl`、`inputs` 不会写入标签。
+
+## 排查问题
+---
+
+- **Splunk 显示通知发送失败**：确认 URL 是完整推送地址且包含 `integration_key`。Splunk 在未收到 `200` 响应时会重试，最长 24 小时
+- **Flashduty 返回参数错误**：确认模板中保留了 `incidentId` 和 `statusExtended`
+- **告警没有恢复**：确认探测器的规则仍添加了该 Webhook 接收方；若模板被修改，确认清除通知中的 `incidentId` 与触发时一致
+- **静默期间的告警**：Splunk 静默规则（Muting rule）生效期间不发送触发通知，但静默开始前已触发的告警在清除时仍会发送清除通知。静默结束后，Splunk 会为仍处于活动状态的告警重新发送通知
+
+字段含义请参阅 [Splunk Observability Cloud Webhook 集成](https://dev.splunk.com/observability/docs/integrations/webhook_integration_overview/)。

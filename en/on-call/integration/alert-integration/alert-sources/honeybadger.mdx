@@ -1,0 +1,138 @@
+---
+title: "Honeybadger alert integration"
+description: "Send error, uptime check, and check-in events from a Honeybadger project to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Honeybadger", "webhook", "error monitoring", "uptime monitoring", "check-in"]
+---
+
+Use the Webhook integration of a Honeybadger project to send error (fault), uptime check, and check-in events to Flashduty On-call. Each error, uptime check, and check-in maps to one Flashduty alert: an error triggers the alert when it occurs and recovers it when it is marked resolved; a site triggers the alert when it goes down and recovers it when it comes back up; a check-in triggers the alert when it is missing and recovers it when it reports again.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Honeybadger**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Honeybadger** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Honeybadger
+---
+
+The Webhook integration is configured per project and is available only on Honeybadger's Team, Business, and Enterprise plans. You need administrative privileges on the project.
+
+<Steps>
+<Step title="Add a Webhook integration">
+
+1. Open the Honeybadger project you want to connect and go to **Settings → Alerts & Integrations**
+2. Select **Webhook** from the list of project integrations
+3. Paste the full Flashduty push URL into **URL**. The URL must include `integration_key`
+4. Leave **Bearer token** empty. Flashduty authenticates the request by the `integration_key` in the URL
+5. Keep **Payload version** at the default `v2`
+
+</Step>
+
+<Step title="Choose the events to send">
+
+In the integration's event options, select the events your on-call team should handle. Select both the trigger and the recovery option for each kind of event, or alerts will not recover automatically. The error options for resolved (`resolved`) and reopened (`unresolved`) errors are not selected by default, so select them yourself:
+
+| Honeybadger event | Event name | Effect in Flashduty |
+| :--- | :--- | :--- |
+| An error is first reported, or a resolved error occurs again | `occurred` | Triggers or updates the error's alert |
+| An error is manually marked unresolved | `unresolved` | Triggers or updates the error's alert |
+| An error exceeds the configured rate (rate escalations) | `rate_exceeded` | Triggers or updates the error's alert and raises its severity to Critical |
+| An error is marked resolved | `resolved` | Recovers the error's alert |
+| A site goes down | `down` | Triggers the check's alert |
+| A site is back up | `up` | Recovers the check's alert |
+| A check-in is missing | `check_in_missing` | Triggers the check-in's alert |
+| A check-in reports again | `check_in_reporting` | Recovers the check-in's alert |
+| An SSL certificate will expire soon | `cert_will_expire` | Triggers an alert that does not recover automatically |
+| The project's error volume spikes (anomaly detection) | `volume_spike` | Triggers an alert that does not recover automatically |
+
+Assignment (`assigned`), comment (`commented`), and deployment (`deployed`) events do not create alerts; Flashduty returns success without processing them. Use the environment filters, error filters, and throttling in the integration options to reduce the events sent to Flashduty.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. Save the integration
+2. Raise a new error in an application that uses the Honeybadger SDK and confirm that Flashduty receives an active alert
+3. Mark the error **Resolved** in Honeybadger and confirm that the alert recovers
+
+The **Test this integration** button on the integration settings page sends an `occurred` event for a sample error of class `TestingException`. Flashduty creates a Warning alert for it; close that alert manually after checking it.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the object the event is about, so the trigger and recovery events of the same object share one Alert Key:
+
+| Object | Events | Field used |
+| :--- | :--- | :--- |
+| Error | `occurred`, `unresolved`, `rate_exceeded`, `resolved` | `fault.id` |
+| Uptime check | `down`, `up` | `site.id` |
+| SSL certificate | `cert_will_expire` | `site.id` |
+| Check-in | `check_in_missing`, `check_in_reporting` | `check_in.id` |
+| Error volume spike | `volume_spike` | `project.id` |
+
+The Alert Key combines the object type with the ID in the table, so an `up` event for a site does not recover that site's certificate alert, and an error ID never merges with an equal project ID. Changes to the error message, environment, occurrence count, site name, and similar fields do not change the Alert Key. Events without the required ID are rejected.
+
+## Status and severity
+---
+
+Honeybadger events carry no severity, so Flashduty sets the status and severity from the event name:
+
+| Event name | Status | Flashduty severity |
+| :--- | :--- | :--- |
+| `down`, `check_in_missing`, `rate_exceeded` | Trigger | Critical |
+| `occurred`, `unresolved` | Trigger | Warning |
+| `cert_will_expire`, `volume_spike` | Trigger | Warning |
+| `resolved`, `up`, `check_in_reporting` | Recover | - |
+
+`cert_will_expire` and `volume_spike` have no recovery event. Close these alerts manually in Flashduty after handling them.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `event` | Event name of this request |
+| `project` / `project_id` | Honeybadger project name and ID |
+| `fault_id` | Error ID |
+| `error_class` | Error class, such as `RuntimeError` |
+| `component` / `action` | Component and action where the error occurred (usually the controller and its method) |
+| `env` | Environment of the error |
+| `notices_count` | Total occurrences of the error |
+| `tags` | Error tags, comma-separated |
+| `site_id` / `site_name` | Uptime check ID and name |
+| `resource` | URL the uptime check requests |
+| `outage_reason` | Reason for the outage, such as `Connection timed out` |
+| `check_in_id` / `check_in_name` | Check-in ID and name |
+| `schedule_type` / `report_period` | Check-in schedule type and reporting period |
+| `observed` / `baseline_median` / `factor` | For an error volume spike: errors in the last hour, the baseline median, and the ratio between them |
+| `url` | Link to the error, check, or check-in page in Honeybadger |
+
+## Troubleshooting
+---
+
+- **Webhook is not in the integration list**: Confirm that the account is on the Team plan or higher and that you are a project administrator
+- **Flashduty returns a parameter error**: Confirm that the URL is complete and includes `integration_key`
+- **The alert does not recover**: Confirm that the matching recovery event is selected (error resolved, site back up, or check-in reporting again)
+- **The test succeeds but real events do not arrive**: Check the integration's environment filters, error filters, and throttling, and whether the site is selected for uptime events
+
+For field details, see [Honeybadger Webhook](https://docs.honeybadger.io/guides/integrations/webhook/).

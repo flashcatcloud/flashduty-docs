@@ -1,0 +1,175 @@
+---
+title: "Checkmk alert integration"
+description: "Send Checkmk host and service notifications to Flashduty On-call through a notification script. Alerts close automatically when the problem recovers."
+keywords: ["alert integration", "Checkmk", "Check_MK", "notification script", "Nagios"]
+---
+
+Checkmk has no generic webhook notification method. This integration provides a notification script: for every notification Checkmk sends, the script posts the notification context (all `NOTIFY_*` variables) to Flashduty as JSON. Each Checkmk host or service maps to one Flashduty alert: it triggers when a problem occurs and closes automatically on recovery.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Checkmk** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Checkmk** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Checkmk
+---
+
+The steps below are based on Checkmk 2.5. Menu names may differ slightly in other 2.x versions. The script only needs the Python 3 that ships with Checkmk; nothing else has to be installed.
+
+<Steps>
+<Step title="Install the notification script">
+
+Log in to the Checkmk server as the site user (for example `omd su mysite`) and create the file `~/local/share/check_mk/notifications/flashduty` with the following content:
+
+```python
+#!/usr/bin/env python3
+# Flashduty
+# Sends Checkmk host and service notifications to a Flashduty Checkmk integration.
+# Parameter 1: the integration push URL.
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+url = os.environ.get("NOTIFY_PARAMETER_1", "")
+if not url:
+    sys.stderr.write("missing parameter 1: Flashduty push URL\n")
+    sys.exit(2)
+
+context = {
+    key[len("NOTIFY_"):]: value
+    for key, value in os.environ.items()
+    if key.startswith("NOTIFY_") and not key.startswith("NOTIFY_PARAMETER")
+}
+request = urllib.request.Request(
+    url,
+    data=json.dumps(context).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        sys.stdout.write("Flashduty accepted the notification: HTTP %d\n" % response.status)
+except urllib.error.HTTPError as e:
+    sys.stderr.write("Flashduty rejected the notification: HTTP %d %s\n" % (e.code, e.read()[:500]))
+    sys.exit(1 if e.code >= 500 or e.code == 429 else 2)
+except (urllib.error.URLError, OSError) as e:
+    sys.stderr.write("Flashduty is unreachable: %s\n" % e)
+    sys.exit(1)
+```
+
+Then make it executable:
+
+```bash
+chmod +x ~/local/share/check_mk/notifications/flashduty
+```
+
+The comment `# Flashduty` on the second line is the name Checkmk shows for the script. The push URL is passed as the script's first parameter and is not included in the request body. On a network error, or when Flashduty returns 5xx or 429, the script exits with code 1 and Checkmk retries later. Other errors exit with code 2 and are not retried.
+
+<Note>In a distributed setup, install the script on every site that sends notifications. If notification forwarding is enabled, the central site is enough.</Note>
+
+</Step>
+
+<Step title="Create a notification rule">
+
+Go to **Setup → Events → Notifications**, click **Add notification rule**, and complete the wizard:
+
+1. **Triggering events**: under **Host events** and **Service events**, select every **State change**, and also select **Start or end of downtime** and **Start or end of flapping state** (see "Alert lifecycle" below for why)
+2. **Filter for hosts/services**: restrict hosts or services as needed. Without a filter, every object is sent
+3. **Notification method (plug-in)**: set **Method** to **Flashduty**. Next to **Select parameters**, create a parameter set and enter the full push URL of the Flashduty integration as the first parameter
+4. **Recipient**: select **Specific users** and choose exactly one user (notifications must not be disabled for that user)
+5. Keep the defaults for the remaining steps and save the rule. If the page shows pending changes, click **Activate changes**
+
+<Warning>Checkmk runs the notification script once for each contact the rule selects. With several contacts, the same notification is posted several times. The posts land on the same alert but create duplicate events, so select only one user under **Recipient**.</Warning>
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Put a service into WARN or CRIT for real (for example by lowering a threshold) and confirm that Flashduty receives an active alert. Then let the service recover and confirm that the alert closes.
+
+You can also send a test from **Test notifications** under **Setup → Events → Notifications** to check connectivity. Test notifications carry Checkmk's test marker: Flashduty returns success and does not create an alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the host name `HOSTNAME` and the service name `SERVICEDESC`. Host notifications use an empty service name. Problem and recovery notifications for the same host or service carry the same host and service names, so they land on the same alert. When the state rises to a higher severity (for example a service going from WARN to CRIT), Flashduty opens a new alert at the higher severity and keeps the earlier alert open; the recovery notification closes both.
+
+Changes to the state, plugin output, notification number, time, host address, site, or labels do not change the Alert Key. Renaming a host or service produces a new alert; close any alert left open under the old name by hand.
+
+Flashduty rejects a request that lacks `HOSTNAME`, `WHAT`, the current state, or `NOTIFICATIONTYPE`, and a service notification that lacks `SERVICEDESC`.
+
+## Alert lifecycle
+---
+
+Checkmk sends a recovery notification only after it has sent a problem notification. Acknowledgement, downtime, flapping, and custom notifications are also sent when the problem notification was suppressed (for example while a service flaps). An alert opened from them would never get a recovery notification to close it. So only problem notifications open alerts, and Flashduty handles each notification type `NOTIFICATIONTYPE` as follows:
+
+| Checkmk notification type | Current state | Flashduty handling |
+| :--- | :--- | :--- |
+| `PROBLEM` | Not `OK` / `UP` | Trigger an alert, or update the existing one |
+| `RECOVERY` | `OK` / `UP` | Recover the alert |
+| `FLAPPINGSTOP`, `FLAPPINGDISABLED`, `DOWNTIMEEND`, `DOWNTIMECANCELLED` | `OK` / `UP` | Recover the alert |
+| `FLAPPINGSTOP`, `FLAPPINGDISABLED`, `DOWNTIMEEND`, `DOWNTIMECANCELLED` | Not `OK` / `UP` | Ignore |
+| `ACKNOWLEDGEMENT`, `DOWNTIMESTART`, `FLAPPINGSTART`, `CUSTOM`, alert handler notifications | Any | Ignore |
+
+While a service flaps, Checkmk sends no state change notifications: a return to `OK` during flapping sends no recovery notification, and none is sent after flapping ends. That is why the rule must include **Start or end of flapping state** and **Start or end of downtime**: the notification at the end of flapping or downtime closes an alert that has already recovered.
+
+Ignored notifications get a success response, so Checkmk does not retry them.
+
+## Severity
+---
+
+Severity comes from the current state: `SERVICESTATE` for service notifications and `HOSTSTATE` for host notifications.
+
+| Checkmk state | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `DOWN` | Critical |
+| `UNREACHABLE` | Critical |
+| `WARNING` | Warning |
+| `UNKNOWN` | Info |
+| Any other value | Critical |
+
+A recovery event takes the severity of the hard state before recovery (`PREVIOUSSERVICEHARDSTATE` or `PREVIOUSHOSTHARDSTATE`).
+
+## Alert content
+---
+
+- **Title**: `<service name> on <host name>` for service notifications, `Host <host name>` for host notifications
+- **Description**: the plugin output `SERVICEOUTPUT` or `HOSTOUTPUT`, followed by the long output when present
+- **Labels**: `host`, `resource` (host name), `service`, `check` (service name, service notifications only), `what` (`HOST` or `SERVICE`), `notification_type`, `state`, `site`, `host_alias`, `host_address`, `host_groups`, `service_groups` (service notifications only), and Checkmk host and service labels: `HOSTLABEL_env` becomes `host_label_env` and `SERVICELABEL_app` becomes `service_label_app`, with characters such as `/` and `.` in the key replaced by `_`
+
+Each alert carries at most 50 labels. When there are more, labels beyond the limit are dropped in name order. Contact details such as contact names and email addresses are not written to labels.
+
+## Troubleshooting
+---
+
+- **Flashduty is not listed as a method in Checkmk**: make sure the script is in the site's `local/share/check_mk/notifications/` directory, is named `flashduty`, is executable, and has `# Flashduty` on its second line
+- **No notification is sent**: check the site's `var/log/notify.log` to confirm the rule matched the event and that the user under **Recipient** has not disabled notifications
+- **The script reports HTTP 4xx**: make sure parameter 1 is the full push URL including `integration_key`
+- **The same notification is posted several times**: **Recipient** selects several contacts; select only one user
+- **The alert does not recover**: make sure the object has really returned to `OK` or `UP`. If the problem happened during flapping or downtime, make sure the rule includes **Start or end of flapping state** and **Start or end of downtime**
+
+For the meaning of the notification context variables, see the Checkmk documentation on [Notifications](https://docs.checkmk.com/latest/en/notifications.html).

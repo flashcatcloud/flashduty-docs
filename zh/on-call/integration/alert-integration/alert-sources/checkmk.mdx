@@ -1,0 +1,175 @@
+---
+title: "Checkmk 告警集成"
+description: "通过通知脚本将 Checkmk 主机和服务的告警通知同步到 Flashduty On-call，问题恢复时自动关闭告警。"
+keywords: ["告警集成", "Checkmk", "Check_MK", "通知脚本", "Nagios"]
+---
+
+Checkmk 没有通用 Webhook 通知方式。本集成提供一个通知脚本：Checkmk 每发出一条通知，脚本就把通知上下文（全部 `NOTIFY_*` 变量）以 JSON 推送到 Flashduty。每个 Checkmk 主机或服务对应一条 Flashduty 告警：出现问题时触发，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Checkmk**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Checkmk**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Checkmk 中配置
+---
+
+以下步骤基于 Checkmk 2.5，其他 2.x 版本菜单名称可能略有不同。脚本只依赖 Checkmk 自带的 Python 3，不需要安装其他软件。
+
+<Steps>
+<Step title="安装通知脚本">
+
+以站点用户登录 Checkmk 服务器（例如 `omd su mysite`），创建文件 `~/local/share/check_mk/notifications/flashduty`，内容如下：
+
+```python
+#!/usr/bin/env python3
+# Flashduty
+# Sends Checkmk host and service notifications to a Flashduty Checkmk integration.
+# Parameter 1: the integration push URL.
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+url = os.environ.get("NOTIFY_PARAMETER_1", "")
+if not url:
+    sys.stderr.write("missing parameter 1: Flashduty push URL\n")
+    sys.exit(2)
+
+context = {
+    key[len("NOTIFY_"):]: value
+    for key, value in os.environ.items()
+    if key.startswith("NOTIFY_") and not key.startswith("NOTIFY_PARAMETER")
+}
+request = urllib.request.Request(
+    url,
+    data=json.dumps(context).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        sys.stdout.write("Flashduty accepted the notification: HTTP %d\n" % response.status)
+except urllib.error.HTTPError as e:
+    sys.stderr.write("Flashduty rejected the notification: HTTP %d %s\n" % (e.code, e.read()[:500]))
+    sys.exit(1 if e.code >= 500 or e.code == 429 else 2)
+except (urllib.error.URLError, OSError) as e:
+    sys.stderr.write("Flashduty is unreachable: %s\n" % e)
+    sys.exit(1)
+```
+
+然后赋予执行权限：
+
+```bash
+chmod +x ~/local/share/check_mk/notifications/flashduty
+```
+
+脚本第二行的注释 `# Flashduty` 是它在 Checkmk 界面中显示的名称。推送地址作为脚本的第一个参数传入，不会写进请求体。网络错误或 Flashduty 返回 5xx、429 时脚本以退出码 1 结束，Checkmk 会稍后重试；其他错误以退出码 2 结束，不再重试。
+
+<Note>分布式监控中，通知由哪个站点发出，脚本就要放在哪个站点上。如果启用了通知转发，放在中心站点即可。</Note>
+
+</Step>
+
+<Step title="创建通知规则">
+
+进入 **Setup → Events → Notifications**，点击 **Add notification rule**，按向导填写：
+
+1. **Triggering events**：勾选 **Host events** 与 **Service events** 中的全部 **State change**，并勾选 **Start or end of downtime** 与 **Start or end of flapping state**（原因见下方「告警生命周期」）
+2. **Filter for hosts/services**：按需限定主机或服务，不限定则所有对象都会推送
+3. **Notification method (plug-in)**：**Method** 选择 **Flashduty**；在 **Select parameters** 旁新建一组参数，第一个参数填写 Flashduty 集成的完整推送地址
+4. **Recipient**：选择 **Specific users**，只选一个用户（该用户不能关闭通知）
+5. 其余步骤保持默认，保存规则。若页面提示有待激活的更改，点击 **Activate changes**
+
+<Warning>Checkmk 会为规则选中的每个联系人各执行一次通知脚本。选中多个联系人时，同一条通知会推送多次；这些推送落在同一条告警上，但会产生重复事件。因此 **Recipient** 只选一个用户。</Warning>
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个服务真正进入 WARN 或 CRIT（例如调低阈值），确认 Flashduty 收到活动告警；再恢复该服务，确认原告警关闭。
+
+也可以在 **Setup → Events → Notifications** 的 **Test notifications** 中发送测试通知，确认链路连通。测试通知带有 Checkmk 的测试标记，Flashduty 返回成功，不会生成告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用主机名 `HOSTNAME` 加服务名 `SERVICEDESC` 计算 Alert Key；主机通知的服务名为空。同一个主机或服务的问题和恢复通知携带相同的主机名和服务名，因此落在同一条告警上。状态升到更高等级时（例如服务从 WARN 变为 CRIT），Flashduty 会新建一条更高等级的告警，原告警保持触发；恢复通知会同时关闭这两条告警。
+
+状态、插件输出、通知序号、时间、主机地址、站点和标签的变化都不会改变 Alert Key。重命名主机或服务后，新名称会产生新的告警；改名前未恢复的告警需要手动关闭。
+
+请求缺少 `HOSTNAME`、`WHAT`、当前状态或 `NOTIFICATIONTYPE`，或服务通知缺少 `SERVICEDESC` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Checkmk 只在发出过问题通知之后才会发送恢复通知。确认、维护、抖动和自定义通知在问题通知被抑制时（例如服务正在抖动）也会发出，如果用它们打开告警，之后不会有恢复通知来关闭。因此只有问题通知会打开告警，Flashduty 按通知类型 `NOTIFICATIONTYPE` 处理：
+
+| Checkmk 通知类型 | 当前状态 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `PROBLEM` | 非 `OK` / `UP` | 触发告警，或更新已有告警 |
+| `RECOVERY` | `OK` / `UP` | 恢复告警 |
+| `FLAPPINGSTOP`、`FLAPPINGDISABLED`、`DOWNTIMEEND`、`DOWNTIMECANCELLED` | `OK` / `UP` | 恢复告警 |
+| `FLAPPINGSTOP`、`FLAPPINGDISABLED`、`DOWNTIMEEND`、`DOWNTIMECANCELLED` | 非 `OK` / `UP` | 忽略 |
+| `ACKNOWLEDGEMENT`、`DOWNTIMESTART`、`FLAPPINGSTART`、`CUSTOM`、告警处理器通知 | 任意 | 忽略 |
+
+服务抖动期间 Checkmk 不发送状态变化通知：抖动期间恢复为 `OK` 时不会发出恢复通知，抖动结束后也不会补发。所以规则要勾选 **Start or end of flapping state** 和 **Start or end of downtime**，让抖动或维护期结束时的通知关闭已恢复的告警。
+
+被忽略的通知返回成功，Checkmk 不会重试。
+
+## 告警等级
+---
+
+告警等级来自当前状态：服务通知取 `SERVICESTATE`，主机通知取 `HOSTSTATE`。
+
+| Checkmk 状态 | Flashduty 等级 |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `DOWN` | Critical |
+| `UNREACHABLE` | Critical |
+| `WARNING` | Warning |
+| `UNKNOWN` | Info |
+| 其他值 | Critical |
+
+恢复事件的等级取恢复前的硬状态（`PREVIOUSSERVICEHARDSTATE` 或 `PREVIOUSHOSTHARDSTATE`）。
+
+## 告警内容
+---
+
+- **标题**：服务通知为 `<服务名> on <主机名>`，主机通知为 `Host <主机名>`
+- **描述**：插件输出 `SERVICEOUTPUT` 或 `HOSTOUTPUT`，有长输出时附在后面
+- **标签**：`host`、`resource`（主机名）、`service`、`check`（服务名，仅服务通知）、`what`（`HOST` 或 `SERVICE`）、`notification_type`、`state`、`site`、`host_alias`、`host_address`、`host_groups`、`service_groups`（仅服务通知），以及 Checkmk 的主机标签和服务标签：`HOSTLABEL_env` 写为 `host_label_env`，`SERVICELABEL_app` 写为 `service_label_app`，键名中的 `/`、`.` 等字符替换为 `_`
+
+每条告警最多 50 个标签；标签过多时，按名称排序后超出部分不写入。联系人姓名、邮箱等联系人信息不会写入标签。
+
+## 排查问题
+---
+
+- **Checkmk 界面找不到 Flashduty 方法**：确认脚本位于站点目录的 `local/share/check_mk/notifications/` 下，文件名为 `flashduty`，有执行权限，第二行是 `# Flashduty`
+- **通知没有发出**：查看站点的 `var/log/notify.log`，确认规则匹配到了该事件，且 **Recipient** 中的用户没有关闭通知
+- **脚本报 HTTP 4xx**：确认参数 1 是完整推送地址且包含 `integration_key`
+- **同一条通知推送了多次**：**Recipient** 选中了多个联系人，改为只选一个用户
+- **告警没有恢复**：确认对象已真正恢复为 `OK` 或 `UP`；若问题发生在抖动或维护期内，确认规则勾选了 **Start or end of flapping state** 和 **Start or end of downtime**
+
+通知上下文变量的含义请参阅 Checkmk 文档 [Notifications](https://docs.checkmk.com/latest/en/notifications.html)。
