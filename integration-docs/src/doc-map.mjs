@@ -67,6 +67,7 @@ export const docMap = {
   NewRelic: `${alertBase}/new-relic.mdx`,
   Checkly: `${alertBase}/checkly.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
+  Pingdom: `${alertBase}/pingdom.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
