@@ -1,0 +1,125 @@
+---
+title: "MongoDB Atlas 告警集成"
+description: "通过 Webhook 将 MongoDB Atlas 项目告警同步到 Flashduty On-call，告警关闭时自动恢复。"
+keywords: ["告警集成", "MongoDB", "MongoDB Atlas", "Atlas", "Webhook"]
+---
+
+通过 MongoDB Atlas 项目的 Webhook 集成，将 Atlas 告警同步到 Flashduty On-call。每条 Atlas 告警对应一条 Flashduty 告警：Atlas 打开告警时触发，关闭或取消告警时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **MongoDB Atlas**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **MongoDB Atlas**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 MongoDB Atlas 中配置
+---
+
+需要项目的 `Project Owner` 或组织的 `Organization Owner` 权限配置 Webhook 集成；编辑告警设置需要 `Project Owner` 或 `Project Alerts Manager` 权限。
+
+<Steps>
+<Step title="配置项目 Webhook 集成">
+
+1. 登录 Atlas，在顶部导航选择组织和项目
+2. 在左侧栏点击 **Project Overview** 旁的图标，进入 **Project Settings**
+3. 切换到 **Integrations** 标签页，点击 **Webhook Settings** 的 **Configure**
+4. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
+5. **Webhook Secret** 可留空。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `X-MMS-Signature`
+6. 不要填写 **Webhook Headers Template** 和 **Webhook Body Template**。Flashduty 按 Atlas 默认的请求体解析，自定义模板会导致字段缺失
+7. 点击 **Save**
+
+</Step>
+
+<Step title="在告警设置中添加 Webhook 通知">
+
+1. 点击 Atlas 右上角的告警图标，在 **Project** 下选择 **Alerts**
+2. 新建告警：点击 **Add** → **New Alert**；或在 **Alert Settings** 标签页中编辑已有的告警设置
+3. 选择告警类别和触发条件
+4. 在 **Add Notifier** 下拉菜单中选择 **Webhook**，URL 默认使用上一步配置的项目 Webhook 地址
+5. 保存告警设置
+
+每条需要推送到 Flashduty 的告警设置都要添加 Webhook 通知方式。
+
+</Step>
+
+<Step title="验证生命周期">
+
+Atlas 没有发送测试告警的按钮。可以临时创建一个容易触发的告警设置，例如 **Connections** 大于 `1`，连接集群让告警打开，确认 Flashduty 收到告警；再断开连接，等 Atlas 关闭告警后确认原告警恢复。验证完成后删除这条临时告警设置。
+
+</Step>
+</Steps>
+
+<Tip>
+Atlas 要求 Webhook 地址可从公网访问并返回 2xx。连续投递失败 24 小时后，Atlas 会停用该通知方式并通知项目 Owner，可在 Atlas 的 **Activity Feed** 中查看投递错误。
+</Tip>
+
+## Alert Key
+---
+
+Flashduty 使用请求体中的告警 `id` 作为 Alert Key。Atlas 文档将 `id` 定义为告警的唯一标识，同一条告警的打开、更新、确认、关闭和取消通知携带相同的 `id`，因此会落在同一条 Flashduty 告警上。
+
+`status`、`currentValue`、`humanReadable` 和时间字段的变化都不会改变 Alert Key。请求缺少 `id` 时 Flashduty 会拒绝，因为无法关联后续恢复。
+
+## 状态和告警等级
+---
+
+Atlas 在请求头 `X-MMS-Event` 中标明告警状态：
+
+| `X-MMS-Event` | Flashduty 状态 |
+| :--- | :--- |
+| `alert.open` | 触发 |
+| `alert.update` | 触发（合并到同一告警） |
+| `alert.acknowledge` | 触发（合并到同一告警） |
+| `alert.close` | 恢复 |
+| `alert.cancel` | 恢复 |
+| `alert.inform` | 信息类告警，不会恢复 |
+
+请求没有 `X-MMS-Event` 头时，Flashduty 改用请求体 `status`：`OPEN`、`TRACKING` 为触发，`CLOSED`、`CANCELLED` 为恢复，`INFORMATIONAL` 为信息类告警。其他取值会被拒绝。
+
+Atlas 的 Webhook 请求体不包含告警设置中的 Severity，因此告警等级固定为：
+
+| 告警类型 | Flashduty 等级 |
+| :--- | :--- |
+| 可恢复的告警（`alert.open` 等） | Warning |
+| 信息类告警（`alert.inform`，如 Primary Elected） | Info |
+
+恢复事件保留原告警等级。如需按告警类型区分等级，可通过[告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 基于 `event_type` 或 `metric_name` 标签调整。
+
+信息类告警是一次性事件，每次通知带有新的 `id`，Atlas 不会发送关闭通知。这类告警在 Flashduty 中不会自动恢复，需要手动关闭，或开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)。
+
+## 告警内容
+---
+
+- **标题**：`metricName`，为空时使用 `eventTypeName`；能取到资源时追加 ` on <资源>`，例如 `CONNECTIONS on Cluster0`
+- **描述**：`humanReadable`，包含项目名、组织名和告警详情
+- **标签**：`alert_id`、`alert_config_id`、`group_id`（项目 ID）、`event_type`、`type_name`、`mms_event`、`status`、`metric_name`、`current_value`（数值和单位）、`cluster`、`replica_set`、`host`、`instance_name`、`processor_name`、`created`、`source`（固定为 `mongodb-atlas`），以及 `resource`（依次取 `clusterName`、`replicaSetName`、`hostnameAndPort`、`instanceName`、`processorName` 中第一个非空值）
+
+确认人 `acknowledgingUsername` 和确认备注不会写入标签。
+
+## 排查问题
+---
+
+- **Atlas Activity Feed 显示投递失败**：确认 **Webhook URL** 是完整推送地址且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认没有配置 **Webhook Body Template**，请求体中有 `id`
+- **收不到告警**：确认告警设置的通知方式中添加了 **Webhook**，且告警出现在 Atlas 的 **Open** 告警列表中
+- **告警没有恢复**：确认 Atlas 已关闭该告警；信息类告警（`alert.inform`）本身不会恢复
+- **所有告警都是 Warning**：Atlas 的 Webhook 不携带 Severity，参见上文的等级说明
+
+字段含义请参阅 [MongoDB Atlas Webhook 集成](https://www.mongodb.com/docs/atlas/tutorial/webhook-integration/) 和 [Atlas 告警设置](https://www.mongodb.com/docs/atlas/configure-alerts/)。
