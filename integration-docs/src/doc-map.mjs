@@ -68,6 +68,7 @@ export const docMap = {
   Checkly: `${alertBase}/checkly.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
+  Rollbar: `${alertBase}/rollbar.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
