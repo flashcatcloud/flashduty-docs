@@ -66,6 +66,7 @@ export const docMap = {
   Datadog: `${alertBase}/datadog.mdx`,
   NewRelic: `${alertBase}/new-relic.mdx`,
   Checkly: `${alertBase}/checkly.mdx`,
+  Site24x7: `${alertBase}/site24x7.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
