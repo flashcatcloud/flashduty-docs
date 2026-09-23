@@ -1,0 +1,127 @@
+---
+title: "Rollbar 告警集成"
+description: "通过 Webhook 将 Rollbar 项目中错误条目（Item）的出现、重新激活和解决事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Rollbar", "Item", "Webhook", "错误监控"]
+---
+
+通过 Rollbar 项目的 Webhook 通知渠道，将错误条目（Item）同步到 Flashduty On-call。每个 Rollbar Item 对应一条 Flashduty 告警：新出现、再次发生、重新激活时触发或更新这条告警，Item 被标记为已解决时告警恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **集成数据**，点击 **添加一个集成**
+3. 选择 **Rollbar**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Rollbar**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Rollbar 中配置
+---
+
+Webhook 按项目配置。需要在 Rollbar 项目中拥有修改通知设置的权限。
+
+<Steps>
+<Step title="启用 Webhook 渠道">
+
+1. 进入需要接入的 Rollbar 项目，点击 **Settings → Notifications → Webhook**
+2. 将 Flashduty 集成的完整推送地址粘贴到 **URL**，地址中需包含 `integration_key`
+3. 点击 **Save**，保存后渠道自动启用
+
+</Step>
+
+<Step title="添加通知规则">
+
+首次保存 URL 时，Rollbar 会自动创建一组默认规则：**New item**、**Item reactivated**、**Item reopened**、**10^nth occurrence**、**Item resolved** 和 **Deploy**。先在页面下方的 **Rules** 列表中核对，只通过 **Add rule** 补充缺少的规则（如 **High occurrence rate**）。同一触发条件不要重复添加，否则每个事件会推送两次。
+
+建议启用以下规则：
+
+| Rollbar 触发条件 | 事件名 | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| New item | `new_item` | 触发告警 |
+| Item reactivated | `reactivated_item` | 触发或更新告警 |
+| Item reopened | `reopened_item` | 触发或更新告警 |
+| 10^nth occurrence | `exp_repeat_item` | 更新告警 |
+| High occurrence rate | `item_velocity` | 更新告警 |
+| Item resolved | `resolved_item` | 恢复告警 |
+
+默认规则只推送等级不低于 `error` 的 Item（条件为 `level >= error`）。如需接收 `warning`、`info` 等级的 Item，编辑规则并调低等级条件。规则中还可以按环境等条件过滤，只推送需要值班处理的 Item。**Every occurrence**（`occurrence`）会在每次错误发生时推送一次，同样合并到该 Item 的告警中，但事件量大，一般不建议开启。
+
+<Warning>
+必须启用 **Item resolved** 规则，否则 Flashduty 中的告警不会随 Item 解决而恢复。规则的 Payload 格式保持默认的 JSON，Flashduty 不接收 XML 格式。
+</Warning>
+
+</Step>
+
+<Step title="验证生命周期">
+
+在接入 Rollbar SDK 的应用中触发一个新错误，确认 Flashduty 收到活动告警；然后在 Rollbar 中将该 Item 标记为 **Resolved**，确认原告警恢复。
+
+Webhook 设置页的 **Send Test Notification** 只验证地址可达：Flashduty 会返回成功，但不会创建告警。**Deploy** 事件同样只返回成功，不会创建告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Item 的 `id`（Webhook 中的 `data.item.id`）作为 Alert Key。Rollbar 官方 Webhook 示例中，同一个 Item 的 `new_item`、`item_velocity`、`exp_repeat_item` 与 `resolved_item` 事件携带相同的 `id`；它也是 Rollbar API 中定位 Item 的 ID。
+
+Item 地址中的数字（如 `.../items/40`）是项目内计数器 `counter`，只作为标签保留。标题、等级、环境和发生次数的变化都不会改变 Alert Key。缺少 `data.item.id` 的 Item 事件会被拒绝。
+
+## 状态和告警等级
+---
+
+告警状态由事件名决定：`resolved_item` 为恢复，其他 Item 事件为触发。告警等级由 Item 的等级（`data.item.level`）决定：
+
+| Rollbar 等级 | 数值 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `critical` | 50 | Critical |
+| `error` | 40 | Warning |
+| `warning` | 30 | Warning |
+| `info` | 20 | Info |
+| `debug` | 10 | Info |
+| 空值或其他值 | - | Warning |
+
+Rollbar 中新 Item 默认等级为 `error`。如需让某类错误以 Critical 通知，可在 Rollbar 中将 Item 等级改为 `critical`，或在 SDK 中为其指定等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `item_id` | Item ID，即 Alert Key |
+| `counter` | 项目内 Item 编号 |
+| `project_id` | Rollbar 项目 ID |
+| `item_url` | Rollbar 中的 Item 链接 |
+| `event_name` | 本次推送的事件名 |
+| `env` | 环境 |
+| `level` | Rollbar 等级 |
+| `host` | 最近一次发生所在主机 |
+| `language` | 最近一次发生的语言 |
+| `total_occurrences` | Item 累计发生次数 |
+| `occurrences` | `exp_repeat_item` 跨过的发生次数阈值（如 10、100） |
+| `window` / `threshold` | `item_velocity` 的时间窗口和阈值 |
+
+## 排查问题
+---
+
+- **Rollbar 显示推送失败**：确认 URL 完整且包含 `integration_key`，并在规则的 **History** 中查看每次推送的结果。Rollbar 会对失败的推送重试，持续失败的规则会被自动停用，修复后需在 Webhook 设置页重新启用
+- **Flashduty 返回参数错误**：确认规则的 Payload 格式为 JSON
+- **告警没有恢复**：确认已启用 **Item resolved** 规则。将 Item 设为 **Muted** 不会发送 Webhook，对应告警需在 Flashduty 中手动关闭
+- **测试成功但真实错误没收到**：检查规则的过滤条件（环境、等级等）是否匹配该错误
+
+更多字段含义请参阅 [Rollbar Webhooks](https://docs.rollbar.com/docs/webhooks) 和 [Item Levels](https://docs.rollbar.com/docs/item-levels)。

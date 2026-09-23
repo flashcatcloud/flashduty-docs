@@ -1,0 +1,149 @@
+---
+title: "Coralogix alert integration"
+description: "Send Coralogix alert trigger and recovery notifications to Flashduty On-call through a Notification Center Generic HTTPS connector."
+keywords: ["alert integration", "Coralogix", "Notification Center", "Generic HTTPS", "groupingKey"]
+---
+
+Use a Coralogix Notification Center Generic HTTPS connector to send alerts to Flashduty On-call. Coralogix identifies an alert notification by its `groupingKey`, and Flashduty uses it as the Alert Key: the trigger, repeat notifications, and recovery of the same alert keep updating one Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Integrations** and click **Add integration**
+3. Select **Coralogix** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Coralogix** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Route** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Coralogix
+---
+
+These steps require Notification Center admin permissions (create connectors, presets, and routers, and edit alert definition labels).
+
+<Steps>
+<Step title="Create a Generic HTTPS connector">
+
+1. Go to **Integrations → Notification Center → Connectors** and click **+ New connector**
+2. Select **Generic HTTPS** as the destination type and name the connector `Flashduty`
+3. Paste the complete Flashduty integration Push URL into **URL** and keep the other fields at their defaults
+
+</Step>
+
+<Step title="Create an alert preset">
+
+1. Go to **Presets**, open the **Alert** tab, select **Generic HTTPS** as the destination type, and click **+ New preset**
+2. Paste the following JSON into **Body** and save the preset
+
+```json
+{
+  "grouping_key": {{ alert.groupingKey | json_encode }},
+  "status": {{ alert.status | json_encode }},
+  "priority": {{ alert.highestPriority | default(value = alertDef.priority) | json_encode }},
+  "alert_name": {{ alertDef.name | json_encode }},
+  "alert_description": {{ alertDef.description | json_encode }},
+  "alert_definition_id": {{ alertDef.id | default(value = "") | json_encode }},
+  "alert_type": {{ alertDef.type | default(value = "") | json_encode }},
+  "alert_url": {{ alert.alertDataUrl | default(value = "") | json_encode }},
+  "team_name": {{ _context.system.name | default(value = "") | json_encode }},
+  "entity_labels": {% if alertDef.entityLabels %}{{ alertDef.entityLabels | json_encode }}{% else %}{}{% endif %},
+  "groups": [{% if alert.groups %}{% for g in alert.groups %}{"priority": {{ g.priority | default(value = "") | json_encode }}, "key_values": {% if g.keyValues %}{{ g.keyValues | json_encode }}{% else %}{}{% endif %}}{% if not loop.last %},{% endif %}{% endfor %}{% endif %}]
+}
+```
+
+<Warning>
+Keep `grouping_key` and `status`. Flashduty rejects requests without `grouping_key` because it cannot match the recovery to the original alert. `status` accepts only `Triggered` and `Resolved`.
+</Warning>
+
+</Step>
+
+<Step title="Create a router and add an alert rule">
+
+1. Go to **Routers**, click **+ Create router**, and set a routing label such as `team`
+2. On the router's **Alerts** tab, add a rule with the condition `true` and select both **Triggered** and **Resolved** as notification triggers
+3. Select the `Flashduty` connector and the alert preset you created as the destination
+
+Use an **Alerts** rule, not a **Cases** rule. Flashduty handles alert grouping and incident management itself, and this integration parses alert notifications only.
+
+</Step>
+
+<Step title="Configure the alert definition">
+
+1. Edit or create an alert definition and select **Alerts, Signal-Based** in the notification settings
+2. Add a routing label that matches the router, for example `routing.team: payments`
+3. Turn on **Notify when resolved**. Otherwise, Coralogix does not send recovery notifications
+4. If the alert uses **Group by**, select **Trigger a separate notification for each combination** so that each combination becomes a separate Flashduty alert
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Let the alert actually trigger and confirm that Flashduty receives an active alert. Then let the condition return to normal and confirm that the original alert recovers. **Send test notification** on a preset or connector uses sample data and only verifies that the push URL is reachable.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `alert.groupingKey` as the Alert Key. Coralogix defines `groupingKey` as the deduplication key in its alert notification schema, and its official Opsgenie and Jira Service Management setups use `groupingKey` to close the matching alert on `Resolved`.
+
+With **Trigger a separate notification for each combination**, each Group by combination is notified separately with its own `groupingKey`, so each one is a separate Flashduty alert. With **Trigger a single notification**, one notification covers every matching combination, so Flashduty creates one alert and lists each combination's priority and values in the description, one per line.
+
+Changes to the title, description, priority, or group values do not change the Alert Key.
+
+## Status and severity
+---
+
+Flashduty uses `status` to tell triggers from recoveries, and `priority` (`alert.highestPriority`, or the alert definition priority when empty) to set the severity.
+
+| Coralogix `priority` | Flashduty severity |
+| :--- | :--- |
+| `P1` | Critical |
+| `P2` | Critical |
+| `P3` | Warning |
+| `P4` | Info |
+| `P5` | Info |
+| Empty or any other value | Warning |
+
+When `status` is `Resolved`, Flashduty recovers the original alert and keeps its last severity. An empty or any other `status` is rejected.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Alert definition name |
+| `grouping_key` | `alert.groupingKey` |
+| `priority` | Alert priority |
+| `alert_definition_id`, `alert_type` | Alert definition ID and type |
+| `alert_url` | Link to the alert in Coralogix |
+| `team_name` | Coralogix team name |
+| Alert definition labels | `alertDef.entityLabels`. Characters such as `.` and `-` in keys become `_`, so `routing.team` becomes `routing_team` |
+| Group values | Each key in `alert.groups[0].keyValues`, only when the notification has a single combination |
+
+An alert can have at most 50 labels. Requests that exceed this limit are rejected.
+
+## Troubleshooting
+---
+
+- **Coralogix reports a delivery failure**: Confirm that the connector URL is the complete push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: Confirm that the preset Body matches the template above, renders valid JSON, and that `grouping_key` and `status` are not empty
+- **Alerts do not recover**: Confirm that **Notify when resolved** is on for the alert definition and that the routing rule includes **Resolved**. For alerts created with Terraform or the API, also confirm that `notifyOn` is not `triggered_only`. Resolving an alert manually in Coralogix does not send a notification
+- **Several combinations merge into one alert**: The alert definition uses **Trigger a single notification**. Switch it to **Trigger a separate notification for each combination**
+- **Using a legacy outbound webhook**: This integration parses the body rendered by a Notification Center preset. Legacy outbound webhook templates with `$` placeholders do not work. Coralogix recommends Notification Center over legacy webhooks
+
+For more information, see the Coralogix documentation: [Alerts as a notification source type](https://coralogix.com/docs/user-guides/alerting/configure-notifications/source-type-schema/), [Generic HTTPS connector](https://coralogix.com/docs/user-guides/notification-center/destination-types/https/connector-config/), and [Routing rules](https://coralogix.com/docs/user-guides/notification-center/routing/define-routing-rule/).
