@@ -1,0 +1,197 @@
+---
+title: "Elastic 告警集成"
+description: "通过 Kibana Webhook 连接器将 Elastic（Kibana Alerting）规则的触发和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Elastic", "Kibana", "Kibana Alerting", "Webhook", "Elastic Observability", "Elastic Security"]
+---
+
+通过 Kibana 的 Webhook 连接器，把 Kibana 告警规则（包括 Stack Management 规则、Observability 规则和 Security 检测规则）的告警推送到 Flashduty On-call。Kibana 中的每个告警（规则 + 告警 ID）对应一条 Flashduty 告警；告警持续期间的重复通知会合并到这条告警，Kibana 发出 Recovered 通知后这条告警自动恢复。
+
+本集成适用于 Elastic Cloud、Elastic Cloud Serverless 和自建 Kibana 8.x 及以上版本。如果您使用的是自建的 ElastAlert 2 规则引擎，请使用 [ElastAlert 2 集成](/zh/on-call/integration/alert-integration/alert-sources/elastalert2)。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警路由到不同的协作空间时，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+  2. 选择 **集成数据**，点击 **添加一个集成**
+  3. 选择 **Elastic**，点击 **保存**
+  4. 打开生成的集成卡片，复制 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据 Payload 将告警路由到不同的协作空间时，选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+  2. 选择 **Elastic**，填写集成名称
+  3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+  4. 点击 **保存**，复制生成的 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## 前提条件
+---
+
+- **订阅级别**：Kibana 的 Webhook 和 PagerDuty 连接器属于 Elastic Gold 及以上订阅（Basic 不包含），30 天试用许可证也可以使用。详见 [Elastic 订阅对比](https://www.elastic.co/subscriptions)。
+- **网络**：Kibana 需要能访问 Flashduty 推送地址。如果自建 Kibana 在 `kibana.yml` 中配置了 [`xpack.actions.allowedHosts`](https://www.elastic.co/docs/reference/kibana/configuration-reference/alerting-settings#action-settings)，请把推送地址的主机名（如 `api.flashcat.cloud`）加入该列表，否则连接器会拒绝发送。
+- **权限**：需要有创建连接器和编辑规则的 Kibana 权限，详见 [Alerting 权限说明](https://www.elastic.co/docs/explore-analyze/alerting/alerts/alerting-setup#alerting-security)。
+
+## 在 Kibana 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 连接器">
+
+1. 进入 **Stack Management → Alerts and Insights → Connectors**，点击 **Create connector**
+2. 选择 **Webhook**，名称可填写 `Flashduty`
+3. **Method** 选择 `POST`，**URL** 粘贴 Flashduty 集成的完整推送地址（包含 `integration_key` 参数）
+4. **Authentication** 选择 **None**，推送地址中的 `integration_key` 已用于鉴权
+5. 在 **HTTP headers** 中添加 `Content-Type: application/json`
+6. 点击 **Save**
+
+</Step>
+
+<Step title="为规则添加告警动作">
+
+编辑或创建一条规则，在 **Actions** 中选择刚创建的 `Flashduty` 连接器，按以下方式添加动作：
+
+- **Action frequency** 选择 **For each alert**。选择 Summary of alerts 时 Kibana 不会提供 `alert.id`，Flashduty 会拒绝请求
+- **Run when** 选择规则的告警动作组（如 `Alert`、`Query matched`、`Threshold met`），通知时机建议选择 **On status changes**
+- **Body** 粘贴下方模板
+
+</Step>
+
+<Step title="为 Recovered 再添加一个动作">
+
+再添加一个使用同一连接器的动作，**Action frequency** 同样选择 **For each alert**，**Run when** 选择 **Recovered**，**Body** 粘贴同一份模板。
+
+<Warning>
+Kibana 的恢复通知是独立的动作。缺少 Recovered 动作时，Flashduty 收不到恢复消息，告警会一直处于活跃状态。
+</Warning>
+
+如果规则有多个告警动作组（例如 Metric threshold 规则的 `Alert` 和 `Warning`，SLO burn rate 规则的 `Critical`、`High`、`Medium`、`Low`），请为每个动作组各添加一个动作，并在模板中填写对应的 `severity`。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让规则真正命中条件，确认 Flashduty 收到活跃告警；再让数据恢复正常，确认原告警恢复。连接器的 **Test** 页面发送的是您手工填写的 Body，不会渲染规则和告警变量，只能用来验证推送地址可达。
+
+</Step>
+</Steps>
+
+## 动作模板
+---
+
+把下面的 JSON 粘贴到每个动作的 **Body**：
+
+```json
+{
+  "rule_id": "{{rule.id}}",
+  "rule_name": "{{rule.name}}",
+  "rule_type": "{{rule.type}}",
+  "rule_tags": "{{rule.tags}}",
+  "rule_url": "{{rule.url}}",
+  "space_id": "{{rule.spaceId}}",
+  "alert_id": "{{alert.id}}",
+  "alert_uuid": "{{alert.uuid}}",
+  "action_group": "{{alert.actionGroup}}",
+  "action_group_name": "{{alert.actionGroupName}}",
+  "severity": "Critical",
+  "reason": "{{context.reason}}",
+  "alert_details_url": "{{context.alertDetailsUrl}}",
+  "kibana_base_url": "{{kibanaBaseUrl}}"
+}
+```
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `rule_id`、`alert_id` | 必填，共同组成 Alert Key，请勿修改 |
+| `action_group` | 必填，Flashduty 通过它判断是否为恢复通知，请勿修改 |
+| `severity` | 告警等级，按动作组填写 `Critical`、`Warning` 或 `Info`；Security 检测规则可填写 `{{context.rule.severity}}` |
+| `reason` | 告警描述。Observability 规则提供 `{{context.reason}}`；Elasticsearch query、Index threshold 等 Stack 规则可改为 `{{context.message}}` |
+| `alert_details_url` | Observability 规则的告警详情链接，其他规则类型为空 |
+| `rule_url`、`kibana_base_url` | 需要在 Kibana 中配置 `server.publicBaseUrl`，否则为空 |
+
+Kibana 会对 Body 中的变量做 JSON 转义，规则名称或描述中的引号和换行不会破坏 JSON。
+
+### 自定义标签
+
+如需把规则上下文中的字段作为 Flashduty 标签（用于路由或降噪），在模板中增加 `custom_labels` 对象，例如：
+
+```json
+"custom_labels": {
+  "host": "{{context.group}}",
+  "env": "production"
+}
+```
+
+自定义标签与内置标签合计不超过 50 个，键只能包含字母、数字和下划线，且不能以数字开头。与内置标签同名的自定义标签会被内置标签覆盖。
+
+## Alert Key
+---
+
+Flashduty 使用 `rule_id` 和 `alert_id` 共同生成 Alert Key。
+
+- `rule.id` 是规则的唯一标识。
+- `alert.id` 是规则产生的单个告警的 ID。对于按字段分组的规则，它是分组值（如某台主机名）；未分组的规则通常是固定值（如 `*`）。同一告警从活跃到 Recovered 期间 `alert.id` 不变。
+- Kibana 自带的 PagerDuty 连接器也使用 `<rule ID>:<alert ID>` 作为默认 dedup key 关联同一告警的触发与恢复，与本集成的做法一致。
+
+`alert.uuid` 在告警活跃期间保持不变，同一个 `alert.id` 恢复后再次触发时会生成新的 UUID。Flashduty 只把它保存为 `alert_uuid` 标签，便于在 Kibana 中定位某一次告警。Flashduty 的告警恢复后，同一 Alert Key 的下一次触发会创建新告警，因此使用 `alert.id` 同样是"每次触发对应一条告警"。
+
+规则名称、标签、等级、描述、动作组的变化都不会改变 Alert Key。例如 Metric threshold 规则的同一分组从 `Warning` 变为 `Alert` 时，两次通知的 Alert Key 相同。
+
+## 状态和告警等级
+---
+
+| 条件 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `action_group` 为 `recovered` | 恢复 |
+| `action_group` 为 `notGeoContained`（Tracking containment 规则的恢复动作组） | 恢复 |
+| `severity` 为 `Critical` 或 `high` | Critical |
+| `severity` 为 `Warning`、`medium` 或为空 | Warning |
+| `severity` 为 `Info` 或 `low` | Info |
+
+`severity` 不区分大小写。填写其他值时 Flashduty 会拒绝请求，避免拼写错误导致告警等级错误。
+
+Security 检测规则不会发送 Recovered 通知，每条检测告警都会在 Flashduty 中生成一条独立告警，需要在 Flashduty 中手动关闭或配置自动关闭。
+
+## 使用 PagerDuty 连接器（可选）
+---
+
+如果已有规则在使用 Kibana 的 PagerDuty 连接器，也可以把它指向 Flashduty 的 [PagerDuty 集成](/zh/on-call/integration/alert-integration/alert-sources/pagerduty)，无需改写动作内容。此方式接入的是 Flashduty 的 PagerDuty 集成，不是本页的 Elastic 集成。
+
+1. 在 Flashduty 中添加一个 **PagerDuty** 集成，复制推送地址
+2. 在 Kibana 中创建 PagerDuty 连接器：**API URL** 填写该推送地址（形如 `https://api.flashcat.cloud/event/push/alert/pagerduty?integration_key=<集成密钥>`），**Integration Key** 填写推送地址中的集成密钥
+3. 规则动作选择 **For each alert**，为告警动作组添加 **Event action** 为 `Trigger` 的动作，为 **Recovered** 添加 **Event action** 为 `Resolve` 的动作
+4. 两个动作的 **DedupKey** 都保留为 `{{rule.id}}:{{alert.id}}`（留空时 Kibana 默认也使用该值），这样恢复事件会关闭对应的告警
+
+## 排查问题
+---
+
+- **Kibana 报 `target url "..." is not added to the Kibana config xpack.actions.allowedHosts`**：将 Flashduty 推送地址的主机名加入 `xpack.actions.allowedHosts`
+- **Flashduty 返回以 `alert_id is required` 开头的错误**：动作的 **Action frequency** 选择了 Summary of alerts，请改为 For each alert
+- **Flashduty 返回 `rule_id is required`**：Body 不是本页模板，或 `rule_id` 被修改
+- **告警没有恢复**：确认为 **Recovered** 添加了动作，且 Body 中保留了 `"action_group": "{{alert.actionGroup}}"`
+- **不同主机的告警合并成一条**：确认规则设置了分组（Group by），且 Body 中保留了 `{{alert.id}}`
+- **Flashduty 返回 `severity ... is not supported`**：`severity` 只能是 Critical、Warning、Info，或 Security 规则的 critical、high、medium、low
+
+更多字段含义请参阅 Elastic 文档 [Rule action variables](https://www.elastic.co/docs/explore-analyze/alerting/alerts/rule-action-variables)、[Webhook connector](https://www.elastic.co/docs/reference/kibana/connectors-kibana/webhook-action-type) 和 [PagerDuty connector](https://www.elastic.co/docs/reference/kibana/connectors-kibana/pagerduty-action-type)。
