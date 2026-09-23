@@ -74,6 +74,7 @@ export const docMap = {
   StatusCake: `${alertBase}/statuscake.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
   Checkly: `${alertBase}/checkly.mdx`,
+  Honeybadger: `${alertBase}/honeybadger.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
