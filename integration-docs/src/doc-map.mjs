@@ -68,6 +68,7 @@ export const docMap = {
   SumoLogic: `${alertBase}/sumo-logic.mdx`,
   Site24x7: `${alertBase}/site24x7.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
+  Pingdom: `${alertBase}/pingdom.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
