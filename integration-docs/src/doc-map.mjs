@@ -78,6 +78,7 @@ export const docMap = {
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   MongodbAtlas: `${alertBase}/mongodb-atlas.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  PRTG: `${alertBase}/prtg.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,

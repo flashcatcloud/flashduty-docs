@@ -1,0 +1,191 @@
+---
+title: "PRTG alert integration"
+description: "Send PRTG Network Monitor sensor alerts and recoveries to Flashduty On-call through Execute HTTP Action notification templates."
+keywords: ["alert integration", "PRTG", "Paessler", "PRTG Network Monitor", "PRTG Hosted Monitor", "Execute HTTP Action", "notification template", "sensorid"]
+---
+
+Use the **Execute HTTP Action** of PRTG notification templates to send sensor state alerts and recoveries to Flashduty On-call. Each PRTG sensor maps to one Flashduty alert: the alert triggers when a state trigger fires, repeated notifications merge into the same alert, and the alert recovers when the sensor leaves that state. Both PRTG Network Monitor (self-hosted) and PRTG Hosted Monitor can be configured as described here.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **PRTG** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **PRTG** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure PRTG
+---
+
+PRTG needs two notification templates: one sent when a sensor enters an alert state (`event=trigger`) and one sent when it leaves that state (`event=resolve`). Both templates use the same push URL and the same fields; only the leading `event` differs.
+
+<Steps>
+<Step title="Create the alert notification template">
+
+1. Sign in to PRTG as an administrator, go to **Setup → Account Settings → Notification Templates**, and click **Add Notification Template**
+2. Enter `Flashduty alert` as the **Template Name**
+3. Select **Execute HTTP Action** and fill it in as follows:
+
+| Setting | Value |
+| :--- | :--- |
+| **URL** | The complete Flashduty push URL |
+| **SNI Handling** | **Send SNI** |
+| **SNI Name** | The host name in the push URL, for example `api.flashcat.cloud` |
+| **HTTP Method** | **POST** |
+| **Payload** | The alert template below, kept on one line |
+
+Alert template:
+
+```text
+event=trigger&sensorid=%sensorid&laststatus=%laststatus&sensor=%sensor&device=%device&deviceid=%deviceid&group=%group&probe=%probe&host=%host&priority=%priority&linksensor=%linksensor&tags=%tags&sitename=%sitename&lastvalue=%lastvalue&message=%message
+```
+
+4. Click **Create**
+
+</Step>
+
+<Step title="Create the recovery notification template">
+
+Create a second template the same way. Enter `Flashduty recovery` as the **Template Name** and use the recovery template below as the **Payload**; keep every other setting the same:
+
+```text
+event=resolve&sensorid=%sensorid&laststatus=%laststatus&sensor=%sensor&device=%device&deviceid=%deviceid&group=%group&probe=%probe&host=%host&priority=%priority&linksensor=%linksensor&tags=%tags&sitename=%sitename&lastvalue=%lastvalue&message=%message
+```
+
+You can send a test notification for a template from the **Notification Templates** list to check the URL. PRTG does not resolve placeholders in test notifications; Flashduty recognizes them, answers with success, and creates no alert.
+
+</Step>
+
+<Step title="Add a state trigger">
+
+1. Open the object to connect (the Root group, a group, a device, or a sensor), go to the **Notification Triggers** tab, and select **Add State Trigger**
+2. Fill it in as follows:
+
+| Setting | Value |
+| :--- | :--- |
+| **When sensor status is** | **Down**, **for at least** `60` **seconds** |
+| **perform** | `Flashduty alert` |
+| **When sensor status is no longer Down, perform** | `Flashduty recovery` |
+
+3. Save the trigger. Child groups, devices, and sensors inherit it
+
+To also receive alerts for the **Warning** or **Unusual** status, add one state trigger per status with the same **perform** and **no longer ... perform** choices. If you use the optional escalation notification (the second **When sensor status is ... for at least ... seconds** line), select `Flashduty alert` for it too; it merges into the same alert.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Put a sensor into the Down state for real (for example, briefly cut the network to the address a Ping sensor checks), wait for the trigger latency, and confirm that Flashduty receives an active alert. After the sensor recovers, confirm that the same alert is closed.
+
+</Step>
+</Steps>
+
+<Warning>
+`sensorid` and `event` are required. Paste the whole template without removing or renaming fields. When `sensorid` or `event` is missing, Flashduty returns a parameter error, because the recovery notification could not otherwise be matched to the original alert.
+</Warning>
+
+## Payload fields
+---
+
+PRTG posts the template fields as an `application/x-www-form-urlencoded` form. Each field is named after the PRTG placeholder that fills it:
+
+| Field | Placeholder meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `event` | Fixed value in the template, `trigger` or `resolve` | Trigger or recovery |
+| `sensorid` | Sensor ID | Alert Key, label `sensor_id` |
+| `laststatus` | Current sensor status | Severity, label `status` |
+| `sensor` | Sensor name, including the sensor type | Alert title, label `check` |
+| `device` | Device name | Alert title, label `resource` |
+| `deviceid` | Device ID | Label `device_id` |
+| `group` | Parent group | Label `group` |
+| `probe` | Parent probe | Label `probe` |
+| `host` | IP address or DNS name of the device | Label `host` |
+| `priority` | Sensor priority (1 to 5 stars) | Label `priority` |
+| `linksensor` | Link to the sensor page | Alert description, label `sensor_url` |
+| `tags` | Tags of the sensor and its parent objects | Label `tags` |
+| `sitename` | Name of the PRTG web server | Label `site` |
+| `lastvalue` | Last value of the sensor | Alert description, label `last_value` |
+| `message` | Last message of the sensor | Alert description |
+
+The alert title is `<device name>: <sensor name>`. If the device name is empty, Flashduty uses the sensor name alone; if both are empty, it uses `PRTG sensor <sensorid>`.
+
+## Alert Key
+---
+
+Flashduty uses `sensorid` as the Alert Key. Alert, escalation, and recovery notifications for the same sensor carry the same sensor ID, so they land on the same alert. Two sensors with the same name on one device have different IDs and produce different alerts. Changing the sensor name, device name, status, or message does not change the Alert Key.
+
+Sensor IDs are unique only within one PRTG server. Use a separate Flashduty integration for each PRTG server, so that sensors with the same ID on different servers do not merge into one alert.
+
+## Status and severity
+---
+
+`event` decides whether the alert triggers or recovers, and `laststatus` decides the severity:
+
+| `event` | `laststatus` | Flashduty status or severity |
+| :--- | :--- | :--- |
+| `trigger` | `Down`, `Down (Partial)`, `Down (Acknowledged)` | Critical |
+| `trigger` | `Warning` | Warning |
+| `trigger` | `Unusual` | Info |
+| `trigger` | Any other value (such as `Unknown`) | Warning |
+| `resolve` | Any value | Recovered, keeping the alert's severity |
+
+Requests with an empty or any other `event` are rejected, so a request whose state cannot be determined never enters the wrong alert lifecycle.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are two notification templates needed?">
+
+No PRTG placeholder tells whether a notification comes from a state trigger firing or from its **no longer** recovery, so the fixed `event` value in the template says it. `laststatus` only describes the sensor's current status: when a sensor moves from Down to Warning, the Down trigger's recovery notification carries `laststatus` `Warning`. Deciding recovery by `event` closes each trigger's alert on time.
+
+</Accordion>
+
+<Accordion title="What happens when a sensor moves from Down to Warning?">
+
+The Down trigger sends its recovery notification, which closes the Down alert. If a Warning state trigger is configured, it sends an alert notification after its latency and reopens an alert for the sensor with Warning severity.
+
+</Accordion>
+
+<Accordion title="PRTG is not in English and the severity is wrong">
+
+The `laststatus` value PRTG sends is translated with the PRTG language setting. Flashduty recognizes English status names only and treats any other status name as Warning. Triggering and recovery are decided by `event` and do not depend on the language.
+
+</Accordion>
+
+<Accordion title="PRTG reports the notification as sent, but Flashduty received nothing">
+
+Check that **SNI Handling** is set to **Send SNI** and that **SNI Name** matches the host name in the push URL. Without SNI, the request may never reach Flashduty while PRTG still reports success.
+
+</Accordion>
+
+<Accordion title="A label shows literal text such as %tags">
+
+PRTG sends placeholders it does not know as literal text. `%laststatus` needs PRTG 20.1.57 or later, and `%tags` needs 20.1.56 or later. On older versions, an alert whose `laststatus` is literal text is treated as Warning; the other fields only affect labels, not triggering or recovery.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **PRTG fails to send**: check that the URL is the complete push URL including `integration_key`, and that HTTP Method is POST
+- **Flashduty returns a parameter error**: check that the Payload contains the whole template on one line, including `event` and `sensorid`
+- **The alert does not recover**: check that the state trigger's **no longer ... perform** uses the `Flashduty recovery` template, and that the recovery and alert notifications come from the same sensor
+
+For placeholder details, see the PRTG manual pages [List of Placeholders for Notifications](https://www.paessler.com/manuals/prtg/list_of_placeholders_for_notifications) and [Notification Templates](https://www.paessler.com/manuals/prtg/notification_templates).
