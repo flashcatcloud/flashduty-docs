@@ -73,6 +73,7 @@ export const docMap = {
   Rollbar: `${alertBase}/rollbar.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
+  MongodbAtlas: `${alertBase}/mongodb-atlas.mdx`,
   Checkly: `${alertBase}/checkly.mdx`,
   SplunkObservability: `${alertBase}/splunk-observability.mdx`,
   PRTG: `${alertBase}/prtg.mdx`,
