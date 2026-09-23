@@ -68,6 +68,7 @@ export const docMap = {
   Checkly: `${alertBase}/checkly.mdx`,
   Site24x7: `${alertBase}/site24x7.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
+  HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
