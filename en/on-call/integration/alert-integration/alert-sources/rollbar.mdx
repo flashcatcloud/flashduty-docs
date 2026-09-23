@@ -1,0 +1,125 @@
+---
+title: "Rollbar alert integration"
+description: "Send new, reactivated, and resolved item events from a Rollbar project to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Rollbar", "item", "webhook", "error monitoring"]
+---
+
+Use the Webhook notification channel of a Rollbar project to send error items to Flashduty On-call. Each Rollbar item maps to one Flashduty alert: new, repeated, and reactivated occurrences trigger or update that alert, and the alert recovers when the item is marked resolved.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Integrations**, then click **Add integration**
+3. Select **Rollbar**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Rollbar** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Rollbar
+---
+
+Webhooks are configured per project. You need permission to change the project's notification settings in Rollbar.
+
+<Steps>
+<Step title="Enable the webhook channel">
+
+1. Open the Rollbar project you want to connect and go to **Settings → Notifications → Webhook**
+2. Paste the complete Flashduty integration Push URL into **URL**. The URL must include `integration_key`
+3. Enable the channel and save
+
+</Step>
+
+<Step title="Add notification rules">
+
+Add rules on the Webhook settings page. Each rule covers one trigger. We recommend these rules:
+
+| Rollbar trigger | Event name | Effect in Flashduty |
+| :--- | :--- | :--- |
+| New item | `new_item` | Triggers an alert |
+| Item reactivated | `reactivated_item` | Triggers or updates the alert |
+| Item reopened | `reopened_item` | Triggers or updates the alert |
+| 10^nth occurrence | `exp_repeat_item` | Updates the alert |
+| High occurrence rate | `item_velocity` | Updates the alert |
+| Item resolved | `resolved_item` | Recovers the alert |
+
+Rules can filter by environment, level, and other conditions, so only items that need on-call attention are sent. **Every occurrence** (`occurrence`) sends one request per error occurrence. These requests also merge into the item's alert, but the volume is high, so we do not recommend enabling it.
+
+<Warning>
+Add the **Item resolved** rule. Without it, Flashduty alerts do not recover when the item is resolved. Keep the rule's payload format at the default JSON; Flashduty does not accept XML.
+</Warning>
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Raise a new error in an application that uses a Rollbar SDK and confirm that Flashduty receives an active alert. Then mark the item **Resolved** in Rollbar and confirm that the alert recovers.
+
+**Send Test Notification** on the Webhook settings page only checks that the URL is reachable: Flashduty returns success but does not create an alert. **Deploy** events are also accepted without creating an alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the item `id` (`data.item.id` in the webhook) as the Alert Key. In Rollbar's official webhook examples, the `new_item`, `item_velocity`, `exp_repeat_item`, and `resolved_item` events for the same item carry the same `id`. It is also the ID that the Rollbar API uses to look up an item.
+
+The number in an item URL (such as `.../items/40`) is the project-level `counter` and is kept only as a label. Changes to the title, level, environment, or occurrence count do not change the Alert Key. Item events without `data.item.id` are rejected.
+
+## Status and severity
+---
+
+The event name sets the alert status: `resolved_item` recovers the alert, and every other item event triggers it. The item level (`data.item.level`) sets the severity:
+
+| Rollbar level | Value | Flashduty severity |
+| :--- | :--- | :--- |
+| `critical` | 50 | Critical |
+| `error` | 40 | Warning |
+| `warning` | 30 | Warning |
+| `info` | 20 | Info |
+| `debug` | 10 | Info |
+| Empty or other values | - | Warning |
+
+New Rollbar items default to `error`. To be notified at Critical for a class of errors, change the item level to `critical` in Rollbar or set the level in your SDK.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `item_id` | Item ID, which is the Alert Key |
+| `counter` | Item number within the project |
+| `project_id` | Rollbar project ID |
+| `item_url` | Link to the item in Rollbar |
+| `event_name` | Event name of this request |
+| `env` | Environment |
+| `level` | Rollbar level |
+| `host` | Host of the most recent occurrence |
+| `language` | Language of the most recent occurrence |
+| `total_occurrences` | Total occurrences of the item |
+| `occurrences` | Occurrence threshold crossed by `exp_repeat_item` (such as 10 or 100) |
+| `window` / `threshold` | Time window and threshold of `item_velocity` |
+
+## Troubleshooting
+---
+
+- **Rollbar shows failed deliveries**: Confirm that the URL is complete and includes `integration_key`, and check each attempt under the rule's **History**. Rollbar retries failed deliveries and automatically disables rules that keep failing; re-enable the rule on the Webhook settings page after fixing the cause
+- **Flashduty returns a parameter error**: Confirm that the rule's payload format is JSON
+- **The alert does not recover**: Confirm that the **Item resolved** rule exists. Muting an item in Rollbar does not send a webhook, so close the corresponding alert in Flashduty manually
+- **The test succeeds but real errors do not arrive**: Check whether the rule's filters (environment, level, and so on) match the error
+
+For field details, see [Rollbar Webhooks](https://docs.rollbar.com/docs/webhooks) and [Item Levels](https://docs.rollbar.com/docs/item-levels).
