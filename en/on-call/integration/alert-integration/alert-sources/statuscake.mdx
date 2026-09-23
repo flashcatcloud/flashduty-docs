@@ -1,0 +1,131 @@
+---
+title: "StatusCake alert integration"
+description: "Send StatusCake uptime test down and up notifications to Flashduty On-call through a contact group webhook."
+keywords: ["alert integration", "StatusCake", "Uptime", "Contact Group", "webhook", "TestID"]
+---
+
+Use a StatusCake contact group webhook to send uptime test down (`Down`) and recovery (`Up`) notifications to Flashduty On-call. Each StatusCake test maps to one Flashduty alert: the alert triggers when the test goes down, repeated down notifications merge into the same alert, and the alert recovers when the test is up again.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Integrations** and click **Add an integration**
+3. Select **StatusCake** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **StatusCake** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure StatusCake
+---
+
+<Steps>
+<Step title="Create a contact group">
+
+1. Sign in to StatusCake, go to **Alerting → Contact Groups**, and click **New Contact Group**
+2. Enter `Flashduty` as the **Group Name**
+3. Paste the complete Flashduty push URL into **Webhook URL**
+4. Set **Webhook Method** to **POST**
+5. Save the contact group
+
+</Step>
+
+<Step title="Attach uptime tests">
+
+Edit each uptime test you want to connect, select the `Flashduty` contact group under **Contact Groups**, and save. One contact group can serve many tests.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a test actually go down (for example, point it at an unreachable address for a moment) and confirm that Flashduty receives an active alert. Then restore the target and confirm that the same alert recovers.
+
+</Step>
+</Steps>
+
+<Warning>
+Webhook Method must be **POST**. With GET, StatusCake only requests the URL without a request body, so Flashduty cannot read the test ID or status.
+</Warning>
+
+## Payload fields
+---
+
+StatusCake posts the following fields as an `application/x-www-form-urlencoded` form. Flashduty parses them directly; no template is needed.
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `TestID` | Test ID | Alert Key, label `test_id` |
+| `Name` | Test name | Alert title, label `check` |
+| `Status` | `Down` or `Up` | Trigger or recovery, label `status` |
+| `StatusCode` | HTTP status code returned, `0` on timeout | Label `status_code` |
+| `URL` | Tested address | Labels `url` and `resource` |
+| `IP` | Tested IP | Label `ip` |
+| `Tags` | Test tags, comma-separated | Label `tags` |
+| `Checkrate` | Check interval in seconds | Label `check_rate` |
+| `Token` | MD5 of the username and API key | Not stored |
+
+The alert title is the test name. If the name is empty, Flashduty uses the tested address, then `StatusCake test <TestID>`.
+
+## Alert Key
+---
+
+Flashduty uses `TestID` as the Alert Key. Down, repeated down, and up notifications for the same test carry the same `TestID`, so they land on the same alert. Two different tests produce different alerts even if they share a name and address. Changing the test name, status code, or tags does not change the Alert Key.
+
+Flashduty returns a parameter error when `TestID` is missing, because the recovery notification could not otherwise be matched to the original alert.
+
+## Status and severity
+---
+
+StatusCake notifications carry no severity, so Flashduty treats every alert as Critical.
+
+| StatusCake `Status` | Flashduty status or severity |
+| :--- | :--- |
+| `Down` | Critical |
+| `Up` | Recovered, previous severity Critical |
+
+Requests with an empty or any other `Status` are rejected, so a request whose state cannot be determined never enters the wrong alert lifecycle.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Do repeat alerts create more Flashduty alerts?">
+
+No. When Repeat Alerts is enabled on the contact group, every notification sent while the test stays down carries the same `TestID` and merges into the same alert.
+
+</Accordion>
+
+<Accordion title="Can SSL, PageSpeed, or domain checks be connected?">
+
+This integration is built for the `Down` / `Up` notifications of uptime tests, including Heartbeat tests. Other check types that also post through a contact group are accepted only when the request carries a `TestID` and `Status` is `Down` or `Up`; otherwise Flashduty returns a parameter error.
+
+</Accordion>
+
+<Accordion title="The contact group test succeeds, but real alerts do not arrive">
+
+The contact group test only proves that the URL is reachable. Check that the test is attached to the contact group, that the test is not paused, and that the outage lasts long enough to meet the test's confirmation setting.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **StatusCake fails to deliver**: Make sure the Webhook URL is the complete push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: Make sure Webhook Method is POST and that `TestID` and `Status` are not empty
+- **The alert does not recover**: Make sure the test is still attached to the same contact group when it recovers; the up notification must carry the same `TestID` as the down notification
+
+For field details, see the StatusCake documentation [How To Use The Web Hook URL](https://www.statuscake.com/kb/knowledge-base/how-to-use-the-web-hook-url/).
