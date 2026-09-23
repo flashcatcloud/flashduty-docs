@@ -42,8 +42,7 @@ keywords: ["告警集成", "MongoDB", "MongoDB Atlas", "Atlas", "Webhook"]
 3. 切换到 **Integrations** 标签页，点击 **Webhook Settings** 的 **Configure**
 4. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
 5. **Webhook Secret** 可留空。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `X-MMS-Signature`
-6. 不要填写 **Webhook Headers Template** 和 **Webhook Body Template**。Flashduty 按 Atlas 默认的请求体解析，自定义模板会导致字段缺失
-7. 点击 **Save**
+6. 点击 **Save**。保存时 Atlas 不会向该地址发送请求
 
 </Step>
 
@@ -53,7 +52,9 @@ keywords: ["告警集成", "MongoDB", "MongoDB Atlas", "Atlas", "Webhook"]
 2. 新建告警：点击 **Add** → **New Alert**；或在 **Alert Settings** 标签页中编辑已有的告警设置
 3. 选择告警类别和触发条件
 4. 在 **Add Notifier** 下拉菜单中选择 **Webhook**，URL 默认使用上一步配置的项目 Webhook 地址
-5. 保存告警设置
+5. 不要填写 **Headers Template** 和 **Body Template**。Flashduty 按 Atlas 默认的请求体解析，自定义模板会导致字段缺失
+6. 按需设置 **Severity**，Flashduty 会据此设置告警等级，见下文的等级说明
+7. 保存告警设置
 
 每条需要推送到 Flashduty 的告警设置都要添加 Webhook 通知方式。
 
@@ -61,7 +62,9 @@ keywords: ["告警集成", "MongoDB", "MongoDB Atlas", "Atlas", "Webhook"]
 
 <Step title="验证生命周期">
 
-Atlas 没有发送测试告警的按钮。可以临时创建一个容易触发的告警设置，例如 **Connections** 大于 `1`，连接集群让告警打开，确认 Flashduty 收到告警；再断开连接，等 Atlas 关闭告警后确认原告警恢复。验证完成后删除这条临时告警设置。
+Webhook 通知方式下的 **Post test message to webhook** 会发送一条测试消息（`X-MMS-Event` 为 `alert.close`，`status` 为 `INFORMATIONAL`）。Flashduty 返回成功但不会创建告警，可用来确认推送地址可达。
+
+验证完整流程时，可以临时创建一个容易触发的告警设置，例如 **Connections** 大于 `1`，连接集群让告警打开，确认 Flashduty 收到告警；再断开连接，等 Atlas 关闭告警后确认原告警恢复。验证完成后删除这条临时告警设置。
 
 </Step>
 </Steps>
@@ -93,14 +96,18 @@ Atlas 在请求头 `X-MMS-Event` 中标明告警状态：
 
 请求没有 `X-MMS-Event` 头时，Flashduty 改用请求体 `status`：`OPEN`、`TRACKING` 为触发，`CLOSED`、`CANCELLED` 为恢复，`INFORMATIONAL` 为信息类告警。其他取值会被拒绝。
 
-Atlas 的 Webhook 请求体不包含告警设置中的 Severity，因此告警等级固定为：
+告警等级取自请求体 `severity`，即告警设置中的 **Severity**（主机类告警默认为 Error）：
 
-| 告警类型 | Flashduty 等级 |
+| Atlas `severity` | Flashduty 等级 |
 | :--- | :--- |
-| 可恢复的告警（`alert.open` 等） | Warning |
-| 信息类告警（`alert.inform`，如 Primary Elected） | Info |
+| `CRITICAL` | Critical |
+| `ERROR` | Critical |
+| `WARNING` | Warning |
+| `INFO` | Info |
 
-恢复事件保留原告警等级。如需按告警类型区分等级，可通过[告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 基于 `event_type` 或 `metric_name` 标签调整。
+请求体没有 `severity` 或取值无法识别时，可恢复的告警为 Warning，信息类告警（`alert.inform`，如 Primary Elected）为 Info。恢复事件保留原告警等级。
+
+Atlas 对副本集的每个节点分别判断主机类条件，每个节点的告警有各自的 `id`，因此在 Flashduty 中是各自独立的告警，可通过 `host` 标签区分。
 
 信息类告警是一次性事件，每次通知带有新的 `id`，Atlas 不会发送关闭通知。这类告警在 Flashduty 中不会自动恢复，需要手动关闭，或开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)。
 
@@ -120,6 +127,6 @@ Atlas 的 Webhook 请求体不包含告警设置中的 Severity，因此告警�
 - **Flashduty 返回参数错误**：确认没有配置 **Webhook Body Template**，请求体中有 `id`
 - **收不到告警**：确认告警设置的通知方式中添加了 **Webhook**，且告警出现在 Atlas 的 **Open** 告警列表中
 - **告警没有恢复**：确认 Atlas 已关闭该告警；信息类告警（`alert.inform`）本身不会恢复
-- **所有告警都是 Warning**：Atlas 的 Webhook 不携带 Severity，参见上文的等级说明
+- **告警等级不符合预期**：检查告警设置中的 **Severity**，映射关系见上文的等级说明
 
 字段含义请参阅 [MongoDB Atlas Webhook 集成](https://www.mongodb.com/docs/atlas/tutorial/webhook-integration/) 和 [Atlas 告警设置](https://www.mongodb.com/docs/atlas/configure-alerts/)。
