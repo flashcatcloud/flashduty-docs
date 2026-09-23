@@ -1,0 +1,149 @@
+---
+title: "Coralogix 告警集成"
+description: "通过 Notification Center 的 Generic HTTPS 连接器，将 Coralogix 告警的触发和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Coralogix", "Notification Center", "Generic HTTPS", "groupingKey"]
+---
+
+通过 Coralogix Notification Center 的 Generic HTTPS 连接器将告警同步到 Flashduty On-call。Coralogix 用 `groupingKey` 标识一条告警通知，Flashduty 用它作为 Alert Key：同一告警的触发、重复通知和恢复会持续更新同一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **集成数据**，点击 **添加一个集成**
+3. 选择 **Coralogix**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Coralogix**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Coralogix 中配置
+---
+
+以下步骤需要 Notification Center 的管理权限（创建连接器、预设和路由器，编辑告警定义的标签）。
+
+<Steps>
+<Step title="创建 Generic HTTPS 连接器">
+
+1. 进入 **Integrations → Notification Center → Connectors**，点击 **+ New connector**
+2. 目标类型选择 **Generic HTTPS**，名称可填写 `Flashduty`
+3. 将 Flashduty 集成的完整推送地址粘贴到 **URL**，其余字段保持默认
+
+</Step>
+
+<Step title="创建告警预设">
+
+1. 进入 **Presets**，打开 **Alert** 页签，目标类型选择 **Generic HTTPS**，点击 **+ New preset**
+2. 把下面的 JSON 粘贴到 **Body**，保存预设
+
+```json
+{
+  "grouping_key": {{ alert.groupingKey | json_encode }},
+  "status": {{ alert.status | json_encode }},
+  "priority": {{ alert.highestPriority | default(value = alertDef.priority) | json_encode }},
+  "alert_name": {{ alertDef.name | json_encode }},
+  "alert_description": {{ alertDef.description | json_encode }},
+  "alert_definition_id": {{ alertDef.id | default(value = "") | json_encode }},
+  "alert_type": {{ alertDef.type | default(value = "") | json_encode }},
+  "alert_url": {{ alert.alertDataUrl | default(value = "") | json_encode }},
+  "team_name": {{ _context.system.name | default(value = "") | json_encode }},
+  "entity_labels": {% if alertDef.entityLabels %}{{ alertDef.entityLabels | json_encode }}{% else %}{}{% endif %},
+  "groups": [{% for g in alert.groups %}{"priority": {{ g.priority | default(value = "") | json_encode }}, "key_values": {{ g.keyValues | json_encode }}}{% if not loop.last %},{% endif %}{% endfor %}]
+}
+```
+
+<Warning>
+请保留 `grouping_key` 和 `status`。缺少 `grouping_key` 时 Flashduty 会拒绝请求，因为无法把恢复关联到原告警；`status` 只接受 `Triggered` 和 `Resolved`。
+</Warning>
+
+</Step>
+
+<Step title="创建路由器并添加告警规则">
+
+1. 进入 **Routers**，点击 **+ Create router**，设置路由标签，例如 `team`
+2. 在路由器的 **Alerts** 页签添加规则：条件填写 `true`，通知触发类型同时勾选 **Triggered** 和 **Resolved**
+3. 目标选择刚创建的 `Flashduty` 连接器和告警预设
+
+请使用 **Alerts** 规则，不要使用 **Cases** 规则：Flashduty 自己负责告警分组和故障管理，本集成只解析告警通知。
+
+</Step>
+
+<Step title="配置告警定义">
+
+1. 编辑或创建告警定义，在通知设置中选择 **Alerts, Signal-Based**
+2. 添加与路由器匹配的路由标签，例如 `routing.team: payments`
+3. 打开 **Notify when resolved**，否则 Coralogix 不会发送恢复通知
+4. 告警设置了 **Group by** 时，建议选择 **Trigger a separate notification for each combination**，每个分组组合在 Flashduty 中成为一条独立告警
+
+</Step>
+
+<Step title="验证生命周期">
+
+让告警真正触发，确认 Flashduty 收到活动告警；再让条件恢复正常，确认原告警恢复。预设和连接器的 **Send test notification** 使用示例数据，只能验证推送地址可达。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 直接使用 `alert.groupingKey` 作为 Alert Key。Coralogix 在告警通知的字段说明中将 `groupingKey` 定义为去重键，其官方 Opsgenie 和 Jira Service Management 配置也在 `Resolved` 时用 `groupingKey` 关闭对应的告警。
+
+选择 **Trigger a separate notification for each combination** 时，每个 Group by 组合分别发送通知，各自拥有自己的 `groupingKey`，因此在 Flashduty 中是不同的告警。选择 **Trigger a single notification** 时，一次通知汇总所有命中的组合，Flashduty 只生成一条告警，并在描述中逐行列出每个组合的优先级和取值。
+
+标题、描述、优先级和分组取值的变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+Flashduty 根据 `status` 判断触发或恢复，根据 `priority`（`alert.highestPriority`，缺省时取告警定义的优先级）确定告警等级。
+
+| Coralogix `priority` | Flashduty 告警等级 |
+| :--- | :--- |
+| `P1` | Critical |
+| `P2` | Critical |
+| `P3` | Warning |
+| `P4` | Info |
+| `P5` | Info |
+| 空值或其他值 | Warning |
+
+`status` 为 `Resolved` 时，Flashduty 恢复原告警，并保留最后一次的告警等级。空值或其他 `status` 会被拒绝。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警定义名称 |
+| `grouping_key` | `alert.groupingKey` |
+| `priority` | 告警优先级 |
+| `alert_definition_id`、`alert_type` | 告警定义 ID 和类型 |
+| `alert_url` | Coralogix 中该告警的链接 |
+| `team_name` | Coralogix 团队名称 |
+| 告警定义标签 | `alertDef.entityLabels`，键中的 `.`、`-` 等字符转为 `_`，例如 `routing.team` 变为 `routing_team` |
+| 分组取值 | 只有一个分组组合时，写入 `alert.groups[0].keyValues` 中的每个键值 |
+
+单条告警最多 50 个标签，超出时请求会被拒绝。
+
+## 排查问题
+---
+
+- **Coralogix 显示投递失败**：确认连接器 URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认预设 Body 与上文一致，渲染结果是有效 JSON，`grouping_key` 和 `status` 非空
+- **告警没有恢复**：确认告警定义打开了 **Notify when resolved**，路由规则勾选了 **Resolved**；通过 Terraform 或 API 创建的告警还需确认 `notifyOn` 不是 `triggered_only`。在 Coralogix 中手动解决告警不会发送通知
+- **多个分组合并成一条告警**：告警定义选择了 **Trigger a single notification**，改为 **Trigger a separate notification for each combination**
+- **使用旧版 Outbound Webhook**：本集成解析 Notification Center 预设渲染的请求体，旧版 Outbound Webhook 的 `$` 占位符模板不适用。Coralogix 推荐使用 Notification Center 替代旧版 Webhook
+
+更多信息请参阅 Coralogix 文档 [Alerts as a notification source type](https://coralogix.com/docs/user-guides/alerting/configure-notifications/source-type-schema/)、[Generic HTTPS 连接器](https://coralogix.com/docs/user-guides/notification-center/destination-types/https/connector-config/) 和 [路由规则](https://coralogix.com/docs/user-guides/notification-center/routing/define-routing-rule/)。
