@@ -1,0 +1,127 @@
+---
+title: "Site24x7 告警集成"
+description: "通过 Webhook 将 Site24x7 监控的状态变化同步到 Flashduty On-call，监控恢复为 Up 时自动恢复告警。"
+keywords: ["告警集成", "Site24x7", "Webhook", "Incident Parameters", "MONITOR_ID"]
+---
+
+通过 Site24x7 的 Webhooks 第三方集成，将监控的状态变化同步到 Flashduty On-call。每个 Site24x7 监控对应一条 Flashduty 告警：监控变为 Down、Trouble 或 Critical 时触发或更新告警，恢复为 Up 时关闭告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Site24x7**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Site24x7**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Site24x7 中配置
+---
+
+<Steps>
+<Step title="添加 Webhooks 集成">
+
+1. 登录 Site24x7，进入 **Admin → Third-Party Integrations → Integrations**
+2. 在集成列表中找到 **Webhooks**，点击 **Integrate Now**（已有集成时，先点击右上角的 **Add Third-Party Integration** 打开该列表）
+3. **Integration Name** 填写 `Flashduty`
+4. **Hook URL** 粘贴 Flashduty 集成的完整推送地址（包含 `integration_key`）
+
+</Step>
+
+<Step title="设置请求方式与请求体">
+
+1. **HTTP Method** 选择 **POST**
+2. 勾选 **Post as JSON**
+3. 勾选 **Send Incident Parameters**，Site24x7 会把 `MONITOR_ID`、`MONITORNAME`、`STATUS` 等事件参数放进 JSON 请求体
+4. **Authentication Method** 无需填写，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+<Warning>
+必须同时勾选 **Post as JSON** 和 **Send Incident Parameters**。缺少 `MONITOR_ID`（且 `MONITOR_DASHBOARD_LINK` 中也没有监控 ID）或 `STATUS` 的请求会被 Flashduty 拒绝，因为无法把后续的状态变化和恢复关联到同一条告警。
+</Warning>
+
+</Step>
+
+<Step title="选择监控范围与触发状态">
+
+1. **Integration Level** 选择需要推送的范围：指定 Monitors、Tags、Monitor Groups 或 All Monitors
+2. **Tags to Be Sent With Alerts** 可选择要随告警发送的标签键；不选时发送监控的全部标签
+3. **Trigger Alerts for Monitor Status Change** 勾选需要通知的状态，建议勾选 **Down**、**Trouble** 和 **Critical**
+4. 点击 **Save** 保存
+
+</Step>
+
+<Step title="验证告警生命周期">
+
+让一个监控真正进入 Down（例如临时指向一个不可达的地址），确认 Flashduty 收到活动告警；再让它恢复为 Up，确认原告警自动恢复。**Save and Test** 发送的测试告警只能证明推送地址可达，请以真实监控的状态变化验证告警能否正确合并与恢复。
+
+<Note>
+测试告警是一条 `STATUS` 为 `DOWN` 的通知，使用固定的示例监控（`MONITOR_ID` 为 `123456`，名称为 `[Site24x7 Test Alert] Zylker Monitor`），Flashduty 会据此生成一条 Critical 告警。Site24x7 不会为它发送 Up 通知，这条告警需要在 Flashduty 中手动关闭。
+</Note>
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Site24x7 的监控 ID 作为 Alert Key：优先取 `MONITOR_ID`，没有时从 `MONITOR_DASHBOARD_LINK`（形如 `.../home/monitors/<监控 ID>/Summary`）中提取。同一个监控的 Down、Trouble、Critical 和 Up 通知都携带同一个监控 ID，因此会合并到同一条告警，并由 Up 通知恢复。
+
+`STATUS`、监控名称、故障原因、故障地点和时间的变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+| Site24x7 `STATUS` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `DOWN` | Critical |
+| `CRITICAL` | Critical |
+| `TROUBLE` | Warning |
+| `UP` | 恢复 |
+| 其他非空值 | Warning |
+
+`STATUS` 为空的请求会被拒绝。
+
+## 告警标签
+---
+
+Flashduty 会把以下事件参数写入告警标签，便于筛选和排查：
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `monitor_id` | 监控 ID（Alert Key） |
+| `monitor_name`、`check` | `MONITORNAME` |
+| `monitor_url`、`resource` | `MONITORURL` |
+| `monitor_type` | `MONITORTYPE` |
+| `monitor_group` | `MONITOR_GROUPNAME` |
+| `monitor_dashboard_link` | `MONITOR_DASHBOARD_LINK` |
+| `status` | `STATUS` 原始值 |
+| `failed_locations` | `FAILED_LOCATIONS` |
+| `incident_time` | `INCIDENT_TIME_ISO`，没有时取 `INCIDENT_TIME` |
+| `outage_time` | `OUTAGE_TIME_UNIX_FORMAT` |
+| `rca_link` | `RCA_LINK` |
+| `tags` | `TAGS`，多个标签以逗号分隔 |
+
+告警标题取 `MONITORNAME`，告警描述取 `INCIDENT_REASON`。
+
+## 排查问题
+---
+
+- **Site24x7 提示集成失败**：确认 Hook URL 完整且包含 `integration_key`，HTTP Method 为 POST
+- **Flashduty 返回参数错误**：确认勾选了 **Post as JSON** 和 **Send Incident Parameters**，请求体中有 `MONITOR_ID` 和 `STATUS`
+- **告警没有恢复**：确认该监控在 **Integration Level** 选择的范围内，且监控确实恢复为 Up
+
+更多参数含义请参阅 Site24x7 的 [Webhooks integration](https://www.site24x7.com/help/admin/third-party-integration/webhooks.html) 和 [Incident Parameters](https://www.site24x7.com/help/admin/configuration-profiles/incident-parameters.html)。

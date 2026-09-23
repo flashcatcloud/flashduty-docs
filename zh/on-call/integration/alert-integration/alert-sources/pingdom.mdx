@@ -1,0 +1,117 @@
+---
+title: "Pingdom 告警集成"
+description: "通过 Webhook 将 Pingdom Uptime 检查和 Transaction 检查的状态变化同步到 Flashduty On-call。"
+keywords: ["告警集成", "Pingdom", "SolarWinds", "Uptime", "Transaction", "Webhook"]
+---
+
+通过 Pingdom 状态变化 Webhook 将 Uptime 检查和 Transaction 检查的告警同步到 Flashduty On-call。每个 Pingdom 检查对应一条 Flashduty 告警：检查失败时触发，检查恢复时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Pingdom**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Pingdom**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Pingdom 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 集成">
+
+1. 登录 My Pingdom，进入 **Settings → Integrations**（左侧栏齿轮图标）
+2. 点击右上角 **Add integration**，类型选择 **Webhook**
+3. 名称可填写 `Flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 **URL**
+5. 点击 **Save integration**
+
+如需发送测试，编辑一个检查（见下一步），点击该集成旁的 **Test**。测试消息是该检查的一条 `DOWN`，`description` 为 `test`。Flashduty 返回成功，不会生成告警。
+
+</Step>
+
+<Step title="在检查中启用该集成">
+
+- **Uptime 检查**：进入 **Synthetics → Uptime**，点击检查所在行末尾的菜单，选择 **Edit**，在集成列表中勾选 `Flashduty`
+- **Transaction 检查**：编辑需要告警的 Transaction 检查，在告警设置的集成列表中同样勾选 `Flashduty`
+
+Pingdom 只在检查状态变化时发送 Webhook：Uptime 检查在 `UP` 与 `DOWN` 之间变化，Transaction 检查在 `SUCCESS` 与 `FAILING` 之间变化。检查持续失败期间不会重复发送。
+
+新建检查的第一次结果（从未知变为 `UP`）不会发送。**When down, alert after** 默认为 5 分钟，因此检查开始失败约 5 分钟后才会发出 `DOWN` Webhook；需要更快告警时可在检查的告警设置中调小。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让检查真正失败（例如暂时指向一个不可访问的地址），确认 Flashduty 收到活动告警；再恢复检查目标，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Tip>
+启用 SolarWinds APM Integrated Experience 后，Pingdom 的菜单位置可能与上述路径不同，按 **Integrations** 和检查的告警设置查找即可。
+</Tip>
+
+## Alert Key
+---
+
+Flashduty 用检查类别（Uptime 或 Transaction）加 `check_id` 计算 Alert Key。同一个检查的失败和恢复 Webhook 携带相同的 `check_id`，因此会落在同一条告警上。Uptime 检查与 Transaction 检查分属不同的检查列表，加入类别后，即使两者数字 ID 相同也不会互相覆盖。
+
+检查名称、`importance_level`、状态、时间、错误描述和探测节点的变化都不会改变 Alert Key。请求缺少 `check_id` 时 Flashduty 会拒绝，因为无法关联后续恢复。
+
+## 状态和告警等级
+---
+
+| Pingdom `current_state` | Flashduty 状态 |
+| :--- | :--- |
+| `DOWN`（Uptime 检查） | 触发 |
+| `FAILING`（Transaction 检查） | 触发 |
+| `UP`（Uptime 检查） | 恢复 |
+| `SUCCESS`（Transaction 检查） | 恢复 |
+
+空值或其他 `current_state` 会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+告警等级来自检查的重要程度 `importance_level`：
+
+| Pingdom `importance_level` | Flashduty 等级 |
+| :--- | :--- |
+| `HIGH` | Critical |
+| `LOW` | Warning |
+| 空值（Pingdom 默认 `HIGH`） | Critical |
+
+恢复事件保留原告警等级。
+
+## 告警内容
+---
+
+- **标题**：检查名称 `check_name`
+- **描述**：`long_description`，为空时使用 `description`
+- **标签**：`check_id`、`check_name`、`check_type`、`importance_level`、`previous_state`、`current_state`、`hostname`、`full_url`、`url`、`tags`（逗号分隔）、`state_changed_timestamp`、`state_changed_utc_time`、`first_probe_location`、`second_probe_location`、`check`（检查名称）、`source`（固定为 `pingdom`），以及 `resource`（优先取 `full_url`，其次 `hostname`、`url`）
+
+`check_params` 中的请求头和认证设置不会写入标签。
+
+## 排查问题
+---
+
+- **Pingdom 返回非 2xx**：确认 URL 是完整推送地址且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求中有 `check_id` 和 `current_state`
+- **告警没有恢复**：确认检查已真正恢复为 `UP` 或 `SUCCESS`，且该检查仍勾选了 `Flashduty` 集成
+- **集成的 Test 按钮**：测试消息指向一个真实检查且状态为 `DOWN`，`description` 为 `test`，`long_description` 以 "This is a test message triggered by a user" 开头。Flashduty 返回成功且不生成告警，不会影响该检查的真实告警
+- **使用 BeepManager Webhook**：本集成接收的是检查状态变化 Webhook，不支持旧版 BeepManager 告警格式
+
+字段含义请参阅 [Pingdom Webhooks](https://www.pingdom.com/resources/webhooks/)。

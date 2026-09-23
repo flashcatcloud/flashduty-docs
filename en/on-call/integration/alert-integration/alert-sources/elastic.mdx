@@ -1,0 +1,197 @@
+---
+title: "Elastic alert integration"
+description: "Send Elastic (Kibana Alerting) rule alerts and recoveries to Flashduty On-call through the Kibana Webhook connector."
+keywords: ["alert integration", "Elastic", "Kibana", "Kibana Alerting", "webhook", "Elastic Observability", "Elastic Security"]
+---
+
+Use the Kibana Webhook connector to send alerts from Kibana rules (Stack Management rules, Observability rules, and Security detection rules) to Flashduty On-call. Each Kibana alert (rule plus alert ID) maps to one Flashduty alert: repeat notifications while the alert is active merge into it, and the Recovered notification from Kibana recovers it.
+
+This integration works with Elastic Cloud, Elastic Cloud Serverless, and self-managed Kibana 8.x and later. If you run the self-managed ElastAlert 2 rule engine, use the [ElastAlert 2 integration](/en/on-call/integration/alert-integration/alert-sources/elastalert2) instead.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+Choose this method when you do not need to route alerts to different channels.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Channel** and open a channel
+  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+  3. Select **Elastic**, then click **Save**
+  4. Open the generated integration card and copy the **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+### Use a shared integration
+
+Choose this method when you need to route alerts to different channels based on the payload.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Integration Center → Alert Events**
+  2. Select **Elastic** and enter an integration name
+  3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+  4. Click **Save** and copy the generated **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## Prerequisites
+---
+
+- **Subscription**: the Kibana Webhook and PagerDuty connectors require an Elastic Gold subscription or higher (Basic does not include them); a 30-day trial license also works. See [Elastic subscriptions](https://www.elastic.co/subscriptions).
+- **Network**: Kibana must be able to reach the Flashduty push URL. If your self-managed Kibana sets [`xpack.actions.allowedHosts`](https://www.elastic.co/docs/reference/kibana/configuration-reference/alerting-settings#action-settings) in `kibana.yml`, add the push URL's host name (for example `api.flashcat.cloud`) to that list, otherwise the connector refuses to send.
+- **Permissions**: you need Kibana privileges to create connectors and edit rules. See [Alerting security](https://www.elastic.co/docs/explore-analyze/alerting/alerts/alerting-setup#alerting-security).
+
+## In Kibana
+---
+
+<Steps>
+<Step title="Create a Webhook connector">
+
+1. Go to **Stack Management → Alerts and Insights → Connectors** and click **Create connector**
+2. Select **Webhook** and name it, for example, `Flashduty`
+3. Set **Method** to `POST` and paste the full Flashduty push URL (including the `integration_key` parameter) into **URL**
+4. Set **Authentication** to **None**; the `integration_key` in the push URL authenticates the request
+5. Under **HTTP headers**, add `Content-Type: application/json`
+6. Click **Save**
+
+</Step>
+
+<Step title="Add an action to the rule">
+
+Edit or create a rule, select the `Flashduty` connector under **Actions**, and configure the action:
+
+- Set **Action frequency** to **For each alert**. With Summary of alerts, Kibana provides no `alert.id` and Flashduty rejects the request
+- Set **Run when** to the rule's alert action group (such as `Alert`, `Query matched`, or `Threshold met`); **On status changes** is the recommended notification timing
+- Paste the template below into **Body**
+
+</Step>
+
+<Step title="Add a second action for Recovered">
+
+Add another action with the same connector, set **Action frequency** to **For each alert** and **Run when** to **Recovered**, and paste the same template into **Body**.
+
+<Warning>
+Kibana sends recovery notifications through a separate action. Without a Recovered action, Flashduty never receives the recovery and the alert stays active.
+</Warning>
+
+If the rule has several alert action groups (for example `Alert` and `Warning` on a Metric threshold rule, or `Critical`, `High`, `Medium`, and `Low` on an SLO burn rate rule), add one action per action group and set the matching `severity` in its template.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Let the rule actually match its condition and confirm that Flashduty receives an active alert, then let the data return to normal and confirm that the same alert recovers. The connector's **Test** tab sends the body you type in by hand without rendering rule or alert variables, so it only proves that the push URL is reachable. If you paste the template below into Test, Flashduty receives the literal `{{rule.id}}` and `{{alert.id}}` and opens an active alert titled `{{rule.name}}`; change `action_group` in the body to `recovered` and click **Run** again to recover that test alert.
+
+</Step>
+</Steps>
+
+## Action template
+---
+
+Paste the following JSON into the **Body** of every action:
+
+```json
+{
+  "rule_id": "{{rule.id}}",
+  "rule_name": "{{rule.name}}",
+  "rule_type": "{{rule.type}}",
+  "rule_tags": "{{rule.tags}}",
+  "rule_url": "{{rule.url}}",
+  "space_id": "{{rule.spaceId}}",
+  "alert_id": "{{alert.id}}",
+  "alert_uuid": "{{alert.uuid}}",
+  "action_group": "{{alert.actionGroup}}",
+  "action_group_name": "{{alert.actionGroupName}}",
+  "severity": "Critical",
+  "reason": "{{context.reason}}",
+  "alert_details_url": "{{context.alertDetailsUrl}}",
+  "kibana_base_url": "{{kibanaBaseUrl}}"
+}
+```
+
+| Field | Description |
+| :--- | :--- |
+| `rule_id`, `alert_id` | Required. Together they form the Alert Key; do not change them |
+| `action_group` | Required. Flashduty uses it to detect recovery notifications; do not change it |
+| `severity` | Alert severity. Set `Critical`, `Warning`, or `Info` per action group; Security detection rules can use `{{context.rule.severity}}` |
+| `reason` | Alert description. Observability rules provide `{{context.reason}}`; for Stack rules such as Elasticsearch query or Index threshold, use `{{context.message}}` instead |
+| `alert_details_url` | Alert details link from Observability rules; empty for other rule types |
+| `rule_url`, `kibana_base_url` | Empty unless `server.publicBaseUrl` is configured in Kibana |
+
+Kibana JSON-escapes variables in the Body, so quotes or line breaks in rule names or descriptions do not break the JSON.
+
+### Custom labels
+
+To turn fields from the rule context into Flashduty labels (for routing or noise reduction), add a `custom_labels` object to the template, for example:
+
+```json
+"custom_labels": {
+  "host": "{{context.group}}",
+  "env": "production"
+}
+```
+
+Custom and built-in labels together are limited to 50. Keys may contain only letters, digits, and underscores and must not start with a digit. A built-in label overrides a custom label with the same key.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from `rule_id` and `alert_id`.
+
+- `rule.id` uniquely identifies the rule.
+- `alert.id` is the ID of a single alert produced by the rule. For rules grouped by a field it is the group value (such as a host name); for ungrouped rules it is usually a fixed value (such as `*`). It does not change while an alert goes from active to Recovered.
+- Kibana's own PagerDuty connector uses `<rule ID>:<alert ID>` as its default dedup key to tie an alert's trigger and resolve together, the same pairing this integration uses.
+
+`alert.uuid` stays the same while an alert is active, and a new UUID is generated when the same `alert.id` fires again after recovering. Flashduty stores it only as the `alert_uuid` label so you can find that occurrence in Kibana. After a Flashduty alert recovers, the next trigger with the same Alert Key opens a new alert, so keying on `alert.id` also gives one Flashduty alert per occurrence.
+
+Changes to the rule name, tags, severity, description, or action group do not change the Alert Key. For example, when a Metric threshold rule's group moves from `Warning` to `Alert`, both notifications carry the same Alert Key.
+
+## Status and severity
+---
+
+| Condition | Flashduty status or severity |
+| :--- | :--- |
+| `action_group` is `recovered` | Recovered |
+| `action_group` is `notGeoContained` (recovery action group of the Tracking containment rule) | Recovered |
+| `severity` is `Critical` or `high` | Critical |
+| `severity` is `Warning`, `medium`, or empty | Warning |
+| `severity` is `Info` or `low` | Info |
+
+`severity` is case-insensitive. Any other value is rejected so that a typo cannot produce the wrong severity.
+
+Security detection rules do not send Recovered notifications. Each detection alert becomes a separate Flashduty alert that you close manually or through auto-close in Flashduty.
+
+## Use the PagerDuty connector (optional)
+---
+
+If your rules already use the Kibana PagerDuty connector, you can point it at the Flashduty [PagerDuty integration](/en/on-call/integration/alert-integration/alert-sources/pagerduty) without rewriting the actions. Alerts sent this way arrive through Flashduty's PagerDuty integration, not the Elastic integration on this page.
+
+1. Add a **PagerDuty** integration in Flashduty and copy its push URL
+2. Create a PagerDuty connector in Kibana: set **API URL** to that push URL (in the form `https://api.flashcat.cloud/event/push/alert/pagerduty?integration_key=<integration key>`) and **Integration Key** to the integration key from the push URL
+3. In the rule, use **For each alert**: add an action with **Event action** `Trigger` for the alert action group, and one with **Event action** `Resolve` for **Recovered** (the Recovered action defaults to `Resolve`)
+4. Keep the **DedupKey** that Kibana pre-fills, `{{rule.id}}:{{alert.id}}`, on both actions and do not clear it, so the resolve event closes the matching alert. With an empty DedupKey on the Trigger action, Kibana sends no `dedup_key`, Flashduty generates a random Alert Key for each trigger, and the resolve event cannot close it
+
+## Troubleshooting
+---
+
+- **Kibana reports `target url "..." is not added to the Kibana config xpack.actions.allowedHosts`**: add the Flashduty push URL's host name to `xpack.actions.allowedHosts`
+- **Flashduty returns an error starting with `alert_id is required`**: the action's **Action frequency** is Summary of alerts; change it to For each alert
+- **Flashduty returns `rule_id is required`**: the Body is not the template on this page, or `rule_id` was changed
+- **Alerts do not recover**: make sure a **Recovered** action exists and the Body keeps `"action_group": "{{alert.actionGroup}}"`
+- **Alerts for different hosts merge into one**: make sure the rule groups by a field (Group by) and the Body keeps `{{alert.id}}`
+- **Flashduty returns `severity ... is not supported`**: `severity` must be Critical, Warning, or Info, or critical, high, medium, or low from Security rules
+
+For field details, see the Elastic documentation on [rule action variables](https://www.elastic.co/docs/explore-analyze/alerting/alerts/rule-action-variables), the [Webhook connector](https://www.elastic.co/docs/reference/kibana/connectors-kibana/webhook-action-type), and the [PagerDuty connector](https://www.elastic.co/docs/reference/kibana/connectors-kibana/pagerduty-action-type).
