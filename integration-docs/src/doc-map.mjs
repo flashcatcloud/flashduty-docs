@@ -69,6 +69,7 @@ export const docMap = {
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
+  Rollbar: `${alertBase}/rollbar.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
