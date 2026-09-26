@@ -82,6 +82,7 @@ export const docMap = {
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Raygun: `${alertBase}/raygun.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
