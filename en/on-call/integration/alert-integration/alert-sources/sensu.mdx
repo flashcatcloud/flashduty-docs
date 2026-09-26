@@ -85,13 +85,28 @@ Handlers and pipelines belong to a namespace. If you use several namespaces, run
 
 `is_incident` is a built-in Sensu filter. It passes only events with a non-zero status and resolution events (the first event whose status goes from non-zero to 0). Without it, every OK check result is also posted to Flashduty, and the volume grows with every check interval.
 
-<Warning>Do not add the `not_silenced` filter to this pipeline. It drops every event while a check is silenced, including the resolution event, so a check that recovers while silenced never closes in Flashduty. To mute alerts, use Flashduty silence or inhibit rules instead.</Warning>
+<Warning>
+
+A check that recovers while it is silenced in Sensu does not close its Flashduty alert:
+
+- Sensu Go 6.14 and later pass no event of a silenced check to any pipeline, including the resolution event.
+- Earlier versions pass these events unless the pipeline has the `not_silenced` filter, so do not add `not_silenced` to this pipeline.
+
+After the silence ends, the check stays OK and sends no further resolution event. Close that alert in Flashduty by hand. To mute alerts, use Flashduty silence or inhibit rules instead of Sensu silences.
+
+</Warning>
 
 </Step>
 
 <Step title="Add the pipeline to your checks">
 
-For each check that should send alerts, run `sensuctl edit check <check name>` and add the following under `spec`:
+For each check that should send alerts, export its definition:
+
+```bash
+sensuctl check info <check name> --format yaml > check.yml
+```
+
+In `check.yml`, replace `pipelines: []` under `spec` with the following. If the check already has pipelines, add this entry to the list instead:
 
 ```yaml
   pipelines:
@@ -100,7 +115,15 @@ For each check that should send alerts, run `sensuctl edit check <check name>` a
     name: flashduty
 ```
 
+Then create the check again:
+
+```bash
+sensuctl create --file check.yml
+```
+
 The change takes effect from the next check execution.
+
+<Note>On Sensu Go 6.14, adding a pipeline with `sensuctl edit check` fails with `cannot have both pipelines and fallback_pipeline defined at the same time`. The export-and-create steps above avoid this.</Note>
 
 To be alerted when an agent stops reporting, add the following to the agent configuration file `/etc/sensu/agent.yml` and restart the agent. Keepalive events are then posted to Flashduty as well:
 
@@ -157,7 +180,7 @@ A resolution event takes the severity of the most recent non-zero status in `che
 
 - **Title**: `<entity name>: <check name>`
 - **Description**: the check output `check.output`, followed by the namespace, status code, `check.state`, and `occurrences`
-- **Labels**: `resource` (entity name), `check` (check name), `namespace`, `host` (the entity's host name `entity.system.hostname`), `entity_class`, `proxy_entity_name`, `status`, `state` (`passing`, `failing`, or `flapping`), `occurrences`, and `is_silenced` when the event is silenced
+- **Labels**: `resource` (entity name), `check` (check name), `namespace`, `host` (the entity's host name `entity.system.hostname`), `entity_class`, `proxy_entity_name`, `status`, `state` (`passing`, `failing`, or `flapping`), `occurrences`, and `is_silenced` when the event is silenced (Sensu Go before 6.14 only, because later versions do not send silenced events)
 
 The check command, secrets, and the entity's `redact` field are not written to labels.
 
@@ -167,7 +190,7 @@ The check command, secrets, and the entity's `redact` field are not written to l
 - **Flashduty receives no alert**: search the backend log for runs of the `flashduty` handler (`journalctl -u sensu-backend`), make sure the check's `pipelines` include `flashduty`, and make sure the event status is non-zero
 - **The handler reports `curl: not found`**: `curl` is not installed on the backend machine or container
 - **The handler reports HTTP 4xx**: make sure the push URL in the command is complete and includes `integration_key`, and that the request carries the `Content-Type: application/json` header
-- **The alert does not recover**: make sure the pipeline uses the `is_incident` filter and not `not_silenced`, and that the entity name and check name did not change before the recovery
+- **The alert does not recover**: make sure the pipeline uses the `is_incident` filter and not `not_silenced`, that the check was not silenced in Sensu when it recovered, and that the entity name and check name did not change before the recovery
 - **Keepalive alerts are not posted**: make sure `keepalive-pipelines` is set to `core/v2.Pipeline.flashduty` and that the pipeline exists in the agent's namespace
 
 For the meaning of event fields, see the Sensu documentation [Events reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-events/events/). For filters, see the [Event filters reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-filter/filters/).

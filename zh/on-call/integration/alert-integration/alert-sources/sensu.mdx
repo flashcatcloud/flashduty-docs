@@ -85,13 +85,28 @@ sensuctl create --file flashduty.yml
 
 `is_incident` 是 Sensu 内置的过滤器，只放行状态非 0 的事件和恢复事件（状态从非 0 变为 0 的那一次）。不加这个过滤器时，每次检查执行结果为 OK 也会推送到 Flashduty，推送量会随检查间隔持续增长。
 
-<Warning>不要在这个管道中加入 `not_silenced` 过滤器。它会丢弃静默期间的所有事件，包括恢复事件；静默期间恢复的检查在 Flashduty 中不会关闭。需要屏蔽告警时，请使用 Flashduty 的静默或抑制规则。</Warning>
+<Warning>
+
+检查在 Sensu 中处于静默时恢复，Flashduty 中的告警不会关闭：
+
+- Sensu Go 6.14 及以上版本不会把静默中检查的任何事件交给管道，包括恢复事件。
+- 更早的版本会交给管道，除非管道中有 `not_silenced` 过滤器。因此不要在这个管道中加入 `not_silenced`。
+
+静默结束后，检查保持 OK，不会再产生恢复事件，需要在 Flashduty 中手动关闭该告警。需要屏蔽告警时，请使用 Flashduty 的静默或抑制规则，不要使用 Sensu 的静默。
+
+</Warning>
 
 </Step>
 
 <Step title="把管道添加到检查">
 
-对需要推送的每个检查执行 `sensuctl edit check <检查名>`，在 `spec` 中加入：
+对需要推送的每个检查，先导出它的定义：
+
+```bash
+sensuctl check info <检查名> --format yaml > check.yml
+```
+
+在 `check.yml` 的 `spec` 中，把 `pipelines: []` 替换为下面的内容。检查已有其他管道时，把这一项加到列表中：
 
 ```yaml
   pipelines:
@@ -100,7 +115,15 @@ sensuctl create --file flashduty.yml
     name: flashduty
 ```
 
-保存后，从下一次检查执行开始生效。
+然后重新创建该检查：
+
+```bash
+sensuctl create --file check.yml
+```
+
+从下一次检查执行开始生效。
+
+<Note>在 Sensu Go 6.14 中，用 `sensuctl edit check` 添加管道会报错 `cannot have both pipelines and fallback_pipeline defined at the same time`。上面的导出再创建方式没有这个问题。</Note>
 
 要在 agent 失联时收到告警，在 agent 配置文件 `/etc/sensu/agent.yml` 中加入以下内容并重启 agent，keepalive 事件也会推送到 Flashduty：
 
@@ -157,7 +180,7 @@ Flashduty 用实体所在的命名空间 `entity.metadata.namespace`、实体名
 
 - **标题**：`<实体名>: <检查名>`
 - **描述**：检查输出 `check.output`，后附命名空间、状态码、`check.state` 和 `occurrences`
-- **标签**：`resource`（实体名）、`check`（检查名）、`namespace`、`host`（实体的主机名 `entity.system.hostname`）、`entity_class`、`proxy_entity_name`、`status`、`state`（`passing`、`failing` 或 `flapping`）、`occurrences`，事件处于静默时还有 `is_silenced`
+- **标签**：`resource`（实体名）、`check`（检查名）、`namespace`、`host`（实体的主机名 `entity.system.hostname`）、`entity_class`、`proxy_entity_name`、`status`、`state`（`passing`、`failing` 或 `flapping`）、`occurrences`，事件处于静默时还有 `is_silenced`（仅 Sensu Go 6.14 之前的版本；之后的版本不推送静默中的事件）
 
 检查命令、密钥和实体的 `redact` 字段不会写入标签。
 
@@ -167,7 +190,7 @@ Flashduty 用实体所在的命名空间 `entity.metadata.namespace`、实体名
 - **Flashduty 没有收到告警**：在后端日志中搜索 `flashduty` 处理器的执行记录（`journalctl -u sensu-backend`），确认检查的 `pipelines` 中有 `flashduty`，且事件状态非 0
 - **处理器报 `curl: not found`**：后端机器或容器没有安装 `curl`
 - **处理器报 HTTP 4xx**：确认命令中的推送地址完整且包含 `integration_key`，并确认请求头包含 `Content-Type: application/json`
-- **告警没有恢复**：确认管道使用了 `is_incident` 过滤器且没有 `not_silenced`；确认恢复前后实体名和检查名没有变化
+- **告警没有恢复**：确认管道使用了 `is_incident` 过滤器且没有 `not_silenced`；确认检查恢复时没有在 Sensu 中被静默；确认恢复前后实体名和检查名没有变化
 - **keepalive 告警没有推送**：确认 `keepalive-pipelines` 的值为 `core/v2.Pipeline.flashduty`，并且 agent 所在命名空间中已创建该管道
 
 事件字段的含义请参阅 Sensu 文档 [Events reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-events/events/)，过滤器说明请参阅 [Event filters reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-filter/filters/)。
