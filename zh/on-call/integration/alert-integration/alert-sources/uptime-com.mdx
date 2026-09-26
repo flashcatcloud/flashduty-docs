@@ -1,0 +1,115 @@
+---
+title: "Uptime.com 告警集成"
+description: "通过 Custom Postback URL (Webhook) 将 Uptime.com 检查的宕机和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Uptime.com", "Custom Postback URL", "Webhook", "可用性监控"]
+---
+
+通过 Uptime.com 的 Custom Postback URL (Webhook) 将检查告警同步到 Flashduty On-call。每个 Uptime.com 检查对应一条 Flashduty 告警：检查宕机时触发，检查恢复时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Uptime.com**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Uptime.com**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Uptime.com 中配置
+---
+
+<Steps>
+<Step title="创建 Custom Postback URL 集成">
+
+1. 登录 Uptime.com，进入 **Notifications → Integrations**，点击 **New Profile**
+2. **Provider Type** 选择 **Custom Postback URL (Webhook)**
+3. **Name** 可填写 `Flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 **URL**
+5. **Custom HTTP Headers** 留空即可，Uptime.com 固定以 `application/json` 发送
+6. 在 **Assign to Contacts** 中选择接收告警的联系人，点击 **Save**
+
+</Step>
+
+<Step title="将联系人分配给检查">
+
+Uptime.com 按联系人投递告警：只有分配了该联系人的检查才会推送到 Flashduty。
+
+- 如果上一步选择的联系人已分配给需要告警的检查，可跳过本步
+- 需要单独的联系人时，进入 **Notifications → Contacts** 新建联系人，在 **Integrations** 中选择 `Flashduty`
+- 编辑需要告警的检查，在 **Contacts** 中加入该联系人并保存
+
+</Step>
+
+<Step title="发送测试并验证生命周期">
+
+1. 在 **Notifications → Integrations** 的 **Active** 列表中找到 `Flashduty`，点击 **More Actions → Test**。测试消息的 `event` 为 `test`，Flashduty 返回成功，不会生成告警
+2. 让一个已分配联系人的检查真正失败（例如把 HTTP(S) 检查的域名暂时改错），确认 Flashduty 收到活动告警
+3. 改回检查配置，等待检查恢复，确认原告警恢复
+
+</Step>
+</Steps>
+
+<Tip>
+检查宕机后，Uptime.com 按检查的 **Sensitivity**（需要多少个探测位置同时失败）判断是否发出告警，因此告警会在失败被多个位置确认后才到达。维护窗口内开始的宕机不会发送告警。
+</Tip>
+
+## Alert Key
+---
+
+Flashduty 用 `data.service.id`（Uptime.com 检查 ID）计算 Alert Key。同一个检查的 `alert_raised` 和 `alert_cleared` 携带相同的 `data.service.id`，因此会落在同一条告警上；持续宕机期间的重复通知也会合并到这条告警。
+
+`data.alert.id` 是每个探测位置的一条检测记录，恢复时会变化，因此不参与 Alert Key。检查名称、标签、状态、输出、时间和宕机位置的变化都不会改变 Alert Key。请求缺少 `data.service.id` 时 Flashduty 会拒绝，因为无法关联后续恢复。
+
+## 状态和告警等级
+---
+
+| Uptime.com `event` | Flashduty 处理 |
+| :--- | :--- |
+| `alert_raised` | 触发或更新告警 |
+| `alert_cleared` | 恢复告警 |
+| `test` | 返回成功，不生成告警 |
+
+空值或其他 `event` 会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+告警等级来自 `data.alert.state`：
+
+| Uptime.com `data.alert.state` | Flashduty 等级 |
+| :--- | :--- |
+| `WARNING` | Warning |
+| `CRITICAL` | Critical |
+| 其他值或空值 | Critical |
+
+恢复事件保留原告警等级。
+
+## 告警内容
+---
+
+- **标题**：检查的 `display_name`，为空时使用 `name`
+- **描述**：`data.alert.output`，为空时使用 `data.alert.short_output`
+- **标签**：`check`（检查名称）、`resource`（检查地址 `msp_address`）、`source`（固定为 `uptime-com`）、`service_id`、`check_type`（`monitoring_service_type`）、`device`、`tags`（逗号分隔）、`alert_state`、`is_up`、`locations`（逗号分隔）、`num_locations_down`、`alert_details`、`real_time_analysis`
+
+`data.integration` 中的推送地址和自定义请求头不会写入标签。
+
+## 排查问题
+---
+
+- **集成显示错误或 Uptime.com 投递失败**：确认 URL 是完整推送地址且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求中有 `event` 和 `data.service.id`；本集成只接收 Custom Postback URL 的 JSON 格式
+- **没有收到告警**：确认检查的 **Contacts** 中包含分配了 `Flashduty` 集成的联系人
+- **告警没有恢复**：确认检查已真正恢复，且恢复时该检查仍分配了该联系人
+
+字段含义请参阅 [Configuring Custom Postback URL | Webhooks](https://support.uptime.com/hc/en-us/articles/115002560845-Configuring-Custom-Postback-URL-Webhooks)。
