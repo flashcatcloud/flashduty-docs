@@ -1,0 +1,173 @@
+---
+title: "Sensu Go alert integration"
+description: "Send Sensu Go check events to Flashduty On-call through a pipe handler. Alerts close automatically when the check recovers."
+keywords: ["alert integration", "Sensu", "Sensu Go", "pipe handler", "handler", "pipeline"]
+---
+
+Sensu Go has no built-in HTTP handler. This integration uses a pipe handler: the Sensu backend writes the event JSON to the command's standard input, and the command posts it unchanged to Flashduty with `curl`. Each entity and check pair maps to one Flashduty alert: it triggers when the check status is non-zero and closes automatically when the status returns to 0.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Sensu Go** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Sensu Go** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Sensu Go
+---
+
+The steps below are based on Sensu Go 6.x and use `sensuctl`. You need permission to create handlers and pipelines and to edit checks in the target namespace.
+
+<Steps>
+<Step title="Make sure the backend can run curl">
+
+Pipe handlers run on the machine that hosts the **Sensu backend** (`sensu-backend`), not on agents. Make sure `curl` is installed on the backend machine and that it can reach the Flashduty push URL.
+
+<Note>The official Docker image `sensu/sensu` does not include `curl`. You can build your own image from it and run `apk add --no-cache curl`.</Note>
+
+</Step>
+
+<Step title="Create the handler and pipeline">
+
+Save the following as `flashduty.yml` and replace `<push URL>` with the full push URL of the Flashduty integration (keep the quotes around it):
+
+```yaml
+---
+type: Handler
+api_version: core/v2
+metadata:
+  name: flashduty
+spec:
+  type: pipe
+  command: "curl -sS -f -m 10 -X POST -H 'Content-Type: application/json' --data-binary @- '<push URL>'"
+  timeout: 15
+---
+type: Pipeline
+api_version: core/v2
+metadata:
+  name: flashduty
+spec:
+  workflows:
+  - name: flashduty
+    filters:
+    - name: is_incident
+      type: EventFilter
+      api_version: core/v2
+    handler:
+      name: flashduty
+      type: Handler
+      api_version: core/v2
+```
+
+Then create them in the target namespace:
+
+```bash
+sensuctl create --file flashduty.yml
+```
+
+Handlers and pipelines belong to a namespace. If you use several namespaces, run the command once in each (`sensuctl create --file flashduty.yml --namespace <namespace>`).
+
+`is_incident` is a built-in Sensu filter. It passes only events with a non-zero status and resolution events (the first event whose status goes from non-zero to 0). Without it, every OK check result is also posted to Flashduty, and the volume grows with every check interval.
+
+<Warning>Do not add the `not_silenced` filter to this pipeline. It drops every event while a check is silenced, including the resolution event, so a check that recovers while silenced never closes in Flashduty. To mute alerts, use Flashduty silence or inhibit rules instead.</Warning>
+
+</Step>
+
+<Step title="Add the pipeline to your checks">
+
+For each check that should send alerts, run `sensuctl edit check <check name>` and add the following under `spec`:
+
+```yaml
+  pipelines:
+  - type: Pipeline
+    api_version: core/v2
+    name: flashduty
+```
+
+The change takes effect from the next check execution.
+
+To be alerted when an agent stops reporting, add the following to the agent configuration file `/etc/sensu/agent.yml` and restart the agent. Keepalive events are then posted to Flashduty as well:
+
+```yaml
+keepalive-pipelines:
+- core/v2.Pipeline.flashduty
+```
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Sensu Go has no "send test notification" button. Put a check into WARNING or CRITICAL for real (for example by lowering a threshold) and confirm that Flashduty receives an active alert. Then let the check recover, or run `sensuctl event resolve <entity name> <check name>`, and confirm that the alert closes.
+
+You can also create events by hand for a proxy entity through the Sensu events API: first send an event with `status` `2`, then one with `status` `0`, using the same entity name and check name in both requests.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the entity's namespace `entity.metadata.namespace`, the entity name `entity.metadata.name`, and the check name `check.metadata.name`. Trigger, repeat, and resolution events for the same check on the same entity carry the same three fields, so they land on the same alert. Events from proxy checks (`proxy_entity_name`) use the proxy entity as their entity, so each proxy entity gets its own alert.
+
+Changes to the status, check output, `occurrences`, time, event ID, or silenced state do not change the Alert Key. When the status rises to a higher severity (for example from WARNING to CRITICAL), Flashduty opens a new alert at the higher severity and keeps the earlier alert open; the resolution event closes both. Renaming an entity or check produces a new alert; close any alert left open under the old name by hand.
+
+Flashduty rejects a request that lacks `entity` or `check` (for example a metrics-only event), or lacks the namespace, entity name, check name, or `check.status`. `curl` then exits with a non-zero code, and the Sensu backend log records the handler failure.
+
+## Alert lifecycle
+---
+
+| Sensu event | Flashduty action |
+| :--- | :--- |
+| First event with a non-zero `check.status` | Trigger an alert |
+| Later events with a non-zero `check.status` (one per check interval) | Update the existing alert |
+| Resolution event with `check.status` 0 | Recover the alert |
+
+With the `is_incident` filter, every execution of a check that stays non-zero is posted once, and these events merge into the same alert.
+
+## Severity
+---
+
+| `check.status` | Sensu meaning | Flashduty severity |
+| :--- | :--- | :--- |
+| `1` | WARNING | Warning |
+| `2` | CRITICAL | Critical |
+| `3` and any other non-zero value | UNKNOWN or custom status | Info |
+| `0` | OK | Recovery |
+
+A resolution event takes the severity of the most recent non-zero status in `check.history`.
+
+## Alert content
+---
+
+- **Title**: `<entity name>: <check name>`
+- **Description**: the check output `check.output`, followed by the namespace, status code, `check.state`, and `occurrences`
+- **Labels**: `resource` (entity name), `check` (check name), `namespace`, `host` (the entity's host name `entity.system.hostname`), `entity_class`, `proxy_entity_name`, `status`, `state` (`passing`, `failing`, or `flapping`), `occurrences`, and `is_silenced` when the event is silenced
+
+The check command, secrets, and the entity's `redact` field are not written to labels.
+
+## Troubleshooting
+---
+
+- **Flashduty receives no alert**: search the backend log for runs of the `flashduty` handler (`journalctl -u sensu-backend`), make sure the check's `pipelines` include `flashduty`, and make sure the event status is non-zero
+- **The handler reports `curl: not found`**: `curl` is not installed on the backend machine or container
+- **The handler reports HTTP 4xx**: make sure the push URL in the command is complete and includes `integration_key`, and that the request carries the `Content-Type: application/json` header
+- **The alert does not recover**: make sure the pipeline uses the `is_incident` filter and not `not_silenced`, and that the entity name and check name did not change before the recovery
+- **Keepalive alerts are not posted**: make sure `keepalive-pipelines` is set to `core/v2.Pipeline.flashduty` and that the pipeline exists in the agent's namespace
+
+For the meaning of event fields, see the Sensu documentation [Events reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-events/events/). For filters, see the [Event filters reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-filter/filters/).

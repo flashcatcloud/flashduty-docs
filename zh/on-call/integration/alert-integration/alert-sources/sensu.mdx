@@ -1,0 +1,173 @@
+---
+title: "Sensu Go 告警集成"
+description: "通过 pipe 处理器将 Sensu Go 的检查事件同步到 Flashduty On-call，检查恢复时自动关闭告警。"
+keywords: ["告警集成", "Sensu", "Sensu Go", "pipe handler", "处理器", "pipeline"]
+---
+
+Sensu Go 没有内置的 HTTP 处理器。本集成使用一个 pipe 处理器：Sensu 后端把事件 JSON 写入命令的标准输入，命令用 `curl` 原样推送到 Flashduty。每个「实体 + 检查」对应一条 Flashduty 告警：检查状态非 0 时触发，恢复为 0 时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Sensu Go**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Sensu Go**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Sensu Go 中配置
+---
+
+以下步骤基于 Sensu Go 6.x，使用 `sensuctl` 完成，需要能在目标命名空间创建处理器、管道并修改检查的权限。
+
+<Steps>
+<Step title="确认后端可以执行 curl">
+
+pipe 处理器在 **Sensu 后端**（`sensu-backend`）所在的机器上执行，不在 agent 上执行。确认后端机器安装了 `curl`，并能访问 Flashduty 推送地址。
+
+<Note>官方 Docker 镜像 `sensu/sensu` 不含 `curl`。可以基于该镜像构建自己的镜像并执行 `apk add --no-cache curl`。</Note>
+
+</Step>
+
+<Step title="创建处理器和管道">
+
+将下面的内容保存为 `flashduty.yml`，把 `<推送地址>` 替换为 Flashduty 集成的完整推送地址（保留两侧的引号）：
+
+```yaml
+---
+type: Handler
+api_version: core/v2
+metadata:
+  name: flashduty
+spec:
+  type: pipe
+  command: "curl -sS -f -m 10 -X POST -H 'Content-Type: application/json' --data-binary @- '<推送地址>'"
+  timeout: 15
+---
+type: Pipeline
+api_version: core/v2
+metadata:
+  name: flashduty
+spec:
+  workflows:
+  - name: flashduty
+    filters:
+    - name: is_incident
+      type: EventFilter
+      api_version: core/v2
+    handler:
+      name: flashduty
+      type: Handler
+      api_version: core/v2
+```
+
+然后在目标命名空间中创建：
+
+```bash
+sensuctl create --file flashduty.yml
+```
+
+处理器和管道属于命名空间。有多个命名空间时，在每个命名空间各执行一次（`sensuctl create --file flashduty.yml --namespace <命名空间>`）。
+
+`is_incident` 是 Sensu 内置的过滤器，只放行状态非 0 的事件和恢复事件（状态从非 0 变为 0 的那一次）。不加这个过滤器时，每次检查执行结果为 OK 也会推送到 Flashduty，推送量会随检查间隔持续增长。
+
+<Warning>不要在这个管道中加入 `not_silenced` 过滤器。它会丢弃静默期间的所有事件，包括恢复事件；静默期间恢复的检查在 Flashduty 中不会关闭。需要屏蔽告警时，请使用 Flashduty 的静默或抑制规则。</Warning>
+
+</Step>
+
+<Step title="把管道添加到检查">
+
+对需要推送的每个检查执行 `sensuctl edit check <检查名>`，在 `spec` 中加入：
+
+```yaml
+  pipelines:
+  - type: Pipeline
+    api_version: core/v2
+    name: flashduty
+```
+
+保存后，从下一次检查执行开始生效。
+
+要在 agent 失联时收到告警，在 agent 配置文件 `/etc/sensu/agent.yml` 中加入以下内容并重启 agent，keepalive 事件也会推送到 Flashduty：
+
+```yaml
+keepalive-pipelines:
+- core/v2.Pipeline.flashduty
+```
+
+</Step>
+
+<Step title="验证生命周期">
+
+Sensu Go 没有「发送测试通知」按钮。让一个检查真正进入 WARNING 或 CRITICAL（例如调低阈值），确认 Flashduty 收到活动告警；再恢复该检查，或执行 `sensuctl event resolve <实体名> <检查名>`，确认原告警关闭。
+
+也可以用 Sensu 事件 API 为一个代理实体手动创建事件：先发送 `status` 为 `2` 的事件，再发送 `status` 为 `0` 的事件，两次请求的实体名和检查名保持一致。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用实体所在的命名空间 `entity.metadata.namespace`、实体名 `entity.metadata.name` 和检查名 `check.metadata.name` 计算 Alert Key。同一个实体上同一个检查的触发、重复和恢复事件携带相同的这三个字段，因此落在同一条告警上。代理检查（`proxy_entity_name`）的事件以代理实体为实体，每个代理实体各自对应一条告警。
+
+状态、检查输出、`occurrences`、时间、事件 ID 和静默状态的变化都不会改变 Alert Key。状态升到更高等级时（例如从 WARNING 变为 CRITICAL），Flashduty 会新建一条更高等级的告警，原告警保持触发；恢复事件会同时关闭这两条告警。重命名实体或检查后，新名称会产生新的告警；改名前未恢复的告警需要手动关闭。
+
+请求缺少 `entity` 或 `check`（例如只含指标的事件）、缺少命名空间、实体名、检查名或 `check.status` 时，Flashduty 会拒绝该请求，`curl` 以非 0 退出码结束，Sensu 后端日志中会记录处理器失败。
+
+## 告警生命周期
+---
+
+| Sensu 事件 | Flashduty 处理 |
+| :--- | :--- |
+| `check.status` 非 0 的第一次事件 | 触发告警 |
+| `check.status` 非 0 的后续事件（每个检查间隔一次） | 更新已有告警 |
+| `check.status` 为 0 的恢复事件 | 恢复告警 |
+
+使用 `is_incident` 过滤器时，检查保持非 0 状态期间每次执行都会推送一次，这些事件合并到同一条告警上。
+
+## 告警等级
+---
+
+| `check.status` | Sensu 含义 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `1` | WARNING | Warning |
+| `2` | CRITICAL | Critical |
+| `3` 及其他非 0 值 | UNKNOWN 或自定义状态 | Info |
+| `0` | OK | 恢复 |
+
+恢复事件的等级取 `check.history` 中最近一次非 0 状态对应的等级。
+
+## 告警内容
+---
+
+- **标题**：`<实体名>: <检查名>`
+- **描述**：检查输出 `check.output`，后附命名空间、状态码、`check.state` 和 `occurrences`
+- **标签**：`resource`（实体名）、`check`（检查名）、`namespace`、`host`（实体的主机名 `entity.system.hostname`）、`entity_class`、`proxy_entity_name`、`status`、`state`（`passing`、`failing` 或 `flapping`）、`occurrences`，事件处于静默时还有 `is_silenced`
+
+检查命令、密钥和实体的 `redact` 字段不会写入标签。
+
+## 排查问题
+---
+
+- **Flashduty 没有收到告警**：在后端日志中搜索 `flashduty` 处理器的执行记录（`journalctl -u sensu-backend`），确认检查的 `pipelines` 中有 `flashduty`，且事件状态非 0
+- **处理器报 `curl: not found`**：后端机器或容器没有安装 `curl`
+- **处理器报 HTTP 4xx**：确认命令中的推送地址完整且包含 `integration_key`，并确认请求头包含 `Content-Type: application/json`
+- **告警没有恢复**：确认管道使用了 `is_incident` 过滤器且没有 `not_silenced`；确认恢复前后实体名和检查名没有变化
+- **keepalive 告警没有推送**：确认 `keepalive-pipelines` 的值为 `core/v2.Pipeline.flashduty`，并且 agent 所在命名空间中已创建该管道
+
+事件字段的含义请参阅 Sensu 文档 [Events reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-events/events/)，过滤器说明请参阅 [Event filters reference](https://docs.sensu.io/sensu-go/latest/observability-pipeline/observe-filter/filters/)。
