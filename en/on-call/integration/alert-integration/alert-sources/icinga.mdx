@@ -1,0 +1,189 @@
+---
+title: "Icinga 2 alert integration"
+description: "Send Icinga 2 host and service notifications to Flashduty On-call through a notification command. Alerts close automatically when the problem recovers."
+keywords: ["alert integration", "Icinga", "Icinga 2", "NotificationCommand", "notification command", "Nagios"]
+---
+
+Icinga 2 has no built-in webhook notification method. This integration provides a piece of Icinga 2 configuration: a `NotificationCommand` builds a JSON body from runtime macros with Icinga 2's own `Json.encode` and posts it to Flashduty with `curl`. Each Icinga 2 host or service maps to one Flashduty alert: it triggers when a problem occurs and closes automatically on recovery.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Icinga** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Icinga** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Icinga 2
+---
+
+The configuration below works with Icinga 2.11 and later. The notification command only needs `curl`, installed on the Icinga 2 node that runs notifications, and that node must be able to reach the Flashduty push URL.
+
+<Steps>
+<Step title="Add the Flashduty configuration">
+
+On the Icinga 2 master, create the file `/etc/icinga2/conf.d/flashduty.conf` with the following content, and replace `vars.flashduty_push_url` with the push URL you copied:
+
+```
+object User "flashduty" {
+  display_name = "Flashduty"
+}
+
+object NotificationCommand "flashduty-notification" {
+  command = [
+    "/usr/bin/curl", "--silent", "--show-error", "--fail",
+    "--max-time", "10",
+    "--header", "Content-Type: application/json"
+  ]
+
+  arguments = {
+    "--data-binary" = {
+      order = 1
+      value = {{
+        Json.encode({
+          notification_type = macro("$notification.type$")
+          host_name = macro("$host.name$")
+          host_display_name = macro("$host.display_name$")
+          host_address = macro("$host.address$")
+          host_state = macro("$host.state$")
+          host_last_state = macro("$host.last_state$")
+          host_output = macro("$host.output$")
+          host_groups = macro("$host.groups$")
+          service_name = macro("$service.name$")
+          service_display_name = macro("$service.display_name$")
+          service_state = macro("$service.state$")
+          service_last_state = macro("$service.last_state$")
+          service_output = macro("$service.output$")
+          service_groups = macro("$service.groups$")
+        })
+      }}
+    }
+    "--url" = {
+      order = 2
+      value = "$flashduty_push_url$"
+    }
+  }
+
+  vars.flashduty_push_url = "<push URL>"
+}
+
+apply Notification "flashduty" to Host {
+  command = "flashduty-notification"
+  users = [ "flashduty" ]
+  assign where true
+}
+
+apply Notification "flashduty" to Service {
+  command = "flashduty-notification"
+  users = [ "flashduty" ]
+  assign where true
+}
+```
+
+Notes:
+
+- Icinga 2 runs the notification command directly, without a shell, so quotes or line breaks in plugin output cannot break the JSON
+- In a host notification the `service.*` macros have no value and are sent as `null`; Flashduty uses this to recognize a host notification
+- `assign where true` sends every host and service. To send only some objects, replace it with your own condition, for example `assign where host.vars.flashduty == true`
+- If `curl` is not at `/usr/bin/curl`, use the path that `which curl` prints
+
+<Note>In distributed monitoring, notifications run in the master zone, so the configuration file and `curl` only need to be on the master nodes. If you manage configuration with Icinga Director, you can still place this file in the master's `conf.d` directory, next to the objects Director deploys.</Note>
+
+</Step>
+
+<Step title="Check and reload the configuration">
+
+```bash
+icinga2 daemon -C
+systemctl reload icinga2
+```
+
+Reload only after `icinga2 daemon -C` reports no errors.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+In Icinga Web, open a service, choose **Process check result**, and submit a `CRITICAL` result. Confirm that Flashduty receives an active alert. Then submit an `OK` result and confirm that the alert closes.
+
+You can also choose **Send custom notification** on the service page to check connectivity. The custom notification (`CUSTOM`) reaches Flashduty and gets a success response, but it does not create an alert.
+
+</Step>
+</Steps>
+
+<Warning>Icinga 2 runs the notification command once for each user of a notification. If `users` or `user_groups` contains several users, the same notification is pushed several times. These pushes land on the same alert but create duplicate events. So configure only the `flashduty` user for the Flashduty notifications.</Warning>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the host name `host_name` and the service name `service_name`. Host notifications use an empty service name. Icinga 2 names a service object `host name!service name`, and a service name is unique within its host, so problem and recovery notifications for the same host or service land on the same alert.
+
+Changes to the state, plugin output, display names, host address, or groups do not change the Alert Key. Renaming a host or service produces a new alert; close any alert left open under the old name by hand.
+
+Flashduty rejects a request that lacks `host_name` or `notification_type`, a host notification that lacks `host_state`, and a service notification that lacks `service_state`.
+
+## Alert lifecycle
+---
+
+Icinga 2 sends a recovery notification only after it has sent a problem notification. An alert opened from an acknowledgement, downtime, flapping, or custom notification might never get a recovery notification to close it. So only problem notifications open alerts, and Flashduty handles each notification type `notification_type` as follows:
+
+| Icinga 2 notification type | Current state | Flashduty handling |
+| :--- | :--- | :--- |
+| `PROBLEM` | Not `OK` / `UP` | Trigger an alert, or update the existing one |
+| `RECOVERY` | `OK` / `UP` | Recover the alert |
+| `FLAPPINGEND`, `DOWNTIMEEND`, `DOWNTIMECANCELLED` | `OK` / `UP` | Recover the alert |
+| `FLAPPINGEND`, `DOWNTIMEEND`, `DOWNTIMECANCELLED` | Not `OK` / `UP` | Ignore |
+| `ACKNOWLEDGEMENT`, `CUSTOM`, `DOWNTIMESTART`, `FLAPPINGSTART` | Any | Ignore |
+
+While a problem lasts, Icinga 2 resends the `PROBLEM` notification every 30 minutes by default (the Notification `interval`), and these notifications update the same alert. To turn this off, add `interval = 0` to both `apply Notification` rules.
+
+The `apply Notification` rules above set no `types` or `states`, so Icinga 2 sends every notification type. When a downtime is removed, Icinga 2 sends the type `DOWNTIMECANCELLED`. Ignored notifications get a success response.
+
+## Severity
+---
+
+Severity comes from the current state: `service_state` for service notifications and `host_state` for host notifications.
+
+| Icinga 2 state | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `DOWN` | Critical |
+| `UNREACHABLE` | Critical |
+| `WARNING` | Warning |
+| `UNKNOWN` | Info |
+| Any other value | Critical |
+
+A recovery event takes its severity from the state before the recovery (`service_last_state` or `host_last_state`).
+
+## Alert content
+---
+
+- **Title**: `<service display name> on <host display name>` for service notifications, `Host <host display name>` for host notifications. Object names are used when no display name is set
+- **Description**: the plugin output `service_output` or `host_output`
+- **Labels**: `host`, `resource` (host name), `service`, `check` (service name, service notifications only), `notification_type`, `state`, `host_display_name`, `host_address`, `host_groups`, `service_display_name` and `service_groups` (service notifications only). Multiple groups are joined with commas
+
+## Troubleshooting
+---
+
+- **No notification is sent**: check the object's notification history in Icinga Web, confirm the `flashduty` notification objects exist (`icinga2 object list --type Notification --name '*flashduty'`), and confirm notifications are not disabled on the host or service
+- **The Icinga 2 log shows `exit code 22`**: `curl` got an HTTP 4xx/5xx response. Confirm that `vars.flashduty_push_url` is the full push URL and includes `integration_key`
+- **The Icinga 2 log shows `exit code 6`, `7`, or `28`**: the node that runs notifications cannot resolve, connect to, or reach the push URL within 10 seconds. Check DNS, the firewall, and proxies
+- **The same notification is pushed several times**: the `apply Notification` rules have several users. Keep only `flashduty`
+- **The alert does not recover**: confirm that the object has really returned to `OK` or `UP`, and that no `types` filter on the Notification or on the `flashduty` user excludes `Recovery`
+
+For runtime macros and notifications, see the Icinga 2 documentation [Monitoring Basics](https://icinga.com/docs/icinga-2/latest/doc/03-monitoring-basics/#notifications).

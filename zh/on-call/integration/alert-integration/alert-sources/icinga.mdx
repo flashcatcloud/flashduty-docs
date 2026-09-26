@@ -1,0 +1,189 @@
+---
+title: "Icinga 2 告警集成"
+description: "通过通知命令将 Icinga 2 主机和服务的告警通知同步到 Flashduty On-call，问题恢复时自动关闭告警。"
+keywords: ["告警集成", "Icinga", "Icinga 2", "NotificationCommand", "通知命令", "Nagios"]
+---
+
+Icinga 2 没有内置的 Webhook 通知方式。本集成提供一段 Icinga 2 配置：一个 `NotificationCommand` 用 Icinga 2 自带的 `Json.encode` 把运行时宏组装成 JSON，再调用 `curl` 推送到 Flashduty。每个 Icinga 2 主机或服务对应一条 Flashduty 告警：出现问题时触发，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Icinga**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Icinga**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Icinga 2 中配置
+---
+
+以下配置适用于 Icinga 2.11 及以上版本。通知命令只依赖 `curl`，需要安装在执行通知的 Icinga 2 节点上，并且该节点能访问 Flashduty 推送地址。
+
+<Steps>
+<Step title="添加 Flashduty 配置">
+
+在 Icinga 2 主节点（master）上创建文件 `/etc/icinga2/conf.d/flashduty.conf`，内容如下，并把 `vars.flashduty_push_url` 替换为上一步复制的推送地址：
+
+```
+object User "flashduty" {
+  display_name = "Flashduty"
+}
+
+object NotificationCommand "flashduty-notification" {
+  command = [
+    "/usr/bin/curl", "--silent", "--show-error", "--fail",
+    "--max-time", "10",
+    "--header", "Content-Type: application/json"
+  ]
+
+  arguments = {
+    "--data-binary" = {
+      order = 1
+      value = {{
+        Json.encode({
+          notification_type = macro("$notification.type$")
+          host_name = macro("$host.name$")
+          host_display_name = macro("$host.display_name$")
+          host_address = macro("$host.address$")
+          host_state = macro("$host.state$")
+          host_last_state = macro("$host.last_state$")
+          host_output = macro("$host.output$")
+          host_groups = macro("$host.groups$")
+          service_name = macro("$service.name$")
+          service_display_name = macro("$service.display_name$")
+          service_state = macro("$service.state$")
+          service_last_state = macro("$service.last_state$")
+          service_output = macro("$service.output$")
+          service_groups = macro("$service.groups$")
+        })
+      }}
+    }
+    "--url" = {
+      order = 2
+      value = "$flashduty_push_url$"
+    }
+  }
+
+  vars.flashduty_push_url = "<推送地址>"
+}
+
+apply Notification "flashduty" to Host {
+  command = "flashduty-notification"
+  users = [ "flashduty" ]
+  assign where true
+}
+
+apply Notification "flashduty" to Service {
+  command = "flashduty-notification"
+  users = [ "flashduty" ]
+  assign where true
+}
+```
+
+说明：
+
+- 通知命令由 Icinga 2 直接执行，不经过 shell，插件输出中的引号或换行不会破坏 JSON
+- 主机通知中 `service.*` 宏没有值，会以 `null` 发送，Flashduty 据此识别为主机通知
+- `assign where true` 表示所有主机和服务都推送。只想推送部分对象时，改成自己的条件，例如 `assign where host.vars.flashduty == true`
+- 如果 `curl` 不在 `/usr/bin/curl`，请改为 `which curl` 的输出
+
+<Note>分布式监控中，通知在 master 区域执行，配置文件和 `curl` 放在 master 节点上即可。使用 Icinga Director 管理配置时，同样可以把此文件放在 master 的 `conf.d` 目录下，与 Director 部署的对象共存。</Note>
+
+</Step>
+
+<Step title="检查并重新加载配置">
+
+```bash
+icinga2 daemon -C
+systemctl reload icinga2
+```
+
+`icinga2 daemon -C` 没有报错后再重新加载。
+
+</Step>
+
+<Step title="验证生命周期">
+
+在 Icinga Web 中打开一个服务，选择 **Process check result**，提交 `CRITICAL` 结果，确认 Flashduty 收到活动告警；再提交 `OK` 结果，确认原告警关闭。
+
+也可以在服务页面选择 **Send custom notification** 确认链路连通。自定义通知（`CUSTOM`）会推送到 Flashduty，Flashduty 返回成功，不会生成告警。
+
+</Step>
+</Steps>
+
+<Warning>Icinga 2 会为通知中的每个用户各执行一次通知命令。`users` 或 `user_groups` 中包含多个用户时，同一条通知会推送多次；这些推送落在同一条告警上，但会产生重复事件。因此 Flashduty 通知只配置 `flashduty` 这一个用户。</Warning>
+
+## Alert Key
+---
+
+Flashduty 用主机名 `host_name` 加服务名 `service_name` 计算 Alert Key；主机通知的服务名为空。Icinga 2 的服务对象以 `主机名!服务名` 作为完整名称，同一主机下服务名唯一，因此同一个主机或服务的问题和恢复通知落在同一条告警上。
+
+状态、插件输出、显示名称、主机地址和分组的变化都不会改变 Alert Key。重命名主机或服务后，新名称会产生新的告警；改名前未恢复的告警需要手动关闭。
+
+请求缺少 `host_name` 或 `notification_type`，主机通知缺少 `host_state`，或服务通知缺少 `service_state` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Icinga 2 只在发出过问题通知之后才会发送恢复通知。确认、维护、抖动和自定义通知如果用来打开告警，之后可能没有恢复通知来关闭。因此只有问题通知会打开告警，Flashduty 按通知类型 `notification_type` 处理：
+
+| Icinga 2 通知类型 | 当前状态 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `PROBLEM` | 非 `OK` / `UP` | 触发告警，或更新已有告警 |
+| `RECOVERY` | `OK` / `UP` | 恢复告警 |
+| `FLAPPINGEND`、`DOWNTIMEEND`、`DOWNTIMECANCELLED` | `OK` / `UP` | 恢复告警 |
+| `FLAPPINGEND`、`DOWNTIMEEND`、`DOWNTIMECANCELLED` | 非 `OK` / `UP` | 忽略 |
+| `ACKNOWLEDGEMENT`、`CUSTOM`、`DOWNTIMESTART`、`FLAPPINGSTART` | 任意 | 忽略 |
+
+问题持续期间，Icinga 2 默认每 30 分钟重发一次 `PROBLEM` 通知（Notification 的 `interval`），这些通知更新同一条告警。不需要时可在两条 `apply Notification` 中加上 `interval = 0`。
+
+配置中的 `apply Notification` 没有设置 `types` 和 `states`，Icinga 2 默认发送全部通知类型。维护期被移除时 Icinga 2 发送的类型是 `DOWNTIMECANCELLED`。被忽略的通知返回成功。
+
+## 告警等级
+---
+
+告警等级来自当前状态：服务通知取 `service_state`，主机通知取 `host_state`。
+
+| Icinga 2 状态 | Flashduty 等级 |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `DOWN` | Critical |
+| `UNREACHABLE` | Critical |
+| `WARNING` | Warning |
+| `UNKNOWN` | Info |
+| 其他值 | Critical |
+
+恢复事件的等级取恢复前的状态（`service_last_state` 或 `host_last_state`）。
+
+## 告警内容
+---
+
+- **标题**：服务通知为 `<服务显示名称> on <主机显示名称>`，主机通知为 `Host <主机显示名称>`；未设置显示名称时使用对象名称
+- **描述**：插件输出 `service_output` 或 `host_output`
+- **标签**：`host`、`resource`（主机名）、`service`、`check`（服务名，仅服务通知）、`notification_type`、`state`、`host_display_name`、`host_address`、`host_groups`、`service_display_name` 和 `service_groups`（仅服务通知）。多个分组以英文逗号连接
+
+## 排查问题
+---
+
+- **通知没有发出**：在 Icinga Web 中查看对象的通知历史，确认 `flashduty` 通知对象存在（`icinga2 object list --type Notification --name '*flashduty'`），并确认主机或服务没有关闭通知
+- **Icinga 2 日志出现 `exit code 22`**：`curl` 收到了 HTTP 4xx/5xx。确认 `vars.flashduty_push_url` 是完整推送地址且包含 `integration_key`
+- **Icinga 2 日志出现 `exit code 6`、`7` 或 `28`**：执行通知的节点无法解析、连接或在 10 秒内访问推送地址，请检查 DNS、防火墙和代理
+- **同一条通知推送了多次**：`apply Notification` 中配置了多个用户，改为只保留 `flashduty`
+- **告警没有恢复**：确认对象已真正恢复为 `OK` 或 `UP`，且没有在 Notification 或 `flashduty` 用户上设置排除 `Recovery` 的 `types` 过滤
+
+运行时宏和通知的说明请参阅 Icinga 2 文档 [Monitoring Basics](https://icinga.com/docs/icinga-2/latest/doc/03-monitoring-basics/#notifications)。
