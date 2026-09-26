@@ -1,9 +1,9 @@
 ---
 title: "AWS CloudWatch Integration"
-description: "Sync AWS CloudWatch alert events to Flashduty via webhook to achieve automated alert noise reduction"
+description: "Sync CloudWatch alarms, Cost Anomaly Detection, Amazon Managed Service for Prometheus and AWS Budgets notifications to Flashduty On-call through Amazon SNS"
 ---
 
-Sync AWS CloudWatch alert events to Flashduty via webhook to achieve automated alert noise reduction.
+This integration receives the HTTPS subscription of an Amazon SNS topic. The trigger and recovery of a CloudWatch alarm update the same Flashduty alert. Cost Anomaly Detection, Amazon Managed Service for Prometheus (AMP) alert manager and AWS Budgets notifications on the same topic are recognized too.
 
 <div class="hide">
 
@@ -42,36 +42,99 @@ Choose this method when you need to route alerts to different channels based on 
 </details>
 </div>
 
-## In AWS CloudWatch
+## In AWS
 ---
 <div class="md-block">
 
-1. Log in to your AWS Console, search for `Simple Notification Service` product and enter its console
-2. Go to the `Topics` page, click the `Create topic` button to start creating a topic
-3. Select `Standard` for `Type`, enter `Flashduty` as the name
-4. Click the `Create Topic` button to complete topic creation
-5. Go to the `Subscriptions` page, click the `Create subscription` button to create a subscription for the topic
-6. Select `Flashduty` for `Topic ARN`, choose `HTTPS` for `Protocol`, enter the integration push URL for `Endpoint` (enter the integration name on the current page, the URL will be generated after saving)
-7. Click the `Create subscription` button to complete subscription creation
+1. Log in to the AWS console and open `Simple Notification Service`
+2. On the `Topics` page, click `Create topic`, select `Standard` for `Type`, enter `Flashduty` as the name, and click `Create topic`
+3. On the `Subscriptions` page, click `Create subscription`
+4. Select `Flashduty` for `Topic ARN`, `HTTPS` for `Protocol`, and enter the integration push URL as `Endpoint`
+5. Click `Create subscription`
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/aws-cloudwatch-subscribe.png" />
 
-8. Return to the `Subscriptions` page. When the subscription status shows `Confirmed`, the subscription URL verification is successful; otherwise, please contact Flashduty
-9. Search for the `CloudWatch` product and enter its console
-10. Go to the `All alarms` page, choose to create or edit existing alarm policies
-11. For the `Notification` step, select `Flashduty` as the `SNS topic` for all three states: `In alarm`, `OK`, and `Insufficient data`, as shown below:
+6. Return to the `Subscriptions` page. The status `Confirmed` means Flashduty has confirmed the subscription
+7. Open the `CloudWatch` console, go to `All alarms`, and create or edit an alarm
+8. In the `Notification` step, select the SNS topic `Flashduty` for all three states: `In alarm`, `OK` and `Insufficient data`. Without `OK`, the alert does not recover automatically
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/aws-cloudwatch-alram.png" />
 
-12. Return to the integration list. If the latest event time is displayed, the configuration is successful and events are being received
-13. Complete
+9. Return to the integration list. A latest event time means events are arriving
 
 </div>
 
-## Status Mapping
+<Note>
+The subscription works with **Raw message delivery** on or off. With raw delivery on, SNS sends no signature and only the `integration_key` in the push URL authenticates the request, so we recommend keeping it off.
+</Note>
+
+## Other AWS services that publish to SNS
+---
+
+Send the notifications of these services to the same `Flashduty` topic. No other setup is needed.
+
+### Cost Anomaly Detection
+
+In **Billing and Cost Management → Cost Anomaly Detection → Alert subscriptions**, create a subscription, set `Alerting frequency` to **Individual alerts**, and select the SNS topic `Flashduty` as the recipient. The topic access policy must allow `costalerts.amazonaws.com` to publish.
+
+Each anomaly (`anomalyId`) maps to one alert, and later notifications for the same anomaly merge into it. Cost Anomaly Detection sends no notification when an anomaly ends, so close the alert manually.
+
+### Amazon Managed Service for Prometheus
+
+Add an `sns_configs` receiver that points to the `Flashduty` topic in the workspace alert manager configuration. Use the `default_template` from the AWS guide [Configure alert manager to send messages to Amazon SNS as JSON](https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-alertmanager-receiver-JSON.html) so that messages are sent as JSON:
+
+- Each alert gets its `fingerprint` as the Alert Key. `firing` triggers and `resolved` recovers
+- A `severity` label of `critical`, `warning` or `info` maps to Critical, Warning or Info; any other value maps to Warning
+- Labels and annotations become Flashduty labels. The title is the `summary` annotation, or `alertname` when it is absent
+
+Without this template, the alert manager sends plain text, which Flashduty handles as described in "Other messages" below and cannot recover automatically. The template does not escape double quotes in label values, so a message containing them is also handled as plain text.
+
+### AWS Budgets
+
+In the budget **Alert** settings, choose **Amazon SNS Alerts** and enter the ARN of the `Flashduty` topic. The topic access policy must allow `budgets.amazonaws.com` to publish. Budgets notifications are plain text and are handled as described in "Other messages" below.
+
+### Other messages
+
+Each unrecognized message (plain text or other JSON) creates one Warning alert. The Alert Key is the SNS `MessageId`, so an SNS retry of the same message does not create a second alert. The title is the SNS `Subject`, or the first line of the message when there is no subject. These alerts do not recover automatically.
+
+## Alert Key
+---
+
+| Message | Alert Key | Recovers when |
+| :--- | :--- | :--- |
+| CloudWatch alarm | `AlarmArn` | `NewStateValue` is `OK` |
+| Cost Anomaly Detection | `anomalyId` | Never automatically |
+| AMP alert manager (JSON template) | `fingerprint` of each alert | Alert `status` is `resolved` |
+| Other messages | SNS `MessageId` | Never automatically |
+
+`ALARM`, `INSUFFICIENT_DATA` and `OK` of a CloudWatch alarm share one Alert Key; changes to the alarm name, threshold, reason or description do not split the alert. A CloudWatch alarm message without `AlarmArn` is rejected.
+
+## Status and severity
 ---
 <div class="md-block">
-  
-All CloudWatch metric alarms correspond to Flashduty "warning" severity level alerts.
+
+CloudWatch alarms have no severity. `ALARM` and `INSUFFICIENT_DATA` map to Warning by default, and `OK` recovers the alert.
+
+To set a severity, add `flashduty_severity: critical` to the alarm's **Alarm description** (`critical`, `warning` or `info`, case-insensitive, with `:` or `=`). For example:
+
+```text
+Order service CPU too high flashduty_severity: critical
+```
 
 </div>
+
+## Labels
+---
+
+- Single-metric alarms: `trigger_metric_name`, `trigger_namespace`, `trigger_dimensions_<dimension name>` and more. When the dimensions include `InstanceId`, it is written to `resource`
+- Metric math and anomaly detection alarms: each query writes `trigger_expression_<query ID>`, `trigger_metric_<query ID>` (`namespace/metric name`) and `trigger_dimensions_<dimension name>`. `metric` and `check` come from the query that returns data
+- Composite alarms: `alarm_rule` and `triggering_children` (ARNs of the child alarms that triggered)
+- All alarms: `alarm_arn`, `aws_account_id`, `region`, `new_state_value`, `old_state_value`
+
+## Troubleshooting
+---
+
+- **Subscription stays in `Pending confirmation`**: Make sure the endpoint is the full push URL including `integration_key`, then run **Request confirmation** on the subscription in the SNS console
+- **Flashduty returns a signature error**: The request was not sent by SNS, or the message was modified in transit. Let SNS deliver to Flashduty directly
+- **Alert does not recover**: Make sure the `OK` state of the CloudWatch alarm also notifies the `Flashduty` topic
+- **Handling events in EventBridge**: For GuardDuty, Security Hub, AWS Health and similar events, use the [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge)

@@ -1,9 +1,9 @@
 ---
 title: "AWS EventBridge Alert Events"
-description: "Sync AWS EventBridge alert events to Flashduty via webhook for automated alert noise reduction"
+description: "Sync CloudWatch alarm, GuardDuty, Security Hub, AWS Health, Inspector, Config and DevOps Guru events to Flashduty On-call through EventBridge, with automatic merging and recovery"
 ---
 
-Sync AWS EventBridge alert events to Flashduty via webhook for automated alert noise reduction.
+This integration receives Amazon EventBridge events, either pushed directly by an API destination or relayed by an SNS topic. CloudWatch alarm, GuardDuty, Security Hub, AWS Health, Amazon Inspector, AWS Config and DevOps Guru events merge per alarm or finding and recover automatically when the source recovers. Every other event creates one alert.
 
 <div class="hide">
 
@@ -45,12 +45,13 @@ Choose this option when you need to route alerts to different channels based on 
 ## In AWS EventBridge
 ---
 
+Use either of the following delivery methods.
+
 <div class="md-block">
 
-## I. AWS EventBridge Alert Push Configuration
-<span id="1"></span>
+### Option 1: API destination
 
-### Step 1: Create Connection in API destinations
+#### Step 1: Create Connection in API destinations
 1. Log in to your AWS Console, search for `Amazon EventBridge` product, and enter the corresponding product console
 2. Select `Integration=>API destinations` from the left navigation bar
 3. Click `Connections`, then click `Create connection`
@@ -65,7 +66,7 @@ Choose this option when you need to route alerts to different channels based on 
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/aws-eb-4.png" />
 
-### Step 2: Create API destination
+#### Step 2: Create API destination
 
 1. Return to the `API destinations` interface and click `Create API destination`
 
@@ -79,7 +80,7 @@ Choose this option when you need to route alerts to different channels based on 
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/aws-eb-6.png" />
 
-### Step 3: Use the API destination created in Step 2 in EventBridge Rules
+#### Step 3: Use the API destination created in Step 2 in EventBridge Rules
 1. Log in to your AWS Console, search for `Amazon EventBridge` product, and enter the corresponding product console
 2. Select `Buses=>Rules` from the left navigation bar, create or edit existing rules
 3. Other configurations are omitted here
@@ -89,13 +90,91 @@ Choose this option when you need to route alerts to different channels based on 
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/aws-eb-7.png" />
 
-## II. Status Mapping
-
-<div class="md-block">
-  
-1. Since AWS EventBridge events don't have severity levels, all events pushed to Flashduty will have a Warning severity
-2. AWS EventBridge events only have triggers without recovery states, so events received by Flashduty won't automatically associate with recovery
-
 </div>
 
-</div>
+### Option 2: SNS topic
+
+1. Create an SNS topic and an HTTPS subscription as described in the [AWS CloudWatch integration](/en/on-call/integration/alert-integration/alert-sources/aws-cloudwatch), using the push URL of **this** integration as the endpoint, and wait until the subscription status is `Confirmed`
+2. In the EventBridge rule, set `Target types` to `AWS service`, and choose `SNS topic` and that topic as the target
+3. Do not configure an input transformer on the target; send the full event
+
+SNS deliveries are signed. Flashduty verifies the signature and only visits subscription confirmation URLs on `sns.<region>.amazonaws.com` and `sns.<region>.amazonaws.com.cn`.
+
+## Event rule
+---
+
+Use an event pattern in the rule, for example:
+
+```json
+{
+  "source": ["aws.guardduty", "aws.securityhub", "aws.health", "aws.inspector2", "aws.config", "aws.devops-guru", "aws.cloudwatch"],
+  "detail-type": [
+    "GuardDuty Finding",
+    "Security Hub Findings - Imported",
+    "AWS Health Event",
+    "Inspector2 Finding",
+    "Config Rules Compliance Change",
+    "DevOps Guru New Insight Open",
+    "DevOps Guru Insight Severity Upgraded",
+    "DevOps Guru New Anomaly Association",
+    "DevOps Guru Insight Closed",
+    "CloudWatch Alarm State Change"
+  ]
+}
+```
+
+<Warning>
+Do not filter out recovery states in the rule, or alerts cannot recover automatically. For example, matching only `"state": {"value": ["ALARM"]}`, `"complianceType": ["NON_COMPLIANT"]`, Security Hub `"Workflow": {"Status": ["NEW"]}` or Inspector `"status": ["ACTIVE"]` drops the recovery events.
+</Warning>
+
+AWS Health sends events to the Region where they occur; events of global services arrive in `us-east-1`. Create the rule in every Region you care about.
+
+## Alert Key and recovery
+---
+
+| Source | `detail-type` | Alert Key | Recovers when |
+| :--- | :--- | :--- | :--- |
+| CloudWatch | `CloudWatch Alarm State Change` | Alarm ARN (`resources[0]`) | `state.value` is `OK` |
+| GuardDuty | `GuardDuty Finding` | Account + Region + `detail.id` | Never automatically |
+| Security Hub | `Security Hub Findings - Imported`, `Security Hub Findings - Custom Action` | `ProductArn` + `Id` of each finding | `Workflow.Status` is `RESOLVED` or `SUPPRESSED`, or `RecordState` is `ARCHIVED` |
+| AWS Health | `AWS Health Event` | `eventArn` + affected account | `statusCode` is `closed` |
+| Amazon Inspector | `Inspector2 Finding` | `findingArn` | `status` is `CLOSED` or `SUPPRESSED` |
+| AWS Config | `Config Rules Compliance Change` | Account + Region + rule name + resource type + resource ID | `complianceType` is `COMPLIANT` or `NOT_APPLICABLE` |
+| DevOps Guru | All `DevOps Guru ...` events | Account + Region + `insightId` | `DevOps Guru Insight Closed` |
+| Other events | Any | Event `id` | Never automatically |
+
+- Later events of the same source (repeated GuardDuty findings, Security Hub updates, AWS Health progress) merge into the original alert
+- When one Security Hub event carries several findings, each finding creates its own alert
+- An event missing the Alert Key field listed above is rejected (HTTP 400)
+- GuardDuty sends no event when a finding is archived, so close the alert manually
+
+## Severity
+---
+
+| Source | Source field | Critical | Warning | Info |
+| :--- | :--- | :--- | :--- | :--- |
+| CloudWatch | `flashduty_severity` in the alarm description | `critical` | `warning` or not set | `info` |
+| GuardDuty | `severity` (number) | 7.0 and above | 4.0 to 6.9 | Below 4.0 |
+| Security Hub | `Severity.Label` | `CRITICAL`, `HIGH` | `MEDIUM`, other | `LOW`, `INFORMATIONAL` |
+| Amazon Inspector | `severity` | `CRITICAL`, `HIGH` | `MEDIUM`, other | `LOW`, `INFORMATIONAL`, `UNTRIAGED` |
+| AWS Health | `eventTypeCategory` | `issue` | `investigation`, `scheduledChange` | `accountNotification` |
+| AWS Config | `complianceType` | - | `NON_COMPLIANT` | `INSUFFICIENT_DATA` |
+| DevOps Guru | `insightSeverity` | `high` | `medium` | `low` |
+| Other events | - | - | All | - |
+
+Set the CloudWatch alarm severity the same way as in the [AWS CloudWatch integration](/en/on-call/integration/alert-integration/alert-sources/aws-cloudwatch), for example `flashduty_severity: critical` in the **Alarm description**.
+
+## Title and labels
+---
+
+- Every event carries the labels `source`, `region`, `account`, `check` (`detail-type`), `detail` (the event `detail` as JSON) and `resources`
+- Sources with dedicated handling use the finding or alarm title and add source fields such as `finding_id`, `finding_arn`, `event_arn`, `config_rule_name` and `insight_id`; `resource` is the affected resource
+- Other events are titled `detail-type: summary`, where the summary is, in order, CloudTrail `eventSource eventName`, RDS `SourceIdentifier Message`, ECS `group stoppedReason`, or EC2 `instance-id state`
+
+## Troubleshooting
+---
+
+- **API destination invocations fail**: Make sure the endpoint is the full push URL including `integration_key` and `HTTP method` is `POST`
+- **SNS subscription stays in `Pending confirmation`**: Make sure the subscription points to this integration's push URL, then run **Request confirmation** in the SNS console
+- **Alert does not recover**: Check whether the rule's event pattern filters out recovery states, and whether the target has an input transformer
+- **One finding creates several alerts**: Make sure the event comes from a source in the table above and its `detail-type` is not rewritten

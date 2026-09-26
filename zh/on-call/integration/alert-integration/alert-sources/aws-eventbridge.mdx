@@ -1,8 +1,10 @@
 ---
 title: "AWS EventBridge 告警事件"
-description: "通过 webhook 的方式同步 AWS EventBridge 告警事件到 Flashduty On-call，实现告警事件自动化降噪处理"
-keywords: ["告警集成", "AWS EventBridge 告警事件", "监控告警", "数据接入"]
+description: "通过 EventBridge 把 CloudWatch 告警、GuardDuty、Security Hub、AWS Health、Inspector、Config 和 DevOps Guru 事件同步到 Flashduty On-call，并自动合并和恢复"
+keywords: ["告警集成", "AWS EventBridge", "GuardDuty", "Security Hub", "AWS Health", "Amazon Inspector", "AWS Config", "DevOps Guru"]
 ---
+
+本集成接收 Amazon EventBridge 事件，可以通过 API destination 直接推送，也可以经 SNS 主题转发。CloudWatch 告警、GuardDuty、Security Hub、AWS Health、Amazon Inspector、AWS Config 和 DevOps Guru 事件会按各自的告警或发现合并，并在来源状态恢复时自动恢复；其他事件每条生成一条告警。
 
 <div className="hide">
 
@@ -45,15 +47,16 @@ keywords: ["告警集成", "AWS EventBridge 告警事件", "监控告警", "数�
 
 </div>
 
-## 在 AWS EventBridge
+## 在 AWS EventBridge 中配置
 ---
+
+以下两种推送方式任选其一。
 
 <div className="md-block">
 
-## 一、AWS EventBridge 告警推送配置
-<span id="1"></span>
+### 方式一：API destination
 
-### 步骤1：在 API destinations 中创建 Connerction
+#### 步骤1：在 API destinations 中创建 Connection
 1. 登录您的 AWS 控制台，检索 `Amazon Eventbridge` 产品，并进入对应产品控制台。
 2. 在左侧导航栏选择 `Integration=>API destinations`。
 3. 点击 `connection`，并点击 `Create connection` 创建链接。
@@ -68,7 +71,7 @@ keywords: ["告警集成", "AWS EventBridge 告警事件", "监控告警", "数�
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/aws-eb-4.png" />
 
-### 步骤2：创建 API destination
+#### 步骤2：创建 API destination
 
 1. 回到 `API destinations` 界面，并点击 `Create API destination`。
 
@@ -82,7 +85,7 @@ keywords: ["告警集成", "AWS EventBridge 告警事件", "监控告警", "数�
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/aws-eb-6.png" />
 
-### 步骤3：在 EventBridge Rules 中使用步骤2创建的 API destination
+#### 步骤3：在 EventBridge Rules 中使用步骤2创建的 API destination
 1. 登录您的 AWS 控制台，检索 `Amazon Eventbridge` 产品，并进入对应产品控制台。
 2. 在左侧导航栏选择 `Buses=>Rules`，创建或编辑已有的规则。
 3. 此处省略其他配置。
@@ -92,14 +95,92 @@ keywords: ["告警集成", "AWS EventBridge 告警事件", "监控告警", "数�
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/aws-eb-7.png" />
 
-</div>
-
-## 二、状态对照
-
-<div className="md-block">
-  
-1. 由于 AWS EventBridge 的事件并没有严重等级，所以推送至 Flashduty 的事件等级均为 Warning。
-2. AWS EventBridge 的事件只有触发，没有恢复，所以 Flashduty On-call 接收到的事件也不会自动关联恢复。
 
 </div>
 
+### 方式二：SNS 主题
+
+1. 按 [AWS CloudWatch 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-cloudwatch) 中的步骤创建 SNS 主题和 HTTPS 订阅，Endpoint 填写**本集成**的推送地址，等待订阅状态变为 `Confirmed`
+2. 在 EventBridge 规则的 `Target types` 中选择 `AWS service`，目标选择 `SNS topic` 和该主题
+3. 不要为目标配置 Input transformer，保持发送完整事件
+
+SNS 推送附带签名，Flashduty 会校验签名，并且只访问 `sns.<region>.amazonaws.com` 与 `sns.<region>.amazonaws.com.cn` 上的订阅确认地址。
+
+## 事件规则
+---
+
+在规则中填写事件模式，例如：
+
+```json
+{
+  "source": ["aws.guardduty", "aws.securityhub", "aws.health", "aws.inspector2", "aws.config", "aws.devops-guru", "aws.cloudwatch"],
+  "detail-type": [
+    "GuardDuty Finding",
+    "Security Hub Findings - Imported",
+    "AWS Health Event",
+    "Inspector2 Finding",
+    "Config Rules Compliance Change",
+    "DevOps Guru New Insight Open",
+    "DevOps Guru Insight Severity Upgraded",
+    "DevOps Guru New Anomaly Association",
+    "DevOps Guru Insight Closed",
+    "CloudWatch Alarm State Change"
+  ]
+}
+```
+
+<Warning>
+不要在规则中过滤掉恢复状态，否则告警无法自动恢复。例如只匹配 `"state": {"value": ["ALARM"]}`、`"complianceType": ["NON_COMPLIANT"]`、Security Hub 的 `"Workflow": {"Status": ["NEW"]}` 或 Inspector 的 `"status": ["ACTIVE"]`，都会丢掉恢复事件。
+</Warning>
+
+AWS Health 事件发往事件发生的区域，全局服务的事件在 `us-east-1`。需要在每个关心的区域创建规则。
+
+## Alert Key 和恢复
+---
+
+| 来源 | `detail-type` | Alert Key | 恢复条件 |
+| :--- | :--- | :--- | :--- |
+| CloudWatch | `CloudWatch Alarm State Change` | 告警 ARN（`resources[0]`） | `state.value` 为 `OK` |
+| GuardDuty | `GuardDuty Finding` | 账号 + 区域 + `detail.id` | 不自动恢复 |
+| Security Hub | `Security Hub Findings - Imported`、`Security Hub Findings - Custom Action` | 每个发现的 `ProductArn` + `Id` | `Workflow.Status` 为 `RESOLVED` 或 `SUPPRESSED`，或 `RecordState` 为 `ARCHIVED` |
+| AWS Health | `AWS Health Event` | `eventArn` + 受影响账号 | `statusCode` 为 `closed` |
+| Amazon Inspector | `Inspector2 Finding` | `findingArn` | `status` 为 `CLOSED` 或 `SUPPRESSED` |
+| AWS Config | `Config Rules Compliance Change` | 账号 + 区域 + 规则名 + 资源类型 + 资源 ID | `complianceType` 为 `COMPLIANT` 或 `NOT_APPLICABLE` |
+| DevOps Guru | 所有 `DevOps Guru ...` 事件 | 账号 + 区域 + `insightId` | `DevOps Guru Insight Closed` |
+| 其他事件 | 任意 | 事件 `id` | 不自动恢复 |
+
+- 同一来源的后续事件（GuardDuty 的重复发现、Security Hub 的更新、Health 事件的进展）会合并到原告警
+- 一个 Security Hub 事件包含多个发现时，每个发现生成一条告警
+- 缺少上表 Alert Key 字段的事件会被拒绝（HTTP 400）
+- GuardDuty 归档发现时不发送事件，告警需要手动关闭
+
+## 告警等级
+---
+
+| 来源 | 来源字段 | Critical | Warning | Info |
+| :--- | :--- | :--- | :--- | :--- |
+| CloudWatch | 告警描述中的 `flashduty_severity` | `critical` | `warning` 或未填写 | `info` |
+| GuardDuty | `severity`（数值） | 7.0 及以上 | 4.0 至 6.9 | 4.0 以下 |
+| Security Hub | `Severity.Label` | `CRITICAL`、`HIGH` | `MEDIUM`、其他 | `LOW`、`INFORMATIONAL` |
+| Amazon Inspector | `severity` | `CRITICAL`、`HIGH` | `MEDIUM`、其他 | `LOW`、`INFORMATIONAL`、`UNTRIAGED` |
+| AWS Health | `eventTypeCategory` | `issue` | `investigation`、`scheduledChange` | `accountNotification` |
+| AWS Config | `complianceType` | - | `NON_COMPLIANT` | `INSUFFICIENT_DATA` |
+| DevOps Guru | `insightSeverity` | `high` | `medium` | `low` |
+| 其他事件 | - | - | 全部 | - |
+
+CloudWatch 告警等级的写法与 [AWS CloudWatch 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-cloudwatch) 相同，例如在 **Alarm description** 中写 `flashduty_severity: critical`。
+
+## 标题和标签
+---
+
+- 所有事件都带 `source`、`region`、`account`、`check`（`detail-type`）、`detail`（事件 `detail` 的 JSON）和 `resources` 标签
+- 有专门处理的来源使用发现或告警的标题，并附加 `finding_id`、`finding_arn`、`event_arn`、`config_rule_name`、`insight_id` 等来源字段，`resource` 取受影响资源
+- 其他事件的标题为 `detail-type: 摘要`，摘要依次取 CloudTrail 的 `eventSource eventName`、RDS 的 `SourceIdentifier Message`、ECS 的 `group stoppedReason`、EC2 的 `instance-id state`
+
+## 排查问题
+---
+
+- **API destination 调用失败**：确认 endpoint 是完整推送地址且包含 `integration_key`，`HTTP method` 为 `POST`
+- **SNS 订阅停留在 `Pending confirmation`**：确认订阅的是本集成的推送地址，然后在 SNS 控制台执行 **Request confirmation**
+- **告警没有恢复**：检查规则的事件模式是否过滤掉了恢复状态，以及目标是否配置了 Input transformer
+- **同一发现产生多条告警**：确认事件来自上表中的来源且 `detail-type` 未被改写
