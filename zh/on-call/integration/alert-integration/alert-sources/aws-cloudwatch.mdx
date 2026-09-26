@@ -1,8 +1,10 @@
 ---
 title: "AWS CloudWatch集成"
-description: "通过 webhook 的方式同步 AWS CloudWatch 告警事件到 Flashduty On-call，实现告警事件自动化降噪处理"
-keywords: ["告警集成", "AWS CloudWatch集成", "监控告警", "数据接入"]
+description: "通过 Amazon SNS 把 CloudWatch 告警、Cost Anomaly Detection、Amazon Managed Service for Prometheus 和 AWS Budgets 通知同步到 Flashduty On-call"
+keywords: ["告警集成", "AWS CloudWatch集成", "Amazon SNS", "Cost Anomaly Detection", "Amazon Managed Service for Prometheus", "AWS Budgets"]
 ---
+
+本集成接收 Amazon SNS 主题的 HTTPS 订阅推送。CloudWatch 告警的触发和恢复对应同一条 Flashduty 告警；同一主题上的 Cost Anomaly Detection、Amazon Managed Service for Prometheus（AMP）告警管理器和 AWS Budgets 通知也会被识别。
 
 <div className="hide">
 
@@ -45,36 +47,99 @@ keywords: ["告警集成", "AWS CloudWatch集成", "监控告警", "数据接入
   
 </div>
 
-## 在 AWS CloudWatch
+## 在 AWS 中配置
 ---
 <div className="md-block">
 
-1. 登录您的 AWS 控制台，检索 `Simple Notification Service` 产品，并进入对应产品控制台
-2. 进入 `Topics` 页面，单击 `Create topic` 按钮，开始创建主题
-3. `Type` 选择 `Standard`，填写名称为 `Flashduty`
-4. 点击 `Create Topic` 按钮，完成主题创建
-5. 进入 `Subscriptions` 页面，单击 `Create subscription` 按钮，为主题创建订阅
-6. `Topic ARN` 选择 `Flashduty`，`Protocal` 选择 `HTTPS`，`Endpoint` 填写集成的推送地址（当前页面填写集成名称，保存后即可生成地址）
-7. 点击 `Create subscription` 按钮，完成订阅创建
+1. 登录 AWS 控制台，打开 `Simple Notification Service`
+2. 进入 `Topics` 页面，单击 `Create topic`，`Type` 选择 `Standard`，名称填写 `Flashduty`，单击 `Create topic`
+3. 进入 `Subscriptions` 页面，单击 `Create subscription`
+4. `Topic ARN` 选择 `Flashduty`，`Protocol` 选择 `HTTPS`，`Endpoint` 填写集成的推送地址
+5. 单击 `Create subscription`
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/aws-cloudwatch-subscribe.png" />
 
-8. 回到 `Subscriptions` 页面，当订阅状态为 `Confirmed`，说明订阅地址校验成功，否则请联系 Flashduty 
-9. 检索 `CloudWatch` 产品，并进入对应产品控制台
-10. 进入 `All alrams` 页面，选择创建或编辑已有的告警策略
-11. 对于 `Notification` 这一步，`In alarm`、`OK` 和 `Insufficient data` 三种状态推送目标 `SNS topic` 均选择 `Flashduty`，如下图所示：
+6. 回到 `Subscriptions` 页面，订阅状态变为 `Confirmed` 说明 Flashduty 已完成订阅确认
+7. 打开 `CloudWatch` 控制台，进入 `All alarms`，创建或编辑告警
+8. 在 `Notification` 这一步，为 `In alarm`、`OK` 和 `Insufficient data` 三种状态都选择 SNS 主题 `Flashduty`。不选 `OK` 时告警不会自动恢复
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/aws-cloudwatch-alram.png" />
 
-12. 回到集成列表，如果展示了最新事件时间，说明配置成功且收到事件
-13. 完成
+9. 回到集成列表，显示最新事件时间即说明已收到事件
 
 </div>
 
-## 状态对照
+<Note>
+订阅可以开启或关闭 **Raw message delivery**，两种方式都能接收。开启后 SNS 不再附带签名，只能依靠推送地址中的 `integration_key` 鉴权，建议保持关闭。
+</Note>
+
+## 其他发布到 SNS 的 AWS 服务
+---
+
+把下列服务的通知发送到同一个 `Flashduty` 主题即可，无需额外配置。
+
+### Cost Anomaly Detection
+
+在 **Billing and Cost Management → Cost Anomaly Detection → Alert subscriptions** 中创建订阅，`Alerting frequency` 选择 **Individual alerts**，`Alert recipients` 选择 SNS 主题 `Flashduty`。SNS 主题的访问策略需要允许 `costalerts.amazonaws.com` 发布消息。
+
+每个异常（`anomalyId`）对应一条告警，同一异常的后续通知会合并。Cost Anomaly Detection 不发送异常结束通知，告警需要手动关闭。
+
+### Amazon Managed Service for Prometheus
+
+在工作区的告警管理器配置中添加 `sns_configs` 接收器，指向 `Flashduty` 主题。请使用 AWS 文档 [Configure alert manager to send messages to Amazon SNS as JSON](https://docs.aws.amazon.com/prometheus/latest/userguide/AMP-alertmanager-receiver-JSON.html) 中的 `default_template`，让消息以 JSON 发送：
+
+- 每条告警按 `fingerprint` 生成 Alert Key，`firing` 触发，`resolved` 恢复
+- `severity` 标签为 `critical`、`warning`、`info` 时分别对应 Critical、Warning、Info，其余为 Warning
+- 标签和注解会成为 Flashduty 标签，标题取 `summary` 注解，没有时取 `alertname`
+
+未使用该模板时，告警管理器默认发送纯文本，Flashduty 会按下文「其他消息」处理，无法自动恢复。模板不会转义标签值中的双引号，含双引号的消息同样按纯文本处理。
+
+### AWS Budgets
+
+在预算的 **Alert** 设置中选择 **Amazon SNS Alerts**，填写 `Flashduty` 主题的 ARN。SNS 主题的访问策略需要允许 `budgets.amazonaws.com` 发布消息。Budgets 通知是纯文本，按下文「其他消息」处理。
+
+### 其他消息
+
+无法识别的消息（纯文本或其他 JSON）每条生成一条 Warning 告警：Alert Key 为 SNS `MessageId`，SNS 重试同一条消息时不会重复建告警；标题取 SNS `Subject`，没有时取消息第一行。这类告警不会自动恢复。
+
+## Alert Key
+---
+
+| 消息 | Alert Key | 恢复条件 |
+| :--- | :--- | :--- |
+| CloudWatch 告警 | `AlarmArn` | `NewStateValue` 为 `OK` |
+| Cost Anomaly Detection | `anomalyId` | 不自动恢复 |
+| AMP 告警管理器（JSON 模板） | 每条告警的 `fingerprint` | 告警 `status` 为 `resolved` |
+| 其他消息 | SNS `MessageId` | 不自动恢复 |
+
+CloudWatch 告警的 `ALARM`、`INSUFFICIENT_DATA`、`OK` 使用同一个 Alert Key，告警名称、阈值、原因和描述的变化不会拆分告警。缺少 `AlarmArn` 的 CloudWatch 告警消息会被拒绝。
+
+## 状态和告警等级
 ---
 <div className="md-block">
-  
-CloudWatch 监控所有指标告警均对应到 Flashduty “警告（warning）”级别告警。
+
+CloudWatch 告警没有等级字段，`ALARM` 和 `INSUFFICIENT_DATA` 默认对应 Warning，`OK` 对应恢复。
+
+如需指定等级，在告警的 **Alarm description** 中写入 `flashduty_severity: critical`（可选 `critical`、`warning`、`info`，不区分大小写，`=` 或 `:` 均可）。例如：
+
+```text
+订单服务 CPU 过高 flashduty_severity: critical
+```
 
 </div>
+
+## 标签
+---
+
+- 单指标告警：`trigger_metric_name`、`trigger_namespace`、`trigger_dimensions_<维度名>` 等，维度含 `InstanceId` 时写入 `resource`
+- 指标数学和异常检测告警：每个查询写入 `trigger_expression_<查询 ID>`、`trigger_metric_<查询 ID>`（`命名空间/指标名`）和 `trigger_dimensions_<维度名>`；`metric` 和 `check` 取返回数据的查询
+- 复合告警：`alarm_rule` 和 `triggering_children`（触发的子告警 ARN）
+- 所有告警：`alarm_arn`、`aws_account_id`、`region`、`new_state_value`、`old_state_value`
+
+## 排查问题
+---
+
+- **订阅停留在 `Pending confirmation`**：确认 Endpoint 是完整推送地址且包含 `integration_key`，然后在 SNS 控制台对该订阅执行 **Request confirmation**
+- **Flashduty 返回签名错误**：请求不是 SNS 发出的，或消息在转发中被改写。请让 SNS 直接推送到 Flashduty
+- **告警没有恢复**：确认 CloudWatch 告警的 `OK` 状态也通知了 `Flashduty` 主题
+- **需要在 EventBridge 中统一处理**：GuardDuty、Security Hub、AWS Health 等事件请使用 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge)
