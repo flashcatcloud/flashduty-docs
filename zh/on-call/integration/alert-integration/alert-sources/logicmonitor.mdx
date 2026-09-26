@@ -1,0 +1,171 @@
+---
+title: "LogicMonitor 告警集成"
+description: "通过 LogicMonitor 的 Custom HTTP Delivery 集成将告警同步到 Flashduty On-call，告警清除时自动关闭告警。"
+keywords: ["告警集成", "LogicMonitor", "Custom HTTP Delivery", "Webhook", "基础设施监控"]
+---
+
+LogicMonitor 通过 **Custom HTTP Delivery** 集成推送告警：告警产生、等级变化或清除时，LogicMonitor 按本文给出的请求体模板向 Flashduty 发送一条 JSON。LogicMonitor 中的每个「资源 + LogicModule + 实例 + 数据点」对应一条 Flashduty 告警：告警产生时打开，告警清除时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **LogicMonitor**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **LogicMonitor**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 LogicMonitor 中配置
+---
+
+以下操作需要可以管理 **Integrations**、**Escalation Chains** 和 **Alert Rules** 的 LogicMonitor 账号。
+
+<Steps>
+<Step title="创建 Custom HTTP Delivery 集成">
+
+进入 **Settings → Integrations**，点击 **Add Integration**，在 **Workflow Integration** 下选择 **Custom HTTP Delivery**，按下表填写：
+
+| 字段 | 填写内容 |
+| :--- | :--- |
+| **Name** | 自定义名称，例如 `Flashduty` |
+| **Alert Notification** | `Use the same URL and data to notify on various alert activity` |
+| **Alert Statuses** | 勾选 **New Alerts**、**Cleared** 和 **Escalated/De-escalated** |
+| **HTTP Method** | `HTTP Post` |
+| **URL** | 完整的推送地址，包含 `?integration_key=...` |
+| **Username / Password** | 留空 |
+| **Alert Data** | 选择 **Raw**，格式选择 **JSON**，粘贴下方的请求体模板 |
+
+请求体模板：
+
+```json
+{
+  "alert_id": "##ALERTID##",
+  "alert_status": "##ALERTSTATUS##",
+  "alert_type": "##ALERTTYPE##",
+  "level": "##LEVEL##",
+  "host": "##HOST##",
+  "datasource": "##DATASOURCE##",
+  "instance": "##INSTANCE##",
+  "datapoint": "##DATAPOINT##",
+  "value": "##VALUE##",
+  "threshold": "##THRESHOLD##",
+  "website": "##WEBSITE##",
+  "group": "##GROUP##",
+  "alert_url": "##ALERTDETAILURL##",
+  "message": "##MESSAGE##"
+}
+```
+
+字段名不要修改，`alert_id` 和 `alert_status` 必须保留。**Use Custom Headers** 和 **Include an ID provided in HTTP response when updating alert status** 保持关闭。
+
+</Step>
+
+<Step title="测试并保存">
+
+点击 **Test Alert Delivery**，确认 LogicMonitor 提示发送成功。测试请求的 `alert_status` 为 `test`，Flashduty 返回成功，不会生成告警。确认后点击 **Save**。
+
+</Step>
+
+<Step title="创建升级链">
+
+LogicMonitor 只把告警发送给告警规则所引用的升级链。进入 **Settings → Escalation Chains**，新建一条升级链，在第一阶段（Stage 1）中添加 **Recipient**，选择上一步创建的 `Flashduty` 集成，然后保存。
+
+</Step>
+
+<Step title="配置告警规则">
+
+进入 **Settings → Alert Rules**，新建告警规则或编辑已有规则，按下表设置：
+
+| 字段 | 设置 |
+| :--- | :--- |
+| **Level** | `All`，让 warn、error、critical 三个等级都走同一个集成 |
+| **Group / Resource / LogicModule / Datapoint** | 需要推送到 Flashduty 的范围 |
+| **Escalation Chain** | 上一步创建的升级链 |
+| **Escalation Interval** | `0`，告警只发送一次，不重复发送 |
+| **Send notification when alerts clear** | 开启 |
+
+<Warning>**Send notification when alerts clear** 未开启时，LogicMonitor 在告警清除时不发送通知，Flashduty 中的告警不会关闭。</Warning>
+
+LogicMonitor 按优先级从小到大匹配告警规则，一条告警只命中第一条匹配的规则。请确认需要推送的告警不会先命中其他规则。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个数据点越过告警阈值（例如临时调低某个 DataSource 数据点的阈值），确认 Flashduty 收到活动告警；恢复阈值后等待告警清除，确认原告警关闭。LogicMonitor 在数据点的轮询周期内评估阈值，告警和清除通常在一到两个轮询周期内送达。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_id`（`##ALERTID##`，形如 `LMD12345`）作为 Alert Key。LogicMonitor 文档说明，同一个「资源（或网站）+ LogicModule + 实例 + 数据点」组合上的告警都使用同一个告警 ID，因此告警产生、等级变化和清除通知落在同一条 Flashduty 告警上；告警清除后再次产生会打开一条新告警。
+
+告警等级、数值、阈值和告警正文的变化都不会改变 Alert Key。请不要把模板中的 `##ALERTID##` 换成 `##INTERNALID##`：`##INTERNALID##` 在告警等级变化时会改变，会导致清除通知关不掉原告警。
+
+请求缺少 `alert_id` 或 `alert_status`，或这两个字段仍是未替换的 `##ALERTID##`、`##ALERTSTATUS##` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Flashduty 按 `alert_status` 字段（`##ALERTSTATUS##`）处理通知：
+
+| LogicMonitor `alert_status` | 含义 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `active` | 告警产生 | 触发告警，或更新已有告警 |
+| `update` | 告警等级升高或降低（Escalated/De-escalated） | 更新告警 |
+| `clear` | 告警清除 | 恢复告警 |
+| `ack` | 告警在 LogicMonitor 中被确认 | 忽略 |
+| `test` | **Test Alert Delivery** 发送的测试请求 | 忽略 |
+
+在集成中勾选 **Acknowledged** 后，LogicMonitor 会在告警被确认时发送 `ack` 通知。确认不会打开或关闭 Flashduty 告警，被忽略的通知返回成功。
+
+## 告警等级
+---
+
+告警等级取自 `level` 字段（`##LEVEL##`），不区分大小写：
+
+| LogicMonitor Level | Flashduty 等级 |
+| :--- | :--- |
+| `critical` | Critical |
+| `error` | Warning |
+| `warn` | Info |
+| 其他值或为空 | Critical |
+
+清除通知携带被清除告警的等级，恢复事件保留该等级。
+
+## 告警内容
+---
+
+- **标题**：`<DataSource> <数据点> on <资源>`；资源为主机名，网站告警为网站名称。缺少 DataSource 和数据点时只用资源名称，全部缺少时为 `LogicMonitor alert <alert_id>`
+- **描述**：`##MESSAGE##` 渲染出的告警正文，即 LogicModule 中配置的告警消息
+- **标签**：`check`（DataSource 和数据点）、`resource`、`host`、`website`、`alert_id`、`alert_status`、`alert_type`、`level`（原始等级）、`datasource`、`instance`、`datapoint`、`value`、`threshold`、`group`、`alert_url`（LogicMonitor 告警详情页链接）
+
+值为空的字段不会写入标签。某些字段不适用于当前告警类型时（例如网站告警没有数据点），LogicMonitor 可能原样保留 `##DATAPOINT##` 这样的占位符，Flashduty 会把它当作空值处理。
+
+## 排查问题
+---
+
+- **Test Alert Delivery 失败**：确认 **URL** 是完整的推送地址，包含 `integration_key` 参数，且 **HTTP Method** 为 `HTTP Post`
+- **Flashduty 提示请求体不是合法 JSON**：确认 **Alert Data** 选择了 **Raw** 和 **JSON** 格式，模板中的每个 `##TOKEN##` 都在双引号内
+- **告警没有发出**：确认告警命中了引用该升级链的告警规则，且升级链的阶段中包含该集成；可以在告警详情的 **History** 中查看通知记录
+- **告警没有恢复**：确认告警规则开启了 **Send notification when alerts clear**，集成的 **Alert Statuses** 勾选了 **Cleared**，模板中的 `alert_id` 为 `##ALERTID##`
+- **同一个问题重复通知**：把告警规则的 **Escalation Interval** 设为 `0`
+- **已清除的告警又被打开**：勾选 **Escalated/De-escalated** 时，在 LogicMonitor 中给已清除的告警添加备注（note）也会发送 `update` 通知，Flashduty 会重新打开该告警。避免给已清除的告警加备注，或在 Flashduty 中手动关闭该告警
+
+令牌的含义请参阅 LogicMonitor 文档 [Tokens Available in LogicModule Alert Messages](https://www.logicmonitor.com/support/logicmodules/about-logicmodules/tokens-available-in-logicmodule-alert-messages) 和 [Custom HTTP Delivery](https://www.logicmonitor.com/support/alerts/integrations/custom-http-delivery)。

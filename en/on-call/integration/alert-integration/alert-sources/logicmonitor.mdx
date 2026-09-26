@@ -1,0 +1,171 @@
+---
+title: "LogicMonitor alert integration"
+description: "Send LogicMonitor alerts to Flashduty On-call through a LogicMonitor Custom HTTP Delivery integration. Alerts close automatically when they clear in LogicMonitor."
+keywords: ["alert integration", "LogicMonitor", "Custom HTTP Delivery", "webhook", "infrastructure monitoring"]
+---
+
+LogicMonitor pushes alerts through a **Custom HTTP Delivery** integration: every time an alert is raised, changes severity, or clears, LogicMonitor posts one JSON body to Flashduty, built from the body template on this page. Each resource, LogicModule, instance, and datapoint combination in LogicMonitor maps to one Flashduty alert: it opens when the LogicMonitor alert is raised and closes automatically when it clears.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **LogicMonitor** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **LogicMonitor** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure LogicMonitor
+---
+
+The steps below need a LogicMonitor user who can manage **Integrations**, **Escalation Chains**, and **Alert Rules**.
+
+<Steps>
+<Step title="Create the Custom HTTP Delivery integration">
+
+Go to **Settings → Integrations**, click **Add Integration**, select **Custom HTTP Delivery** under **Workflow Integration**, and fill in the form as follows:
+
+| Field | Value |
+| :--- | :--- |
+| **Name** | A name of your choice, for example `Flashduty` |
+| **Alert Notification** | `Use the same URL and data to notify on various alert activity` |
+| **Alert Statuses** | Select **New Alerts**, **Cleared**, and **Escalated/De-escalated** |
+| **HTTP Method** | `HTTP Post` |
+| **URL** | The full push URL, including `?integration_key=...` |
+| **Username / Password** | Leave empty |
+| **Alert Data** | Select **Raw**, choose the **JSON** format, and paste the body template below |
+
+Body template:
+
+```json
+{
+  "alert_id": "##ALERTID##",
+  "alert_status": "##ALERTSTATUS##",
+  "alert_type": "##ALERTTYPE##",
+  "level": "##LEVEL##",
+  "host": "##HOST##",
+  "datasource": "##DATASOURCE##",
+  "instance": "##INSTANCE##",
+  "datapoint": "##DATAPOINT##",
+  "value": "##VALUE##",
+  "threshold": "##THRESHOLD##",
+  "website": "##WEBSITE##",
+  "group": "##GROUP##",
+  "alert_url": "##ALERTDETAILURL##",
+  "message": "##MESSAGE##"
+}
+```
+
+Do not rename the fields, and keep `alert_id` and `alert_status`. Leave **Use Custom Headers** and **Include an ID provided in HTTP response when updating alert status** off.
+
+</Step>
+
+<Step title="Test and save">
+
+Click **Test Alert Delivery** and make sure LogicMonitor reports success. The test request carries `alert_status` `test`; Flashduty returns success and creates no alert. Then click **Save**.
+
+</Step>
+
+<Step title="Create an escalation chain">
+
+LogicMonitor sends alerts only to escalation chains referenced by an alert rule. Go to **Settings → Escalation Chains**, create a chain, add a **Recipient** in Stage 1, select the `Flashduty` integration created above, and save.
+
+</Step>
+
+<Step title="Configure the alert rule">
+
+Go to **Settings → Alert Rules**, create a rule or edit an existing one, and set it as follows:
+
+| Field | Setting |
+| :--- | :--- |
+| **Level** | `All`, so warn, error, and critical alerts all go through the same integration |
+| **Group / Resource / LogicModule / Datapoint** | The scope you want to push to Flashduty |
+| **Escalation Chain** | The chain created above |
+| **Escalation Interval** | `0`, so each alert is sent once and not repeated |
+| **Send notification when alerts clear** | On |
+
+<Warning>If **Send notification when alerts clear** is off, LogicMonitor sends nothing when an alert clears, and the Flashduty alert never closes.</Warning>
+
+LogicMonitor evaluates alert rules in ascending priority order, and an alert matches only the first rule that fits. Make sure the alerts you want to push do not match another rule first.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a datapoint cross its alert threshold (for example, temporarily lower the threshold of a DataSource datapoint) and confirm that Flashduty receives an active alert. Restore the threshold, wait for the alert to clear, and confirm that the original alert closes. LogicMonitor evaluates thresholds on each datapoint's polling interval, so the alert and the clear usually arrive within one or two polling intervals.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `alert_id` (`##ALERTID##`, for example `LMD12345`) as the Alert Key. The LogicMonitor docs state that all alerts on one resource (or website), LogicModule, instance, and datapoint combination share the same alert ID, so the raise, severity change, and clear notifications land on one Flashduty alert. A new alert after a clear opens a new Flashduty alert.
+
+Changes to the severity, value, threshold, or alert message do not change the Alert Key. Do not replace `##ALERTID##` with `##INTERNALID##` in the template: `##INTERNALID##` changes when the severity changes, so the clear notification would not close the original alert.
+
+Flashduty rejects requests without `alert_id` or `alert_status`, or where either field is still the unreplaced `##ALERTID##` or `##ALERTSTATUS##`.
+
+## Alert lifecycle
+---
+
+Flashduty handles each notification by its `alert_status` field (`##ALERTSTATUS##`):
+
+| LogicMonitor `alert_status` | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `active` | Alert raised | Trigger an alert, or update the existing one |
+| `update` | Severity raised or lowered (Escalated/De-escalated) | Update the alert |
+| `clear` | Alert cleared | Recover the alert |
+| `ack` | Alert acknowledged in LogicMonitor | Ignore |
+| `test` | Test request from **Test Alert Delivery** | Ignore |
+
+If you select **Acknowledged** in the integration, LogicMonitor sends an `ack` notification when an alert is acknowledged. An acknowledgement neither opens nor closes a Flashduty alert, and ignored notifications return success.
+
+## Severity
+---
+
+The severity comes from the `level` field (`##LEVEL##`), case-insensitive:
+
+| LogicMonitor level | Flashduty severity |
+| :--- | :--- |
+| `critical` | Critical |
+| `error` | Warning |
+| `warn` | Info |
+| Any other value or empty | Critical |
+
+The clear notification carries the level of the alert that cleared, and the recovery event keeps that severity.
+
+## Alert content
+---
+
+- **Title**: `<DataSource> <datapoint> on <resource>`, where the resource is the host name, or the website name for website alerts. Without a DataSource and datapoint, the title is the resource name; with none of them, it is `LogicMonitor alert <alert_id>`
+- **Description**: the alert message rendered by `##MESSAGE##`, as configured in the LogicModule
+- **Labels**: `check` (DataSource and datapoint), `resource`, `host`, `website`, `alert_id`, `alert_status`, `alert_type`, `level` (original level), `datasource`, `instance`, `datapoint`, `value`, `threshold`, `group`, `alert_url` (link to the LogicMonitor alert details page)
+
+Empty fields are not written as labels. When a field does not apply to the alert type (for example, website alerts have no datapoint), LogicMonitor may leave a placeholder such as `##DATAPOINT##` as-is; Flashduty treats it as empty.
+
+## Troubleshooting
+---
+
+- **Test Alert Delivery fails**: make sure **URL** is the full push URL including the `integration_key` parameter, and that **HTTP Method** is `HTTP Post`
+- **Flashduty says the body is not valid JSON**: make sure **Alert Data** uses **Raw** with the **JSON** format, and that every `##TOKEN##` in the template is inside double quotes
+- **No alert is sent**: make sure the alert matches an alert rule that references the escalation chain, and that the chain's stage contains the integration. The alert's **History** shows the notifications sent
+- **The alert does not recover**: make sure **Send notification when alerts clear** is on for the alert rule, **Cleared** is selected in the integration's **Alert Statuses**, and `alert_id` in the template is `##ALERTID##`
+- **The same issue is notified repeatedly**: set the alert rule's **Escalation Interval** to `0`
+- **A cleared alert reopens**: with **Escalated/De-escalated** selected, adding a note to a cleared alert in LogicMonitor also sends an `update` notification, and Flashduty reopens the alert. Avoid adding notes to cleared alerts, or close the alert manually in Flashduty
+
+For the tokens, see the LogicMonitor docs [Tokens Available in LogicModule Alert Messages](https://www.logicmonitor.com/support/logicmodules/about-logicmodules/tokens-available-in-logicmodule-alert-messages) and [Custom HTTP Delivery](https://www.logicmonitor.com/support/alerts/integrations/custom-http-delivery).

@@ -88,6 +88,7 @@ export const docMap = {
   Icinga: `${alertBase}/icinga.mdx`,
   Sensu: `${alertBase}/sensu.mdx`,
   Instana: `${alertBase}/instana.mdx`,
+  Logicmonitor: `${alertBase}/logicmonitor.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
