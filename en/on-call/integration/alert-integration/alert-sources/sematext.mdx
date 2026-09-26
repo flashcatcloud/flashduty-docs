@@ -1,0 +1,151 @@
+---
+title: "Sematext alert integration"
+description: "Send metric, log, Heartbeat, Experience and Synthetics alerts from Sematext Cloud to Flashduty On-call through a Custom notification hook."
+keywords: ["alert integration", "Sematext", "webhook", "Notification Hook", "monitoring"]
+---
+
+Use a Custom notification hook in Sematext Cloud to send alert rule notifications to Flashduty On-call. Each alert rule (or each group of the rule when it uses Group by) maps to one Flashduty alert: the alert triggers when the rule fires and recovers automatically when Sematext sends the back-to-normal notification.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Sematext**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Sematext** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Sematext
+---
+
+<Steps>
+<Step title="Create a Custom notification hook">
+
+1. Sign in to Sematext Cloud (US region `apps.sematext.com` or EU region `apps.eu.sematext.com`) and select **Alerts** → **Notification Hooks** in the left menu
+2. Click the **Custom** card to create a notification hook
+3. Set **Hook Name** to `Flashduty`
+4. Paste the full Flashduty push URL into **URL**. The URL must include `integration_key`
+5. Set **Send data as** to **Json** and **HTTP method** to **Post**
+6. Click **Add parameter** and add each parameter in the table below. The left column is the parameter name and the right column is its value; Sematext replaces the `$` variables when it sends the notification
+
+| Parameter name | Value |
+| :--- | :--- |
+| `backToNormal` | `$backToNormal` |
+| `priority` | `$priority` |
+| `ruleType` | `$ruleType` |
+| `description` | `$description` |
+| `applicationId` | `$applicationId` |
+| `createTimestamp` | `$createTimestamp` |
+| `troubleshootUrl` | `$troubleshootUrl` |
+
+When you are done, the request body in **Preview** should be:
+
+```json
+{
+  "backToNormal": "$backToNormal",
+  "priority": "$priority",
+  "ruleType": "$ruleType",
+  "description": "$description",
+  "applicationId": "$applicationId",
+  "createTimestamp": "$createTimestamp",
+  "troubleshootUrl": "$troubleshootUrl"
+}
+```
+
+7. Click **Send Test Notification** and confirm that the request succeeds, then click **Save Notification Hook**
+
+<Warning>
+Do not add `$applicationToken`. Anyone who has the App token can read the data in that App, and Flashduty does not need it.
+</Warning>
+
+</Step>
+
+<Step title="Use the hook in alert rules">
+
+1. Open the alert rule you want to connect (**Alerts** → **Alert Rules**) and go to the **Notifications** tab of the edit page
+2. Select the `Flashduty` hook in the **Additionally send to** drop-down and save the rule
+
+To send every new alert rule to Flashduty, set the hook as an account-default hook.
+
+</Step>
+
+<Step title="Verify">
+
+1. Make an alert rule fire. For example, create a Heartbeat alert for a host and stop the Sematext Agent on it, then confirm that Flashduty receives an active alert
+2. Resume data collection, wait for Sematext to send the back-to-normal notification, and confirm that the alert recovers
+
+</Step>
+</Steps>
+
+<Note>
+The request sent by **Send Test Notification** does not belong to any alert rule. Flashduty returns success and does not create an alert.
+</Note>
+
+## Alert Key
+---
+
+Sematext adds the alert rule ID (`ruleId`) and rule name (`alertName`) to every alert notification. When the rule uses Group by, it also adds the group tag values that fired the alert (`filters`, for example `{os.host=web-01}`). You do not need to configure these fields in the hook.
+
+The Alert Key is computed from `ruleId` and all group tags in `filters`; the order of the tags does not matter. As a result:
+
+- Trigger and recovery notifications for the same alert rule and group go to the same alert
+- When an alert rule is grouped by a tag such as host, each group gets its own alert
+- Changes to the priority, description, time or rule name do not change the Alert Key
+
+Requests that carry `alertName` but no `ruleId` are rejected.
+
+## Status and severity
+---
+
+The alert recovers when `backToNormal` is `true`; any other value is treated as a trigger. The severity comes from the alert rule priority (`$priority`):
+
+| Sematext priority | Flashduty severity |
+| :--- | :--- |
+| Critical | Critical |
+| Error | Critical |
+| Warning | Warning |
+| Info | Info |
+| Empty or any other value | Warning |
+
+<Note>
+`$priority` is not listed in the Sematext custom parameters documentation. If `priority` reaches Flashduty as the literal text `$priority`, every alert uses the Warning severity.
+</Note>
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Alert rule name (`alertName`) |
+| `rule_id` | Alert rule ID (`ruleId`) |
+| `rule_type` | Alert rule type (`ruleType`), such as `HEARTBEAT`, `AF_VALUE`, `LOGSENE_VALUE` or `SYNTHETICS_RESULT_VALUE` |
+| `priority` | Original priority in Sematext |
+| `application_id` | Sematext App ID |
+| `filters` | Group tags as sent by Sematext |
+| Group tags, such as `os_host` | Each tag in `filters`; characters such as `.` in the tag name are replaced with `_` |
+| `troubleshoot_url` | Link to the alert details page in Sematext |
+| `create_timestamp` | Creation time of the alert notification (UTC) |
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: Make sure the URL is complete and includes `integration_key`, and that **Send data as** is set to **Json**
+- **The alert does not recover**: Make sure the hook has the `backToNormal` parameter with the value `$backToNormal`
+- **Alerts for different hosts of the same rule are merged**: Set Group by on a host tag (such as `os.host`) in the alert rule and set the aggregation to all separately
+- **Every alert has the Warning severity**: Check `priority` in the pushed content; see Status and severity above
+
+For the meaning of each variable, see [Sematext Custom Webhooks Parameters](https://sematext.com/docs/integration/alerts-webhooks-custom-params/).

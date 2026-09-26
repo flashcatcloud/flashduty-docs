@@ -90,6 +90,7 @@ export const docMap = {
   Logicmonitor: `${alertBase}/logicmonitor.mdx`,
   Instana: `${alertBase}/instana.mdx`,
   UptimeCom: `${alertBase}/uptime-com.mdx`,
+  Sematext: `${alertBase}/sematext.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
