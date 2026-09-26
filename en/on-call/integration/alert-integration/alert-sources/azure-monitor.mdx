@@ -44,20 +44,21 @@ Choose this method when you need to route alerts to different channels based on 
 
 ## In Azure Monitor
 ---
-**Step 1: Configure Webhook**
+**Step 1: Configure webhook**
 
 <div class="md-block">
 
 1. Log in to your Azure Portal and select Monitor product;
 2. Go to `Alerts -> Action groups` page, click Create button to start editing;
 3. As shown in the image, select `Action type` as `Webhook` under `Actions`;
-4. Enter a name, copy and paste the integration push URL into the `URI` field, and make sure to `Enable` the common alert schema;
+4. Enter a name, copy and paste the integration push URL into the `URI` field. We recommend that you `Enable` the common alert schema;
 5. Click Create button to save.
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/integration/azure-mon/action_group.png" />
 
+Flashduty also parses Azure's noncommon payloads when the common alert schema is off: metric alerts, Log Alerts V1 log search alerts (Log Analytics and Application Insights), and activity log alerts. The only unsupported payload is a log search alert with a custom JSON payload. Such a request returns 400; enable the common alert schema instead.
 
-**Step 2: Configure Alert Rule**
+**Step 2: Configure alert rule**
 
 1. Go to `Alerts -> Alert rules` page, click Create or select an existing policy to edit;
 2. As shown below, select the created Action group on the `Actions` page;
@@ -66,9 +67,72 @@ Choose this method when you need to route alerts to different channels based on 
 
 3. Save and wait for alerts to trigger.
 
+Metric alerts, log search alerts, Prometheus alerts, Application Insights smart detection, and availability tests are all configured this way. The activity log alerts below are created from their own entry points; select the same Action group.
+
 </div>
 
-## Status Mapping
+## Service Health
+---
+<div class="md-block">
+
+1. In the Azure Portal, go to `Service Health -> Health alerts` and click `Create service health alert`;
+2. Select the subscription, services, regions, and event types (service issues, planned maintenance, health advisories, security advisories);
+3. Under `Actions`, select the Action group created above and save.
+
+One Azure event (one Tracking ID) creates one Flashduty alert per subscription, and later updates merge into that alert. The alert recovers when the notification stage (`stage`) is `Resolved`, `RCA`, `Complete`, or `Canceled`. The alert title is the event title, the description is Azure's communication text, and the labels include `tracking_id`, `stage`, `incident_type`, `impacted_services`, and `impacted_regions`. `detail_url` links to the event's Service Health page.
+
+The Service Health sample sent by `Test action group` carries a synthetic marker. Flashduty returns success without creating an alert.
+
+</div>
+
+## Resource Health
+---
+<div class="md-block">
+
+1. In the Azure Portal, go to `Service Health -> Resource health` and click `Add resource health alert`;
+2. Select the resources to monitor. Under event status, select both `Active` and `Resolved`, otherwise Azure sends no recovery notification;
+3. Under `Actions`, select the Action group created above and save.
+
+Each resource maps to one Flashduty alert, with the Alert Key derived from the resource ID (case-insensitive). The alert triggers when the resource becomes unavailable, degraded, or unknown, and later status changes of the same resource merge into it. The alert recovers when `currentHealthStatus` becomes `Available` or the activity log status is `Resolved`. Labels include `current_health_status`, `previous_health_status`, `health_event_type`, `health_event_cause`, and `resource_id`.
+
+</div>
+
+## Defender for Cloud security alerts
+---
+<div class="md-block">
+
+Defender for Cloud writes its security alerts to the `Security` category of the activity log. In `Alerts -> Alert rules`, create an alert rule whose condition is an activity log signal with category `Security`, and select the Action group created above.
+
+The alert title is the security alert's description or category plus the affected entity, for example `Failed SSH brute force attack on LinuxVM1`. The severity comes from the security alert itself: `High` maps to Critical, `Medium` to Warning, and `Low` and `Informational` to Info. Each security alert notification creates its own Flashduty alert, which does not recover automatically; close it by hand once handled.
+
+</div>
+
+## Other activity log alerts
+---
+<div class="md-block">
+
+Administrative, Policy, Autoscale, and Recommendation activity log alerts are one-shot events: each notification creates one Flashduty alert that does not recover automatically. The alert title is "operation on resource", for example `Microsoft.Compute/virtualMachines/restart/action on test-VM`; the alert rule name is kept in the `check` label.
+
+</div>
+
+## Alert Key and recovery
+---
+<div class="md-block">
+
+| Alert type | Alert Key source | Recovers when |
+| :--- | :--- | :--- |
+| Metric, log search, Prometheus, smart detection, availability test (common schema) | Azure `alertId` | `monitorCondition` is `Resolved` |
+| Metric alert (noncommon schema) | Alert rule ID + resource ID + dimensions | `status` is `Resolved` |
+| Log Alerts V1 log search alert (noncommon schema) | Alert rule + query time window + dimensions, one alert per evaluation | Azure sends no recovery; close by hand |
+| Service Health | Subscription + Tracking ID | `stage` is `Resolved`, `RCA`, `Complete`, or `Canceled` |
+| Resource Health | Resource ID | `currentHealthStatus` is `Available`, or the status is `Resolved` |
+| Security and other activity log alerts | Each notification on its own | Does not recover automatically |
+
+Dimensions of metric and log alerts (for example `ApiName` or `Computer`), the metric name `metric_name`, the query `search_query`, and the labels of Prometheus alerts all become Flashduty labels. `subscription_id`, `resource_group`, and `resource_id` are parsed from the resource ID.
+
+</div>
+
+## Status mapping
 ---
 <div class="md-block">
   
@@ -81,5 +145,20 @@ Azure Monitor to Flashduty alert severity mapping:
 | Sev2     | Warning  | Warning |
 | Sev3     | Info     | Info |
 | Sev4     | Info     | Info |
+
+Noncommon metric alerts and Log Alerts V1 express severity as `0` to `4`, mapped as above. The `Critical`, `Warning`, and `Informational` values of the legacy Log Analytics alert API map to Critical, Warning, and Info. Azure sends every activity log alert as Sev4 (Info), except security alerts, which follow the security alert severity mapping above.
+
+</div>
+
+## FAQ
+---
+<div class="md-block">
+
+- **Azure reports a failed webhook call (400)**: check whether the log search alert uses a custom JSON payload. Enable the common alert schema and retry.
+- **A Service Health alert does not recover**: Azure sends a `Resolved` stage notification when the event is resolved; make sure the alert rule is still enabled. Planned maintenance recovers at the `Complete` or `Canceled` stage.
+- **A Resource Health alert does not recover**: make sure the alert rule's event status includes `Resolved`.
+- **An alert appears after testing the Action group**: except for Service Health, Azure's test samples cannot be told apart from real alerts, so they create alerts. Close them by hand.
+
+For field details, see the Azure documentation [Common alert schema](https://learn.microsoft.com/azure/azure-monitor/alerts/alerts-common-schema) and [Noncommon alert schema definitions](https://learn.microsoft.com/azure/azure-monitor/alerts/alerts-non-common-schema-definitions).
 
 </div>
