@@ -54,11 +54,12 @@ keywords: ["告警集成", "Azure Monitor集成", "监控告警", "数据接入"
 1. 登录您的 Azure 门户，选择 Monitor 产品；
 2. 进入 `Alerts -> Action groups` 页面，单击 Create 按钮，开始编辑；
 3. 如图，`Actions` 选项选择 `Action type` 为 `Webhook`；
-4. 填写名称，`URI` 部分复制写入集成的推送地址，注意要 `Enable` 通用 alert 结构；
+4. 填写名称，`URI` 部分复制写入集成的推送地址，建议 `Enable` 通用告警架构（common alert schema）；
 5. 点击 Create 按钮，提交保存。
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/integration/azure-mon/action_group.png" />
 
+未开启通用告警架构时，Flashduty 也能解析 Azure 的旧版（noncommon）Payload：指标告警、Log Alerts V1 日志搜索告警（Log Analytics 与 Application Insights）和活动日志告警。唯一不支持的是日志搜索告警的“自定义 JSON Payload”，这种请求会返回 400，请改用通用告警架构。
 
 **步骤 2：配置 Alert rule**
 
@@ -68,6 +69,69 @@ keywords: ["告警集成", "Azure Monitor集成", "监控告警", "数据接入"
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/integration/azure-mon/alert_rule.png" />
 
 3. 提交保存，等待告警触发。
+
+指标告警、日志搜索告警、Prometheus 告警、Application Insights 智能检测和可用性测试都按此步骤配置。下面几类活动日志告警在各自的入口创建，选择同一个 Action group 即可。
+
+</div>
+
+## 服务运行状况（Service Health）
+---
+<div className="md-block">
+
+1. 在 Azure 门户进入 `Service Health -> Health alerts`，点击 `Create service health alert`；
+2. 选择订阅、服务、区域和事件类型（服务问题、计划内维护、运行状况公告、安全公告）；
+3. 在 `Actions` 中选择上面创建的 Action group，保存。
+
+同一个 Azure 事件（相同的 Tracking ID）在同一订阅下只产生一个 Flashduty 告警，后续进展通知会合并到该告警。通知的阶段（`stage`）为 `Resolved`、`RCA`、`Complete` 或 `Canceled` 时告警自动恢复。告警标题取自事件标题，描述为 Azure 的通报正文，标签包含 `tracking_id`、`stage`、`incident_type`、`impacted_services`、`impacted_regions`，`detail_url` 指向该事件的 Service Health 页面。
+
+Action group 的 `Test action group` 发送的 Service Health 示例带有合成标记，Flashduty 返回成功但不创建告警。
+
+</div>
+
+## 资源运行状况（Resource Health）
+---
+<div className="md-block">
+
+1. 在 Azure 门户进入 `Service Health -> Resource health`，点击 `Add resource health alert`；
+2. 选择要监控的资源；在事件状态中勾选 `Active` 与 `Resolved`，否则 Azure 不会发送恢复通知；
+3. 在 `Actions` 中选择上面创建的 Action group，保存。
+
+每个资源对应一个 Flashduty 告警，Alert Key 由资源 ID 生成（不区分大小写）。资源变为不可用、降级或未知时告警触发，同一资源的后续状态变化合并到该告警；当前状态（`currentHealthStatus`）变为 `Available`，或活动日志状态为 `Resolved` 时告警恢复。标签包含 `current_health_status`、`previous_health_status`、`health_event_type`、`health_event_cause` 和 `resource_id`。
+
+</div>
+
+## Defender for Cloud 安全告警
+---
+<div className="md-block">
+
+Defender for Cloud 的安全告警会写入活动日志的 `Security` 类别。在 `Alerts -> Alert rules` 新建告警规则，条件选择活动日志信号，类别（Category）为 `Security`，Action 选择上面创建的 Action group。
+
+告警标题取自安全告警的描述或类别，加上受影响的实体，例如 `Failed SSH brute force attack on LinuxVM1`。等级取自安全告警自身的严重性：`High` 为 Critical，`Medium` 为 Warning，`Low` 与 `Informational` 为 Info。每条安全告警通知对应一个 Flashduty 告警，不会自动恢复，处理完成后请手动关闭。
+
+</div>
+
+## 其他活动日志告警
+---
+<div className="md-block">
+
+管理操作（Administrative）、策略（Policy）、自动缩放（Autoscale）和顾问建议（Recommendation）的活动日志告警是一次性事件：每条通知对应一个 Flashduty 告警，不会自动恢复。告警标题为“操作名 on 资源名”，例如 `Microsoft.Compute/virtualMachines/restart/action on test-VM`；告警规则名称保存在 `check` 标签中。
+
+</div>
+
+## Alert Key 与恢复
+---
+<div className="md-block">
+
+| 告警类型 | Alert Key 来源 | 恢复条件 |
+| :--- | :--- | :--- |
+| 指标、日志搜索、Prometheus、智能检测、可用性测试（通用架构） | Azure 的 `alertId` | `monitorCondition` 为 `Resolved` |
+| 指标告警（旧版架构） | 告警规则 ID + 资源 ID + 维度 | `status` 为 `Resolved` |
+| 日志搜索告警 Log Alerts V1（旧版架构） | 告警规则 + 查询时间窗口 + 维度，每次评估一个告警 | Azure 不发送恢复，需手动关闭 |
+| 服务运行状况 | 订阅 + Tracking ID | `stage` 为 `Resolved`、`RCA`、`Complete` 或 `Canceled` |
+| 资源运行状况 | 资源 ID | `currentHealthStatus` 为 `Available`，或状态为 `Resolved` |
+| 安全告警及其他活动日志告警 | 每条通知独立 | 不自动恢复 |
+
+指标与日志告警的维度（例如 `ApiName`、`Computer`）、指标名 `metric_name`、查询语句 `search_query`，以及 Prometheus 告警的标签都会写入 Flashduty 标签；`subscription_id`、`resource_group`、`resource_id` 从资源 ID 中解析。
 
 </div>
 
@@ -84,5 +148,20 @@ Azure Monitor 到 Flashduty 告警等级映射关系：
 | Sev2     | Warning  | 警告 |
 | Sev3     | Info     | 提醒 |
 | Sev4     | Info     | 提醒 |
+
+旧版架构的指标告警和 Log Alerts V1 使用 `0` 到 `4` 表示严重性，按上表对应；旧版 Log Analytics 告警 API 的 `Critical`、`Warning`、`Informational` 分别对应 Critical、Warning、Info。活动日志告警在 Azure 中统一为 Sev4（Info），安全告警例外，按上文的安全告警严重性映射。
+
+</div>
+
+## 常见问题
+---
+<div className="md-block">
+
+- **Azure 显示 Webhook 调用失败（400）**：检查日志搜索告警是否配置了自定义 JSON Payload，改为开启通用告警架构后重试。
+- **服务运行状况告警没有恢复**：Azure 在事件解决后发送 `Resolved` 阶段通知，请确认告警规则仍然启用；计划内维护在 `Complete` 或 `Canceled` 阶段恢复。
+- **资源运行状况告警没有恢复**：确认告警规则的事件状态包含 `Resolved`。
+- **测试 Action group 后看到了告警**：除服务运行状况外，Azure 的测试示例与真实告警无法区分，会创建告警，请手动关闭。
+
+更多字段含义请参阅 Azure 文档 [Common alert schema](https://learn.microsoft.com/azure/azure-monitor/alerts/alerts-common-schema) 和 [Noncommon alert schema definitions](https://learn.microsoft.com/azure/azure-monitor/alerts/alerts-non-common-schema-definitions)。
 
 </div>
