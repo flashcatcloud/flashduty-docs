@@ -1,0 +1,137 @@
+---
+title: "IBM Instana 告警集成"
+description: "通过 Generic webhook 告警通道将 IBM Instana 的问题、事件和变更同步到 Flashduty On-call。"
+keywords: ["告警集成", "Instana", "IBM Instana", "Webhook", "Generic webhook", "告警通道"]
+---
+
+通过 IBM Instana 的 Generic webhook 告警通道，将 Instana 的问题（Issue）、事件（Incident）和变更同步到 Flashduty On-call。Instana 中的每个问题或事件对应一条 Flashduty 告警：问题打开时触发，问题关闭时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Instana**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Instana**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Instana 中配置
+---
+
+需要 Instana 中配置告警通道和告警的权限。先创建指向 Flashduty 的告警通道，再在告警配置中选择这个通道。
+
+<Steps>
+<Step title="创建 Generic webhook 告警通道">
+
+1. 在 Instana 中点击 **Settings** → **Global settings**，在 **Events & alerts** 下选择 **Alert channels**。部分版本的入口是 **Settings** → **Team settings** → **Alert channels**
+2. 点击 **Add alert channel**，选择 **Generic webhook**
+3. 填写 **Name**，例如 `Flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URLs**，地址中需包含 `integration_key`
+5. **HTTP request headers** 和 OAuth 保持为空，Flashduty 通过地址中的 `integration_key` 鉴权
+6. 点击 **Test channel** 检查 Instana 能否访问 Flashduty，然后点击 **Create**
+
+</Step>
+
+<Step title="在告警配置中选择通道">
+
+1. 点击 **Settings** → **Alerts** → **New Alert**，填写告警名称
+2. 选择需要推送的事件。按事件类型选择时，可以勾选：
+
+| Instana 事件类型 | 推送内容 | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| Incidents | `type` 为 `incident`，带 `OPEN` / `CLOSED` 状态 | 打开时触发，关闭时恢复 |
+| Critical issues / Warning issues | `type` 为 `issue`，带 `OPEN` / `CLOSED` 状态 | 打开时触发，关闭时恢复 |
+| Monitoring issues | `type` 为 `monitoringIssue`，带 `OPEN` / `CLOSED` 状态 | 打开时触发，关闭时恢复 |
+| Changes | `type` 为 `change`，没有状态 | 每次推送生成一条 Info 告警，不会自动恢复 |
+| Online / Offline | `type` 为 `presence`，没有状态 | 每次推送生成一条 Info 告警，不会自动恢复 |
+
+变更和上下线事件数量较多且不会自动恢复，一般只勾选 **Incidents**、**Critical issues** 和 **Warning issues**。
+
+3. 在 **Scope** 中按应用视图（Application perspective）或 Dynamic Focus 查询缩小范围
+4. 在 **Alerting** 中点击 **Add alert channels**，选择上一步创建的通道
+5. （可选）在 **Custom payloads** 中添加键值对，它们会作为标签带到 Flashduty
+6. 点击 **Create** 保存
+
+应用、网站、合成监控等 Smart Alert 在各自的告警配置中选择告警通道，同样选择上一步创建的通道即可。
+
+</Step>
+
+<Step title="验证">
+
+1. 触发一个 Instana 问题（例如让受监控主机的 CPU 超过内置事件的阈值），确认 Flashduty 收到活动告警
+2. 等问题在 Instana 中关闭，确认原告警恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Instana 的问题 ID（`issue.id`）作为 Alert Key。同一个问题或事件打开和关闭时推送的 `issue.id` 相同，因此关闭通知会恢复打开时创建的告警。
+
+问题标题、严重程度、开始时间、标签的变化不会改变 Alert Key。缺少 `issue.id` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+Flashduty 按问题的严重程度（`issue.severity`）确定告警等级：
+
+| Instana 严重程度 | Flashduty 等级 |
+| :--- | :--- |
+| `10`（Critical） | Critical |
+| `5`（Warning） | Warning |
+| `-1`、其他或为空（变更、上下线事件） | Info |
+
+状态由 `issue.state` 决定：
+
+| `issue.state` | 状态 |
+| :--- | :--- |
+| `OPEN` | 触发 |
+| `CLOSED` | 恢复，告警等级保持打开时的等级 |
+| 为空（变更、上下线事件） | 触发，不会自动恢复，需要手动关闭 |
+
+其他状态值会被拒绝并返回参数错误。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `issue_id` | 问题 ID，即 Alert Key |
+| `issue_type` | 事件类型：`issue`、`incident`、`monitoringIssue`、`change`、`presence` |
+| `state` | `OPEN` 或 `CLOSED` |
+| `instana_severity` | Instana 原始严重程度 |
+| `resource` / `entity_label` | 受影响实体的名称 |
+| `entity` / `entity_type` | 受影响实体的类型，如 `jvm`、`Host` |
+| `host` | 受影响主机的 FQDN |
+| `service` | 受影响的服务 |
+| `zone` / `custom_zone` / `availability_zone` | 实体所在的区域 |
+| `tags` | 实体的标签 |
+| `container` | 受影响的容器 |
+| `link` | Instana 中该问题的链接 |
+| `custom_*` | 告警配置中的 Custom payloads，例如 `custom:team` 对应 `custom_team`，多个值用逗号连接 |
+
+## 排查问题
+---
+
+- **Test channel 提示域名不被允许**：Instana SaaS 可能限制告警通道的外发域名，请联系 IBM Instana 支持将 Flashduty 推送地址的域名加入允许列表
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **Test channel 在 Flashduty 中生成了告警**：测试通知只用于检查连通性，手动关闭该告警即可
+- **告警没有恢复**：确认推送的是带状态的问题或事件；变更和上下线事件不会自动恢复
+- **真实问题没有推送**：检查告警配置的事件类型和 Scope，确认告警已关联该通道
+
+更多字段含义请参阅 [Instana Webhook 告警通道](https://www.ibm.com/docs/en/instana-observability/current?topic=alerting-webhooks)。
