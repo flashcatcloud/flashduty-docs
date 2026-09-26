@@ -1,0 +1,151 @@
+---
+title: "Sematext 告警集成"
+description: "通过 Sematext Cloud 的 Custom 通知钩子（Notification Hook），将指标、日志、Heartbeat、Experience 和 Synthetics 告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Sematext", "Webhook", "Notification Hook", "监控"]
+---
+
+通过 Sematext Cloud 的 Custom 通知钩子，将告警规则的通知推送到 Flashduty On-call。每条告警规则（按 Group by 分组时为规则下的每个分组）对应一条 Flashduty 告警：规则触发时产生告警，Sematext 发出恢复正常（back to normal）通知时告警自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Sematext**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Sematext**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Sematext 中配置
+---
+
+<Steps>
+<Step title="创建 Custom 通知钩子">
+
+1. 登录 Sematext Cloud（美国区 `apps.sematext.com` 或欧洲区 `apps.eu.sematext.com`），在左侧菜单选择 **Alerts** → **Notification Hooks**
+2. 点击 **Custom** 卡片，创建一个新的通知钩子
+3. **Hook Name** 填写 `Flashduty`
+4. **URL** 粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
+5. **Send data as** 选择 **Json**，**HTTP method** 选择 **Post**
+6. 点击 **Add parameter**，逐行添加下表中的参数。左列是参数名，右列是值，值中的 `$` 变量由 Sematext 在发送时替换
+
+| 参数名 | 值 |
+| :--- | :--- |
+| `backToNormal` | `$backToNormal` |
+| `priority` | `$priority` |
+| `ruleType` | `$ruleType` |
+| `description` | `$description` |
+| `applicationId` | `$applicationId` |
+| `createTimestamp` | `$createTimestamp` |
+| `troubleshootUrl` | `$troubleshootUrl` |
+
+添加完成后，**Preview** 中的请求体应为：
+
+```json
+{
+  "backToNormal": "$backToNormal",
+  "priority": "$priority",
+  "ruleType": "$ruleType",
+  "description": "$description",
+  "applicationId": "$applicationId",
+  "createTimestamp": "$createTimestamp",
+  "troubleshootUrl": "$troubleshootUrl"
+}
+```
+
+7. 点击 **Send Test Notification**，确认请求成功，然后点击 **Save Notification Hook**
+
+<Warning>
+不要添加 `$applicationToken`。持有 App token 的人可以读取该 App 中的数据，Flashduty 也不需要它。
+</Warning>
+
+</Step>
+
+<Step title="在告警规则中使用该钩子">
+
+1. 打开需要接入的告警规则（**Alerts** → **Alert Rules**），进入编辑页的 **Notifications** 页签
+2. 在 **Additionally send to** 下拉框中选择刚创建的 `Flashduty` 钩子，保存规则
+
+如需让所有新建的告警规则都推送到 Flashduty，可以把该钩子设为账号默认钩子（Account-default hooks）。
+
+</Step>
+
+<Step title="验证">
+
+1. 让一条告警规则触发，例如给一台主机建立 Heartbeat 告警后停止该主机上的 Sematext Agent，确认 Flashduty 收到活动告警
+2. 恢复数据上报，等 Sematext 发出恢复正常通知后，确认原告警恢复
+
+</Step>
+</Steps>
+
+<Note>
+**Send Test Notification** 发出的请求不属于任何告警规则，Flashduty 收到后直接返回成功，不会创建告警。
+</Note>
+
+## Alert Key
+---
+
+Sematext 在每条告警通知中都会自动带上告警规则 ID（`ruleId`）、规则名称（`alertName`），规则设置了 Group by 时还会带上触发告警的分组标签值（`filters`，例如 `{os.host=web-01}`）。这些字段不需要在通知钩子中配置。
+
+Alert Key 由 `ruleId` 和 `filters` 中的全部分组标签计算，标签的顺序不影响结果。因此：
+
+- 同一告警规则、同一分组的触发和恢复通知归入同一条告警
+- 同一告警规则按主机等标签分组时，每个分组各自一条告警
+- 告警等级、描述、时间和规则名称的变化不会改变 Alert Key
+
+带有 `alertName` 但缺少 `ruleId` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+`backToNormal` 为 `true` 时告警恢复，其余情况均视为触发。告警等级来自告警规则的优先级（`$priority`）：
+
+| Sematext 优先级 | Flashduty 等级 |
+| :--- | :--- |
+| Critical | Critical |
+| Error | Critical |
+| Warning | Warning |
+| Info | Info |
+| 为空或其他值 | Warning |
+
+<Note>
+`$priority` 未列在 Sematext 自定义参数文档中。如果推送到 Flashduty 的 `priority` 仍是原样的 `$priority`，告警等级统一为 Warning。
+</Note>
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警规则名称（`alertName`） |
+| `rule_id` | 告警规则 ID（`ruleId`） |
+| `rule_type` | 告警规则类型（`ruleType`），如 `HEARTBEAT`、`AF_VALUE`、`LOGSENE_VALUE`、`SYNTHETICS_RESULT_VALUE` |
+| `priority` | Sematext 中的原始优先级 |
+| `application_id` | Sematext App ID |
+| `filters` | Sematext 发送的分组标签原文 |
+| 分组标签，如 `os_host` | `filters` 中的每个标签，标签名中的 `.` 等字符替换为 `_` |
+| `troubleshoot_url` | Sematext 中该告警详情页的链接 |
+| `create_timestamp` | 本次告警通知的创建时间（UTC） |
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，**Send data as** 选择的是 **Json**
+- **告警没有恢复**：确认通知钩子中添加了 `backToNormal` 参数，值为 `$backToNormal`
+- **同一规则下不同主机的告警合并到了一起**：在告警规则中按主机标签（如 `os.host`）设置 Group by，并把聚合方式设为分别处理（all separately）
+- **告警等级都是 Warning**：检查推送内容中的 `priority`，参见上文状态和告警等级的说明
+
+更多变量含义请参阅 [Sematext Custom Webhooks Parameters](https://sematext.com/docs/integration/alerts-webhooks-custom-params/)。
