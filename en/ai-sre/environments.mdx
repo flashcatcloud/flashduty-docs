@@ -66,12 +66,22 @@ Go to **Environments** in the AI SRE sidebar and switch to the **Cloud** tab at 
 | Name | Yes | Must be unique within the account, up to 128 characters. |
 | Scope | Yes | Shared-scope templates are visible to the whole account. Team-scoped templates are visible and editable only by that team. |
 | Network access | No, defaults to "Allow all" | The dropdown shows three options — "Default allowlist," "Custom (your domain list)," and "Allow all" — but currently only **"Allow all"** can be selected. "Default allowlist" and "Custom" are shown in the UI but disabled; this is a known limitation, not yet available. In other words, creating or editing a cloud environment template today always leaves the Sandbox it's bound to with fully open egress. |
-| Environment variables | No | `.env` format (`KEY=value`, one per line, multi-line quoted values supported), up to 32 KB, with a live byte counter in the UI. |
+| Environment variables | No | `.env` format (`KEY=value`, one per line, multi-line quoted values supported), up to 32 KB, with a live byte counter in the UI. Platform-reserved keys cannot be set here — see below. |
 | Setup script | No | A Bash script, up to 64 KB, with a live byte counter in the UI. |
 
 <Warning>
 Environment variables are visible in plaintext to everyone who uses this cloud environment template — do not put secrets or credentials here.
 </Warning>
+
+<Note>
+**Platform-reserved keys cannot be set here.** These names are injected by the platform, and a template that sets one is rejected on save.
+
+- Exact matches: `FLASHDUTY_APP_KEY`, `FLASHDUTY_BASE_URL`, `FLASHDUTY_DOCS_URL`, `GH_TOKEN`, `GH_PROMPT_DISABLED`, `PATH`, `HOME`;
+- The auth / host / TLS settings the GitLab CLI (`glab`) reads: `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, `GITLAB_HOST`, `GL_HOST`, `GITLAB_URI`, `GITLAB_API_HOST`, `GITLAB_SSH_HOST`, `GITLAB_SUBFOLDER`, `CA_CERT`, `SKIP_TLS_VERIFY`;
+- Prefix matches: `GIT_CONFIG_`, `GLAB_`, and `GH_TOKEN_` (the last covering extra-installation GitHub tokens such as `GH_TOKEN_1`, `GH_TOKEN_2`).
+
+The server's own error is the authority on the list. One of these, `FLASHDUTY_DOCS_URL`, is injected into **every bash execution** and points at the product-docs tarball, so the built-in `flashduty-docs` skill can download the docs on demand — a template neither supplies nor overrides it.
+</Note>
 
 The setup script runs inside a **fresh sandbox (Ubuntu 24.04, running as root)**, **before the agent starts** — typically used to `apt install` packages the agent needs.
 
@@ -279,6 +289,17 @@ Uninstall commands are also in the setup guide, and differ by installation metho
 - **Linux (systemd) / manual install**: the install script's `--uninstall` flag (removes the service while preserving config) and `--purge` flag (removes config and data).
 - **Docker install**: uninstalling is a container command, unrelated to the install script's flags — `docker rm -f flashduty-runner` (removes the container, keeps the `/var/flashduty/workspace` data) and `docker rm -f flashduty-runner && rm -rf /var/flashduty/workspace` (full removal, including the workspace data).
 
+### Runner tool management
+
+A Runner can install the command-line tools it uses itself — you do not have to prepare them on the host:
+
+- **Manual install**: `flashduty-runner tool ensure gh`, `glab`, `uv`, or `node`. If a binary of the same name is already on `PATH`, the Runner reuses it and installs nothing; otherwise it downloads the pinned upstream archive, verifies the embedded SHA-256, and installs it atomically into the runner-owned tools directory.
+- **Automatic install**: before it launches a stdio MCP connector, the Runner installs the runtime that connector needs — `uv` (which provides `uvx`) or `node` (which provides `npx`) — so a host without either runtime can still run those connectors.
+
+Both paths need the Runner host to have **outbound network access** to fetch the archives. For intranet or air-gapped hosts, set `FLASHDUTY_RUNNER_TOOL_MIRROR_URL` to a private mirror with the same `<name>/<version>/<asset>` layout; this explicit override never falls back to the official source.
+
+Tools installed this way lead the `PATH`, so a name that exists both in the tools directory and on the host resolves to the Runner-installed version, while every other host command stays available.
+
 ## Permission Configuration
 
 ---
@@ -413,6 +434,19 @@ Environment selection is locked once per session: the Environment determined whe
 
 When you open a historical session, the selector shows the Environment that session originally locked to, along with its current status, in read-only mode. If the bound Runner is offline or deleted, the session cannot continue sending messages; reconnect that Runner or start a new session and use the cloud Sandbox.
 
+<Note>
+These are **two different layers** — don't conflate them:
+
+1. **A session binding never falls back** (the two paragraphs above describe this layer): the Environment a session locked to on its first send does not change. If that Runner later goes offline or is deleted, AI SRE never silently moves the session to another environment — it says so and refuses the send.
+2. **A selection-level fallback announces itself**: if you arrive via an entry that pins a **one-off Runner** — "Let AI SRE install it on the Runner", for example — and that Runner is no longer usable before the first send (deleted, or outside the set you can pick), belongs to a team you are not in, or its team cannot be confirmed, the composer's environment selector **explicitly switches back to Auto** and shows a warning — it does not silently land you on an environment you never picked. The three messages are:
+
+   - "This Runner is no longer available - switched to Auto."
+   - "This Runner belongs to team 〈team〉, which you're not a member of - switched to Auto."
+   - "Couldn't confirm which team this Runner belongs to - switched to Auto."
+
+   Along the same lines, a remembered composer selection that does not match the session's team is simply left off the first send, and the server resolves it as Auto.
+</Note>
+
 ## Scope
 
 ---
@@ -451,7 +485,7 @@ When troubleshooting Runner issues, start with the **Status** and **Last heartbe
   The private endpoint's certificate is not trusted by Runner. Prefer adding the CA that issued the certificate to the trust store of the Runner host or container. If the endpoint uses a self-signed certificate inside a trusted private network, you can instead explicitly enable `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY` as described above. Restart the service for a systemd deployment, recreate the container with the new environment variable for Docker, or restart the process for a manual deployment.
 </Accordion>
 <Accordion title="Session times out or does not respond" icon="server">
-  If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment. Restore that Runner, or start a new session and choose Auto or cloud Sandbox. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.
+  If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment — that rule covers sessions **already locked** to an Environment; for the selection-level fallback before the first send, see [Selecting an environment in a session](#selecting-an-environment-in-a-session). Restore that Runner, or start a new session and choose Auto or cloud Sandbox. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.
 </Accordion>
 </AccordionGroup>
 
