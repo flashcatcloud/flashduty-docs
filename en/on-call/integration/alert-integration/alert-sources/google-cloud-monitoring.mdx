@@ -1,9 +1,9 @@
 ---
 title: "Google Cloud Monitoring Alert Events"
-description: "Sync Google Cloud Monitoring alert events to Flashduty via webhook for automated alert noise reduction"
+description: "Sync Google Cloud Monitoring, Error Reporting, Security Command Center, and Cloud Billing budget alerts to Flashduty through a webhook or a Pub/Sub push subscription"
 ---
 
-Sync Google Cloud Monitoring alert events to Flashduty via webhook for automated alert noise reduction.
+Sync Google Cloud Monitoring, Error Reporting, Security Command Center, and Cloud Billing budget alerts to Flashduty through a webhook or a Pub/Sub push subscription.
 
 <div class="hide">
 
@@ -47,9 +47,20 @@ Choose this option when you need to route alerts to different channels based on 
 
 <div class="md-block">
 
-## I. Google Cloud Monitoring Alert Push Configuration
+The push URL of one **GCP Cloud Monitoring** integration accepts all of the following sources. No code runs in Google Cloud.
 
-### Step 1: Configure Alert Channel
+| Source | Delivery | Auto-recovery |
+|---|---|---|
+| Cloud Monitoring alerting policies | Webhook notification channel, or Pub/Sub notification channel + push subscription | Yes, when the incident closes |
+| Error Reporting | Webhook notification channel | No |
+| Security Command Center findings | Continuous export (NotificationConfig) to Pub/Sub + push subscription | Yes, when the finding becomes INACTIVE or is muted |
+| Cloud Billing budgets | Budget connected to a Pub/Sub topic + push subscription | No |
+
+Below, **push URL** means the integration push URL you copied earlier, in the form `https://api.flashcat.cloud/event/push/alert/google-cm?integration_key=<integration key>`.
+
+## I. Cloud Monitoring: webhook notification channel
+
+### Step 1: Configure alert channel
 1. Log in to the Google Cloud Console, search for the `Monitoring` product, and enter its console
 2. Find `Alerting` in the left menu and click `EDIT NOTIFICATION CHANNELS` to create a channel
 
@@ -62,7 +73,7 @@ Choose this option when you need to route alerts to different channels based on 
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/google-cm-2.png" />
 
-### Step 2: Use Flashduty Alert Channel in Alert Policy
+### Step 2: Use Flashduty alert channel in alert policy
 
 1. Return to the `Alerting` page
 2. Create or edit an existing policy
@@ -73,17 +84,150 @@ Choose this option when you need to route alerts to different channels based on 
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/google-cm-3.png" />
 
+Metric alerts, uptime checks, log-based alerts, and PromQL alerts (Managed Service for Prometheus) are all sent by alerting policies and are configured the same way.
+
+## II. Cloud Monitoring: Pub/Sub notification channel
+
+If your organization requires alerts to go through Pub/Sub, use a Pub/Sub notification channel. The Alert Key is the same as for the webhook channel (`incident_id`), so the two channels are interchangeable.
+
+1. Create the topic and push subscription as described in **Section VI. Create a Pub/Sub push subscription**.
+2. In `Alerting` → `EDIT NOTIFICATION CHANNELS`, click `ADD NEW` in the `Pub/Sub` section and enter the topic name.
+3. As prompted, grant `service-<project number>@gcp-sa-monitoring-notification.iam.gserviceaccount.com` the `Pub/Sub Publisher` role on the topic.
+4. Select this Pub/Sub channel in the alerting policy's `Notification channels` and check `Notify on incident closure`.
+
+## III. Error Reporting
+
+Error Reporting sends notifications through Cloud Monitoring webhook notification channels (schema version 1.0). It supports webhooks only, not Pub/Sub.
+
+1. Create a webhook notification channel as in **Section I, Step 1** (you can reuse the same **Flashduty** channel).
+2. Open the `Error Reporting` page and click `Configure notifications`.
+3. Select the **Flashduty** channel under `Notification channels` and save.
+
+Error Reporting sends a notification when an error cannot be grouped with existing errors, and when an error group marked `Resolved` occurs again.
+
+- One error group (same project, same error details link) maps to one alert. A notification for the same group merges into the alert while it is still open.
+- Error Reporting sends no "resolved" notification, so the alert never recovers by itself. Close it in Flashduty.
+- Alerts have Warning severity. To use another severity, append `&severity=Critical` (or `Info`) to the push URL.
+
+## IV. Security Command Center
+
+Security Command Center (SCC) can only continuously export findings to Pub/Sub. A push subscription forwards them to Flashduty.
+
+1. Create the topic and push subscription as described in **Section VI. Create a Pub/Sub push subscription**.
+2. Grant the SCC service account the `Pub/Sub Publisher` role on the topic, then create a continuous export (NotificationConfig), for example:
+
+```bash
+gcloud scc notifications create flashduty-findings \
+    --organization=<organization ID> \
+    --location=global \
+    --pubsub-topic=projects/<project ID>/topics/<topic name> \
+    --filter='severity="HIGH" OR severity="CRITICAL"'
+```
+
+<Warning>
+Do not add `state="ACTIVE"` to the filter. SCC only publishes finding updates that match the filter, so with `state="ACTIVE"` the update that makes a finding INACTIVE never arrives and the Flashduty alert cannot recover automatically.
+</Warning>
+
+- The finding's resource name, `finding.name`, is the Alert Key, so every update to one finding merges into one alert.
+- The alert recovers when the finding's `state` becomes `INACTIVE` (remediated, resource deleted, or set by hand) or its `mute` becomes `MUTED`. It triggers again when the finding becomes `ACTIVE` or `UNMUTED`.
+- Threat findings (for example, from Event Threat Detection) never become INACTIVE automatically. Change their state or mute them in SCC.
+
+## V. Cloud Billing budgets
+
+Budget alerts are available only as programmatic notifications through Pub/Sub.
+
+1. Create the topic and push subscription as described in **Section VI. Create a Pub/Sub push subscription**.
+2. Go to `Billing` → `Budgets & alerts`, create or edit a budget, and set threshold rules (actual and/or forecasted cost).
+3. Under `Manage notifications`, check `Connect a Pub/Sub topic to this budget`, select the topic above, and save.
+
+Cloud Billing publishes the budget's current status to the topic several times a day. The first message can take several hours. Flashduty handles the messages as follows:
+
+- A message that exceeds no threshold creates no alert.
+- Actual cost (`alertThresholdExceeded`) and forecasted cost (`forecastThresholdExceeded`) create separate alerts.
+- The Alert Key combines the billing account, budget, budget period, cost type, and the highest threshold exceeded. Repeated messages for the same threshold merge into one alert. Crossing a higher threshold creates a new alert.
+- Budget alerts never recover automatically. When a new budget period starts, alerts are tracked for the new period. Close alerts from the previous period by hand.
+
+## VI. Create a Pub/Sub push subscription
+
+Sections II, IV, and V share these steps. One push subscription can carry several sources.
+
+1. Go to `Pub/Sub` → `Topics` and click `CREATE TOPIC` (or use an existing topic).
+2. In the topic, click `CREATE SUBSCRIPTION`:
+    - **Delivery type**: select `Push`.
+    - **Endpoint URL**: enter the integration push URL.
+    - **Enable authentication**: leave unchecked. The `integration_key` in the push URL authenticates the request; Flashduty does not check Pub/Sub identity tokens.
+    - **Enable payload unwrapping**: leave unchecked. Flashduty needs the message attributes (such as a budget's `budgetId`), which unwrapping drops.
+3. Save the subscription.
+
+Flashduty returns 200 and logs the message when a Pub/Sub message cannot become an alert (for example, an unknown format), so Pub/Sub does not redeliver it forever.
+
 </div>
 
-## II. Status Mapping
+## Severity mapping
 
 <div class="md-block">
-  
+
+**Cloud Monitoring** (same for webhook and Pub/Sub)
+
 |Google Cloud Monitoring|Flashduty|Status|
 |---|---|---|
 |Critical|Critical|Critical|
 |Error|Warning|Warning|
 |Warning|Warning|Warning|
 |No severity|Info|Info|
+
+**Security Command Center**
+
+|SCC severity|Flashduty|Status|
+|---|---|---|
+|CRITICAL, HIGH|Critical|Critical|
+|MEDIUM|Warning|Warning|
+|LOW, unspecified|Info|Info|
+
+**Cloud Billing budgets**
+
+|Cost type|Highest threshold exceeded|Flashduty|
+|---|---|---|
+|Actual|≥ 100%|Critical|
+|Actual|< 100%|Warning|
+|Forecasted|≥ 100%|Warning|
+|Forecasted|< 100%|Info|
+
+**Error Reporting**: always Warning; change it with the `severity` push URL parameter.
+
+</div>
+
+## Alert labels
+
+<div class="md-block">
+
+|Source|Main labels|
+|---|---|
+|Cloud Monitoring|`policy_name`, `check` (condition name), `resource_name`, `resource_type`, `resource_display_name`, `severity`, `url`, `threshold_value`, `observed_value`, plus resource labels, metric labels, metadata user/system labels, and policy user labels|
+|Error Reporting|`project_id`, `service`, `service_version`, `exception_type`, `detail_link`, `request_method`, `request_url` (without query string), `response_status`|
+|Security Command Center|`check` (category), `resource` (resourceName), `finding_name`, `finding_class`, `state`, `mute`, `severity`, `external_uri`, `notification_config`|
+|Cloud Billing budgets|`budget_name`, `budget_id`, `billing_account_id`, `budget_amount`, `cost_amount`, `currency_code`, `cost_interval_start`, `threshold_type`, `threshold`|
+
+Cloud Monitoring resource labels and metadata labels never overwrite an existing label with the same name.
+
+</div>
+
+## FAQ
+
+<div class="md-block">
+
+<AccordionGroup>
+  <Accordion title="Does the Pub/Sub push subscription need authentication?">
+  No. The `integration_key` in the push URL identifies the integration. Leave `Enable authentication` unchecked.
+  </Accordion>
+  <Accordion title="Why don't budget alerts appear?">
+  - The first message can take several hours.
+  - A message that exceeds no threshold creates no alert.
+  - Check whether `Enable payload unwrapping` is checked on the push subscription. Unwrapping drops the message attributes, so Flashduty cannot identify the budget.
+  </Accordion>
+  <Accordion title="Why doesn't an SCC alert recover automatically?">
+  Check whether the NotificationConfig filter contains `state="ACTIVE"`, and whether the finding is a threat finding, which never becomes INACTIVE automatically.
+  </Accordion>
+</AccordionGroup>
 
 </div>
