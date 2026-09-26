@@ -1,0 +1,139 @@
+---
+title: "BugSnag alert integration"
+description: "Send error events from a BugSnag project to Flashduty On-call through the Webhook data forwarding integration."
+keywords: ["alert integration", "BugSnag", "webhook", "error monitoring", "data forwarding"]
+---
+
+Use the Webhook (data forwarding) integration of a BugSnag project to send error events to Flashduty On-call. Each BugSnag error maps to one Flashduty alert: the alert triggers when a new error occurs, occurs frequently, or is reopened, and recovers when the error is marked as fixed, snoozed, or ignored.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **BugSnag**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **BugSnag** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure BugSnag
+---
+
+The Webhook integration is configured per project and requires administrative privileges on the project. Configure it once for each project you want to connect.
+
+<Steps>
+<Step title="Add a Webhook integration">
+
+1. Open the BugSnag project you want to connect and click the settings icon in the upper-right corner to open **Project settings**
+2. Under **Integrations and email**, select **Data forwarding**
+3. Select **Webhook** from the available integrations
+4. Paste the full Flashduty push URL into **Webhook URL**. The URL must include `integration_key`
+
+</Step>
+
+<Step title="Select the triggers to send">
+
+Under **Notify me when**, select the triggers your on-call team should handle. Select **A collaborator changes the state of an error**; otherwise the alert does not recover when the error is marked as fixed. Also select **An error is automatically reopened** so that the alert triggers again when a fixed or snoozed error comes back:
+
+| BugSnag trigger | Trigger type | Effect in Flashduty |
+| :--- | :--- | :--- |
+| A new error occurs | `firstException` | Triggers the error's alert |
+| An error occurs frequently | `errorEventFrequency` | Triggers or updates the error's alert |
+| An error milestone is reached | `powerTen` | Triggers or updates the error's alert |
+| Every time an error occurs | `exception` | Triggers or updates the error's alert |
+| An error is automatically reopened | `reopened` | Triggers the error's alert again |
+| A collaborator changes the state of an error | `errorStateManualChange` | Recovers the error's alert when it is marked as Fixed, Snoozed, or Ignored; triggers it again when it is reopened, its snooze is cancelled, or it is unignored |
+
+**Every time an error occurs** sends one event for every occurrence of an error, which can be a large volume. In most cases, selecting **A new error occurs** and **An error occurs frequently** is enough.
+
+The following triggers are not about a single error. Flashduty acknowledges them without creating an alert, so you do not need to select them:
+
+- A collaborator comments on an error (`comment`)
+- This project has a spike in errors (`projectSpiking`)
+- This project has a new release (`release`)
+- This project is being rate-limited (`projectSamplingStarted`)
+- This project is close to being rate-limited (`projectApproachingRateLimit`)
+
+The filters below the triggers, such as release stage and handled state, reduce the events sent to Flashduty.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. Click **Test** to send a test request. The test request contains BugSnag's fixed sample error (`ExampleException`). Flashduty acknowledges it but does not create an alert
+2. Click **Save**
+3. Raise a new error in an application that uses the BugSnag SDK and confirm that Flashduty receives an active alert
+4. Mark the error as **Fixed** in BugSnag and confirm that the alert recovers
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the BugSnag error ID (`error.errorId`) as the Alert Key. BugSnag groups repeated occurrences of the same exception into one error, and every occurrence, frequency notification, reopen, and state change of that error carries the same `errorId`, so they merge into one alert, which the error's state change recovers.
+
+The per-occurrence event ID (`error.id`), error message, release stage, and severity do not change the Alert Key. Error events without `errorId` are rejected.
+
+## Status and severity
+---
+
+Flashduty sets the alert severity from the error's severity (`error.severity`):
+
+| BugSnag severity | Flashduty severity |
+| :--- | :--- |
+| `error` (default for unhandled errors) | Critical |
+| `warning` (default for manually reported errors) | Warning |
+| `info` | Info |
+| Other or empty | Warning |
+
+The trigger type sets the status:
+
+| Trigger type | Status |
+| :--- | :--- |
+| `firstException`, `errorEventFrequency`, `powerTen`, `exception`, `reopened` | Trigger |
+| `errorStateManualChange` with state `fixed`, `snoozed`, or `ignored` | Recover |
+| `errorStateManualChange` with state `reopened`, `snoozeCancelled`, or `unignored` | Trigger |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `trigger` | Trigger type of this delivery, such as `firstException` |
+| `state_change` | Type of manual state change, such as `fixed` |
+| `project` / `project_id` | BugSnag project name and ID |
+| `error_id` | Error ID, which is also the Alert Key |
+| `error_class` | Exception class name, such as `NoMethodError` |
+| `context` | Where the application was when the error occurred, such as `auth/session#create` |
+| `env` | Release stage, such as `production` |
+| `app_version` | Application version |
+| `host` | Hostname of the server that reported the error |
+| `bugsnag_severity` | Original BugSnag severity |
+| `error_status` | Current error status: `open`, `fixed`, `snoozed`, or `ignored` |
+| `unhandled` | Whether the error was unhandled |
+| `url` | Link to the error in BugSnag |
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: Confirm that the URL is complete and includes `integration_key`
+- **No alert after clicking Test**: This is expected. The test request does not create an alert; verify with a real error
+- **The alert does not recover**: Confirm that **A collaborator changes the state of an error** is selected and that the error was marked as Fixed, Snoozed, or Ignored in BugSnag
+- **A fixed error comes back but no new alert appears**: Confirm that **An error is automatically reopened** is selected
+- **The test succeeds but real errors do not arrive**: Check the filters below the triggers, for example whether only the `production` release stage is sent
+
+For field details, see [BugSnag Webhook](https://docs.bugsnag.com/product/integrations/data-forwarding/webhook/).

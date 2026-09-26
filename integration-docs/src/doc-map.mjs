@@ -81,6 +81,7 @@ export const docMap = {
   PRTG: `${alertBase}/prtg.mdx`,
   Netdata: `${alertBase}/netdata.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
+  Bugsnag: `${alertBase}/bugsnag.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
