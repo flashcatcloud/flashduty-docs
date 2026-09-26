@@ -1,0 +1,164 @@
+---
+title: "LibreNMS alert integration"
+description: "Send LibreNMS device alerts to Flashduty On-call through the LibreNMS API alert transport. Alerts close automatically when the alert rule recovers."
+keywords: ["alert integration", "LibreNMS", "API transport", "network monitoring", "SNMP"]
+---
+
+LibreNMS pushes alerts through an alert transport of type **API**: every time an alert rule triggers, changes, or recovers, LibreNMS posts one JSON body to Flashduty, built from the body template on this page. Each device and alert rule pair maps to one Flashduty alert: it opens when the rule triggers and closes automatically when the rule recovers.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **LibreNMS** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **LibreNMS** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure LibreNMS
+---
+
+The steps below need LibreNMS 25.7.0 or later: the body template escapes text fields with the `json_encode` filter, which is available from 25.7.0.
+
+<Steps>
+<Step title="Create the alert transport">
+
+Go to **Alerts → Alert Transports**, click **Create alert transport**, and fill in the form as follows:
+
+| Field | Value |
+| :--- | :--- |
+| **Transport name** | Any name, for example `Flashduty` |
+| **Transport type** | `API` |
+| **API Method** | `POST` |
+| **Send as form** | Unchecked |
+| **API URL** | The part of the push URL before `?`, that is `https://api.flashcat.cloud/event/push/alert/librenms` |
+| **Options** | `integration_key=<the integration_key value from the push URL>` |
+| **headers** | `Content-Type=application/json` |
+| **body** | The body template below |
+
+<Warning>LibreNMS drops everything after `?` in the **API URL** and sends only the **Options** entries as query parameters. Put `integration_key` in **Options**. If it is left in the **API URL**, Flashduty rejects the request.</Warning>
+
+Body template:
+
+```json
+{
+  "alert_id": "{{ $alert_id }}",
+  "rule_id": "{{ $rule_id }}",
+  "device_id": "{{ $device_id }}",
+  "state": "{{ $state }}",
+  "severity": "{{ $severity }}",
+  "rule": {{ $name|json_encode }},
+  "hostname": {{ $hostname|json_encode }},
+  "sys_name": {{ $sysName|json_encode }},
+  "os": {{ $os|json_encode }},
+  "location": {{ $location|json_encode }},
+  "msg": {{ $msg|json_encode }}
+}
+```
+
+Do not add quotes around the fields that use `|json_encode`: the filter already outputs a quoted, escaped JSON string, so quotes or line breaks in a rule name or alert message cannot break the JSON.
+
+Leave the other fields at their defaults and click **Save**.
+
+</Step>
+
+<Step title="Attach the transport to alert rules">
+
+From LibreNMS 26.4.0, alert rules pick their notification transports through an **Operation**. Earlier versions select **Transports** directly on the rule. Follow the steps for your version:
+
+**LibreNMS 26.4.0 and later**
+
+1. Go to **Alerts → Operations** and create an Operation, or edit the Operation the rule already uses
+2. Add the transport created above to a segment. For a new Operation, set **Steps from** to `1`, **Steps to** to `1`, and **Start** to `0` to send one notification as soon as the rule matches
+3. Go to **Alerts → Alert Rules**, edit the rule, and select that Operation under **Operation**
+
+A rule without an Operation still raises alerts in LibreNMS but sends no notification.
+
+**LibreNMS 25.7.0 to 26.3.x**
+
+Go to **Alerts → Alert Rules**, edit the rule, and select the transport created above under **Transports**. You can also check **Default Alert** on the transport so that every rule without its own transports uses it.
+
+On both versions, make sure **Recovery alerts** is on for the rule. Otherwise LibreNMS sends no notification when the rule recovers, and the Flashduty alert stays open. Click **Save Rule**.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+In the **Alerts → Alert Transports** list, click the test button next to the transport (the yellow check mark icon, tooltip **Test transport**) and confirm that LibreNMS reports a successful test. The test uses fixed LibreNMS test data (`alert_id` is `000`); Flashduty returns success and creates no alert.
+
+Then make a rule really trigger (for example, make a monitored device unreachable so that the **Devices up/down** rule alerts) and confirm that Flashduty receives an active alert. Bring the device back and confirm that the alert closes. LibreNMS checks alert rules after each poll, so alerts and recoveries usually arrive within one polling interval (5 minutes by default).
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `alert_id` as the Alert Key. `alert_id` is the row ID in the LibreNMS `alerts` table, which holds exactly one row per device and alert rule, and every trigger, change, and recovery notification carries the same value. The LibreNMS PagerDuty transport uses it as its dedup key too. So notifications for the same rule on the same device land on one alert, and a new trigger after recovery opens a new alert.
+
+Changes to the severity, rule name, host name, or alert message do not change the Alert Key. `alert_id` is unique only within one LibreNMS instance: use a separate Flashduty integration for each LibreNMS instance.
+
+Flashduty rejects requests without `alert_id` or `state`.
+
+## Alert lifecycle
+---
+
+Flashduty handles notifications by the `state` field:
+
+| LibreNMS `state` | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `1` | Alert triggered | Trigger an alert, or update the existing alert |
+| `3` | Alert got worse (more matching items) | Update the alert |
+| `4` | Alert got better (fewer matching items) | Update the alert |
+| `5` | Alert changed | Update the alert |
+| `0` | Alert recovered | Recover the alert |
+| `2` | Alert acknowledged | Ignore |
+
+When **Acknowledgement alerts** is on for a rule, LibreNMS sends a notification with `state` `2` when the alert is acknowledged. Acknowledgements neither open nor close a Flashduty alert, and ignored notifications get a success response.
+
+## Severity
+---
+
+The severity comes from the **Severity** of the alert rule:
+
+| LibreNMS Severity | Flashduty severity |
+| :--- | :--- |
+| `critical` | Critical |
+| `warning` | Warning |
+| `ok` | Info |
+| Any other value or empty | Critical |
+
+Recovery notifications carry the same rule severity, and the recovery event keeps it.
+
+## Alert content
+---
+
+- **Title**: `<rule name> on <host name>`. When the rule name is empty, `LibreNMS rule <rule_id>` is used instead
+- **Description**: the alert message `msg` rendered from the LibreNMS alert template. The default template includes the title, severity, time, and faulty items
+- **Labels**: `check` (rule name), `resource` and `host` (host name), `alert_id`, `rule_id`, `device_id`, `sys_name`, `os`, `location`, `severity` (raw rule severity), `state` (`alert`, `worse`, `better`, `changed`, or `recovered`)
+
+Empty fields are not written as labels.
+
+## Troubleshooting
+---
+
+- **LibreNMS reports HTTP 4xx when testing**: make sure `integration_key` is in **Options**, not in the **API URL**, and that **Send as form** is unchecked
+- **Flashduty says the body is not valid JSON**: make sure LibreNMS is 25.7.0 or later and that the fields with `|json_encode` have no extra quotes
+- **No alert is sent**: on 26.4.0 and later, make sure the rule uses an **Operation** that contains the transport; on earlier versions, make sure the rule's **Transports** include it. Check the send result on the device's **Alerts** page or in the **Event Log**
+- **The alert does not recover**: make sure **Recovery alerts** is on for the rule
+
+For the template variables, see the LibreNMS docs [Templates](https://docs.librenms.org/Alerting/Templates/) and [API transport](https://docs.librenms.org/Alerting/Transports/Api/).

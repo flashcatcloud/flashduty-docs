@@ -1,0 +1,115 @@
+---
+title: "Raygun 告警集成"
+description: "通过 Webhook 将 Raygun Crash Reporting 应用的错误通知和状态变更同步到 Flashduty On-call。"
+keywords: ["告警集成", "Raygun", "Webhook", "错误监控", "Crash Reporting"]
+---
+
+通过 Raygun Crash Reporting 应用的 Webhook 集成，将错误通知同步到 Flashduty On-call。每个错误组（Error group）对应一条 Flashduty 告警：错误首次出现或再次出现时触发，持续出现时更新，在 Raygun 中被标记为已解决（Resolved）时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Raygun**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Raygun**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Raygun 中配置
+---
+
+Webhook 集成按应用配置，只有 Raygun 的 Team 及更高套餐提供。多个应用需要分别配置，可以使用同一个推送地址。
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 在 Raygun 中打开需要接入的应用
+2. 在左侧菜单点击 **Integrations**，在集成列表中点击 **Webhook**
+3. 在 **Setup** 页签中，将 Flashduty 集成的完整推送地址粘贴到 URL 输入框，地址中需包含 `integration_key`
+4. 勾选 **Enabled**，点击 **Save changes**
+
+</Step>
+
+<Step title="了解推送的事件">
+
+Raygun 按应用的通知规则推送事件，Flashduty 的处理方式如下：
+
+| Raygun 事件 | `event` / `eventType` | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| 新错误出现 | `error_notification` / `NewErrorOccurred` | 触发该错误组的告警 |
+| 已解决的错误再次出现 | `error_notification` / `ErrorReoccurred` | 触发或更新该错误组的告警 |
+| 错误持续出现（1、5、10、30 分钟和每小时跟进） | `error_notification` / `OneMinuteFollowUp`、`FiveMinuteFollowUp`、`TenMinuteFollowUp`、`ThirtyMinuteFollowUp`、`HourlyFollowUp` | 更新该错误组的告警 |
+| 错误组被标记为已解决（包括在指定版本解决） | `error_activity` / `StatusChanged`，`status` 以 `Resolved` 开头 | 恢复该错误组的告警 |
+
+错误组被标记为 Ignored、Permanently Ignored 或 Active，以及分配（`AssignedToUser`）和评论（`CommentAdded`）事件不会创建告警，Flashduty 收到后直接返回成功。
+
+</Step>
+
+<Step title="验证">
+
+1. 在接入 Raygun SDK 的应用中触发一个新错误，确认 Flashduty 收到活动告警
+2. 在 Raygun 中将该错误组的状态改为 **Resolved**，确认原告警恢复
+
+</Step>
+</Steps>
+
+<Note>
+请使用应用级的 **Integrations → Webhook**。Raygun **Alerting** 中的计划级 Webhook 推送的是另一种结构（`EventType: Alert`），不包含错误组的状态变更，Flashduty 会返回参数错误。
+</Note>
+
+## Alert Key
+---
+
+Flashduty 按 Raygun 错误组聚合告警：同一错误组的新增、复发、跟进和解决通知归入同一条告警。
+
+Alert Key 由事件中的 `error.url`（Raygun 中错误组页面的链接）计算，只取链接的路径，协议、域名、末尾斜杠和查询参数都不参与计算。错误消息、发生次数、影响用户数和标签变化不会改变 Alert Key。缺少 `error.url` 的事件会被拒绝。
+
+## 状态和告警等级
+---
+
+Raygun 的错误不携带等级，Flashduty 统一使用 Warning：
+
+| Raygun 事件 | 状态 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| 所有 `error_notification` 事件 | 触发 | Warning |
+| `StatusChanged`，`status` 以 `Resolved` 开头 | 恢复 | - |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `event_type` | 本次推送的 `eventType` |
+| `status` | 状态变更事件中的新状态 |
+| `application` / `application_url` | Raygun 应用名称和链接 |
+| `url` | Raygun 中错误组页面的链接 |
+| `error_group` | 计算 Alert Key 使用的错误组路径 |
+| `users_affected` / `total_occurrences` | 错误组的影响用户数和累计发生次数 |
+| `first_occurred_on` / `last_occurred_on` | 错误组首次和最近一次发生的时间 |
+| `tags` | 本次错误实例的标签，逗号分隔 |
+
+受影响用户的标识、自定义数据（`customData`）和操作人姓名不会写入标签。
+
+## 排查问题
+---
+
+- **集成列表中没有 Webhook**：确认账号的套餐为 Team 或更高
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并且配置的是应用级 Webhook，而不是 Alerting 中的 Webhook
+- **告警没有恢复**：确认在 Raygun 中把错误组状态改为了 Resolved；改为 Ignored 不会恢复告警
+- **错误持续发生但没有新的推送**：Raygun 只在 1、5、10、30 分钟和每小时发送跟进通知，不会为每次发生都推送
+
+更多字段含义请参阅 [Raygun Webhooks](https://raygun.com/documentation/product-guides/crash-reporting/integrations/webhooks/)。

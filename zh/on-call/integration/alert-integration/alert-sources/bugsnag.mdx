@@ -1,0 +1,139 @@
+---
+title: "BugSnag 告警集成"
+description: "通过 Data forwarding 中的 Webhook 将 BugSnag 项目的错误事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "BugSnag", "Webhook", "错误监控", "Data forwarding"]
+---
+
+通过 BugSnag 项目的 Webhook（Data forwarding）集成，将错误事件同步到 Flashduty On-call。BugSnag 中的每个错误对应一条 Flashduty 告警：新错误出现、错误频繁发生或重新打开时触发，错误被标记为已修复（Fixed）、暂停提醒（Snoozed）或忽略（Ignored）时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **BugSnag**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **BugSnag**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 BugSnag 中配置
+---
+
+Webhook 集成按项目配置，需要项目的管理员权限。每个需要接入的项目都要单独配置一次。
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 打开需要接入的 BugSnag 项目，点击右上角的设置图标进入 **Project settings**
+2. 在 **Integrations and email** 下选择 **Data forwarding**
+3. 在可用集成中选择 **Webhook**
+4. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**，地址中需包含 `integration_key`
+
+</Step>
+
+<Step title="选择推送的触发条件">
+
+在 **Notify me when** 中勾选需要值班处理的触发条件。建议勾选 **A collaborator changes the state of an error**，否则错误被标记为已修复后告警不会自动恢复；同时勾选 **An error is automatically reopened**，以便已修复或暂停提醒的错误再次出现时重新触发告警：
+
+| BugSnag 触发条件 | 触发类型 | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| A new error occurs | `firstException` | 触发该错误的告警 |
+| An error occurs frequently | `errorEventFrequency` | 触发或更新该错误的告警 |
+| An error milestone is reached | `powerTen` | 触发或更新该错误的告警 |
+| Every time an error occurs | `exception` | 触发或更新该错误的告警 |
+| An error is automatically reopened | `reopened` | 重新触发该错误的告警 |
+| A collaborator changes the state of an error | `errorStateManualChange` | 标记为 Fixed、Snoozed、Ignored 时恢复该错误的告警；重新打开、取消暂停提醒或取消忽略时重新触发 |
+
+**Every time an error occurs** 会为错误的每一次发生推送一条事件，事件量较大，一般只勾选 **A new error occurs** 和 **An error occurs frequently** 即可。
+
+以下触发条件不针对单个错误，Flashduty 收到后直接返回成功，不会创建告警，无需勾选：
+
+- A collaborator comments on an error（`comment`）
+- This project has a spike in errors（`projectSpiking`）
+- This project has a new release（`release`）
+- This project is being rate-limited（`projectSamplingStarted`）
+- This project is close to being rate-limited（`projectApproachingRateLimit`）
+
+触发条件下方的过滤器（如发布阶段、错误是否已处理）可以减少推送到 Flashduty 的事件。
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 点击 **Test** 发送测试请求。测试请求的内容是 BugSnag 固定的示例错误（`ExampleException`），Flashduty 收到后返回成功，但不会创建告警
+2. 点击 **Save** 保存
+3. 在接入 BugSnag SDK 的应用中触发一个新错误，确认 Flashduty 收到活动告警
+4. 在 BugSnag 中将该错误标记为 **Fixed**，确认原告警恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 BugSnag 的错误 ID（`error.errorId`）作为 Alert Key。BugSnag 把同一类异常的多次发生归为一个错误，同一错误的每次发生、频率提醒、重新打开和状态变更都携带同一个 `errorId`，因此会合并到同一条告警，并由该错误的状态变更恢复。
+
+每次发生各自的事件 ID（`error.id`）、错误消息、发布阶段和严重程度变化不会改变 Alert Key。缺少 `errorId` 的错误事件会被拒绝。
+
+## 状态和告警等级
+---
+
+Flashduty 按错误的严重程度（`error.severity`）确定告警等级：
+
+| BugSnag 严重程度 | Flashduty 等级 |
+| :--- | :--- |
+| `error`（未处理异常的默认值） | Critical |
+| `warning`（手动上报的默认值） | Warning |
+| `info` | Info |
+| 其他或为空 | Warning |
+
+状态由触发类型决定：
+
+| 触发类型 | 状态 |
+| :--- | :--- |
+| `firstException`、`errorEventFrequency`、`powerTen`、`exception`、`reopened` | 触发 |
+| `errorStateManualChange`，状态变为 `fixed`、`snoozed`、`ignored` | 恢复 |
+| `errorStateManualChange`，状态变为 `reopened`、`snoozeCancelled`、`unignored` | 触发 |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `trigger` | 本次推送的触发类型，如 `firstException` |
+| `state_change` | 手动状态变更的类型，如 `fixed` |
+| `project` / `project_id` | BugSnag 项目名称和 ID |
+| `error_id` | 错误 ID，即 Alert Key |
+| `error_class` | 异常类名，如 `NoMethodError` |
+| `context` | 错误发生时应用所在的位置，如 `auth/session#create` |
+| `env` | 发布阶段，如 `production` |
+| `app_version` | 应用版本 |
+| `host` | 上报错误的服务器主机名 |
+| `bugsnag_severity` | BugSnag 原始严重程度 |
+| `error_status` | 错误当前状态：`open`、`fixed`、`snoozed`、`ignored` |
+| `unhandled` | 是否为未处理异常 |
+| `url` | BugSnag 中该错误的链接 |
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **点击 Test 后没有告警**：这是预期行为，测试请求不会创建告警；请用真实错误验证
+- **告警没有恢复**：确认已勾选 **A collaborator changes the state of an error**，并且是在 BugSnag 中将错误标记为 Fixed、Snoozed 或 Ignored
+- **错误已修复后再次出现，但没有新告警**：确认已勾选 **An error is automatically reopened**
+- **测试成功但真实错误没收到**：检查触发条件下方的过滤器，例如是否只推送 `production` 发布阶段的错误
+
+更多字段含义请参阅 [BugSnag Webhook](https://docs.bugsnag.com/product/integrations/data-forwarding/webhook/)。
