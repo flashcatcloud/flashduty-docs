@@ -87,6 +87,7 @@ export const docMap = {
   Librenms: `${alertBase}/librenms.mdx`,
   Icinga: `${alertBase}/icinga.mdx`,
   Sensu: `${alertBase}/sensu.mdx`,
+  Sysdig: `${alertBase}/sysdig.mdx`,
   Instana: `${alertBase}/instana.mdx`,
   Logicmonitor: `${alertBase}/logicmonitor.mdx`,
   UptimeCom: `${alertBase}/uptime-com.mdx`,
