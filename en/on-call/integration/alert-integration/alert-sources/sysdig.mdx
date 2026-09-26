@@ -1,0 +1,137 @@
+---
+title: "Sysdig alert integration"
+description: "Send Sysdig Monitor alerts to Flashduty On-call through a Webhook notification channel, and recover them automatically when the alert resolves."
+keywords: ["alert integration", "Sysdig", "Sysdig Monitor", "webhook", "notification channel"]
+---
+
+Use a Sysdig Monitor Webhook notification channel to send alert events to Flashduty On-call. Each time a Sysdig alert fires, it maps to one Flashduty alert: Sysdig sends `ACTIVE` when the alert triggers and when it renotifies, and sends `OK` when the alert condition clears, which recovers the alert. For alerts segmented with **Segment by**, each segment maps to its own Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Sysdig**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Sysdig** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Sysdig Monitor
+---
+
+Creating a notification channel requires administrator privileges in Sysdig Monitor.
+
+<Steps>
+<Step title="Create a Webhook notification channel">
+
+1. Log in to Sysdig Monitor as an administrator and go to **Integrations** → **Notification Channels** (**Settings** → **Notification Channels** in some versions)
+2. Click **Add Notification Channel** and select **Webhook**. Do not select **Custom Webhook**: Flashduty parses the fixed format of the Webhook channel
+3. Fill in the fields as follows:
+
+| Field | Value |
+| :--- | :--- |
+| **URL** | The full Flashduty push URL, including `integration_key` |
+| **Channel Name** | A recognizable name, such as `Flashduty` |
+| **Enabled** | On |
+| **Notify when Resolved** | On. If it is off, Sysdig sends no resolve notifications and alerts in Flashduty do not recover automatically |
+| **Notify when Acknowledged** | Off is recommended. Flashduty does not sync Sysdig acknowledgements |
+| **Test notification** | When on, Sysdig sends a test notification on save to check that the URL is reachable |
+| **Shared With** | **All Teams** or the current team, as needed |
+| **Custom headers** / **Custom data** | Leave empty |
+
+4. Click **Save**
+
+</Step>
+
+<Step title="Use the channel in alert rules">
+
+1. Go to **Alerts** and create or edit an alert rule
+2. In the notification settings (Notify), select the Webhook channel created in the previous step
+3. If the alert rule overrides this channel's notification options, make sure resolve notifications are not turned off
+4. Save the alert rule
+
+</Step>
+
+<Step title="Verify">
+
+1. When you save the notification channel, Sysdig sends a test notification named `TEST ALERT: Testing Notification Channel <channel name>`. Flashduty returns success but does not create an alert
+2. Make an alert rule that uses the channel fire, and confirm that Flashduty receives an active alert
+3. Wait for the alert condition to clear, and confirm that the alert recovers
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the Sysdig event ID (`event.id`) as the Alert Key. Sysdig creates one event each time an alert fires, and the first notification, renotifications, and the resolve notification of that event all carry the same event ID, so they merge into one alert, which the resolve notification recovers.
+
+- **Segmented alerts**: Sysdig sends a separate notification for each segment that fires, and each segment has its own event ID, so each segment is a separate Flashduty alert that recovers on its own
+- **Firing again**: when a rule fires again after it resolved, Sysdig creates a new event and Flashduty creates a new alert
+- Changes to the alert name, severity, metric value, and time do not change the Alert Key. Requests without `event.id` are rejected
+
+## Status and severity
+---
+
+`state` sets the status:
+
+| Sysdig `state` | Status |
+| :--- | :--- |
+| `ACTIVE` (trigger and renotification) | Trigger |
+| `OK` (alert condition cleared) | Recover |
+
+The alert rule's severity (`alert.severity`, 0 to 7) sets the alert severity. If it is missing, Flashduty uses `alert.severityLabel`:
+
+| Sysdig severity | Value | Flashduty severity |
+| :--- | :--- | :--- |
+| High | 0, 1 | Critical |
+| Medium | 2, 3 | Warning |
+| Low | 4, 5 | Warning |
+| Info (None) | 6, 7 | Info |
+| Other or empty | - | Warning |
+
+A recovered alert keeps the severity of its last trigger.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Alert rule name |
+| `resource` | The segment that fired, such as `kube_pod_name = 'api-7d9f'` |
+| `alert_id` | Sysdig alert rule ID |
+| `event_id` | Event ID, which is the Alert Key |
+| `condition` | Alert condition, such as `avg(avg(sysdig_container_cpu_used_percent)) > 75` |
+| `scope` | Alert rule scope; empty when not set |
+| `severity_level` / `severity_label` | Raw Sysdig severity value and name |
+| `alert_url` | Link to the alert rule in Sysdig |
+| `event_url` | Link to the event in Sysdig |
+| Others | Segment and scope labels from the Sysdig `labels` object, such as `kube_cluster_name`. The labels above take precedence on a name clash |
+
+The alert description is the Sysdig notification body (`alert.body`), which includes the metric value, segment, and trigger time.
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: make sure the URL is complete and includes `integration_key`, and that the channel type is **Webhook**, not **Custom Webhook**
+- **No alert after saving the channel**: this is expected. The test notification does not create an alert; use a real alert to verify
+- **The alert does not recover**: make sure the channel has **Notify when Resolved** on and that the alert rule does not turn off resolve notifications for this channel
+- **One rule creates several alerts**: the alert rule uses **Segment by**, and each segment fires and recovers on its own. This is expected
+- **Sysdig disabled the notification channel**: after repeated 4xx responses, Sysdig puts the channel under observation and disables it after several failures. After fixing the URL, re-enable the channel in Sysdig manually
+
+This integration accepts Sysdig Monitor alert notifications only. Sysdig Secure Webhook notifications (runtime policies, vulnerabilities, and so on) use a different format and are not supported at this URL.
+
+For field details, see [Sysdig Webhook notification channel](https://docs.sysdig.com/en/administration/configure-a-webhook-channel/).
