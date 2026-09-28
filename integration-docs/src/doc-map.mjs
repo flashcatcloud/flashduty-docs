@@ -22,6 +22,7 @@ export const docMap = {
   PagerDuty: `${alertBase}/pagerduty.mdx`,
   TencentBK: `${alertBase}/blueking.mdx`,
   TencentCLS: `${alertBase}/tencent-cls.mdx`,
+  TencentCSS: `${alertBase}/tencent-css.mdx`,
   TencentCm: `${alertBase}/tencent-cm.mdx`,
   TencentEb: `${alertBase}/tencent-eventbridge.mdx`,
   OceanBase: `${alertBase}/oceanbase.mdx`,
