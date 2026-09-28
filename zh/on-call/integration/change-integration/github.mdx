@@ -1,0 +1,131 @@
+---
+title: "GitHub 变更集成"
+description: "通过 GitHub Webhook 将 Deployment 部署和 Release 发布同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "GitHub", "Deployment", "Release", "Webhook", "部署事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 GitHub 仓库或组织的 Webhook，将部署（Deployment）和发布（Release）同步到 Flashduty On-call。每一次部署、每一个 Release 对应一条 Flashduty 变更；部署从创建、排队、执行到成功或失败的每个状态，都会更新同一条变更。
+
+GitHub Actions 中声明了 `environment` 的任务会自动创建 Deployment，因此使用 Actions 发布的仓库无需改动流水线即可接入。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **GitHub**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `repo`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 GitHub 中配置
+---
+
+<Steps>
+<Step title="打开 Webhook 设置">
+
+- 仓库级：进入仓库 **Settings → Webhooks**，点击 **Add webhook**
+- 组织级：进入组织 **Settings → Webhooks**，点击 **Add webhook**，组织下所有仓库的事件都会推送
+
+需要仓库或组织的管理员权限。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Payload URL**：粘贴 Flashduty 集成的完整推送地址
+2. **Content type**：选择 `application/json`（选择 `application/x-www-form-urlencoded` 同样可以接收）
+3. **Secret**：留空即可，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+</Step>
+
+<Step title="选择事件">
+
+1. 选择 **Let me select individual events**
+2. 勾选 **Deployments**、**Deployment statuses** 和 **Releases**，取消默认勾选的 **Pushes**
+3. 保持 **Active** 勾选，点击 **Add webhook**
+
+保存后 GitHub 会发送一次 `ping`，Flashduty 返回成功但不会生成变更。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| GitHub 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Deployment | `deployment:<deployment.id>` | 同一次部署的 `deployment` 事件和所有 `deployment_status` 事件更新同一条变更；同一仓库、同一环境的两次部署是两条变更 |
+| Release | `release:<release.id>` | 发布、取消发布、删除同一个 Release 更新同一条变更 |
+
+## 状态映射
+---
+
+| GitHub 事件 | GitHub 状态 | Flashduty 变更状态 |
+|---|---|---|
+| deployment | created | Ready |
+| deployment_status | waiting（等待环境审批） | Planned |
+| deployment_status | pending、queued | Ready |
+| deployment_status | in_progress | Processing |
+| deployment_status | success | Done |
+| deployment_status | failure、error | Failed |
+| release | published | Done |
+| release | unpublished、deleted | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
+
+以下推送返回成功但不生成变更：`ping`、未列出的其他事件类型、Release 的 `created`、`edited`、`released`、`prereleased` 动作（发布时 GitHub 会同时发送 `published`，以 `published` 为准）、部署状态 `inactive`（旧部署被新部署取代，不改变旧部署已有的结果）。
+
+## 变更内容
+---
+
+| 字段 | Deployment | Release |
+|---|---|---|
+| 标题 | `<仓库>: deploy <ref> (<短 SHA>) to <环境>` | `<仓库>: release <tag>` |
+| 描述 | Deployment 的 description | Release 名称（与 tag 相同时为空） |
+| 链接 | 部署日志（`log_url` 或 `target_url`），没有时为仓库的 Deployments 页面 | Release 页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | Deployment | Release |
+|---|---|---|
+| `repo` | 仓库全名，例如 `octo-org/hello-world` | 同左 |
+| `environment` | 部署环境 | — |
+| `ref` | 部署的分支、tag 或 SHA | Release 的目标分支或提交 |
+| `sha` | 部署的完整提交 SHA | — |
+| `version` | — | Release tag |
+| `task` | Deployment task，通常为 `deploy` | — |
+| `actor` | 创建部署的用户 | 发布者 |
+| `deployment_id` / `release_id` | GitHub 对象 ID | GitHub 对象 ID |
+| `state` | 最新的 GitHub 部署状态 | — |
+| `prerelease` | — | 预发布时为 `true` |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到部署变更？">
+
+- 确认 Webhook 勾选了 **Deployments** 和 **Deployment statuses**。只勾选 **Pushes** 时不会产生变更
+- 在 GitHub Webhook 页面的 **Recent Deliveries** 查看推送记录和 Flashduty 的响应
+- 只有使用 GitHub Deployments 的发布才会产生部署事件，例如在 GitHub Actions 任务中声明 `environment`，或调用 Deployments API
+
+</Accordion>
+
+<Accordion title="在 GitHub 中重新推送（Redeliver）会重复记录吗？">
+
+不会。同一状态、同一时间的事件只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported deployment_status.state`：收到了 Flashduty 尚未支持的部署状态，请联系我们
+- `deployment.id is missing` 或 `release.id is missing`：推送内容不完整，请确认推送来自 GitHub 原生 Webhook
+
+</Accordion>
+</AccordionGroup>
