@@ -101,6 +101,7 @@ export const docMap = {
   Mackerel: `${alertBase}/mackerel.mdx`,
   Thousandeyes: `${alertBase}/thousandeyes.mdx`,
   Kentik: `${alertBase}/kentik.mdx`,
+  Tailscale: `${alertBase}/tailscale.mdx`,
   Firefly: `${alertBase}/firefly.mdx`,
   Hackerone: `${alertBase}/hackerone.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
