@@ -1,0 +1,133 @@
+---
+title: "GitLab change integration"
+description: "Sync GitLab deployments to Flashduty On-call through a GitLab webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "GitLab", "Deployment", "Webhook", "deployment events"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a GitLab project or group webhook to sync deployments to Flashduty On-call. Each deployment becomes one Flashduty change; every state of a deployment, from waiting for approval through running to success, failure or cancellation, updates that same change.
+
+GitLab CI/CD jobs that declare an `environment` create deployments automatically, so projects that release with GitLab CI/CD can connect without changing their pipelines. This works for both GitLab.com and self-managed GitLab.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **GitLab** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project` or `environment`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure GitLab
+---
+
+<Steps>
+<Step title="Open webhook settings">
+
+- Project: go to the project's **Settings → Webhooks** and click **Add new webhook**
+- Group (GitLab Premium or higher): go to the group's **Settings → Webhooks** and click **Add new webhook**; deployments from every project in the group are sent
+
+Project webhooks need the Maintainer or Owner role on the project; group webhooks need the Owner role on the group.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **URL**: paste the complete Flashduty integration Push URL
+2. **Signing token** and **Secret token**: not needed; Flashduty authenticates the request with the `integration_key` in the Push URL
+
+</Step>
+
+<Step title="Select events">
+
+1. Under **Trigger**, select only **Deployment events** and clear the default **Push events**
+2. Keep **Enable SSL verification** selected and click **Add webhook**
+
+GitLab's **Test** feature cannot send deployment events. Other events sent with Test (such as Push events) get a success response from Flashduty but create no change.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| GitLab object | Change identifier (change_key) | Notes |
+|---|---|---|
+| Deployment | `deployment:<deployment_id>` | Every Deployment event of one deployment updates the same change; two deployments of the same project to the same environment (including a retried deploy job) are two changes |
+
+`deployment_id` is unique within one GitLab instance. To connect several GitLab instances (for example GitLab.com and a self-managed instance), create one integration per instance.
+
+## Status mapping
+---
+
+| GitLab deployment status | Flashduty change status |
+|---|---|
+| blocked (waiting for approval or a manual action) | Planned |
+| created | Ready |
+| running | Processing |
+| success | Done |
+| failed | Failed |
+| canceled, skipped | Canceled |
+
+Done, Failed and Canceled are end states; Flashduty records the change's end time. GitLab only sends events for blocked, running, success, failed and canceled.
+
+These deliveries get a success response but create no change: event types other than Deployment (Push, Pipeline and so on), and the protected-environment approval events `approved` and `rejected`. An approval event describes the approval record, not the deployment itself: after an approval GitLab sends `running` when the deployment starts, and after a rejection it sends `failed`; the change status follows those deployment events.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project>: deploy <ref> (<short SHA>) to <environment>` |
+| Description | The title of the deployed commit (`commit_title`) |
+| Link | The CI/CD job that ran the deployment; deployments created through the API or by a trigger job have no job, so the link is the project's Environments page |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Content |
+|---|---|
+| `project` | Full project path, for example `acme/order-service` |
+| `project_id` | GitLab project ID |
+| `environment` | Deployment environment |
+| `environment_tier` | Environment tier, for example `production` or `staging` |
+| `ref` | Deployed branch or tag |
+| `sha` | Short SHA of the deployed commit |
+| `actor` | Username of the user who triggered the deployment |
+| `deployment_id` | GitLab deployment ID |
+| `state` | Latest GitLab deployment status |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no deployment changes coming in?">
+
+- Make sure the webhook has **Deployment events** selected. With only **Push events** selected, no changes are created
+- Check the deliveries and Flashduty's responses under **Recent events** on the GitLab webhook edit page
+- Only GitLab deployments produce deployment events, for example a CI/CD job that declares an `environment`, or a call to the Deployments API
+
+</Accordion>
+
+<Accordion title="Does resending a request in GitLab (Resend Request) record it twice?">
+
+No. An event with the same status and the same time is recorded only once.
+
+</Accordion>
+
+<Accordion title="Why does a rejected deployment show as Failed?">
+
+After a deployment is rejected, GitLab sends `failed`; Flashduty records the deployment status as Failed, with the `state` label set to `failed`.
+
+</Accordion>
+
+<Accordion title="The push returns an InvalidParameter error?">
+
+- `unsupported deployment status`: Flashduty received a deployment status it does not support yet; contact us
+- `deployment_id is missing`: the payload is incomplete; make sure it comes from a native GitLab webhook
+
+</Accordion>
+</AccordionGroup>

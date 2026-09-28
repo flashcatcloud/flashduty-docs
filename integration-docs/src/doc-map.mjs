@@ -101,6 +101,12 @@ export const docMap = {
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
+  GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
+  HcpTerraformChange: `${integrationBase}/change-integration/hcp-terraform.mdx`,
+  ArgocdChange: `${integrationBase}/change-integration/argocd.mdx`,
+  NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
+  VercelChange: `${integrationBase}/change-integration/vercel.mdx`,
+  JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
   LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
