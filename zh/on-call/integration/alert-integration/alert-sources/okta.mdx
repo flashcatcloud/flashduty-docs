@@ -1,0 +1,165 @@
+---
+title: "Okta 告警集成"
+description: "通过 Okta Event Hooks 将账户锁定、泄露凭据和用户上报的可疑活动同步到 Flashduty On-call。"
+keywords: ["告警集成", "Okta", "Event Hooks", "账户锁定", "身份安全"]
+---
+
+通过 Okta 的 Event Hooks（事件钩子），把 Okta 组织中需要人处理的身份安全事件同步到 Flashduty On-call：
+
+- 用户账户被锁定（`user.account.lock`）时触发一条告警，账户解锁（`user.account.unlock` 或 `user.account.unlock_by_admin`）时这条告警自动恢复
+- 登录时使用了已知泄露的凭据（`security.breached_credential.detected`）、用户上报可疑活动（`user.account.report_suspicious_activity_by_enduser`）时各触发一条告警，这两类事件没有恢复通知
+
+只有超级管理员（Super Administrator）可以创建和配置 Event Hook，每个 Okta 组织最多 25 个 Event Hook。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Okta**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Okta**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Okta 中配置
+---
+
+<Steps>
+<Step title="创建 Event Hook">
+
+1. 以超级管理员身份登录 Okta 管理控制台（Admin Console），进入 **Workflow → Event Hooks**，点击 **Create Event Hook**
+2. **Name**：填写名称，例如 `Flashduty`
+3. **URL**：粘贴 Flashduty 集成的完整推送地址（包含 `integration_key`）
+4. **Authentication field**、**Authentication secret** 和 **Custom headers** 留空。Flashduty 通过推送地址中的 `integration_key` 识别集成，不需要额外的认证头
+
+</Step>
+
+<Step title="订阅事件">
+
+在 **Subscribe to events** 中选择以下事件，不需要选其他事件：
+
+| 事件 | 说明 |
+| :--- | :--- |
+| `user.account.lock` | 登录失败次数超过上限，账户被自动锁定 |
+| `user.account.unlock` | 账户自动解锁或用户自助解锁 |
+| `user.account.unlock_by_admin` | 管理员解锁账户 |
+| `security.breached_credential.detected` | 登录时使用了已知泄露的凭据 |
+| `user.account.report_suspicious_activity_by_enduser` | 用户上报了可疑活动 |
+
+锁定和解锁要订阅在同一个 Event Hook 里，否则告警不会自动恢复。其他事件即使推送过来，Flashduty 也会返回成功并忽略，不会生成告警。
+
+点击 **Save & Continue**。
+
+</Step>
+
+<Step title="验证推送地址">
+
+在 **Verify Endpoint Ownership** 窗口中点击 **Verify**。Okta 会向推送地址发送一次 GET 请求，Flashduty 自动完成应答。验证通过后 Event Hook 状态变为 **Active**，开始推送事件。
+
+创建或修改 Event Hook 后，Okta 可能需要几分钟才开始推送事件。
+
+</Step>
+
+<Step title="测试推送">
+
+在 Event Hook 的 **Preview** 页签中：
+
+1. 在 **Event Type** 中选择 `user.account.lock`，在 **System Log Event** 中选择一条近期的锁定事件
+2. 点击 **Deliver Request**，Flashduty 中出现一条账户锁定告警
+3. 再选择 `user.account.unlock_by_admin` 或 `user.account.unlock`，选择同一用户的解锁事件并发送，原告警恢复
+
+Preview 发送的是组织 System Log 中的真实事件，Flashduty 无法把它和正式推送区分开，因此会生成真实告警。如果组织中没有可选的 System Log 事件，Okta 使用字段为 `null` 的示例数据，这类请求缺少用户信息，会被 Flashduty 拒绝。
+
+</Step>
+</Steps>
+
+## 配置超时自动关闭
+---
+
+泄露凭据和可疑活动告警没有恢复通知，不会自动关闭。请在接收这些告警的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，**超时计时起点**选择**故障触发**，**超时时长**建议设为 24 小时：处理人有一个工作日确认和重置凭据，未处理的故障也不会一直处于打开状态。
+
+账户锁定告警由解锁事件关闭，不依赖这项设置。
+
+## 推送内容
+---
+
+每次推送的 `data.events` 数组中可能包含多个事件，Flashduty 按事件的 `published` 时间顺序逐条处理。每个事件是一条 Okta System Log 记录，Flashduty 使用以下字段：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `eventType` | 事件类型 | 判断是否生成告警、告警状态和等级；标签 `event_type` |
+| `target[]` 中类型为 `User` 的对象，没有时取 `actor` | 事件涉及的用户 | Alert Key；标签 `user_id`、`user_name`；登录名写入告警描述 |
+| `actor` | 事件的执行者（例如解锁账户的管理员） | 与涉及用户不同时，标签 `actor_id`、`actor_name` |
+| `displayMessage` | 事件说明 | 告警描述 |
+| `severity` | Okta 记录的事件级别 | 标签 `okta_severity`，不影响告警等级 |
+| `outcome.result`、`outcome.reason` | 事件结果和原因 | 标签 `outcome_result`、`outcome_reason` |
+| `client.ipAddress`、`client.geographicalContext` | 请求来源 IP、城市和国家 | 标签 `client_ip`、`client_city`、`client_country` |
+| 推送的 `source` | Event Hook 所在的 Okta 组织地址 | 标签 `okta_org` |
+
+告警标题的格式为 `<事件名称>: <用户显示名>`，例如 `Okta account locked: Jane Doe`。每条告警还带有标签 `source=okta`。
+
+## Alert Key
+---
+
+Flashduty 使用事件类别和用户 ID 生成 Alert Key：
+
+- 同一用户的锁定和解锁事件落在同一条告警上：锁定触发告警，解锁恢复告警。Okta 至少投递一次，重复投递的锁定事件会合并到同一条活动告警中
+- 不同用户的锁定生成不同的告警
+- 同一用户的锁定、泄露凭据和可疑活动分别生成不同的告警
+- 同一用户在告警未关闭时再次发生泄露凭据或可疑活动事件，合并到同一条告警中
+
+## 状态和告警等级
+---
+
+Okta 事件自带的 `severity` 不反映处理的紧急程度（例如账户锁定记录为 `DEBUG`），Flashduty 按事件类型映射等级：
+
+| Okta 事件 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `user.account.lock` | Warning |
+| `user.account.unlock`、`user.account.unlock_by_admin` | 恢复，原等级为 Warning |
+| `security.breached_credential.detected` | Warning |
+| `user.account.report_suspicious_activity_by_enduser` | Critical |
+| 其他事件类型 | 忽略，不生成告警 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么不支持 security.threat.detected（ThreatInsight）？">
+
+Okta 事件类型参考中，`security.threat.detected` 和 `user.account.lock.limit` 没有标记为 Event Hook 可用（event-hook-eligible），无法通过 Event Hook 订阅。
+
+</Accordion>
+
+<Accordion title="解锁后告警为什么没有恢复？">
+
+请确认 `user.account.unlock` 和 `user.account.unlock_by_admin` 已订阅在同一个 Event Hook 中。Okta 不保证推送顺序：如果解锁事件比锁定事件先到达（两者不在同一次推送中），锁定告警会保持打开，需要手动关闭。
+
+</Accordion>
+
+<Accordion title="Okta 会重试失败的推送吗？">
+
+Okta 的超时时间为 3 秒，返回 5xx 或超时时最多重试一次；返回 4xx 不重试。推送失败会记录在 Okta System Log 中，事件类型为 `event_hook.delivery`。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Verify 失败**：确认 URL 是完整的推送地址（包含 `integration_key`）
+- **Flashduty 返回参数错误**：推送中需要生成告警的事件缺少用户信息（`target` 和 `actor` 中都没有类型为 `User` 的对象）。常见于在 Preview 中使用示例数据
+- **收不到事件**：确认 Event Hook 状态为 **Active**，并已订阅上述事件；在 Okta System Log 中搜索 `event_hook.delivery` 查看推送失败记录
