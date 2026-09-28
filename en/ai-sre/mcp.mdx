@@ -72,6 +72,22 @@ Installed MCP servers record a `source_template_name` field that points back to 
 A template that **requires a Runner** (the `requires_runner` flag in its details) can only be used in an environment where you have deployed a BYOC Runner; cloud Sandboxes do not support it. `requires_runner` is independent of transport, and today's 50-template catalog contains both kinds: 23 **HTTP Streaming** templates that need no Runner, and 27 **stdio** templates that do — including Alibaba Cloud OpenAPI, Alibaba Cloud Observability, Nightingale (n9e), Gitee, GreptimeDB, Prometheus, Grafana (Self-Hosted), Kafka (Confluent), AWS, ClickHouse, MySQL, PostgreSQL, Alibaba Cloud RDS, Redis, and MongoDB. Those stdio templates are launched locally on each environment via `uvx` / `npx`, and a cloud Sandbox cannot launch local subprocesses; confirm your account has a working BYOC Runner configured before installing. See [Environments (BYOC)](/en/ai-sre/environments).
 </Warning>
 
+### Systems only Monitors can query
+
+The catalog also contains a class of rows for **systems only Monitors can query** (currently Loki, VictoriaLogs, and Oracle): they appear under their category (Observability / Database), and when MCP / App / Skill rows are mixed on the same screen they carry a `Monitors` kind tag. They are **not connectors you can onboard from the marketplace** — they are entry points meaning "once you add a datasource in Monitors, AI SRE can query this system" — so they never appear in the **Recommended** block above (that block lists connectable templates).
+
+Clicking such a row (or its **+**, which opens the same panel) opens a panel with **no Connect button**, showing only:
+
+- The account's **datasources of that type** and their status, e.g. "N connected · runs through the alert engine — no URL, token or Runner needed"; with none yet it reads "No 〈type〉 datasource yet · add one in Monitors and you can query it, no Runner needed". The row's **+** appears only while the account has no datasource of that type and you have permission to add one; otherwise that slot shows "N connected" or "Added by a Monitors admin".
+- When datasources of that type exist, the primary button is **Try it in chat**: it opens a new session prefilled with a question against your datasource (it is not sent automatically).
+- With none yet, it offers **Add more in Monitors →**, opening Monitors → Datasources → Add in a new tab (the type preselected); a member without add permission only sees "A Monitors admin adds it and this updates automatically" and is not offered that action.
+
+Some MCP templates support both routes — a direct MCP connector and the Monitors one (for example Prometheus, MySQL, PostgreSQL, ClickHouse, Elasticsearch, SLS). Those rows are tagged `MCP · Monitors` and their dialog adds an "Access method" choice between the two.
+
+<Note>
+Row names share a namespace with template names: if a system already has a template of the same name, only the template row is shown (the template row is the one carrying connection parameters). On a private deployment **without the Monitors module**, these rows are not listed and a template's dialog offers no Monitors route — the list API returns `monit_available: false` and the console hides the related affordances based on it.
+</Note>
+
 ## Adding an MCP Server
 
 ---
@@ -88,7 +104,7 @@ Go to **Plugins → MCP**. The list page has two entries in the top-right corner
 | Name | string | Yes | The server name, used as the identifier when agents call it (e.g., `sqlite-explorer` in `mcp:sqlite-explorer/query`). Must start with a letter; may only contain letters, digits, `-`, and `_`; length 1–255. **Case-insensitive and unique** within an account; cannot duplicate a built-in server name. |
 | Transport | enum | Yes | How the agent communicates with the server. See "Transport" below. |
 | Scope | Shared / Team | Yes | The scope of this MCP server: **Shared** (visible account-wide) or a specific **Team** (visible only to members of that team). See "Scope" below. |
-| Execution Environment | Cloud / BYOC Runners (multiple) | No | Controls where this MCP server is available. Select Cloud and one or more visible BYOC Runners; leave empty to make it available everywhere. It does not route calls: an MCP call still runs in the current AI SRE session's environment. For a service available only on a private network, select only the Runner(s) that can reach it. See [Environments (BYOC)](/en/ai-sre/environments). |
+| Execution Environment | Cloud / BYOC Runners (multiple) | No | Controls where this MCP server is available. Select Cloud and one or more visible BYOC Runners; leave empty to make it available everywhere. It does not route calls: an MCP call still runs in the current AI SRE session's environment. For a service available only on a private network, select only the Runner(s) that can reach it. Conversely, when this list **does not** include the session's own environment, that session cannot call it directly — but the agent still knows the server exists and which environment can run it; see "Cross-environment connectors" below. See [Environments (BYOC)](/en/ai-sre/environments). |
 | Description | string | Yes | Describes what this server does, for identification in the list. |
 
 <Note>
@@ -203,6 +219,19 @@ To confirm which tools a given MCP server actually exposes in a particular envir
 <Note>
 Reading Flashduty incidents, alerts, and other data is a **built-in** agent capability: the **Flashduty MCP server** is injected directly into the agent at the start of every session by the runtime, bypassing this page's MCP server list API — it does not appear in the server list above, and there is nothing to configure, enable, or view here for it. This capability is maintained by the platform and is available to every account by default.
 </Note>
+
+### Cross-environment connectors
+
+An MCP server can be bound to execution environments **other than the current session's own**. That session cannot call it directly — execution environments do not share a network, and a tool call is always made from the session's own environment. But the agent does not conclude the connector is absent:
+
+- **The agent knows about it from the start**: at session start the agent sees the connectors that are connected but bound to another execution environment — their names, what they do, and **which execution environments they run in**. The same connector can resolve to different names in different environments, so directory entries carry a team annotation to keep them distinguishable.
+- **A search states where it can run**: when a search matches such a connector, the result carries the environments it runs in.
+- **Asking for it by name is not answered with "not found"**: when the agent looks a connector up by name, it gets an explanation that the connector is connected but bound to another execution environment, plus how to use it — rather than being told the account has no such thing.
+- **The way to use it is to dispatch a subagent into that environment**: the agent hands the work to a subagent running in the target execution environment (`agent_dispatch`'s `environment` argument — see [Agent](/en/ai-sre/agents)), and that subagent discovers and calls the server's tools on its own side, then brings the results back into the conversation.
+- **Only environments it can actually dispatch to are listed**: the targets are **account-scope Runners** plus the Runners of the **team the current session is bound to**, and online ones (plus the bound cloud environment). Environments that are offline, never connected, deleted, or scoped to a team this session cannot dispatch to are annotated with the reason, and the agent says so plainly instead of pretending the call is possible.
+- **Only the conversation's main session sees this directory**: a dispatched subagent has no dispatch capability of its own and reports only the connectors it can call directly in its own environment; when another environment is needed, the subagent reports back to its parent.
+
+Conversely, to make a connector directly usable **here**, add the current environment to that server's Execution Environment list (provided the server is reachable from this session). See [Environments (BYOC)](/en/ai-sre/environments) for how the environments themselves differ.
 
 ## Scope
 
