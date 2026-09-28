@@ -108,6 +108,7 @@ export const docMap = {
   Statuspage: `${alertBase}/statuspage.mdx`,
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
+  Github: `${alertBase}/github.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,

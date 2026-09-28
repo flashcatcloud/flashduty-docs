@@ -1,0 +1,159 @@
+---
+title: "GitHub alert integration"
+description: "Send GitHub Dependabot, code scanning, and secret scanning alerts and failed Actions workflow runs to Flashduty On-call through a repository or organization webhook."
+keywords: ["alert integration", "GitHub", "Dependabot", "code scanning", "secret scanning", "GitHub Actions", "webhook"]
+---
+
+Use a GitHub repository or organization webhook to send the GitHub events that need on-call attention to Flashduty On-call:
+
+- **Security alerts**: Dependabot alerts, code scanning alerts, and secret scanning alerts. Each GitHub security alert maps to one Flashduty alert, which recovers when the alert is fixed, dismissed, or closed in GitHub.
+- **Failed Actions workflow runs**: workflow runs that conclude with `failure`, `timed_out`, or `startup_failure`. Each run maps to one alert, and GitHub never sends a recovery event for it.
+
+Change events such as deployments and code pushes are not part of this integration.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **GitHub**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **GitHub** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure GitHub
+---
+
+A webhook can be created on a single repository or on an organization (covering every repository in it). A repository webhook requires admin access to the repository; an organization webhook requires the organization owner role.
+
+<Steps>
+<Step title="Make sure the security features are on">
+
+Security alerts are only raised when the matching feature is enabled. Check under the repository's **Settings → Advanced Security**:
+
+| Feature | Cost |
+| :--- | :--- |
+| Dependabot alerts | Free for all repositories |
+| Code scanning (for example, the CodeQL default setup) | Free for public repositories; private repositories need GitHub Code Security |
+| Secret scanning | Free for public repositories; private repositories need GitHub Secret Protection |
+
+Skip this step if you only want Actions failures.
+
+</Step>
+
+<Step title="Add the webhook">
+
+1. Repository webhook: open the repository and click **Settings → Webhooks → Add webhook**. Organization webhook: open the organization and click **Settings → Webhooks → Add webhook**
+2. **Payload URL**: paste the full Flashduty push URL, including `integration_key`
+3. **Content type**: select `application/json` (`application/x-www-form-urlencoded` is also accepted)
+4. **Secret**: leave it empty. Flashduty identifies the integration by the `integration_key` in the push URL and does not verify signatures
+5. **SSL verification**: keep **Enable SSL verification**
+6. **Which events would you like to trigger this webhook?**: select **Let me select individual events**, clear the preselected **Pushes**, and select the events you need:
+   - **Dependabot alerts**
+   - **Code scanning alerts**
+   - **Secret scanning alerts**
+   - **Workflow runs**
+7. Keep **Active** selected and click **Add webhook**
+
+</Step>
+
+<Step title="Verify connectivity and the lifecycle">
+
+GitHub sends a `ping` event as soon as the webhook is added. Check under the webhook's **Recent Deliveries** that the response code is `200`. The `ping` only verifies that the URL is reachable and does not create an alert.
+
+- **Actions failure**: run a workflow that fails (for example, a `workflow_dispatch` workflow that runs `exit 1`) and confirm that Flashduty receives an alert.
+- **Security alert**: add a dependency version with a known vulnerability to a test repository. When Dependabot raises the alert, Flashduty triggers an alert; **Dismiss** the alert in GitHub and confirm that the Flashduty alert recovers.
+
+GitHub does not retry failed deliveries automatically. Use **Redeliver** in **Recent Deliveries** to resend any delivery from the past 3 days; a redelivered event merges into the original alert.
+
+</Step>
+</Steps>
+
+## Events and alert status
+---
+
+GitHub puts the event type in the `X-GitHub-Event` request header and the action in the `action` field of the body. Flashduty handles them as follows:
+
+| Event | Triggers or updates the alert | Recovers the alert | Ignored (success response, no alert) |
+| :--- | :--- | :--- | :--- |
+| `dependabot_alert` | `created`, `reopened`, `reintroduced`, `auto_reopened` | `fixed`, `dismissed`, `auto_dismissed` | `assignees_changed` |
+| `code_scanning_alert` | `created`, `reopened`, `reopened_by_user` | `fixed`, `closed_by_user` | `appeared_in_branch`, `updated_assignment` |
+| `secret_scanning_alert` | `created`, `reopened`, `publicly_leaked` | `resolved` | `assigned`, `unassigned`, `validated`, `metadata_created`, `metadata_removed` |
+| `workflow_run` | `completed` with conclusion `failure`, `timed_out`, or `startup_failure` | None | `requested`, `in_progress`, and every other conclusion (`success`, `cancelled`, `skipped`, and so on) |
+
+`ping` and other event types (such as a `push` selected by mistake) also get a success response without creating an alert.
+
+### Turn on the auto-resolve timeout for Actions failures
+
+A failed workflow run is a one-shot event: even when a later run succeeds, GitHub sends no recovery event for the failure. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest **Incident trigger** as the **Window timing start** and a **Timeout duration** of 12 hours, or close the incident by hand after the fix.
+
+The auto-resolve timeout applies to every incident in the channel. If security alerts and Actions failures go to the same channel, unfinished security alerts are closed by the timeout too. We recommend a shared integration whose **Route** sends `workflow_run` (label `event`) to a separate channel with the auto-resolve timeout turned on.
+
+## Alert Key
+---
+
+- **Security alerts**: the Alert Key is built from the event type, the repository ID (`repository.id`), and the alert number (`alert.number`). The alert number is unique per repository and alert type, and GitHub uses it to address the alert in its API (for example, `/repos/{owner}/{repo}/dependabot/alerts/{alert_number}`). The Alert Key stays the same from creation through fix, dismissal, and reopening, and renaming the repository does not change it.
+- **Actions failures**: the Alert Key is built from the repository ID and the workflow run ID (`workflow_run.id`). **Re-run** keeps the run ID, so a re-run that fails again merges into the same alert; a new run creates a new alert.
+
+Events without `repository.id`, `alert.number`, or `workflow_run.id` are rejected.
+
+## Severity
+---
+
+| Event | GitHub field | GitHub value | Flashduty severity |
+| :--- | :--- | :--- | :--- |
+| Dependabot | `alert.security_advisory.severity` | `critical`, `high` | Critical |
+| | | `medium` | Warning |
+| | | `low` | Info |
+| | | Empty or other | Warning |
+| Code scanning | `alert.rule.security_severity_level` (security rules) | `critical`, `high` | Critical |
+| | | `medium` | Warning |
+| | | `low` | Info |
+| | `alert.rule.severity` when there is no security severity | `error` | Critical |
+| | | `warning` | Warning |
+| | | `note`, `none` | Info |
+| | | Empty or other | Warning |
+| Secret scanning | No severity field | - | Critical |
+| Actions failure | - | - | Warning |
+
+A recovery event keeps the alert's existing severity.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `event` / `action` | Event type and action |
+| `repository` / `repository_id` | Repository full name and ID |
+| `alert_number` / `alert_url` | Security alert number and its link in GitHub |
+| `check` | GHSA ID for Dependabot, rule ID for code scanning, secret type for secret scanning, workflow name for Actions |
+| `severity` | Raw GitHub severity (Dependabot advisory severity or code scanning rule severity) |
+| `security_severity` | Security severity of the code scanning rule |
+| `package` / `ecosystem` / `manifest_path` / `ghsa_id` / `cve_id` | Dependency package, ecosystem, manifest file, and vulnerability IDs of a Dependabot alert |
+| `tool` / `ref` | Code scanning tool and the branch of the most recent instance |
+| `validity` | Whether the secret is still valid (`active`, `inactive`, `unknown`) |
+| `workflow_path` / `branch` / `conclusion` / `trigger` | Workflow file, branch, run conclusion, and triggering event |
+| `run_id` / `run_number` / `run_attempt` / `run_url` / `head_sha` | Workflow run ID, number, attempt, link, and commit |
+
+## Troubleshooting
+---
+
+- **Recent Deliveries shows a failure**: open the delivery's **Response**. If it is not `200`, make sure the push URL is complete and includes `integration_key`. GitHub waits at most 10 seconds for a response
+- **Ping succeeds but no alert arrives**: make sure the four events above are selected and the repository has the matching security features enabled. Successful, cancelled, or skipped workflow runs never create alerts
+- **A security alert does not recover**: make sure the alert was fixed, dismissed, or closed in GitHub, and find the matching `fixed`, `dismissed`, `closed_by_user`, or `resolved` delivery in **Recent Deliveries**
+- **An Actions failure alert never closes**: GitHub sends no recovery event; turn on the auto-resolve timeout as described above
+
+For field details, see GitHub's [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and [Creating webhooks](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks).
