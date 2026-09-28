@@ -93,6 +93,7 @@ export const docMap = {
   Logicmonitor: `${alertBase}/logicmonitor.mdx`,
   UptimeCom: `${alertBase}/uptime-com.mdx`,
   Sematext: `${alertBase}/sematext.mdx`,
+  Uptrends: `${alertBase}/uptrends.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
