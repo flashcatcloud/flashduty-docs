@@ -86,6 +86,7 @@ export const docMap = {
   Bugsnag: `${alertBase}/bugsnag.mdx`,
   Raygun: `${alertBase}/raygun.mdx`,
   Librenms: `${alertBase}/librenms.mdx`,
+  Observium: `${alertBase}/observium.mdx`,
   Icinga: `${alertBase}/icinga.mdx`,
   Sensu: `${alertBase}/sensu.mdx`,
   Sysdig: `${alertBase}/sysdig.mdx`,
