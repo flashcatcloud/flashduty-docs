@@ -1,0 +1,137 @@
+---
+title: "JFrog Artifactory change integration"
+description: "Sync artifact deploys, deletes, moves, and copies from JFrog Artifactory to Flashduty On-call through a webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "JFrog", "Artifactory", "artifact", "Webhook", "change events"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a JFrog Artifactory predefined webhook to sync artifact deploys, deletes, moves, and copies to Flashduty On-call. Each deployed artifact becomes one change, and deleting that same artifact later updates the change to Canceled; each move or copy becomes a change of its own.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **JFrog Artifactory** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `repo` or `path`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure JFrog Artifactory
+---
+
+<Steps>
+<Step title="Create a webhook">
+
+1. Sign in to the JFrog Platform and select **All Projects** or a specific project
+2. Go to **Platform → Integrations → Webhooks** and click **New Webhook**
+3. Keep the **Predefined** toggle selected (do not use Custom)
+
+You need admin or project admin permission.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **Name**: for example, `flashduty-changes`
+2. **URL**: paste the complete Flashduty integration Push URL
+3. **Secret token**: leave empty; Flashduty authenticates with the `integration_key` in the Push URL
+
+</Step>
+
+<Step title="Select events and repositories">
+
+1. Under **Artifacts**, select **Artifact was deployed**, **Artifact was deleted**, **Artifact was moved**, and **Artifact was copied**
+2. Select the repositories to watch: all local repositories, a list of repositories, or include/exclude path patterns
+3. Click **Test** to check connectivity, then click **Create**
+
+**Test** sends JFrog's sample data (checksum `sample_checksum`); Flashduty returns success but records no change.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+JFrog payloads carry no change ID, so Flashduty identifies an artifact by its location plus its content checksum:
+
+| Artifactory event | Change key (change_key) | Notes |
+|---|---|---|
+| deployed, deleted | `artifact:<repository>/<path>@<sha256>` | Deploying and later deleting the same content update the same change; new content at the same path (a different checksum) is a new change |
+| moved | `moved:<repository>/<path>@<sha256> -> <target>` | One change per move |
+| copied | `copied:<repository>/<path>@<sha256> -> <target>` | One change per copy |
+
+For moved and copied, `<repository>/<path>` is the artifact's original location and `<target>` is the payload's `target_repo_path`.
+
+## Status mapping
+---
+
+| Artifactory event (event_type) | Flashduty change status |
+|---|---|
+| deployed | Done |
+| moved | Done |
+| copied | Done |
+| deleted | Canceled |
+
+Artifactory sends artifact events after the operation completes, so each change has already ended when its first event arrives.
+
+The following deliveries return success but record no change: event domains other than artifacts (Artifact Properties, Docker, Builds, Release Bundles, and so on), `cached` (a remote repository caching a downloaded artifact, which is not a change), and the sample data sent by the **Test** button.
+
+## Change content
+---
+
+| Field | deployed, deleted | moved, copied |
+|---|---|---|
+| Title | `<repository>/<path> (<first 12 characters of sha256>)` | `move <repository>/<path> (<first 12 characters of sha256>) to <target>`, or `copy ...` for a copy |
+| Description | Empty | Empty |
+| Link | The artifact's page in the JFrog Platform | The target location's page in the JFrog Platform |
+
+The link is built from the payload's `jpd_origin`; when the payload has no such field, the change has no link.
+
+Labels can be used in routes and to filter the change list:
+
+| Label | Description |
+|---|---|
+| `repo` | Repository key; for moved and copied, the original repository |
+| `path` | The artifact's path in the repository |
+| `name` | File name |
+| `sha256` | SHA-256 checksum of the artifact's content |
+| `source_repo_path` | moved and copied only: the original location |
+| `target_repo_path` | moved and copied only: the target location |
+| `actor` | The user or access token subject that performed the operation |
+| `event_type` | Artifactory event: `deployed`, `deleted`, `moved`, or `copied` |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no changes arriving?">
+
+- Make sure the webhook is **Predefined** and has events under **Artifacts** selected
+- Make sure the repository you deploy to is within the webhook's selected repositories
+- Check the delivery records and Flashduty's responses on the webhook's **Troubleshooting** tab (on JFrog Cloud, the instance must have this feature enabled)
+
+</Accordion>
+
+<Accordion title="What happens when I deploy the same file again?">
+
+Deploying a file with identical content to the same path adds an event to the existing change instead of creating a new one. Different content creates a new change.
+
+</Accordion>
+
+<Accordion title="Are Artifactory retries recorded twice?">
+
+A retry adds an event but does not create a new change. JFrog payloads carry no event time, so Flashduty records each event at the time it is received and cannot recognize a retry.
+
+</Accordion>
+
+<Accordion title="The push returns an InvalidParameter error">
+
+- `unsupported event_type`: Flashduty received an artifact event it does not support yet; contact us
+- `data.repo_key is missing`, `data.path is missing`, `data.sha256 is missing`, or `data.target_repo_path is missing`: the payload is incomplete; make sure you use a Predefined webhook, not a Custom webhook with a customized payload
+
+</Accordion>
+</AccordionGroup>
