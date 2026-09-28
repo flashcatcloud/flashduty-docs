@@ -94,6 +94,7 @@ export const docMap = {
   Logicmonitor: `${alertBase}/logicmonitor.mdx`,
   UptimeCom: `${alertBase}/uptime-com.mdx`,
   Sematext: `${alertBase}/sematext.mdx`,
+  Fortimonitor: `${alertBase}/fortimonitor.mdx`,
   Uptrends: `${alertBase}/uptrends.mdx`,
   Hetrixtools: `${alertBase}/hetrixtools.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
