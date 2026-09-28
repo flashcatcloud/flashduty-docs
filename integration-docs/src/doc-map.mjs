@@ -126,7 +126,6 @@ export const docMap = {
   JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
   VercelChange: `${integrationBase}/change-integration/vercel.mdx`,
   JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
-  NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
   BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
