@@ -1,0 +1,139 @@
+---
+title: "LaunchDarkly 变更集成"
+description: "通过 LaunchDarkly Webhook 将功能开关（Feature Flag）和用户分群（Segment）的变更同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "LaunchDarkly", "Feature Flag", "功能开关", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 LaunchDarkly 组织级 Webhook，将功能开关（Flag）和用户分群（Segment）的变更同步到 Flashduty On-call。LaunchDarkly 的变更历史（Change history）中每一条 Flag 或 Segment 记录对应一条 Flashduty 变更，例如打开或关闭开关、修改定向规则、修改默认规则。
+
+LaunchDarkly 推送的是已经生效的变更，因此每条变更都直接记录为 **Done**。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **LaunchDarkly**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`、`flag`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 LaunchDarkly 中配置
+---
+
+<Steps>
+<Step title="打开 Webhooks 集成">
+
+1. 点击左侧栏的 **齿轮** 图标，进入 **Organization settings**
+2. 点击 **Integrations**，找到 **Webhooks**，点击 **Add integration**
+
+需要能管理集成的成员角色（例如 Admin）。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Name**：填写便于识别的名称，例如 `Flashduty`
+2. **URL**：粘贴 Flashduty 集成的完整推送地址
+3. **Sign this webhook**：无需勾选，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+</Step>
+
+<Step title="选择推送范围">
+
+不添加策略（Policy）时，LaunchDarkly 只推送 **production** 环境的 Flag 变更。如需推送其他环境或 Segment 变更，添加如下策略：
+
+```json
+[
+  {
+    "effect": "allow",
+    "actions": ["*"],
+    "resources": ["proj/*:env/*:flag/*", "proj/*:env/*:segment/*"]
+  }
+]
+```
+
+将 `env/*` 替换为具体环境（例如 `env/production`）即可只推送该环境。勾选同意条款后点击 **Save settings**。
+
+</Step>
+</Steps>
+
+LaunchDarkly 没有测试推送按钮。保存后在任一 Flag 上做一次变更，即可在 Flashduty 变更列表中看到记录。
+
+## 一条变更是什么
+---
+
+| LaunchDarkly 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 变更历史记录（Change history entry） | 记录的 `_id` | 每次保存 Flag 或 Segment 产生一条记录，对应一条 Flashduty 变更；同一个开关先打开再关闭是两条变更 |
+
+## 状态映射
+---
+
+| LaunchDarkly 记录 | Flashduty 变更状态 |
+|---|---|
+| Flag 或 Segment 的变更（开关、定向规则、默认规则、变体、创建、删除、归档、应用审批请求等） | Done |
+
+以下推送返回成功但不生成变更：
+
+- 其他资源类型的记录，例如项目、环境、成员、角色、Webhook、指标、实验
+- 只包含以下动作的记录，它们不改变 Flag 的求值结果：
+  - 审批请求的创建、修改、评审、删除（审批通过并应用后，LaunchDarkly 会推送应用这一步的记录）
+  - 定时变更的创建、修改和删除（到期执行时会推送执行的记录）
+  - 名称、描述、标签、维护者、临时标记、弃用标记、自定义属性、规则描述、代码引用、Flag 链接、关注者、Segment 导出
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<Flag 或 Segment 名称> in <环境>: <动作描述>`，例如 `Checkout redesign in production: turned on the flag`；项目级动作（例如创建 Flag）不带环境 |
+| 描述 | 变更备注（Comment）与 LaunchDarkly 的变更明细 |
+| 链接 | LaunchDarkly 中该 Flag 或 Segment 的页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目 key |
+| `environment` | 环境 key，例如 `production`；项目级动作没有此标签 |
+| `flag` | Flag key（Flag 变更） |
+| `segment` | Segment key（Segment 变更） |
+| `kind` | `flag` 或 `segment` |
+| `action` | LaunchDarkly 动作，多个时以逗号分隔，例如 `updateOn`、`updateRules` |
+| `actor` | 操作的成员姓名，通过 API 操作时为 Access token 或应用名称 |
+| `audit_log_id` | 变更历史记录 ID |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到 staging 等环境或 Segment 的变更？">
+
+未配置策略时 LaunchDarkly 只推送 production 环境的 Flag 变更。按上文 **选择推送范围** 添加策略。
+
+</Accordion>
+
+<Accordion title="LaunchDarkly 重试推送会重复记录吗？">
+
+不会。推送失败时 LaunchDarkly 会重试一次，重试内容与原推送相同，Flashduty 只记录一次。
+
+</Accordion>
+
+<Accordion title="推送顺序与变更顺序不一致？">
+
+LaunchDarkly 不保证按时间顺序推送。Flashduty 使用记录自身的时间（`date`）作为变更时间。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `_id is missing`：推送内容不完整，请确认推送来自 LaunchDarkly 原生 Webhook
+- `invalid date`：推送中的时间字段格式不正确
+
+</Accordion>
+</AccordionGroup>

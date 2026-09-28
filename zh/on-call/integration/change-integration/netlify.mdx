@@ -1,0 +1,130 @@
+---
+title: "Netlify 变更集成"
+description: "通过 Netlify 部署通知（HTTP POST request）将部署同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Netlify", "部署通知", "Deploy notifications", "Webhook", "部署事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Netlify 项目的部署通知（Deploy notifications），将部署同步到 Flashduty On-call。每一次部署（Deploy）对应一条 Flashduty 变更；部署从等待审批、开始构建到成功或失败的每个通知，都会更新同一条变更。
+
+生产部署、分支部署和 Deploy Preview 都会推送，可以用 `environment` 标签区分。Netlify 所有套餐都支持 HTTP POST request 类型的部署通知。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Netlify**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Netlify 中配置
+---
+
+Netlify 的每条通知只监听一个事件，需要为下表中的每个事件各添加一条通知，推送地址相同。
+
+<Steps>
+<Step title="打开部署通知设置">
+
+进入 Netlify 项目，选择 **Project configuration → Notifications → Deploy notifications**，点击 **Add notification**，选择 **HTTP POST request**。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Event to listen for**：选择一个事件，见下一步
+2. **URL to notify**：粘贴 Flashduty 集成的完整推送地址
+3. **JWS secret token**：留空即可，Flashduty 通过推送地址中的 `integration_key` 鉴权
+4. 点击 **Save**
+
+</Step>
+
+<Step title="为每个事件添加一条通知">
+
+| 事件 | 是否需要 |
+|---|---|
+| Deploy started | 必需 |
+| Deploy succeeded | 必需 |
+| Deploy failed | 必需 |
+| Deploy restored | 建议，记录回滚 |
+| Deploy request pending、Deploy request accepted、Deploy request rejected | 项目开启了部署审批（不受信任的部署需要批准）时添加 |
+
+无需添加 Deploy locked、Deploy unlocked、Deploy deleted：它们不改变部署结果，Flashduty 返回成功但不生成变更。Previously successful deploy failed 和 Previously failed deploy succeeded 与 Deploy failed、Deploy succeeded 重复，也无需添加。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| Netlify 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Deploy | 部署 ID（`id`） | 同一次部署的所有通知更新同一条变更；同一项目、同一分支的两次部署是两条变更 |
+
+回滚（Deploy restored）重新发布的是一次已有的部署，因此会更新那次部署对应的变更，状态为 Done，事件时间为回滚时间。
+
+## 状态映射
+---
+
+| Netlify 事件 | Flashduty 变更状态 |
+|---|---|
+| Deploy request pending | Planned |
+| Deploy request accepted | Ready |
+| Deploy started | Processing |
+| Deploy succeeded | Done |
+| Deploy restored | Done |
+| Deploy failed | Failed |
+| Deploy request rejected | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目名>: deploy <分支> (<短 SHA>) to <部署上下文>`，例如 `example-site: deploy main (f95f852) to production`；手动部署没有分支和提交时为 `<项目名>: deploy to <部署上下文>` |
+| 描述 | 部署的 title，通常是提交信息或手动部署时填写的说明 |
+| 链接 | Netlify 控制台中这次部署的页面；推送中没有 `admin_url` 时为这次部署的访问地址 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | Netlify 项目名 |
+| `site_id` | Netlify 项目 ID |
+| `environment` | 部署上下文：`production`、`deploy-preview`、`branch-deploy` 等 |
+| `ref` | 部署的分支 |
+| `sha` | 部署的完整提交 SHA |
+| `deploy_id` | Netlify 部署 ID |
+| `review_id` | Deploy Preview 对应的 Pull Request 编号 |
+| `state` | 最新通知中的 Netlify 部署状态，例如 `building`、`ready`、`error` |
+| `error_message` | 部署失败时 Netlify 给出的错误信息 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么只看到开始或只看到结束？">
+
+Netlify 的每条通知只推送一个事件。请确认 Deploy started、Deploy succeeded、Deploy failed 三个事件都已各自添加了一条通知。
+
+</Accordion>
+
+<Accordion title="重复推送会重复记录吗？">
+
+不会。同一部署、同一状态、同一时间的通知只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported X-Netlify-Event`：收到了 Flashduty 尚未支持的 Netlify 事件，请联系我们
+- `deploy id is missing`：推送内容不完整，请确认推送来自 Netlify 部署通知
+
+</Accordion>
+</AccordionGroup>

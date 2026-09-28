@@ -117,6 +117,16 @@ export const docMap = {
   DbPull: `${alertBase}/db-pull.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  GithubChange: `${integrationBase}/change-integration/github.mdx`,
+  GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
+  LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
+  NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
+  HcpTerraformChange: `${integrationBase}/change-integration/hcp-terraform.mdx`,
+  ArgocdChange: `${integrationBase}/change-integration/argocd.mdx`,
+  JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
+  VercelChange: `${integrationBase}/change-integration/vercel.mdx`,
+  JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
+  BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
