@@ -101,6 +101,7 @@ export const docMap = {
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
+  JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
