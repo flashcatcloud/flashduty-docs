@@ -1,13 +1,13 @@
 ---
 title: "GitHub alert integration"
-description: "Send GitHub Dependabot, code scanning, and secret scanning alerts and failed Actions workflow runs to Flashduty On-call through a repository or organization webhook."
+description: "Send GitHub Dependabot, code scanning, and secret scanning alerts and failed Actions workflows to Flashduty On-call through a repository or organization webhook, and recover them once fixed."
 keywords: ["alert integration", "GitHub", "Dependabot", "code scanning", "secret scanning", "GitHub Actions", "webhook"]
 ---
 
 Use a GitHub repository or organization webhook to send the GitHub events that need on-call attention to Flashduty On-call:
 
 - **Security alerts**: Dependabot alerts, code scanning alerts, and secret scanning alerts. Each GitHub security alert maps to one Flashduty alert, which recovers when the alert is fixed, dismissed, or closed in GitHub.
-- **Failed Actions workflow runs**: workflow runs that conclude with `failure`, `timed_out`, or `startup_failure`. Each run maps to one alert, and GitHub never sends a recovery event for it.
+- **Failed Actions workflows**: each workflow on each branch maps to one alert. It triggers when a run concludes with `failure`, `timed_out`, or `startup_failure`, and recovers when a later run of that workflow on the same branch succeeds.
 
 Change events such as deployments and code pushes are not part of this integration.
 
@@ -74,7 +74,7 @@ Skip this step if you only want Actions failures.
 
 GitHub sends a `ping` event as soon as the webhook is added. Check under the webhook's **Recent Deliveries** that the response code is `200`. The `ping` only verifies that the URL is reachable and does not create an alert.
 
-- **Actions failure**: run a workflow that fails (for example, a `workflow_dispatch` workflow that runs `exit 1`) and confirm that Flashduty receives an alert.
+- **Actions failure**: run a workflow that fails (for example, a `workflow_dispatch` workflow that runs `exit 1`) and confirm that Flashduty receives an alert. Then make the workflow pass on the same branch and confirm that the alert recovers.
 - **Security alert**: add a dependency version with a known vulnerability to a test repository. When Dependabot raises the alert, Flashduty triggers an alert; **Dismiss** the alert in GitHub and confirm that the Flashduty alert recovers.
 
 GitHub does not retry failed deliveries automatically. Use **Redeliver** in **Recent Deliveries** to resend any delivery from the past 3 days; a redelivered event merges into the original alert.
@@ -92,23 +92,28 @@ GitHub puts the event type in the `X-GitHub-Event` request header and the action
 | `dependabot_alert` | `created`, `reopened`, `reintroduced`, `auto_reopened` | `fixed`, `dismissed`, `auto_dismissed` | `assignees_changed` |
 | `code_scanning_alert` | `created`, `reopened`, `reopened_by_user` | `fixed`, `closed_by_user` | `appeared_in_branch`, `updated_assignment` |
 | `secret_scanning_alert` | `created`, `reopened`, `publicly_leaked` | `resolved` | `assigned`, `unassigned`, `validated`, `metadata_created`, `metadata_removed` |
-| `workflow_run` | `completed` with conclusion `failure`, `timed_out`, or `startup_failure` | None | `requested`, `in_progress`, and every other conclusion (`success`, `cancelled`, `skipped`, and so on) |
+| `workflow_run` | `completed` with conclusion `failure`, `timed_out`, or `startup_failure` | `completed` with conclusion `success` | `requested`, `in_progress`, and conclusions `cancelled`, `skipped`, `neutral`, `action_required`, `stale` |
 
 `ping` and other event types (such as a `push` selected by mistake) also get a success response without creating an alert.
-
-### Turn on the auto-resolve timeout for Actions failures
-
-A failed workflow run is a one-shot event: even when a later run succeeds, GitHub sends no recovery event for the failure. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest **Incident trigger** as the **Window timing start** and a **Timeout duration** of 12 hours, or close the incident by hand after the fix.
-
-The auto-resolve timeout applies to every incident in the channel. If security alerts and Actions failures go to the same channel, unfinished security alerts are closed by the timeout too. We recommend a shared integration whose **Route** sends `workflow_run` (label `event`) to a separate channel with the auto-resolve timeout turned on.
 
 ## Alert Key
 ---
 
 - **Security alerts**: the Alert Key is built from the event type, the repository ID (`repository.id`), and the alert number (`alert.number`). The alert number is unique per repository and alert type, and GitHub uses it to address the alert in its API (for example, `/repos/{owner}/{repo}/dependabot/alerts/{alert_number}`). The Alert Key stays the same from creation through fix, dismissal, and reopening, and renaming the repository does not change it.
-- **Actions failures**: the Alert Key is built from the repository ID and the workflow run ID (`workflow_run.id`). **Re-run** keeps the run ID, so a re-run that fails again merges into the same alert; a new run creates a new alert.
+- **Actions failures**: the Alert Key is built from the repository ID, the workflow ID (`workflow_run.workflow_id`), the ID of the repository the run came from (`workflow_run.head_repository.id`), and the branch (`workflow_run.head_branch`). Later runs of the same workflow on the same branch, including **Re-run**, merge into this alert, and any successful run recovers it. Each branch and each workflow gets its own alert; a pull request from a fork never merges with a branch of the same name in your repository. A run without branch information gets its own alert keyed by the run ID (`workflow_run.id`), which recovers only when a **Re-run** of that run succeeds.
 
-Events without `repository.id`, `alert.number`, or `workflow_run.id` are rejected.
+Events without `repository.id`, `alert.number`, `workflow_run.id`, or `workflow_run.workflow_id` are rejected.
+
+## When alerts do not recover
+---
+
+In these cases no successful run follows, so the alert does not recover on its own:
+
+- The branch was deleted or merged after the failure (for example, a pull request branch), or the workflow no longer runs on that branch
+- The failed run has no branch information and was not re-run
+- An older run on the same branch finished with a failure after a newer run succeeded
+
+We recommend turning on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) with **Incident trigger** as the **Window timing start** and a **Timeout duration** of 24 hours. A failed workflow is normally fixed within a working day. Security alerts recover when they are fixed, dismissed, or closed in GitHub, so a channel that only receives security alerts can leave the timeout off.
 
 ## Severity
 ---
@@ -124,7 +129,7 @@ Events without `repository.id`, `alert.number`, or `workflow_run.id` are rejecte
 | | | `note`, `none` | Info |
 | | | Empty or other | Warning |
 | Secret scanning | No severity field | - | Critical |
-| Actions failure | - | - | Warning |
+| Actions failure | - | - | Warning (kept on recovery) |
 
 A recovery event keeps the alert's existing severity.
 
@@ -149,8 +154,8 @@ A recovery event keeps the alert's existing severity.
 ---
 
 - **Recent Deliveries shows a failure**: open the delivery's **Response**. If it is not `200`, make sure the push URL is complete and includes `integration_key`. GitHub waits at most 10 seconds for a response
-- **Ping succeeds but no alert arrives**: make sure the four events above are selected and the repository has the matching security features enabled. Successful, cancelled, or skipped workflow runs never create alerts
+- **Ping succeeds but no alert arrives**: make sure the four events above are selected and the repository has the matching security features enabled. Cancelled or skipped workflow runs never create alerts, and a successful run only recovers an existing one
 - **A security alert does not recover**: make sure the alert was fixed, dismissed, or closed in GitHub, and find the matching `fixed`, `dismissed`, `closed_by_user`, or `resolved` delivery in **Recent Deliveries**
-- **An Actions failure alert never closes**: GitHub sends no recovery event; turn on the auto-resolve timeout as described above
+- **An Actions failure alert never closes**: make sure a later run of that workflow succeeded on the same branch. For deleted branches and similar cases, see "When alerts do not recover" above
 
 For field details, see GitHub's [Webhook events and payloads](https://docs.github.com/en/webhooks/webhook-events-and-payloads) and [Creating webhooks](https://docs.github.com/en/webhooks/using-webhooks/creating-webhooks).
