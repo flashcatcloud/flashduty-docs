@@ -105,6 +105,7 @@ export const docMap = {
   Firefly: `${alertBase}/firefly.mdx`,
   Hackerone: `${alertBase}/hackerone.mdx`,
   Okta: `${alertBase}/okta.mdx`,
+  Statuspage: `${alertBase}/statuspage.mdx`,
   Argocd: `${alertBase}/argocd.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
