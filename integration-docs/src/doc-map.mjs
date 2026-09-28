@@ -125,6 +125,7 @@ export const docMap = {
   ArgocdChange: `${integrationBase}/change-integration/argocd.mdx`,
   JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
   VercelChange: `${integrationBase}/change-integration/vercel.mdx`,
+  JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
