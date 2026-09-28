@@ -1,0 +1,164 @@
+---
+title: "Flux CD 告警集成"
+description: "通过 Flux notification-controller 的 generic Provider 将 Flux 对象的对账失败同步到 Flashduty On-call，对账恢复成功后自动关闭告警。"
+keywords: ["告警集成", "Flux CD", "Flux", "GitOps", "notification-controller", "Kustomization", "HelmRelease", "Kubernetes"]
+---
+
+Flux 的 notification-controller 通过 **Provider** 和 **Alert** 两种对象向外推送事件：Alert 选择要关注的 Flux 对象（Kustomization、HelmRelease、GitRepository 等），Provider 决定事件发往哪里。本集成使用 `generic` 类型的 Provider，Flux 把每条事件以 JSON 推送到 Flashduty。每个 Flux 对象对应一条 Flashduty 告警：对账出错（`error` 事件）时触发，之后该对象再发出成功类的 `info` 事件时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Flux CD**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Flux CD**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Flux 中配置
+---
+
+以下操作需要能在集群中创建 Secret 以及 Flux `Provider`、`Alert` 对象的 `kubectl` 权限。示例使用 `notification.toolkit.fluxcd.io/v1beta3` API 和 `flux-system` 命名空间；Provider、Alert 和 Secret 必须位于同一命名空间。集群需要能访问 Flashduty 推送地址所在的域名。
+
+<Steps>
+<Step title="把推送地址存入 Secret">
+
+推送地址中的 `integration_key` 相当于密码，放在 Secret 的 `address` 键中，而不是直接写在 Provider 里：
+
+```bash
+kubectl -n flux-system create secret generic flashduty-webhook \
+  --from-literal=address='<推送地址>'
+```
+
+Secret 中存在 `address` 键时，Flux 使用它作为 Provider 的地址。
+
+</Step>
+
+<Step title="创建 Provider">
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: flashduty
+  namespace: flux-system
+spec:
+  type: generic
+  secretRef:
+    name: flashduty-webhook
+```
+
+`type` 必须是 `generic`。不要使用 `pagerduty` 类型：它只取地址中的协议和域名，会丢掉 `integration_key` 参数。
+
+</Step>
+
+<Step title="创建 Alert">
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: flashduty
+  namespace: flux-system
+spec:
+  providerRef:
+    name: flashduty
+  eventSeverity: info
+  eventMetadata:
+    cluster: <集群名称>
+  eventSources:
+    - kind: GitRepository
+      name: '*'
+    - kind: OCIRepository
+      name: '*'
+    - kind: HelmRepository
+      name: '*'
+    - kind: Kustomization
+      name: '*'
+    - kind: HelmRelease
+      name: '*'
+```
+
+- `eventSeverity` 设为 `info`（或不填）：Flux 同时转发 `error` 和 `info` 事件，Flashduty 靠 `info` 事件关闭告警。设为 `error` 时告警不会自动恢复，见 [告警生命周期](#告警生命周期)
+- `eventSources` 中未写 `namespace` 时只匹配 Alert 所在命名空间的对象。其他命名空间的 Flux 对象需要为每个命名空间再加一组条目并填写 `namespace`，或在该命名空间中另建 Alert
+- `eventMetadata` 中的键值会出现在告警标签中，建议至少填写集群名称，以便区分多个集群推送的告警
+
+用 `kubectl apply -f` 创建 Provider 和 Alert，执行 `kubectl -n flux-system get providers,alerts` 确认两者已创建。
+
+</Step>
+
+<Step title="验证生命周期">
+
+Flux 没有发送测试消息的按钮。可以用一个临时 Kustomization 验证：
+
+1. 创建一个 `spec.path` 指向 Git 仓库中不存在目录的 Kustomization（源使用已有的 GitRepository），等待对账失败，确认 Flashduty 收到一条告警，标题形如 `Kustomization flux-system/<名称>: ArtifactFailed`，描述为 `kustomization path not found: ...`
+2. 把 `spec.path` 改成存在的目录，执行 `flux reconcile kustomization <名称>`，确认对账成功后原告警关闭
+3. 删除临时 Kustomization
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `involvedObject.uid`（Flux 对象在 Kubernetes 中的 UID）作为 Alert Key。Flux 自带的 `pagerduty` Provider 也使用这个 UID 作为触发和恢复的去重键。同一个 Flux 对象的所有失败事件落在同一条 Flashduty 告警上，失败原因（`reason`）、消息、版本（revision）的变化都不会改变 Alert Key。
+
+- 删除后重新创建的同名对象会得到新的 UID，对应一条新告警
+- 删除 Flux 对象不一定会发出成功事件，对象删除后仍处于活动状态的告警需要手动关闭
+
+请求缺少 `involvedObject.uid` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Flashduty 按事件的 `severity` 和 `reason` 字段处理：
+
+| Flux 事件 | 含义 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `severity: error` | 对账、拉取或健康检查失败 | 触发告警；已有活动告警时更新该告警 |
+| `severity: info`，`reason` 不是 `Progressing` | 对账成功、拉取到新版本等 | 恢复该对象的告警；没有活动告警时不做任何处理 |
+| `severity: info`，`reason: Progressing` | 对账仍在进行 | 忽略 |
+
+规则与 Flux `pagerduty` Provider 相同：`error` 触发，其他事件恢复，跳过 `Progressing`。Flux 只转发 `info` 和 `error` 两种事件；其他 `severity` 值会被拒绝。
+
+同一对象的 `message` 和 `metadata` 都相同的事件，Flux 默认 5 分钟内只推送一次。
+
+**只转发 `error` 事件时**：如果 Alert 的 `eventSeverity` 设为 `error`，或 `exclusionList` 过滤掉了成功事件，Flashduty 收不到恢复事件，告警不会自动关闭。此时请在协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，超时计时起点选择 **故障触发**，建议超时时长 12 小时：对象仍然失败时，下一次对账失败会重新触发告警。
+
+## 告警等级
+---
+
+Flux 的失败事件只有 `error` 一个等级，所有告警默认为 **Critical**。如需其他等级，在推送地址后追加 `&severity=Warning`（或 `Info`）。恢复事件保留原告警的等级。
+
+## 告警内容
+---
+
+- **标题**：`<Kind> <命名空间>/<名称>: <reason>`，例如 `Kustomization apps/webapp: ValidationFailed`
+- **描述**：事件的 `message`
+- **标签**：`resource`（`<Kind>/<命名空间>/<名称>`）、`kind`、`namespace`、`name`、`uid`、`api_version`、`reason`、`vendor_severity`（`error` 或 `info`）、`reporting_controller`（发出事件的控制器，例如 `kustomize-controller`），以及事件 `metadata` 中的键值（例如 `revision`，以及 Alert `eventMetadata` 中配置的 `cluster`）
+
+`metadata` 键名中 `a-z`、`A-Z`、`0-9`、`_` 以外的字符会被替换为 `_`（例如旧版 Flux 发送的 `kustomize.toolkit.fluxcd.io/revision` 变为 `kustomize_toolkit_fluxcd_io_revision`），与内置标签同名的键不会覆盖内置标签。值为空的字段不会写入标签。
+
+## 排查问题
+---
+
+- **没有收到告警**：执行 `kubectl -n flux-system logs deploy/notification-controller`，查找 `failed to dispatch notification` 等错误；执行 `kubectl -n flux-system get events --field-selector involvedObject.kind=Alert` 查看 Alert 上的告警事件
+- **只收到部分对象的告警**：确认对象的 `kind` 列在 `eventSources` 中，且对象与 Alert 在同一命名空间或已填写 `namespace`
+- **告警没有恢复**：确认 Alert 的 `eventSeverity` 为 `info` 或未填写，且 `exclusionList` 没有过滤掉成功事件
+- **请求被拒绝**：确认 Provider 的 `type` 是 `generic`，且 Secret 中的 `address` 是完整的推送地址，包含 `integration_key` 参数
+
+Flux 相关配置请参阅 Flux 文档 [Providers](https://fluxcd.io/flux/components/notification/providers/)、[Alerts](https://fluxcd.io/flux/components/notification/alerts/) 和 [Events](https://fluxcd.io/flux/components/notification/events/)。

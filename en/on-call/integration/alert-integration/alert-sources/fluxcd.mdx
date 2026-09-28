@@ -1,0 +1,164 @@
+---
+title: "Flux CD alert integration"
+description: "Send Flux object reconciliation failures to Flashduty On-call through a Flux notification-controller generic Provider, and close the alert automatically once reconciliation succeeds again."
+keywords: ["alert integration", "Flux CD", "Flux", "GitOps", "notification-controller", "Kustomization", "HelmRelease", "Kubernetes"]
+---
+
+Flux's notification-controller pushes events out through two kinds of objects: an **Alert** selects the Flux objects to watch (Kustomization, HelmRelease, GitRepository, and so on), and a **Provider** decides where the events go. This integration uses a Provider of type `generic`, which posts each event to Flashduty as JSON. Each Flux object maps to one Flashduty alert: it triggers when reconciliation fails (an `error` event) and closes automatically when the object later sends a success `info` event.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Flux CD** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Flux CD** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Flux
+---
+
+You need `kubectl` permissions to create a Secret and the Flux `Provider` and `Alert` objects in the cluster. The examples use the `notification.toolkit.fluxcd.io/v1beta3` API and the `flux-system` namespace; the Provider, Alert, and Secret must be in the same namespace. The cluster must be able to reach the domain of the Flashduty push URL.
+
+<Steps>
+<Step title="Store the push URL in a Secret">
+
+The `integration_key` in the push URL works like a password, so keep the URL under the `address` key of a Secret instead of writing it into the Provider:
+
+```bash
+kubectl -n flux-system create secret generic flashduty-webhook \
+  --from-literal=address='<push URL>'
+```
+
+When the Secret has an `address` key, Flux uses it as the Provider's address.
+
+</Step>
+
+<Step title="Create the Provider">
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: flashduty
+  namespace: flux-system
+spec:
+  type: generic
+  secretRef:
+    name: flashduty-webhook
+```
+
+`type` must be `generic`. Do not use the `pagerduty` type: it keeps only the scheme and host of the address and drops the `integration_key` parameter.
+
+</Step>
+
+<Step title="Create the Alert">
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: flashduty
+  namespace: flux-system
+spec:
+  providerRef:
+    name: flashduty
+  eventSeverity: info
+  eventMetadata:
+    cluster: <cluster name>
+  eventSources:
+    - kind: GitRepository
+      name: '*'
+    - kind: OCIRepository
+      name: '*'
+    - kind: HelmRepository
+      name: '*'
+    - kind: Kustomization
+      name: '*'
+    - kind: HelmRelease
+      name: '*'
+```
+
+- Set `eventSeverity` to `info` (or leave it out): Flux then forwards both `error` and `info` events, and Flashduty uses the `info` events to close alerts. With `error`, alerts do not recover automatically; see [Alert lifecycle](#alert-lifecycle)
+- An `eventSources` entry without `namespace` matches only objects in the Alert's namespace. For Flux objects in other namespaces, add a set of entries with `namespace` for each namespace, or create an Alert in that namespace
+- Keys in `eventMetadata` appear as alert labels. Set at least the cluster name so you can tell alerts from different clusters apart
+
+Create the Provider and Alert with `kubectl apply -f`, then run `kubectl -n flux-system get providers,alerts` to confirm both exist.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Flux has no button that sends a test message. Use a temporary Kustomization instead:
+
+1. Create a Kustomization whose `spec.path` points to a directory that does not exist in the Git repository (use an existing GitRepository as its source). Wait for reconciliation to fail, and confirm that Flashduty receives an alert with a title like `Kustomization flux-system/<name>: ArtifactFailed` and a description starting with `kustomization path not found: ...`
+2. Change `spec.path` to a directory that exists and run `flux reconcile kustomization <name>`. Confirm the alert closes once reconciliation succeeds
+3. Delete the temporary Kustomization
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `involvedObject.uid`, the Kubernetes UID of the Flux object, as the Alert Key. Flux's own `pagerduty` Provider uses the same UID as the deduplication key for both trigger and resolve. All failure events of one Flux object land on the same Flashduty alert; changes to the failure reason (`reason`), message, or revision do not change the Alert Key.
+
+- An object deleted and recreated with the same name gets a new UID and a new alert
+- Deleting a Flux object does not always send a success event; close any alert still active after the object is deleted by hand
+
+Flashduty rejects a request without `involvedObject.uid`.
+
+## Alert lifecycle
+---
+
+Flashduty handles each event by its `severity` and `reason` fields:
+
+| Flux event | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `severity: error` | Reconciliation, fetch, or health check failed | Triggers an alert, or updates the active alert |
+| `severity: info` with a `reason` other than `Progressing` | Reconciliation succeeded, a new revision was fetched, and so on | Recovers the object's alert; does nothing if there is no active alert |
+| `severity: info` with `reason: Progressing` | Reconciliation is still in progress | Ignored |
+
+These are the rules of Flux's `pagerduty` Provider: `error` triggers, other events resolve, `Progressing` is skipped. Flux forwards only `info` and `error` events; any other `severity` value is rejected.
+
+By default, Flux pushes an event for the same object with the same `message` and `metadata` at most once every 5 minutes.
+
+**When only `error` events are forwarded**: if the Alert's `eventSeverity` is `error`, or its `exclusionList` filters out success events, Flashduty receives no recovery events and alerts never close on their own. In that case, turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) with **Incident trigger** as the timing start. A timeout of 12 hours is a reasonable default: if the object is still failing, the next failed reconciliation triggers the alert again.
+
+## Severity
+---
+
+Flux failure events have a single level, `error`, so all alerts default to **Critical**. For a different severity, append `&severity=Warning` (or `Info`) to the push URL. A recovery event keeps the severity of the original alert.
+
+## Alert content
+---
+
+- **Title**: `<Kind> <namespace>/<name>: <reason>`, for example `Kustomization apps/webapp: ValidationFailed`
+- **Description**: the event `message`
+- **Labels**: `resource` (`<Kind>/<namespace>/<name>`), `kind`, `namespace`, `name`, `uid`, `api_version`, `reason`, `vendor_severity` (`error` or `info`), `reporting_controller` (the controller that sent the event, for example `kustomize-controller`), plus the keys in the event `metadata` (for example `revision`, and `cluster` from the Alert's `eventMetadata`)
+
+In `metadata` key names, characters other than `a-z`, `A-Z`, `0-9`, and `_` are replaced with `_` (for example, `kustomize.toolkit.fluxcd.io/revision` sent by older Flux versions becomes `kustomize_toolkit_fluxcd_io_revision`). A key with the same name as a built-in label does not overwrite it. Empty values are not written as labels.
+
+## Troubleshooting
+---
+
+- **No alerts arrive**: run `kubectl -n flux-system logs deploy/notification-controller` and look for errors such as `failed to dispatch notification`; run `kubectl -n flux-system get events --field-selector involvedObject.kind=Alert` to see warnings recorded on the Alert
+- **Alerts arrive for only some objects**: check that the object's `kind` is listed in `eventSources`, and that the object is in the Alert's namespace or the entry sets `namespace`
+- **Alerts do not recover**: check that the Alert's `eventSeverity` is `info` or unset, and that `exclusionList` does not filter out success events
+- **Requests are rejected**: check that the Provider's `type` is `generic` and that `address` in the Secret is the full push URL, including the `integration_key` parameter
+
+For Flux configuration, see the Flux documentation on [Providers](https://fluxcd.io/flux/components/notification/providers/), [Alerts](https://fluxcd.io/flux/components/notification/alerts/), and [Events](https://fluxcd.io/flux/components/notification/events/).
