@@ -109,6 +109,7 @@ export const docMap = {
   JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
   BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
   LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
+  JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',

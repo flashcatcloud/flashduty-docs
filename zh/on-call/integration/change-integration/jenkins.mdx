@@ -1,0 +1,139 @@
+---
+title: "Jenkins 变更集成"
+description: "通过 Jenkins Notification 插件将部署任务的每次构建同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Jenkins", "Notification 插件", "构建", "部署事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Jenkins 的 [Notification 插件](https://plugins.jenkins.io/notification/)，将任务（Job）的构建同步到 Flashduty On-call。每一次构建对应一条 Flashduty 变更；构建从排队、开始执行到结束的每个阶段，都会更新同一条变更。
+
+Jenkins 无法区分一次构建是否发布了变更，因此只需在**执行部署的任务**上配置通知，不要在单纯编译、测试的任务上配置。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Jenkins**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `job`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Jenkins 中配置
+---
+
+<Steps>
+<Step title="确认 Jenkins URL">
+
+进入 **Manage Jenkins → System**，确认 **Jenkins Location** 中的 **Jenkins URL** 已填写为 Jenkins 的访问地址。未填写时推送内容不含构建链接，Flashduty 无法识别构建，会拒绝推送。
+
+</Step>
+
+<Step title="安装 Notification 插件">
+
+进入 **Manage Jenkins → Plugins → Available plugins**，搜索 **Notification** 并安装。需要 Jenkins 管理员权限。
+
+</Step>
+
+<Step title="在部署任务上添加通知地址">
+
+1. 打开部署任务，点击 **Configure**，找到 **Job Notifications** 区域，点击 **Add Endpoint**
+2. **Format**：选择 `JSON`
+3. **Protocol**：选择 `HTTP`
+4. **Event**：选择 `All Events`，Flashduty 才能看到排队、开始和结束的完整过程
+5. **URL Source**：选择 `Plain Text`，**URL** 粘贴 Flashduty 集成的完整推送地址。不希望在任务配置中明文显示地址时，可选择 `Credentials Store`，把推送地址保存为 Secret text 凭据后引用其 ID
+6. **Branch** 保持默认的 `.*`，其余选项保持默认，点击 **Save**
+
+任务配置由 Jenkinsfile 管理（例如多分支流水线）时，在 Jenkinsfile 的 `properties` 中添加同样的配置，可通过流水线页面的 **Pipeline Syntax → Snippet Generator** 选择 `properties: Set job properties` 生成代码。
+
+</Step>
+
+<Step title="运行一次构建">
+
+运行一次该任务，在 Flashduty 的变更列表中即可看到对应的变更。Notification 插件没有测试按钮。连接 Flashduty 失败时，构建日志中会出现 `Failed to notify endpoint`；插件不检查响应内容，Flashduty 拒绝的推送不会在 Jenkins 中显示。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+每一次构建是一条变更，变更标识（change_key）为 `<构建完整地址>#<队列 ID>`，例如 `https://jenkins.example.com/job/deploy/18/#4711`。
+
+- 同一次构建的所有阶段更新同一条变更
+- 同一任务的两次构建是两条变更
+- 任务被删除后重建、构建编号从 1 重新开始时，队列 ID 不同，不会与旧构建混为一条
+- 多个 Jenkins 实例推送到同一个集成时，构建地址不同，不会混淆
+
+## 状态映射
+---
+
+| 构建阶段（phase） | 构建结果（status） | Flashduty 变更状态 |
+|---|---|---|
+| QUEUED | — | Ready |
+| STARTED | — | Processing |
+| COMPLETED、FINALIZED | SUCCESS | Done |
+| COMPLETED、FINALIZED | UNSTABLE | Done |
+| COMPLETED、FINALIZED | FAILURE | Failed |
+| COMPLETED、FINALIZED | ABORTED、NOT_BUILT | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。COMPLETED 表示构建步骤执行完毕，FINALIZED 表示构建后操作（例如归档制品）也已完成，两者结果相同。
+
+UNSTABLE 表示构建步骤全部执行完成，但测试或质量检查报告了问题，因此记为 Done；可以通过 `result` 标签筛选出这类变更。
+
+在流水线中调用 `notifyEndpoints` 步骤且 `phase` 为 `NONE` 时，推送返回成功但不生成变更。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<任务完整名称> #<构建编号>`，例如 `platform/order-service/main #18` |
+| 描述 | 通知地址中 **Notes** 选项的内容，未填写时为空 |
+| 链接 | 构建页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `job` | 任务完整名称，包含文件夹和多分支流水线的分支，例如 `platform/order-service/main` |
+| `build_number` | 构建编号 |
+| `branch` | 构建检出的 Git 分支 |
+| `commit` | 构建检出的 Git 提交 |
+| `phase` | 最新的构建阶段 |
+| `result` | 构建结果，结束后才有 |
+
+`branch` 和 `commit` 只在构建检出代码之后的推送中出现，排队和开始阶段没有。请按 `job` 配置路由规则，否则同一次构建的前后事件可能进入不同的协作空间。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 确认 **Format** 选择的是 `JSON`，**Protocol** 选择的是 `HTTP`
+- 确认 **Manage Jenkins → System** 中已填写 **Jenkins URL**
+- 查看构建日志中是否有 `Notifying endpoint` 或 `Failed to notify endpoint`
+- **Branch** 不是 `.*` 时，只有带 `BRANCH_NAME` 环境变量且分支匹配的构建才会推送
+
+</Accordion>
+
+<Accordion title="为什么一次构建有两个结束事件？">
+
+插件在构建完成（COMPLETED）和构建后操作完成（FINALIZED）时各推送一次，两者结果相同，变更状态不变。只想接收一次时，可以把 **Event** 改为 `Job Finalized`，但这样就看不到排队和执行中的阶段。
+
+</Accordion>
+
+<Accordion title="Flashduty 会拒绝哪些推送？">
+
+Flashduty 在以下情况拒绝推送：
+
+- `build.full_url is missing`：Jenkins URL 未配置
+- `must use Format JSON`：通知地址的 **Format** 选择了 `XML`
+- `unsupported build.phase` 或 `unsupported build.status`：收到了 Flashduty 尚未支持的阶段或结果，请联系我们
+
+</Accordion>
+</AccordionGroup>
