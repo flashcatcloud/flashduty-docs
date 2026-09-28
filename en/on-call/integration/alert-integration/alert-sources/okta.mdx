@@ -1,0 +1,165 @@
+---
+title: "Okta alert integration"
+description: "Sync account lockouts, breached credentials, and user-reported suspicious activity from Okta Event Hooks to Flashduty On-call."
+keywords: ["alert integration", "Okta", "Event Hooks", "account lockout", "identity security"]
+---
+
+Use Okta Event Hooks to sync the identity security events in your Okta org that need a person to act on them to Flashduty On-call:
+
+- When a user account is locked (`user.account.lock`), an alert is triggered. When the account is unlocked (`user.account.unlock` or `user.account.unlock_by_admin`), the alert recovers automatically
+- When a known breached credential is used to sign in (`security.breached_credential.detected`) or a user reports suspicious activity (`user.account.report_suspicious_activity_by_enduser`), an alert is triggered. These two events have no recovery notification
+
+Only super administrators can create and configure event hooks, and each Okta org allows at most 25 event hooks.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Okta** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Okta** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Okta
+---
+
+<Steps>
+<Step title="Create an event hook">
+
+1. Sign in to the Okta Admin Console as a super administrator, go to **Workflow → Event Hooks**, and click **Create Event Hook**
+2. **Name**: enter a name, for example `Flashduty`
+3. **URL**: paste the full push URL of the Flashduty integration, including `integration_key`
+4. Leave **Authentication field**, **Authentication secret**, and **Custom headers** empty. Flashduty identifies the integration by the `integration_key` in the push URL and needs no extra authentication header
+
+</Step>
+
+<Step title="Subscribe to events">
+
+Under **Subscribe to events**, select the following events. No other events are needed:
+
+| Event | Description |
+| :--- | :--- |
+| `user.account.lock` | The account is locked automatically after too many failed sign-in attempts |
+| `user.account.unlock` | The account is unlocked automatically or by the user through self-service |
+| `user.account.unlock_by_admin` | An administrator unlocks the account |
+| `security.breached_credential.detected` | A known breached credential was used to sign in |
+| `user.account.report_suspicious_activity_by_enduser` | A user reported suspicious activity |
+
+Subscribe to the lock and unlock events in the same event hook, or alerts will not recover automatically. If other events are delivered, Flashduty returns success and ignores them without creating alerts.
+
+Click **Save & Continue**.
+
+</Step>
+
+<Step title="Verify the push URL">
+
+In the **Verify Endpoint Ownership** window, click **Verify**. Okta sends a single GET request to the push URL, and Flashduty answers it automatically. After verification, the event hook status becomes **Active** and Okta starts delivering events.
+
+After you create or edit an event hook, it may take several minutes before Okta starts delivering events.
+
+</Step>
+
+<Step title="Test delivery">
+
+On the event hook's **Preview** tab:
+
+1. For **Event Type**, select `user.account.lock`. For **System Log Event**, select a recent lockout event
+2. Click **Deliver Request**. An account lockout alert appears in Flashduty
+3. Select `user.account.unlock_by_admin` or `user.account.unlock`, pick the unlock event of the same user, and deliver it. The alert recovers
+
+Preview sends real events from your org's System Log, and Flashduty cannot tell them apart from regular deliveries, so they create real alerts. If your org has no System Log event to choose, Okta uses sample data whose fields are `null`. If that data carries no user, Flashduty returns an invalid parameter error.
+
+</Step>
+</Steps>
+
+## Configure auto-resolve timeout
+---
+
+Breached credential and suspicious activity alerts have no recovery notification and never close on their own. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit), set **Window timing start** to **Incident trigger**, and set the timeout to 24 hours: responders get one working day to confirm and reset the credential, and unhandled incidents do not stay open indefinitely.
+
+Account lockout alerts are closed by unlock events and do not depend on this setting.
+
+## Payload fields
+---
+
+The `data.events` array in one delivery may carry several events. Flashduty processes them one by one in order of each event's `published` time. Each event is an Okta System Log record, and Flashduty uses the following fields:
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `eventType` | Event type | Decides whether an alert is created, and its status and severity; label `event_type` |
+| The `User` object in `target[]`, or `actor` when there is none | The user the event is about | Alert Key; labels `user_id` and `user_name`; the sign-in name goes into the alert description |
+| `actor` | Who performed the event, for example the administrator who unlocked the account | Labels `actor_id` and `actor_name` when different from the user the event is about |
+| `displayMessage` | Event summary | Alert description |
+| `severity` | Event level recorded by Okta | Label `okta_severity`; does not affect alert severity |
+| `outcome.result`, `outcome.reason` | Event result and reason | Labels `outcome_result` and `outcome_reason` |
+| `client.ipAddress`, `client.geographicalContext` | Source IP, city, and country of the request | Labels `client_ip`, `client_city`, and `client_country` |
+| `source` of the delivery | Address of the Okta org that owns the event hook | Label `okta_org` |
+
+The alert title has the form `<event name>: <user display name>`, for example `Okta account locked: Jane Doe`. Every alert also carries the label `source=okta`.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the event category and the user ID:
+
+- Lock and unlock events of the same user land on the same alert: the lock triggers it and the unlock recovers it. Okta delivers at least once, and a redelivered lock event merges into the same active alert
+- Lockouts of different users create different alerts
+- A lockout, a breached credential, and suspicious activity of the same user create separate alerts
+- A new breached credential or suspicious activity event for a user whose alert is still open merges into that alert
+
+## Status and severity
+---
+
+The `severity` that Okta records does not reflect urgency (an account lockout is recorded as `DEBUG`, for example), so Flashduty maps severity by event type:
+
+| Okta event | Flashduty status or severity |
+| :--- | :--- |
+| `user.account.lock` | Warning |
+| `user.account.unlock`, `user.account.unlock_by_admin` | Recovered; original severity Warning |
+| `security.breached_credential.detected` | Warning |
+| `user.account.report_suspicious_activity_by_enduser` | Critical |
+| Other event types | Ignored; no alert |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why is security.threat.detected (ThreatInsight) not supported?">
+
+In the Okta event types reference, `security.threat.detected` and `user.account.lock.limit` are not marked event-hook-eligible, so an event hook cannot subscribe to them.
+
+</Accordion>
+
+<Accordion title="Why didn't the alert recover after the account was unlocked?">
+
+Make sure `user.account.unlock` and `user.account.unlock_by_admin` are subscribed in the same event hook. Okta does not guarantee delivery order: if the unlock event arrives before the lock event in a separate delivery, the lockout alert stays open and must be closed by hand.
+
+</Accordion>
+
+<Accordion title="Does Okta retry failed deliveries?">
+
+Okta times out after 3 seconds and retries at most once on a 5xx response or a timeout. It does not retry 4xx responses. Failed deliveries are recorded in the Okta System Log with the event type `event_hook.delivery`.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Verify fails**: make sure the URL is the full push URL, including `integration_key`
+- **Flashduty returns an invalid parameter error**: an event that should create an alert has no user (neither `target` nor `actor` contains an object of type `User`). This usually happens with sample data in Preview
+- **No events arrive**: make sure the event hook status is **Active** and the events above are subscribed. Search the Okta System Log for `event_hook.delivery` to see failed deliveries

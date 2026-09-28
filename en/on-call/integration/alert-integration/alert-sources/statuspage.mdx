@@ -1,0 +1,176 @@
+---
+title: "Atlassian Statuspage alert integration"
+description: "Subscribe to any Atlassian Statuspage status page by webhook and send component outages and Statuspage incidents to Flashduty On-call."
+keywords: ["alert integration", "Statuspage", "Atlassian", "status page", "third-party service status", "webhook"]
+---
+
+Use Atlassian Statuspage subscriber webhooks to send changes on an upstream service's status page to Flashduty On-call. The public status pages of many services, such as GitHub and Atlassian, are hosted on Statuspage. After you subscribe, a Flashduty alert triggers when a component goes into an outage state or the status page publishes an incident, and recovers when the component returns to `operational` or the incident is `resolved`.
+
+Subscribers need no Statuspage account and pay nothing. The Webhook option appears in a page's subscribe menu only when the page owner has enabled webhook subscriptions; according to the Statuspage pricing page, webhook notifications start with the Startup plan.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Atlassian Statuspage** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Atlassian Statuspage** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Subscribe on a Statuspage status page
+---
+
+<Steps>
+<Step title="Open the subscribe menu">
+
+Open the status page you want to follow (for example, `https://www.githubstatus.com`), click **Subscribe to updates**, and select the webhook icon.
+
+If there is no webhook option, the page owner has not enabled webhook subscriptions, and this integration cannot receive updates from that page.
+
+</Step>
+
+<Step title="Enter the push URL">
+
+1. **Webhook URL**: paste the full push URL of the Flashduty integration, including `integration_key`
+2. **Email address**: enter a team mailbox. Statuspage emails this address when the push URL returns an error
+3. Click **Subscribe**. If you receive a confirmation email, follow its instructions
+
+One integration can subscribe to several status pages. Alerts from different pages are told apart by page ID and never merge or close each other. You can also create one integration per upstream service to route each one separately.
+
+</Step>
+
+<Step title="(Optional) Subscribe to your own team's status page">
+
+If your team runs a status page on Statuspage, first go to **Subscribers → Options → Settings** in the Statuspage management console and select **Webhook** as a delivery type. The webhook option then appears in the page's subscribe menu, and you can subscribe as in the previous step.
+
+</Step>
+
+<Step title="Verify">
+
+Statuspage has no button to send a test notification. An alert appears in Flashduty only after the next component status change or incident update on the page.
+
+If your team runs a Statuspage page, you can use it to verify: change a component's status to **Major outage** and a Critical alert appears in Flashduty; change it back to **Operational** and the alert recovers.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Statuspage posts one JSON body each time a component changes status and each time an incident is updated. There are two kinds:
+
+**Component status change**
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `page.id` | Status page ID | Alert Key, label `page_id` |
+| `page.status_description` | Overall page status, such as `Partial System Outage` | Alert description, label `page_status` |
+| `component.id` (or `component_update.component_id`) | Component ID | Alert Key, label `component_id` |
+| `component.name` | Component name | Alert title, label `component` |
+| `component_update.new_status` | New component status | Alert severity and status, label `component_status` |
+| `component_update.old_status` | Previous component status | Alert description, label `component_old_status` |
+
+The alert title looks like `API Requests: major outage`.
+
+**Incident update**
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `page.id` | Status page ID | Alert Key, label `page_id` |
+| `incident.id` | Incident ID | Alert Key, label `incident_id` |
+| `incident.name` | Incident name | Alert title |
+| `incident.status` | Incident status | Alert status, label `incident_status` |
+| `incident.impact` | Incident impact | Alert severity, label `impact` |
+| `incident.shortlink` | Short link to the incident | Label `incident_url` |
+| `incident.incident_updates` | All updates of the incident | The body of the newest update becomes the alert description, truncated beyond 8 KB |
+
+Every alert also carries the label `source=statuspage`. The unsubscribe link in the payload (`meta.unsubscribe`) contains the subscription credential, and Flashduty never writes it into the alert.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key per payload kind:
+
+- Component: status page ID + component ID. Every status change of one component, from outage to recovery, lands on the same alert
+- Incident: status page ID + incident ID. Every update of one Statuspage incident, from `investigating` to `resolved`, lands on the same alert
+
+Component alerts and incident alerts are independent. One upstream outage usually produces both; use the channel's [alert grouping](/en/on-call/channel/noise-reduction) to group them into one incident.
+
+Renaming a component or incident, or changing the impact, does not change the Alert Key. After an alert recovers, a new outage of the same component opens a new alert.
+
+## Status and severity
+---
+
+**Component status**
+
+| Statuspage `new_status` | Flashduty status or severity |
+| :--- | :--- |
+| `major_outage` | Critical |
+| `partial_outage` | Warning |
+| `degraded_performance` | Info |
+| `operational` | Recovered |
+| `under_maintenance` | Ignored, no alert |
+| Empty or any other value | Warning |
+
+**Statuspage incidents**
+
+The alert severity comes from the impact (`impact`), and the alert status from the incident status (`status`):
+
+| Statuspage `impact` | Flashduty severity |
+| :--- | :--- |
+| `critical` | Critical |
+| `major` | Warning |
+| `minor`, `none` | Info |
+| Empty or any other value | Warning |
+
+| Statuspage `status` | Flashduty status |
+| :--- | :--- |
+| `investigating`, `identified`, `monitoring` | Triggers or updates the alert |
+| `resolved`, `postmortem` | Recovered |
+
+Scheduled maintenance (status `scheduled`, `in_progress`, `verifying`, or `completed`, or impact `maintenance`) is planned change: Flashduty returns success and creates no alert.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does the alert recover while an incident is in monitoring?">
+
+No. `monitoring` means a fix is deployed and being watched. The alert stays triggered until the status page marks the incident `resolved`.
+
+</Accordion>
+
+<Accordion title="A component went from an outage straight into maintenance. Why didn't the alert recover?">
+
+`under_maintenance` is ignored and is not a recovery signal. The alert recovers when maintenance ends and the component returns to `operational`, or you can close it manually in Flashduty.
+
+</Accordion>
+
+<Accordion title="How do I stop receiving updates from a status page?">
+
+The Statuspage unsubscribe link appears only in the payload, and Flashduty does not keep it. You can delete the Flashduty integration, or ask the status page's owner to remove the subscription; Statuspage emails the address you entered when deliveries fail.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **The status page has no webhook subscribe option**: the page owner has not enabled webhook subscriptions, so this integration cannot subscribe to it
+- **Flashduty returns an invalid parameter error**: make sure the push URL is complete (including `integration_key`). Payloads without `page.id`, a component ID, or an incident ID are rejected
+- **Statuspage emails that deliveries fail**: Statuspage requires a 2xx response within 30 seconds. Make sure the integration still exists and the push URL has not changed
+- **A component's alert does not recover**: make sure the component is back to `operational`; maintenance does not close the alert
