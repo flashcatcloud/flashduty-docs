@@ -1,0 +1,178 @@
+---
+title: "Stripe 告警集成"
+description: "通过 Webhook 将 Stripe 的拒付（Dispute）、提现失败和早期欺诈预警事件同步到 Flashduty On-call，拒付结案时自动关闭告警。"
+keywords: ["告警集成", "Stripe", "拒付", "Dispute", "提现失败", "Payout", "早期欺诈预警", "Radar", "Webhook"]
+---
+
+通过 Stripe 的 Webhook 端点，把需要人处理的支付事件同步到 Flashduty On-call：
+
+- **拒付和问询**（`charge.dispute.*`）：持卡人向发卡行发起拒付或问询时打开告警，Stripe 结案（胜诉、败诉、问询关闭）时关闭告警
+- **提现失败**（`payout.failed`）：打款到银行账户或借记卡失败时打开告警
+- **早期欺诈预警**（`radar.early_fraud_warning.*`）：发卡行报告某笔付款可能是盗刷时打开告警，该付款被拒付或全额退款后关闭告警
+
+Stripe 的所有账户都可以创建 Webhook 端点，每个账户最多 16 个。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Stripe**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Stripe**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Stripe 中配置
+---
+
+<Steps>
+<Step title="创建事件目的地">
+
+需要能管理 Webhook 的 Stripe 角色（如 Administrator 或 Developer）。
+
+1. 登录 Stripe Dashboard，打开 Workbench 的 [Webhooks](https://dashboard.stripe.com/webhooks) 页面，点击 **Create an event destination**
+2. **Events from** 选择 **Your account**。如果您是 Connect 平台、要接收已连接账户的事件，选择 **Connected accounts**（两种都需要时各建一个）
+3. **API version** 保持默认即可。如果页面要求选择事件格式，选择 **Snapshot**：Thin 格式不含对象内容，Flashduty 无法解析
+
+</Step>
+
+<Step title="选择事件">
+
+选择下列事件：
+
+| 事件 | 作用 |
+| :--- | :--- |
+| `charge.dispute.created` | 拒付或问询创建，打开告警 |
+| `charge.dispute.updated` | 拒付状态变化（例如提交证据后进入审核），更新告警 |
+| `charge.dispute.funds_withdrawn` | 拒付金额从余额中扣除，更新告警 |
+| `charge.dispute.closed` | 拒付结案，关闭告警 |
+| `payout.failed` | 提现失败，打开告警 |
+| `radar.early_fraud_warning.created` | 收到早期欺诈预警，打开告警 |
+| `radar.early_fraud_warning.updated` | 预警变为不可处理（已被拒付或已全额退款）时关闭告警 |
+
+订阅其他事件类型（例如 `charge.succeeded`）时，Flashduty 返回成功但不生成告警。建议只订阅上表中的事件。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. 点击 **Continue**，目的地类型选择 **Webhook endpoint**
+2. **Endpoint URL** 填写 Flashduty 集成的完整推送地址
+3. 完成创建。端点详情页上的签名密钥（`whsec_` 开头）Flashduty 不使用，无需复制
+
+测试环境（Sandbox 或 Test mode）和正式环境（Live mode）的 Webhook 端点相互独立。两边都要接入时，分别在各自的环境中创建端点，可以填写同一个推送地址。
+
+</Step>
+
+<Step title="测试">
+
+Stripe 没有“发送测试通知”按钮。在测试环境中用下面任一方式产生真实的测试事件：
+
+- 使用 [Stripe CLI](https://docs.stripe.com/cli) 执行 `stripe trigger charge.dispute.created`
+- 用测试卡号 `4000000000000259` 付款，付款成功后会产生一笔欺诈类拒付；用 `4000000000005423` 付款会产生早期欺诈预警
+- 在拒付的证据中填写 `winning_evidence` 并提交，拒付以胜诉结案，Flashduty 关闭告警
+
+测试事件的 `livemode` 为 `false`，Flashduty 照常生成告警，并打上标签 `livemode=false`。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+提现失败没有恢复事件；早期欺诈预警如果一直没有被拒付或退款，也不会再有通知。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 **72 小时**，计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭。
+
+拒付从创建到结案通常要 2 到 3 个月。超时自动关闭同样会关闭仍在进行的拒付故障。如果希望拒付告警一直保持到 Stripe 结案，可以使用共享集成，按标签 `object` 把 `dispute` 路由到一个不开启超时自动关闭的协作空间。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Stripe 每次推送一个事件（Event 对象），事件内容在 `data.object` 中：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `type` | 事件类型 | 告警状态和等级，标签 `event_type` |
+| `livemode` | 是否正式环境 | 标签 `livemode` |
+| `account` | 已连接账户 ID（仅 Connect 事件） | 标签 `account` |
+| `data.object.id` | 拒付、提现或预警的 ID | Alert Key，标签 `object_id` |
+| `data.object.object` | 对象类型：`dispute`、`payout`、`radar.early_fraud_warning` | 标签 `object` |
+| `data.object.status` | 拒付或提现状态 | 告警状态和等级，标签 `status` |
+| `data.object.reason` | 拒付原因 | 告警标题，标签 `reason` |
+| `data.object.amount`、`currency` | 金额（最小货币单位，如美分）和币种 | 标签 `amount`、`currency` |
+| `data.object.charge`、`payment_intent` | 关联的付款 | 标签 `charge`、`payment_intent` |
+| `data.object.evidence_details.due_by` | 拒付证据提交截止时间 | 标签 `evidence_due_by`（UTC） |
+| `data.object.failure_code`、`failure_message` | 提现失败原因 | 告警标题和描述，标签 `failure_code`、`failure_message` |
+| `data.object.method`、`destination` | 提现方式和收款账户 ID | 标签 `method`、`destination` |
+| `data.object.fraud_type`、`actionable` | 欺诈类型、预警是否仍需处理 | 告警标题，标签 `fraud_type`、`actionable` |
+
+每条告警还带有标签 `source=stripe`。标题示例：`Stripe dispute needs response: fraudulent`、`Stripe inquiry under review: general`、`Stripe payout failed: account_closed`、`Stripe early fraud warning: made_with_stolen_card`。
+
+## Alert Key
+---
+
+Flashduty 用 `data.object.id`（拒付、提现或预警本身的 ID）作为 Alert Key，不使用事件 ID：
+
+- 同一笔拒付的 created、funds_withdrawn、updated、closed 事件落在同一条告警上，结案后告警关闭
+- 同一条早期欺诈预警的 created 和 updated 事件落在同一条告警上
+- 同一笔付款上的拒付和早期欺诈预警是两条告警
+- Stripe 投递失败会重试（正式环境最长 3 天），偶尔也会为同一变化发送两个事件；这些事件都合并到原告警，不会生成重复告警
+
+## 状态和告警等级
+---
+
+| Stripe 事件或状态 | Flashduty 状态或等级 |
+| :--- | :--- |
+| 拒付状态 `needs_response`、问询状态 `warning_needs_response` | Critical |
+| 拒付状态 `under_review`、问询状态 `warning_under_review` | Warning |
+| `charge.dispute.closed`，或拒付状态为 `won`、`lost`、`warning_closed`、`prevented` | 恢复 |
+| `payout.failed` | Critical |
+| 早期欺诈预警，`actionable` 为 `true` | Warning |
+| 早期欺诈预警，`actionable` 为 `false` | 恢复 |
+| 其他事件类型 | 不生成告警 |
+
+会生成告警的事件缺少 `data.object.id` 时，请求会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么有的拒付没有生成告警？">
+
+部分拒付无法申诉（例如 Cartes Bancaires 卡组织的拒付），Stripe 在通知时就已将其以 `lost` 结案。这类拒付没有需要处理的动作，Flashduty 按恢复事件处理，不打开告警。它们仍然会出现在 Stripe Dashboard 的拒付列表中。
+
+</Accordion>
+
+<Accordion title="怎样只接收正式环境的事件？">
+
+只在正式环境（Live mode）中创建端点即可。按 Stripe 文档，Connect 平台选择 **Connected accounts** 的正式环境端点也会收到已连接账户的测试事件，这些告警带有标签 `livemode=false`，可以在共享集成的路由中按该标签把它们分到别的协作空间。
+
+</Accordion>
+
+<Accordion title="需要配置签名密钥吗？">
+
+不需要。Flashduty 通过推送地址中的 `integration_key` 识别集成，不校验 `Stripe-Signature` 签名。请像保管密钥一样保管推送地址。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Stripe 显示投递失败（4xx）**：确认推送地址完整（包含 `integration_key`），并且事件格式为 Snapshot
+- **投递成功但没有告警**：确认事件类型在上表中；其他事件类型不生成告警
+- **拒付结案后告警没有关闭**：确认端点订阅了 `charge.dispute.closed`
+- **查看投递记录**：在 Workbench 的 **Webhooks** 中选中端点，打开 **Event deliveries** 标签页，可以看到每次投递的状态码，并可重新发送
