@@ -1,0 +1,137 @@
+---
+title: "Sysdig 告警集成"
+description: "通过 Webhook 通知渠道将 Sysdig Monitor 告警同步到 Flashduty On-call，告警恢复时自动关闭。"
+keywords: ["告警集成", "Sysdig", "Sysdig Monitor", "Webhook", "通知渠道"]
+---
+
+通过 Sysdig Monitor 的 Webhook 通知渠道（Notification Channel），将告警事件同步到 Flashduty On-call。Sysdig 的每次告警触发对应一条 Flashduty 告警：告警触发和重复通知时推送 `ACTIVE`，告警条件不再满足时推送 `OK` 并恢复该告警。按分段（Segment by）配置的告警，每个分段各自对应一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Sysdig**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Sysdig**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Sysdig Monitor 中配置
+---
+
+创建通知渠道需要 Sysdig Monitor 的管理员权限。
+
+<Steps>
+<Step title="创建 Webhook 通知渠道">
+
+1. 以管理员身份登录 Sysdig Monitor，进入 **Integrations** → **Notification Channels**（部分版本在 **Settings** → **Notification Channels**）
+2. 点击 **Add Notification Channel**，选择 **Webhook**。请不要选择 **Custom Webhook**，Flashduty 解析的是 Webhook 渠道的固定格式
+3. 按下表填写：
+
+| 配置项 | 填写内容 |
+| :--- | :--- |
+| **URL** | Flashduty 集成的完整推送地址，需包含 `integration_key` |
+| **Channel Name** | 便于识别的名称，如 `Flashduty` |
+| **Enabled** | 开启 |
+| **Notify when Resolved** | 开启。关闭后 Sysdig 不推送恢复通知，Flashduty 中的告警不会自动恢复 |
+| **Notify when Acknowledged** | 建议关闭。Flashduty 不同步 Sysdig 的确认状态 |
+| **Test notification** | 开启后保存时会发送一条测试通知，用于验证地址可达 |
+| **Shared With** | 按需选择 **All Teams** 或当前团队 |
+| **Custom headers** / **Custom data** | 无需填写 |
+
+4. 点击 **Save**
+
+</Step>
+
+<Step title="在告警规则中使用该渠道">
+
+1. 进入 **Alerts**，新建或编辑一条告警规则
+2. 在通知设置（Notify）中选择上一步创建的 Webhook 渠道
+3. 如果告警规则里单独设置了该渠道的通知选项，确认没有关闭恢复通知
+4. 保存告警规则
+
+</Step>
+
+<Step title="验证">
+
+1. 保存通知渠道时，Sysdig 会发送一条名称为 `TEST ALERT: Testing Notification Channel <渠道名>` 的测试通知，Flashduty 收到后返回成功，但不会创建告警
+2. 让一条使用该渠道的告警规则进入触发状态，确认 Flashduty 收到活动告警
+3. 等待告警条件恢复，确认原告警变为已恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Sysdig 的事件 ID（`event.id`）作为 Alert Key。Sysdig 为每次告警触发生成一个事件，同一次触发的首次通知、重复通知（Renotification）和恢复通知都携带同一个事件 ID，因此会合并到同一条告警，并由恢复通知关闭。
+
+- **分段告警**：Sysdig 对每个触发的分段单独发送通知，每个分段有自己的事件 ID，因此在 Flashduty 中是不同的告警，分别恢复
+- **再次触发**：同一条规则在恢复后再次触发时，Sysdig 生成新的事件，Flashduty 会创建一条新告警
+- 告警名称、严重程度、指标值和时间的变化不会改变 Alert Key。缺少 `event.id` 的请求会被拒绝
+
+## 状态和告警等级
+---
+
+状态由 `state` 决定：
+
+| Sysdig `state` | 状态 |
+| :--- | :--- |
+| `ACTIVE`（触发和重复通知） | 触发 |
+| `OK`（告警条件恢复） | 恢复 |
+
+告警等级由告警规则的严重程度（`alert.severity`，0 到 7）决定，缺少时按 `alert.severityLabel` 判断：
+
+| Sysdig 严重程度 | 数值 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| High | 0、1 | Critical |
+| Medium | 2、3 | Warning |
+| Low | 4、5 | Warning |
+| Info（None） | 6、7 | Info |
+| 其他或为空 | - | Warning |
+
+告警恢复时保留最后一次触发时的等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警规则名称 |
+| `resource` | 触发告警的分段，如 `kube_pod_name = 'api-7d9f'` |
+| `alert_id` | Sysdig 告警规则 ID |
+| `event_id` | 事件 ID，即 Alert Key |
+| `condition` | 告警条件，如 `avg(avg(sysdig_container_cpu_used_percent)) > 75` |
+| `scope` | 告警规则的范围（Scope），未设置时为空 |
+| `severity_level` / `severity_label` | Sysdig 原始严重程度数值和名称 |
+| `alert_url` | Sysdig 中告警规则的链接 |
+| `event_url` | Sysdig 中该事件的链接 |
+| 其他 | Sysdig 推送的 `labels` 中的分段和范围标签，如 `kube_cluster_name`，与上面的标签重名时以上面的为准 |
+
+告警描述为 Sysdig 通知正文（`alert.body`），包含指标值、分段和触发时间。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并且渠道类型是 **Webhook** 而不是 **Custom Webhook**
+- **保存渠道后没有告警**：这是预期行为，测试通知不会创建告警；请用真实告警验证
+- **告警没有恢复**：确认渠道开启了 **Notify when Resolved**，并且告警规则里没有关闭该渠道的恢复通知
+- **一条规则产生了多条告警**：告警规则配置了分段（Segment by），每个分段各自触发和恢复，这是预期行为
+- **Sysdig 禁用了通知渠道**：Sysdig 在推送连续收到 4xx 错误后会将渠道置于观察期，多次失败后自动禁用。修复地址后需要在 Sysdig 中手动重新启用该渠道
+
+本集成只接收 Sysdig Monitor 的告警通知。Sysdig Secure 的 Webhook 通知（运行时策略、漏洞等）格式不同，不支持推送到此地址。
+
+更多字段含义请参阅 [Sysdig Webhook 通知渠道](https://docs.sysdig.com/en/administration/configure-a-webhook-channel/)。
