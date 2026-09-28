@@ -1,0 +1,158 @@
+---
+title: "Tailscale 告警集成"
+description: "通过 Webhook 将 Tailscale 节点密钥过期、设备待审批和子网路由/出口节点配置错误等事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Tailscale", "tailnet", "节点密钥过期", "设备审批", "Webhook"]
+---
+
+通过 Tailscale 的 Webhooks 功能，把需要管理员处理的 tailnet 事件同步到 Flashduty On-call：节点密钥即将过期或已过期、设备或用户等待审批、Tailnet Lock 下设备等待签名，以及子网路由或出口节点未开启 IP 转发。设备被批准、签名或删除时，Flashduty 关闭对应告警。
+
+根据 Tailscale 文档，所有套餐（包括免费的 Personal 套餐）都可以使用 Webhooks。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Tailscale**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Tailscale**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Tailscale 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 端点">
+
+需要 tailnet 的 Owner、Admin、Network admin 或 IT admin 角色。
+
+1. 登录 Tailscale 管理控制台，打开 **Settings → Webhooks** 页面，点击 **Add endpoint**
+2. **Webhook URL** 填写 Flashduty 集成的完整推送地址
+3. **Destination** 保持 **None**（Tailscale 默认格式）。选择 Slack、Discord 等格式时，Flashduty 无法解析请求
+
+</Step>
+
+<Step title="选择事件">
+
+选择下列事件（也可以直接勾选 **Device misconfiguration** 分类）：
+
+| 事件 | 作用 |
+| :--- | :--- |
+| `nodeKeyExpiringInOneDay` | 节点密钥将在一天内过期，打开告警 |
+| `nodeKeyExpired` | 节点密钥已过期，把同一告警升级为 Critical |
+| `nodeNeedsApproval` | 设备等待审批，打开告警 |
+| `nodeApproved` | 设备已批准，关闭审批告警 |
+| `nodeNeedsSignature` | 启用 Tailnet Lock 后设备等待签名，打开告警 |
+| `nodeSigned` | 设备已签名，关闭签名告警 |
+| `userNeedsApproval` | 用户等待审批，打开告警 |
+| `userApproved` | 用户已批准，关闭用户审批告警 |
+| `exitNodeIPForwardingNotEnabled` | 出口节点未开启 IP 转发，打开告警 |
+| `subnetIPForwardingNotEnabled` | 子网路由未开启 IP 转发，打开告警 |
+| `nodeDeleted`（可选） | 设备被删除，关闭该设备的全部告警 |
+
+在 Tailscale 中拒绝一台待审批设备就是删除它，此时不会有 `nodeApproved`。订阅 `nodeDeleted` 后，这类审批告警会随设备删除而关闭。临时节点（ephemeral node）每次自动删除也会发送 `nodeDeleted`；没有对应告警时，Flashduty 忽略这些关闭事件。
+
+也可以勾选 **Tailnet Management** 整个分类。分类中的其他事件（如 `nodeCreated`、`policyUpdate`、`userRoleUpdated`）是信息类事件，Flashduty 返回成功但不生成告警。
+
+</Step>
+
+<Step title="保存并测试">
+
+1. 点击 **Add endpoint**。Tailscale 弹出 Webhook secret，Flashduty 不使用它，可直接关闭
+2. 在 Webhooks 列表中找到该端点，点击右侧菜单 → **Test endpoint** → **Send test event**
+3. Tailscale 发送 `type` 为 `test` 的事件。Flashduty 返回成功，不生成告警
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+节点密钥过期和 IP 转发配置错误没有恢复事件：续期密钥或开启 IP 转发后，Tailscale 不会再通知。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 **24 小时**，计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Tailscale 每次推送一个 JSON 数组，一个数组可包含多个事件。Flashduty 对每个会生成告警的事件分别处理：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `type` | 事件类型 | 告警状态和等级，标签 `event_type` |
+| `tailnet` | tailnet 名称 | 标签 `tailnet` |
+| `message` | 事件摘要 | 告警标题 |
+| `data.nodeID` | 设备的节点 ID | 设备事件的 Alert Key，标签 `node_id` |
+| `data.user` | 用户登录名 | 用户事件的 Alert Key，标签 `user` |
+| `data.deviceName` | 设备名称 | 标签 `resource` |
+| `data.url` | 管理控制台中的详情链接 | 标签 `url` |
+| `data.expiration` | 节点密钥到期时间 | 标签 `key_expiry` |
+
+每条告警还带有标签 `source=tailscale` 和 `check`（取值 `key_expiry`、`approval`、`signature`、`user_approval`、`exit_node_ip_forwarding`、`subnet_ip_forwarding`）。`message` 为空时，标题为 `Tailscale <事件类型>: <设备名或用户>`。
+
+## Alert Key
+---
+
+Flashduty 用对象（设备的 `nodeID` 或用户的 `user`）和检查项（`check`）一起生成 Alert Key：
+
+- 同一台设备的 `nodeNeedsApproval` 和 `nodeApproved` 落在同一条告警上，批准后告警关闭
+- 同一台设备的 `nodeKeyExpiringInOneDay` 和 `nodeKeyExpired` 落在同一条告警上，密钥过期时告警升级为 Critical
+- 同一台设备的不同检查项（例如密钥过期和等待审批）各生成一条告警
+- Tailscale 投递失败后每小时重试一次，最多 24 小时；重试的事件合并到原告警，不会生成重复告警
+
+修改设备名或 tailnet 名称不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+| Tailscale 事件 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `nodeKeyExpiringInOneDay` | Warning |
+| `nodeKeyExpired` | Critical |
+| `nodeNeedsApproval`、`nodeNeedsAuthorization`（已弃用） | Warning |
+| `nodeNeedsSignature` | Warning |
+| `userNeedsApproval` | Warning |
+| `exitNodeIPForwardingNotEnabled`、`subnetIPForwardingNotEnabled` | Warning |
+| `nodeApproved`、`nodeAuthorized`（已弃用） | 恢复审批告警 |
+| `nodeSigned` | 恢复签名告警 |
+| `userApproved` | 恢复用户审批告警 |
+| `nodeDeleted` | 恢复该设备的全部告警 |
+| `test` 及其他事件类型 | 不生成告警 |
+
+会生成告警的设备事件缺少 `data.nodeID`，或用户事件缺少 `data.user` 时，整个请求会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="续期节点密钥后告警为什么没有关闭？">
+
+Tailscale 没有“密钥已续期”事件。请开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭该告警。也可以在 Tailscale 中为不需要过期的服务器 [关闭密钥过期](https://tailscale.com/kb/1028/key-expiry)。
+
+</Accordion>
+
+<Accordion title="需要配置 Webhook secret 吗？">
+
+不需要。Flashduty 通过推送地址中的 `integration_key` 识别集成，不校验 `Tailscale-Webhook-Signature` 签名。请像保管密钥一样保管推送地址。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 **Destination** 为 **None**，推送地址完整（包含 `integration_key`）
+- **测试事件成功但没有告警**：`test` 事件不生成告警；请确认端点订阅了上表中的事件
+- **设备批准后告警没有关闭**：确认端点订阅了 `nodeApproved`

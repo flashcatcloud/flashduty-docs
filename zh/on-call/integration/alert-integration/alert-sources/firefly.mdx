@@ -1,0 +1,129 @@
+---
+title: "Firefly 告警集成"
+description: "通过 Webhook 将 Firefly 检测到的配置漂移、未托管资源、幽灵资源和 Insight 同步到 Flashduty On-call。"
+keywords: ["告警集成", "Firefly", "Webhook", "配置漂移", "Drift", "IaC", "未托管资源"]
+---
+
+通过 Firefly 的 Webhook 通知集成，将 Firefly 检测到的事件同步到 Flashduty On-call：云资源配置和 IaC 定义不一致（Drift）、在 IaC 之外创建的资源（UnmanagedResource）、只存在于 IaC 状态文件中的资源（GhostResource），以及命中 Insight 规则的资源（InsightDetected）。一次推送可以包含多个资源，每个资源对应一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Firefly**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Firefly**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Firefly 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 登录 Firefly，点击 **Settings → Integrations**
+2. 点击 **Add New → Webhook Integration**
+3. 在 **Nickname** 中填写便于识别的名称，如 `Flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**，地址中需包含 `integration_key`
+5. 不要勾选 **Add custom credentials**，Flashduty 通过地址中的 `integration_key` 认证
+6. 点击 **Next**，再点击 **Done**
+
+Firefly 创建集成前会先向该地址发送一次连通性测试，测试失败时集成不会被创建。
+
+</Step>
+
+<Step title="选择推送的事件">
+
+进入 **Settings → Notifications**，为漂移、未托管资源、幽灵资源或策略违规等事件新增通知，目标选择上一步创建的 Webhook 集成。Webhook 推送的事件类型（`notificationType`）如下：
+
+| 事件类型 | 含义 | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| `Drift` | 资源的实际配置和 IaC 定义不一致 | 每个资源触发一条 Warning 告警 |
+| `GhostResource` | 资源已从云上删除，但仍留在 IaC 状态文件中 | 每个资源触发一条 Warning 告警 |
+| `InsightDetected` | 资源命中 Insight（策略）规则 | 每个资源触发一条 Warning 告警 |
+| `UnmanagedResource` | 资源在 IaC 之外创建，未被 IaC 管理 | 每个资源触发一条 Info 告警 |
+
+其他事件类型、不含资源的推送（`samples` 为空）和空请求体不会创建告警，Flashduty 收到后直接返回成功。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Firefly 的 Webhook 通知没有“已恢复”事件，资源修复后 Firefly 不会再推送，Flashduty 中的告警不会自动恢复。请在接收该集成告警的协作空间中开启 **超时自动关闭**，超时计时起点选择 **故障触发**，超时时长建议设置为 **24 小时**，配置方法参阅 [配置协作空间](/zh/on-call/channel/create-edit)。在超时前修复的问题，可以在 Flashduty 中手动关闭。
+
+</Step>
+
+<Step title="验证">
+
+在集成设置页点击通知测试按钮，确认 Firefly 显示推送成功。然后在已接入 Firefly 的云账号中手动修改一个由 Terraform 管理的资源，等待 Firefly 检测到漂移，确认 Flashduty 收到对应资源的告警。
+
+Firefly 未公开测试按钮推送的内容。测试内容如果不含资源，Flashduty 不会创建告警；如果带有示例资源，会为它创建一条告警，验证后请手动关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+每个资源（`samples` 中的一项）生成一条告警，Alert Key 由事件类型 `notificationType` 和资源的 `FRN` 共同计算；`FRN` 为空时使用资源的 `ARN`。因此：
+
+- 同一资源再次被报告同一类事件时，合并到原告警
+- 同一资源的漂移和 Insight 事件是两条告警
+- 资源名称、漂移的属性和取值、检测时间等变化不会改变 Alert Key
+
+资源同时缺少 `FRN` 和 `ARN` 时，Flashduty 拒绝整次推送。
+
+## 状态和告警等级
+---
+
+Firefly 的 Webhook 通知不携带等级，Flashduty 按事件类型确定等级，所有事件都是触发状态：
+
+| 事件类型 | Flashduty 等级 |
+| :--- | :--- |
+| `Drift`、`GhostResource`、`InsightDetected` | Warning |
+| `UnmanagedResource` | Info |
+
+## 标题、描述和标签
+---
+
+告警标题为 `Firefly <事件类型>: <资源名称> (<资源类型>)`，如 `Firefly drift detected: web-1 (aws_instance)`。`Drift` 告警的描述逐行列出漂移的属性、IaC 中的值和云上的实际值。
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `notification_type` | 事件类型 `notificationType` |
+| `resource` | 资源名称 `name`，为空时使用 `FRN` 或 `ARN` |
+| `asset_type` | 资源类型 `assetType`，如 `aws_instance` |
+| `frn` / `arn` | 资源的 `FRN` 和 `ARN` |
+| `provider` | 云厂商 `providerType`，如 `aws`、`gcp`、`azurerm` |
+| `region` | 资源所在地域 |
+| `account_name` | Firefly 账号名称 `accountName` |
+| `integration_name` / `integration_identifier` | 资源所属数据源集成的名称和标识 |
+| `drift_keys` | 漂移的属性名，逗号分隔 |
+| `iac_type` | IaC 类型，如 `terraform`、`cloudformation` |
+| `action_type` / `cloud_event` | 引起变化的操作类型和云事件名，如 `ModifyInstanceAttribute` |
+
+Firefly 推送中的操作人信息（`ownerData.userIdentity`）不会写入标签。
+
+## 排查问题
+---
+
+- **创建 Webhook 集成时提示地址无效**：确认 URL 完整且包含 `integration_key`，并且没有勾选 **Add custom credentials**
+- **Flashduty 返回参数错误**：确认推送地址中的 `integration_key` 属于 Firefly 集成
+- **测试成功但没有收到告警**：确认在 **Settings → Notifications** 中为需要的事件选择了该 Webhook 集成
+- **告警一直不恢复**：Firefly 不推送恢复事件，请开启协作空间的超时自动关闭，或手动关闭
+
+更多字段含义请参阅 [Firefly Webhook](https://docs.firefly.ai/integrations/notifications/webhook)。
