@@ -100,6 +100,7 @@ export const docMap = {
   Rizhiyi: `${alertBase}/rizhiyi.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  GithubChange: `${integrationBase}/change-integration/github.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
