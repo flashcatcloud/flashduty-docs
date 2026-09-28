@@ -1,0 +1,218 @@
+---
+title: "Argo CD 告警集成"
+description: "通过 Argo CD Notifications 的 Webhook 服务将应用同步失败和健康降级同步到 Flashduty On-call，同步成功或恢复健康时自动关闭告警。"
+keywords: ["告警集成", "Argo CD", "ArgoCD", "GitOps", "Notifications", "Webhook", "Kubernetes"]
+---
+
+Argo CD 通过内置的 **Notifications**（`argocd-notifications-controller`）推送告警：本集成提供一段 `argocd-notifications-cm` 配置，包含一个 Webhook 服务、两个请求体模板和一个触发器。每个 Argo CD 应用（Application）对应两类 Flashduty 告警：
+
+- **同步失败**：同步操作以 `Error` 或 `Failed` 结束时触发，下一次同步成功（`Succeeded`）时自动关闭
+- **健康降级**：应用健康状态变为 `Degraded` 时触发，恢复为 `Healthy` 时自动关闭
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Argo CD**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Argo CD**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Argo CD 中配置
+---
+
+以下操作需要能修改 Argo CD 所在命名空间（默认 `argocd`）中 ConfigMap 的 Kubernetes 权限，以及修改 Application 或 AppProject 注解的权限。Argo CD 集群需要能访问推送地址所在的域名。
+
+<Steps>
+<Step title="写入 Webhook 服务、模板和触发器">
+
+把下面的内容保存为 `flashduty-notifications.yaml`，将 `url` 替换为上一步复制的推送地址（包含 `?integration_key=...`）：
+
+```yaml
+data:
+  service.webhook.flashduty: |
+    url: <推送地址>
+    headers:
+    - name: Content-Type
+      value: application/json
+
+  template.flashduty-sync: |
+    webhook:
+      flashduty:
+        method: POST
+        body: |
+          {
+            "event_type": "sync",
+            "app_uid": {{ .app.metadata.uid | toJson }},
+            "app_name": {{ .app.metadata.name | toJson }},
+            "app_namespace": {{ .app.metadata.namespace | toJson }},
+            "project": {{ .app.spec.project | toJson }},
+            "argocd_url": {{ .context.argocdUrl | toJson }},
+            "phase": {{ .app.status.operationState.phase | toJson }},
+            "message": {{ .app.status.operationState.message | toJson }},
+            "revision": {{ .app.status.sync.revision | toJson }},
+            "sync_status": {{ .app.status.sync.status | toJson }},
+            "health_status": {{ .app.status.health.status | toJson }}
+          }
+
+  template.flashduty-health: |
+    webhook:
+      flashduty:
+        method: POST
+        body: |
+          {
+            "event_type": "health",
+            "app_uid": {{ .app.metadata.uid | toJson }},
+            "app_name": {{ .app.metadata.name | toJson }},
+            "app_namespace": {{ .app.metadata.namespace | toJson }},
+            "project": {{ .app.spec.project | toJson }},
+            "argocd_url": {{ .context.argocdUrl | toJson }},
+            "health_status": {{ .app.status.health.status | toJson }},
+            "sync_status": {{ .app.status.sync.status | toJson }},
+            "revision": {{ .app.status.sync.revision | toJson }}
+          }
+
+  trigger.on-flashduty: |
+    - when: app.status.operationState != nil and app.status.operationState.phase in ['Error', 'Failed']
+      send: [flashduty-sync]
+    - when: app.status.operationState != nil and app.status.operationState.phase == 'Succeeded'
+      send: [flashduty-sync]
+    - when: app.status.health.status == 'Degraded'
+      send: [flashduty-health]
+    - when: app.status.health.status == 'Healthy'
+      send: [flashduty-health]
+```
+
+合并到现有的 `argocd-notifications-cm`（`--type merge` 只增改上面这些键，不影响已有配置）：
+
+```bash
+kubectl patch configmap argocd-notifications-cm -n argocd --type merge --patch-file flashduty-notifications.yaml
+```
+
+如果 Argo CD 通过 Helm Chart 安装，请把 `service.webhook.flashduty` 写到 `notifications.notifiers`，两个模板写到 `notifications.templates`，触发器写到 `notifications.triggers`，否则下次升级会覆盖手动修改。
+
+配置说明：
+
+- 模板中的每个值都经过 `toJson` 转义，同步错误信息中的引号和换行不会破坏 JSON，请不要去掉。字段名不要修改，`event_type` 和 `app_uid` 必须保留
+- 触发器的四个条件分别对应同步失败、同步成功、健康降级和恢复健康。Argo CD 对每个条件单独记录是否已通知，条件从不成立变为成立时发送一次，所以不需要 `oncePer`
+- `argocd_url` 取自 `argocd-notifications-cm` 的 `context.argocdUrl`，用于生成告警中的应用链接；未配置时该字段为空，不影响告警
+
+</Step>
+
+<Step title="订阅通知">
+
+触发器需要被订阅后才会发送。按需要的范围选择一种方式：
+
+- **单个应用**：在 Application 上添加注解
+
+  ```bash
+  kubectl patch application <应用名> -n argocd --type merge \
+    -p '{"metadata":{"annotations":{"notifications.argoproj.io/subscribe.on-flashduty.flashduty":""}}}'
+  ```
+
+- **一个项目下的所有应用**：在 AppProject 的 `metadata.annotations` 中添加同样的注解 `notifications.argoproj.io/subscribe.on-flashduty.flashduty: ""`
+- **所有应用**：在 `argocd-notifications-cm` 的 `subscriptions` 中添加一项。如果已有 `subscriptions`，请在原列表中追加，不要用上一步的 merge 命令整体覆盖
+
+  ```yaml
+  subscriptions: |
+    - recipients:
+      - flashduty
+      triggers:
+      - on-flashduty
+  ```
+
+订阅生效时，健康或已同步成功的应用会立即发送一次恢复消息。此时 Flashduty 中没有对应的告警，这些消息会被忽略，不会生成告警。
+
+</Step>
+
+<Step title="验证连通性">
+
+Argo CD 没有发送测试消息的按钮。可以在 `argocd-notifications-controller` Pod 中用 `argocd admin notifications template notify` 按当前应用状态发送一次通知：
+
+```bash
+kubectl exec -n argocd deploy/argocd-notifications-controller -- \
+  /usr/local/bin/argocd admin notifications template notify flashduty-health <应用名> --recipient flashduty
+```
+
+命令没有输出错误即表示 Flashduty 已接受请求。应用当前为 `Healthy` 时这是一条恢复消息，不会生成告警；为 `Progressing` 等中间状态时 Flashduty 直接忽略。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个已订阅的应用同步失败（例如在 Git 中把某个 Deployment 的镜像字段改为空后同步），确认 Flashduty 收到告警；改回后再次同步成功，确认原告警关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `event_type` 和应用的 `app_uid`（`app.metadata.uid`）计算 Alert Key。Kubernetes 为每个对象分配的 UID 在集群的整个生命周期内唯一，因此：
+
+- 同一应用的同步失败、再次失败和同步成功落在同一条告警上；健康降级和恢复健康落在另一条告警上，同步成功不会关闭健康降级告警
+- 不同 Argo CD 实例中同名的应用不会共用告警
+- 应用删除后重建会得到新的 UID，对应新的告警
+
+应用名称、项目、版本、同步状态和错误信息的变化都不会改变 Alert Key。
+
+请求缺少 `event_type` 或 `app_uid`，或者同步消息缺少 `phase`、健康消息缺少 `health_status` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+| `event_type` | 状态字段 | 值 | Flashduty 处理 |
+| :--- | :--- | :--- | :--- |
+| `sync` | `phase` | `Error`、`Failed` | 触发或更新同步失败告警 |
+| `sync` | `phase` | `Succeeded` | 恢复同步失败告警 |
+| `sync` | `phase` | `Running`、`Terminating` | 忽略，返回成功 |
+| `health` | `health_status` | `Degraded` | 触发或更新健康降级告警 |
+| `health` | `health_status` | `Healthy` | 恢复健康降级告警 |
+| `health` | `health_status` | `Progressing`、`Suspended`、`Missing`、`Unknown` | 忽略，返回成功 |
+
+状态值不区分大小写，其他值会被拒绝。
+
+应用在告警期间被删除时，Argo CD 不会再发送恢复消息，需要在 Flashduty 中手动关闭该告警，或开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)（建议 24 小时）。
+
+## 告警等级
+---
+
+| 告警 | 等级 |
+| :--- | :--- |
+| 同步失败 | **Warning** |
+| 健康降级 | **Critical** |
+
+如需统一改为其他等级，在推送地址后追加 `&severity=Critical`（或 `Warning`、`Info`）。恢复事件保留原告警的等级。
+
+## 告警内容
+---
+
+- **标题**：`Argo CD application <应用名> sync <phase>` 或 `Argo CD application <应用名> health <health_status>`
+- **描述**：同步失败为 Argo CD 的同步结果信息（`operationState.message`）；健康降级为 `Health status: Degraded`
+- **标签**：`resource`（应用名）、`app_uid`、`app_namespace`、`project`、`event_type`、`phase`、`revision`、`sync_status`、`health_status`、`app_url`（`<argocdUrl>/applications/<应用名>`，配置了 `context.argocdUrl` 时才有）
+
+值为空的字段不会写入标签。
+
+## 排查问题
+---
+
+- **没有收到告警**：查看 `argocd-notifications-controller` 的日志（`kubectl logs -n argocd deploy/argocd-notifications-controller`），确认应用上有 `notifications.argoproj.io/subscribe.on-flashduty.flashduty` 注解，或 `subscriptions` 中包含 `on-flashduty`
+- **日志中出现 `failed with error code 400`**：确认模板与本文一致，所有值都经过 `toJson`；响应内容会指出缺少或不支持的字段
+- **日志中出现 `template 'flashduty-sync' is not supported` 或 `trigger 'on-flashduty' is not configured`**：确认上一步的键已写入 `argocd-notifications-cm`，Helm 安装请检查对应的 values
+- **告警没有恢复**：确认触发器中包含 `Succeeded` 和 `Healthy` 两个条件，且没有为它们设置 `oncePer`
+
+相关配置请参阅 Argo CD 文档 [Webhook](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/services/webhook/)、[Triggers](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/triggers/)、[Templates](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/templates/) 和 [Subscriptions](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/subscriptions/)。
