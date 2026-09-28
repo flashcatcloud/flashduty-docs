@@ -1,0 +1,218 @@
+---
+title: "Argo CD alert integration"
+description: "Send Argo CD application sync failures and health degradation to Flashduty On-call through an Argo CD Notifications webhook service. Alerts close automatically when a sync succeeds or the application is healthy again."
+keywords: ["alert integration", "Argo CD", "ArgoCD", "GitOps", "Notifications", "webhook", "Kubernetes"]
+---
+
+Argo CD pushes alerts through its built-in **Notifications** (`argocd-notifications-controller`). This integration provides an `argocd-notifications-cm` configuration with one webhook service, two request body templates, and one trigger. Each Argo CD Application maps to two kinds of Flashduty alerts:
+
+- **Sync failed**: opens when a sync operation ends in `Error` or `Failed`, and closes automatically when the next sync succeeds (`Succeeded`)
+- **Health degraded**: opens when the application health becomes `Degraded`, and closes automatically when it returns to `Healthy`
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Argo CD** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Argo CD** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Argo CD
+---
+
+The steps below need Kubernetes permission to edit ConfigMaps in the Argo CD namespace (`argocd` by default) and to edit annotations on Applications or AppProjects. The Argo CD cluster must be able to reach the domain of the push URL.
+
+<Steps>
+<Step title="Add the webhook service, templates, and trigger">
+
+Save the following as `flashduty-notifications.yaml` and replace `url` with the push URL copied above (including `?integration_key=...`):
+
+```yaml
+data:
+  service.webhook.flashduty: |
+    url: <push URL>
+    headers:
+    - name: Content-Type
+      value: application/json
+
+  template.flashduty-sync: |
+    webhook:
+      flashduty:
+        method: POST
+        body: |
+          {
+            "event_type": "sync",
+            "app_uid": {{ .app.metadata.uid | toJson }},
+            "app_name": {{ .app.metadata.name | toJson }},
+            "app_namespace": {{ .app.metadata.namespace | toJson }},
+            "project": {{ .app.spec.project | toJson }},
+            "argocd_url": {{ .context.argocdUrl | toJson }},
+            "phase": {{ .app.status.operationState.phase | toJson }},
+            "message": {{ .app.status.operationState.message | toJson }},
+            "revision": {{ .app.status.sync.revision | toJson }},
+            "sync_status": {{ .app.status.sync.status | toJson }},
+            "health_status": {{ .app.status.health.status | toJson }}
+          }
+
+  template.flashduty-health: |
+    webhook:
+      flashduty:
+        method: POST
+        body: |
+          {
+            "event_type": "health",
+            "app_uid": {{ .app.metadata.uid | toJson }},
+            "app_name": {{ .app.metadata.name | toJson }},
+            "app_namespace": {{ .app.metadata.namespace | toJson }},
+            "project": {{ .app.spec.project | toJson }},
+            "argocd_url": {{ .context.argocdUrl | toJson }},
+            "health_status": {{ .app.status.health.status | toJson }},
+            "sync_status": {{ .app.status.sync.status | toJson }},
+            "revision": {{ .app.status.sync.revision | toJson }}
+          }
+
+  trigger.on-flashduty: |
+    - when: app.status.operationState != nil and app.status.operationState.phase in ['Error', 'Failed']
+      send: [flashduty-sync]
+    - when: app.status.operationState != nil and app.status.operationState.phase == 'Succeeded'
+      send: [flashduty-sync]
+    - when: app.status.health.status == 'Degraded'
+      send: [flashduty-health]
+    - when: app.status.health.status == 'Healthy'
+      send: [flashduty-health]
+```
+
+Merge it into the existing `argocd-notifications-cm` (`--type merge` only adds or changes the keys above and leaves the rest of the configuration alone):
+
+```bash
+kubectl patch configmap argocd-notifications-cm -n argocd --type merge --patch-file flashduty-notifications.yaml
+```
+
+If Argo CD is installed with the Helm chart, put `service.webhook.flashduty` under `notifications.notifiers`, the two templates under `notifications.templates`, and the trigger under `notifications.triggers`. Otherwise the next upgrade overwrites the manual change.
+
+Notes:
+
+- Every value in the templates goes through `toJson`, so quotes and line breaks in a sync error message cannot break the JSON. Do not remove it. Keep the field names; `event_type` and `app_uid` are required
+- The four trigger conditions cover sync failed, sync succeeded, health degraded, and healthy again. Argo CD records the notified state of each condition separately and sends once when a condition turns from false to true, so no `oncePer` is needed
+- `argocd_url` comes from `context.argocdUrl` in `argocd-notifications-cm` and is used to build the application link on the alert. When it is not set, the field is empty and the alert is unaffected
+
+</Step>
+
+<Step title="Subscribe to the trigger">
+
+A trigger sends nothing until it is subscribed. Pick the scope you need:
+
+- **One application**: add an annotation to the Application
+
+  ```bash
+  kubectl patch application <app-name> -n argocd --type merge \
+    -p '{"metadata":{"annotations":{"notifications.argoproj.io/subscribe.on-flashduty.flashduty":""}}}'
+  ```
+
+- **All applications of a project**: add the same annotation `notifications.argoproj.io/subscribe.on-flashduty.flashduty: ""` to `metadata.annotations` of the AppProject
+- **All applications**: add an entry to `subscriptions` in `argocd-notifications-cm`. If `subscriptions` already exists, append to the existing list instead of overwriting it with the merge command above
+
+  ```yaml
+  subscriptions: |
+    - recipients:
+      - flashduty
+      triggers:
+      - on-flashduty
+  ```
+
+When a subscription takes effect, applications that are healthy or whose last sync succeeded send one recovery message right away. Flashduty has no matching alert for them, so these messages are ignored and create no alert.
+
+</Step>
+
+<Step title="Check connectivity">
+
+Argo CD has no test button. Run `argocd admin notifications template notify` in the `argocd-notifications-controller` Pod to send one notification from the current application state:
+
+```bash
+kubectl exec -n argocd deploy/argocd-notifications-controller -- \
+  /usr/local/bin/argocd admin notifications template notify flashduty-health <app-name> --recipient flashduty
+```
+
+No error output means Flashduty accepted the request. When the application is `Healthy`, this is a recovery message and creates no alert; in an intermediate state such as `Progressing`, Flashduty ignores it.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a subscribed application fail to sync (for example, set a Deployment's image field to empty in Git and sync) and confirm that Flashduty receives an alert. Revert the change, sync successfully, and confirm that the alert closes.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from `event_type` and the application's `app_uid` (`app.metadata.uid`). Kubernetes gives every object a UID that is unique over the whole lifetime of the cluster, so:
+
+- A sync failure, further failures, and the successful sync of one application land on the same alert; health degraded and healthy again land on another alert, so a successful sync never closes a health alert
+- Applications with the same name in different Argo CD instances never share an alert
+- An application that is deleted and recreated gets a new UID and a new alert
+
+Changes to the application name, project, revision, sync status, or error message do not change the Alert Key.
+
+Flashduty rejects a request that lacks `event_type` or `app_uid`, a sync message without `phase`, or a health message without `health_status`.
+
+## Alert lifecycle
+---
+
+| `event_type` | Status field | Value | Flashduty action |
+| :--- | :--- | :--- | :--- |
+| `sync` | `phase` | `Error`, `Failed` | Triggers or updates the sync failed alert |
+| `sync` | `phase` | `Succeeded` | Recovers the sync failed alert |
+| `sync` | `phase` | `Running`, `Terminating` | Ignored, returns success |
+| `health` | `health_status` | `Degraded` | Triggers or updates the health degraded alert |
+| `health` | `health_status` | `Healthy` | Recovers the health degraded alert |
+| `health` | `health_status` | `Progressing`, `Suspended`, `Missing`, `Unknown` | Ignored, returns success |
+
+Status values are case-insensitive. Any other value is rejected.
+
+If an application is deleted while its alert is open, Argo CD sends no recovery message. Close the alert by hand, or turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) (24 hours suggested).
+
+## Severity
+---
+
+| Alert | Severity |
+| :--- | :--- |
+| Sync failed | **Warning** |
+| Health degraded | **Critical** |
+
+To use one severity for every alert, append `&severity=Critical` (or `Warning`, `Info`) to the push URL. A recovery event keeps the severity of the original alert.
+
+## Alert content
+---
+
+- **Title**: `Argo CD application <app-name> sync <phase>` or `Argo CD application <app-name> health <health_status>`
+- **Description**: for a sync failure, the Argo CD sync result message (`operationState.message`); for health degraded, `Health status: Degraded`
+- **Labels**: `resource` (application name), `app_uid`, `app_namespace`, `project`, `event_type`, `phase`, `revision`, `sync_status`, `health_status`, and `app_url` (`<argocdUrl>/applications/<app-name>`, only when `context.argocdUrl` is set)
+
+Empty fields are not written as labels.
+
+## Troubleshooting
+---
+
+- **No alert arrives**: check the `argocd-notifications-controller` logs (`kubectl logs -n argocd deploy/argocd-notifications-controller`) and confirm that the application has the `notifications.argoproj.io/subscribe.on-flashduty.flashduty` annotation, or that `subscriptions` includes `on-flashduty`
+- **The logs show `failed with error code 400`**: make sure the templates match this page and every value goes through `toJson`. The response body names the missing or unsupported field
+- **The logs show `template 'flashduty-sync' is not supported` or `trigger 'on-flashduty' is not configured`**: make sure the keys from the first step are in `argocd-notifications-cm`. For a Helm install, check the matching values
+- **The alert does not recover**: make sure the trigger includes both the `Succeeded` and `Healthy` conditions and that neither sets `oncePer`
+
+For the related configuration, see the Argo CD docs on [Webhook](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/services/webhook/), [Triggers](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/triggers/), [Templates](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/templates/), and [Subscriptions](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/subscriptions/).
