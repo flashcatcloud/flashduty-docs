@@ -98,6 +98,7 @@ export const docMap = {
   Fortimonitor: `${alertBase}/fortimonitor.mdx`,
   Uptrends: `${alertBase}/uptrends.mdx`,
   Hetrixtools: `${alertBase}/hetrixtools.mdx`,
+  Mackerel: `${alertBase}/mackerel.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
