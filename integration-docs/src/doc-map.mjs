@@ -83,6 +83,7 @@ export const docMap = {
   PRTG: `${alertBase}/prtg.mdx`,
   Netdata: `${alertBase}/netdata.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
+  Gitlab: `${alertBase}/gitlab.mdx`,
   Bugsnag: `${alertBase}/bugsnag.mdx`,
   Raygun: `${alertBase}/raygun.mdx`,
   Librenms: `${alertBase}/librenms.mdx`,
