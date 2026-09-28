@@ -99,6 +99,7 @@ export const docMap = {
   Hetrixtools: `${alertBase}/hetrixtools.mdx`,
   Mackerel: `${alertBase}/mackerel.mdx`,
   Thousandeyes: `${alertBase}/thousandeyes.mdx`,
+  Kentik: `${alertBase}/kentik.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
