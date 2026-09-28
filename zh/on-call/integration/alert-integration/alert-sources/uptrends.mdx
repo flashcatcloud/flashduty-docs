@@ -1,0 +1,149 @@
+---
+title: "Uptrends 告警集成"
+description: "通过 Uptrends 的自定义集成将监控告警同步到 Flashduty On-call，监控恢复时自动关闭告警。"
+keywords: ["告警集成", "Uptrends", "自定义集成", "Webhook", "网站监控", "拨测"]
+---
+
+Uptrends 通过**自定义集成**（Uptrends integration）推送告警：监控出错、错误持续提醒和恢复时，Uptrends 按本文给出的请求体模板向 Flashduty 发送一条 JSON。Uptrends 中的每次故障（incident）对应一条 Flashduty 告警：出错时打开，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Uptrends**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Uptrends**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Uptrends 中配置
+---
+
+以下操作需要可以管理 **Integrations** 和 **Alert definitions** 的 Uptrends 账号。
+
+<Steps>
+<Step title="创建自定义集成">
+
+进入 **Alerting → Integrations**，点击 **+**（新版菜单为 **Configure → Alerting channels → +**），选择 **Uptrends integration**，点击 **Choose...**，然后：
+
+1. **Name** 填写自定义名称，例如 `Flashduty`
+2. **ApiUrl** 选择 **Specify value here**，填入完整的推送地址，包含 `?integration_key=...`
+
+</Step>
+
+<Step title="填写请求">
+
+打开 **Customizations** 标签页，按下表设置 HTTP 请求：
+
+| 字段 | 填写内容 |
+| :--- | :--- |
+| **Method** | `POST` |
+| **URL** | 保持默认的 ApiUrl 变量（`{{ApiUrl}}`） |
+| **Request headers** | `Content-Type: application/json` |
+| **Request body** | 用下方的请求体模板替换默认模板 |
+
+请求体模板：
+
+```json
+{
+  "incident_key": "{{@incident.key}}",
+  "alert_type": "{{@alert.type}}",
+  "monitor_guid": "{{@monitor.monitorGuid}}",
+  "monitor_name": "{{@JsonEncode({{@monitor.name}})}}",
+  "monitor_type": "{{@monitor.type}}",
+  "monitor_url": "{{@JsonEncode({{@monitor.url}})}}",
+  "description": "{{@JsonEncode({{@alert.description}})}}",
+  "checkpoint": "{{@JsonEncode({{@alert.checkpointName}})}}",
+  "error_type_id": "{{@alert.errorTypeId}}",
+  "first_error_utc": "{{@alert.firstErrorUtc}}",
+  "first_error_check_url": "{{@alert.firstErrorCheckUrl}}",
+  "dashboard_url": "{{@monitor.dashboardUrl}}",
+  "alert_definition": "{{@JsonEncode({{@alertDefinition.name}})}}"
+}
+```
+
+字段名不要修改，`incident_key` 和 `alert_type` 必须保留。监控名称、错误描述等文本可能包含引号或换行，模板用 `@JsonEncode` 转义，请不要去掉。
+
+Uptrends 默认用同一个请求发送 **Error**、**Reminder** 和 **Ok** 三种消息。不要通过 **Add steps** 把它们拆开；如果已经拆开，确认每种消息都使用上面的模板，且 **OK alert** 已勾选。
+
+</Step>
+
+<Step title="发送测试消息">
+
+在 **Customizations** 标签页点击 **Send test message**，消息类型选择 **OK alert**，确认返回状态码为 `200`，然后点击 **Save**。
+
+测试消息中的监控和告警数据是 Uptrends 生成的虚构值。OK 类型的测试消息找不到对应的活动告警，不会在 Flashduty 中生成告警；选择 **Error alert** 发送测试会生成一条测试告警，需要在 Flashduty 中手动关闭。
+
+</Step>
+
+<Step title="关联告警定义">
+
+集成只有被告警定义引用后才会发送告警。进入 **Alerting → Alert definitions**（新版菜单为 **Configure → Alert escalations**），打开要使用的告警定义，选择一个 **Escalation level** 标签页，勾选上一步创建的 `Flashduty` 集成，然后点击 **Save**。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个监控出错（例如临时把某个 HTTPS 监控的地址改成一个返回 500 的路径），确认 Flashduty 收到告警；改回地址后等待监控恢复，确认原告警关闭。Uptrends 在监控确认出错（通常需要多个检查点确认）并满足告警定义的升级条件后才发送告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `incident_key`（`{{@incident.key}}`）作为 Alert Key。Uptrends 文档说明，同一次故障的出错告警和恢复告警使用相同的 incident key，每次新的故障使用新的 key，因此出错、提醒和恢复消息落在同一条 Flashduty 告警上；监控恢复后再次出错会打开一条新告警。
+
+监控名称、错误描述、检查点和告警定义的变化都不会改变 Alert Key。
+
+请求缺少 `incident_key` 或 `alert_type`，或这两个字段仍是未替换的 `{{@...}}` 变量时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Flashduty 按 `alert_type` 字段（`{{@alert.type}}`，不区分大小写）处理消息：
+
+| Uptrends `alert_type` | 含义 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `Alert` | 监控出错（Error 消息） | 触发告警 |
+| `Reminder` | 错误仍在持续 | 更新告警 |
+| `Ok` | 错误已恢复 | 恢复告警 |
+
+其他值会被拒绝。
+
+## 告警等级
+---
+
+Uptrends 的告警没有等级，所有告警默认为 **Critical**。如需其他等级，在推送地址后追加 `&severity=Warning`（或 `Info`）。恢复事件保留原告警的等级。
+
+## 告警内容
+---
+
+- **标题**：监控名称；缺少监控名称时为 `Uptrends incident <incident_key>`
+- **描述**：错误描述（`{{@alert.description}}`），多步骤监控会包含出错的步骤编号
+- **标签**：`check`（监控名称）、`resource`（监控的地址）、`incident_key`、`alert_type`、`monitor_guid`、`monitor_type`、`checkpoint`（最后一次检查的检查点）、`error_type_id`、`first_error_utc`（首次出错时间，UTC）、`first_error_check_url`（首次出错的检查详情链接）、`dashboard_url`（监控仪表盘链接）、`alert_definition`（告警定义名称）
+
+值为空的字段不会写入标签。
+
+## 排查问题
+---
+
+- **测试消息返回失败**：确认 **ApiUrl** 是完整的推送地址，包含 `integration_key` 参数，且 **Method** 为 `POST`
+- **Flashduty 提示请求体不是合法 JSON**：确认请求体与模板一致，文本字段使用了 `@JsonEncode`
+- **告警没有发出**：确认监控使用的告警定义在某个 **Escalation level** 中勾选了该集成；可以在告警详情的 **Messages** 标签页查看 Uptrends 发出的请求和 Flashduty 的响应
+- **告警没有恢复**：确认 Ok 消息使用了同一个模板，且模板中的 `incident_key` 为 `{{@incident.key}}`
+
+变量的含义请参阅 Uptrends 文档 [Alerting system variables](https://www.uptrends.com/support/kb/alerting/integrations/custom-integrations/alerting-system-variables) 和 [Custom integrations](https://www.uptrends.com/support/kb/alerting/integrations/custom-integrations/custom-integrations-overview)。
