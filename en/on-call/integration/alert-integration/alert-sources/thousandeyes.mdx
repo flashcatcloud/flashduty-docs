@@ -1,0 +1,136 @@
+---
+title: "ThousandEyes alert integration"
+description: "Send Cisco ThousandEyes alerts to Flashduty On-call through a classic webhook, and recover them automatically when the alert clears."
+keywords: ["alert integration", "ThousandEyes", "Cisco ThousandEyes", "webhook", "classic webhook"]
+---
+
+Use a Cisco ThousandEyes classic webhook (the webhook you configure in an alert rule) to send alert events to Flashduty On-call. Each alert that ThousandEyes generates maps to one Flashduty alert: ThousandEyes sends `ALERT_NOTIFICATION_TRIGGER` when the alert triggers, and sends `ALERT_NOTIFICATION_CLEAR` when it clears, which recovers the alert. Both test alerts (Cloud Agent and Enterprise Agent tests) and agent notifications (agent offline, clock offset, and so on) are supported.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **ThousandEyes**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **ThousandEyes** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure ThousandEyes
+---
+
+Editing alert rules and webhooks requires permission to manage alert rules in ThousandEyes. Webhook alert notifications are not available in the ThousandEyes for Government instance.
+
+<Steps>
+<Step title="Add a webhook">
+
+1. Log in to ThousandEyes and go to **Manage** → **Alert Rules**
+2. Expand an alert rule and open the **Notifications** tab
+3. In the **Webhooks** section, click **Configure Webhooks** (**Edit webhooks** if webhooks already exist), then click **Add New Webhook**
+4. Fill in the fields as follows:
+
+| Field | Value |
+| :--- | :--- |
+| **Name** | A recognizable name, such as `Flashduty` |
+| **URL** | The full push URL of the Flashduty integration, including `integration_key`. Paste the URL as is, not URL-encoded. ThousandEyes does not follow HTTP redirects, so use the final URL you copied |
+| **Auth Type** | Select **None**. Flashduty authenticates the request by the `integration_key` in the URL |
+
+5. Click **Test**. **Webhook test completed successfully** means the URL is reachable
+6. Save the webhook
+
+<Note>
+Use this alert-rule webhook, which ThousandEyes calls a classic webhook. Do not use a custom webhook operation under **Manage** → **Integrations** → **Integrations 2.0**. Flashduty parses the fixed classic webhook format.
+</Note>
+
+</Step>
+
+<Step title="Select the webhook in alert rules">
+
+1. Back on the alert rule's **Notifications** tab, select the webhook you created under **Webhooks**
+2. Leave **Add Custom Payload** empty. Flashduty does not read custom key-value pairs
+3. Save the alert rule. Select the webhook in every alert rule that should send alerts, including the rules for agent notifications
+
+</Step>
+
+<Step title="Verify">
+
+1. Clicking **Test** sends a `WEBHOOK_TEST` event. Flashduty returns success but does not create an alert
+2. Make an alert rule that uses the webhook trigger (for example, lower its threshold temporarily), and confirm that Flashduty receives an active alert
+3. Wait for the alert to clear (or restore the threshold), and confirm that the alert is recovered
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the ThousandEyes alert ID (`alert.alertId`) as the Alert Key. ThousandEyes assigns a unique `alertId` to each generated alert, and the trigger and clear notifications of one alert carry the same `alertId`, so the clear notification recovers the matching Flashduty alert.
+
+- **Triggering again**: when an alert triggers again after it clears, ThousandEyes generates a new alert with a new `alertId`, and Flashduty creates a new alert
+- **Multiple agents**: an alert that involves several agents still has one `alertId`, so it is one Flashduty alert; each agent's metrics are listed in the alert description
+- The `eventId` differs on every delivery and is not part of the Alert Key. Changes to the rule name, severity, metric values, or time do not change the Alert Key either. Requests without `alert.alertId` are rejected
+
+## Status and severity
+---
+
+The status is determined by `eventType`:
+
+| ThousandEyes `eventType` | Status |
+| :--- | :--- |
+| `ALERT_NOTIFICATION_TRIGGER` | Triggered |
+| `ALERT_NOTIFICATION_CLEAR` (the alert cleared, or the alert rule was deleted or removed from the test) | Recovered |
+| `WEBHOOK_TEST` | No alert is created |
+
+The severity is determined by the alert rule severity (`alert.severity`):
+
+| ThousandEyes severity | Flashduty severity |
+| :--- | :--- |
+| Critical | Critical |
+| Major | Critical |
+| Minor | Warning |
+| Info | Info |
+| Empty (agent notifications have no severity) or any other value | Warning |
+
+New alert rules in ThousandEyes default to the **Info** severity, and such alerts are Info in Flashduty. For a higher severity, change the alert rule's **Severity** in ThousandEyes. A recovered alert keeps the severity it had when it triggered.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Alert rule name |
+| `resource` | Test targets (`testTargetsDescription`); the agent hostname for agent notifications |
+| `alert_id` | ThousandEyes alert ID, which is the Alert Key |
+| `rule_id` | Alert rule ID |
+| `rule_expression` | Alert condition, such as `Response Time ≥ 500 ms` |
+| `severity` | Original ThousandEyes severity |
+| `alert_type` | Alert type, such as `HTTP Server` or `Agent` |
+| `alert_url` | Link to the alert in ThousandEyes |
+| `test_id` / `test_name` | Test ID and name (test alerts) |
+| `agents` | Names of the alerting agents, comma-separated (test alerts) |
+| `agent_id` / `agent_name` / `host` / `ip_address` | Agent ID, name, hostname, and IP address (agent notifications) |
+
+The alert title is "alert rule name: test name", or "alert rule name: agent name" for agent notifications. The alert description contains the alert condition and each agent's metrics when the alert triggered.
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: make sure the URL is complete, not encoded, and includes `integration_key`, and that you use the classic webhook in the alert rule rather than a custom webhook
+- **No alert after clicking Test**: this is expected. The test event does not create an alert; verify with a real alert
+- **The alert does not recover**: make sure the alert has cleared in ThousandEyes. A global alert clears only after all of its agents no longer meet the condition; while any agent is still alerting, no clear notification is sent
+- **An alert rule sends nothing**: webhooks are selected per alert rule. Make sure the Flashduty webhook is selected in that rule's **Notifications**
+
+For more on the fields, see [ThousandEyes Classic Webhooks for Alert Notifications](https://docs.thousandeyes.com/product-documentation/alerts/standard-notification-methods/classic-webhooks-for-alert-notifs).
