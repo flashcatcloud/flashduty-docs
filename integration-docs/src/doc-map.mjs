@@ -101,6 +101,7 @@ export const docMap = {
   Thousandeyes: `${alertBase}/thousandeyes.mdx`,
   Kentik: `${alertBase}/kentik.mdx`,
   Hackerone: `${alertBase}/hackerone.mdx`,
+  Tailscale: `${alertBase}/tailscale.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
