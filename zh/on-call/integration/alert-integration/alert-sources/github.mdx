@@ -1,0 +1,159 @@
+---
+title: "GitHub 告警集成"
+description: "通过仓库或组织 Webhook，将 GitHub 的 Dependabot、代码扫描、密钥扫描告警和失败的 Actions 工作流运行同步到 Flashduty On-call。"
+keywords: ["告警集成", "GitHub", "Dependabot", "Code scanning", "Secret scanning", "GitHub Actions", "Webhook"]
+---
+
+通过 GitHub 仓库或组织的 Webhook，将需要值班处理的 GitHub 事件同步到 Flashduty On-call：
+
+- **安全告警**：Dependabot 告警、代码扫描（Code scanning）告警、密钥扫描（Secret scanning）告警。每条 GitHub 安全告警对应一条 Flashduty 告警，在 GitHub 中修复、忽略或关闭后自动恢复。
+- **Actions 工作流运行失败**：结论为 `failure`、`timed_out` 或 `startup_failure` 的工作流运行。每次运行对应一条告警，GitHub 不会发送恢复事件。
+
+部署、代码推送等变更类事件不在本集成范围内。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **GitHub**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **GitHub**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 GitHub 中配置
+---
+
+Webhook 可以建在单个仓库上，也可以建在组织上（覆盖组织内所有仓库）。仓库 Webhook 需要仓库的 Admin 权限，组织 Webhook 需要组织 Owner 权限。
+
+<Steps>
+<Step title="确认安全功能已开启">
+
+安全告警只在对应功能开启后才会产生。在仓库的 **Settings → Advanced Security** 中确认：
+
+| 功能 | 费用 |
+| :--- | :--- |
+| Dependabot alerts | 所有仓库免费 |
+| Code scanning（如 CodeQL 默认配置） | 公开仓库免费；私有仓库需要 GitHub Code Security |
+| Secret scanning | 公开仓库免费；私有仓库需要 GitHub Secret Protection |
+
+只接收 Actions 失败时可跳过此步。
+
+</Step>
+
+<Step title="添加 Webhook">
+
+1. 仓库 Webhook：进入仓库，点击 **Settings → Webhooks → Add webhook**；组织 Webhook：进入组织，点击 **Settings → Webhooks → Add webhook**
+2. **Payload URL**：粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
+3. **Content type**：选择 `application/json`（选 `application/x-www-form-urlencoded` 也能接收）
+4. **Secret**：留空。Flashduty 通过推送地址中的 `integration_key` 识别集成，不校验签名
+5. **SSL verification**：保持 **Enable SSL verification**
+6. **Which events would you like to trigger this webhook?**：选择 **Let me select individual events**，取消默认勾选的 **Pushes**，然后勾选需要的事件：
+   - **Dependabot alerts**
+   - **Code scanning alerts**
+   - **Secret scanning alerts**
+   - **Workflow runs**
+7. 保持 **Active** 勾选，点击 **Add webhook**
+
+</Step>
+
+<Step title="验证连通性和生命周期">
+
+添加后 GitHub 会立即发送一次 `ping` 事件。在 Webhook 的 **Recent Deliveries** 中确认响应码为 `200`；`ping` 只验证地址可达，不会创建告警。
+
+- **Actions 失败**：在仓库中运行一个会失败的工作流（例如一个执行 `exit 1` 的 `workflow_dispatch` 工作流），确认 Flashduty 收到告警。
+- **安全告警**：在测试仓库中引入一个存在已知漏洞的依赖版本，Dependabot 生成告警后 Flashduty 触发告警；在 GitHub 中将该告警 **Dismiss**，确认原告警恢复。
+
+GitHub 不会自动重试失败的推送。可在 **Recent Deliveries** 中对 3 天内的推送点击 **Redeliver** 重新发送，重发的事件会合并到原告警。
+
+</Step>
+</Steps>
+
+## 事件与告警状态
+---
+
+GitHub 在请求头 `X-GitHub-Event` 中给出事件类型，在请求体的 `action` 中给出动作。Flashduty 按下表处理：
+
+| 事件 | 触发或更新告警 | 恢复告警 | 忽略（返回成功，不创建告警） |
+| :--- | :--- | :--- | :--- |
+| `dependabot_alert` | `created`、`reopened`、`reintroduced`、`auto_reopened` | `fixed`、`dismissed`、`auto_dismissed` | `assignees_changed` |
+| `code_scanning_alert` | `created`、`reopened`、`reopened_by_user` | `fixed`、`closed_by_user` | `appeared_in_branch`、`updated_assignment` |
+| `secret_scanning_alert` | `created`、`reopened`、`publicly_leaked` | `resolved` | `assigned`、`unassigned`、`validated`、`metadata_created`、`metadata_removed` |
+| `workflow_run` | `completed` 且结论为 `failure`、`timed_out`、`startup_failure` | 无 | `requested`、`in_progress`，以及其他结论（`success`、`cancelled`、`skipped` 等） |
+
+`ping` 和其他事件类型（如误勾选的 `push`）同样返回成功，不创建告警。
+
+### Actions 失败告警需要开启超时自动关闭
+
+工作流运行失败是一次性事件：之后的运行即使成功，GitHub 也不会为这次失败发送恢复事件。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 **超时计时起点** 选择 **故障触发**，**超时时长** 设为 12 小时，或在修复后手动关闭。
+
+超时自动关闭对协作空间内的所有故障生效。如果安全告警和 Actions 失败进入同一个协作空间，未处理完的安全告警也会被超时关闭。建议使用共享集成，在 **路由** 中按标签 `event` 将 `workflow_run` 分派到单独开启了超时自动关闭的协作空间。
+
+## Alert Key
+---
+
+- **安全告警**：Alert Key 由事件类型、仓库 ID（`repository.id`）和告警编号（`alert.number`）组成。告警编号在同一仓库、同一类告警内唯一，GitHub 也用它在 API 中定位告警（如 `/repos/{owner}/{repo}/dependabot/alerts/{alert_number}`）。同一条告警从创建到修复、忽略、重新打开，Alert Key 保持不变；仓库改名不会影响 Alert Key。
+- **Actions 失败**：Alert Key 由仓库 ID 和工作流运行 ID（`workflow_run.id`）组成。对同一次运行点击 **Re-run** 时运行 ID 不变，再次失败会合并到同一条告警；新的一次运行会产生新的告警。
+
+缺少 `repository.id`、`alert.number` 或 `workflow_run.id` 的事件会被拒绝。
+
+## 告警等级
+---
+
+| 事件 | GitHub 字段 | GitHub 值 | Flashduty 等级 |
+| :--- | :--- | :--- | :--- |
+| Dependabot | `alert.security_advisory.severity` | `critical`、`high` | Critical |
+| | | `medium` | Warning |
+| | | `low` | Info |
+| | | 空值或其他值 | Warning |
+| 代码扫描 | `alert.rule.security_severity_level`（安全类规则） | `critical`、`high` | Critical |
+| | | `medium` | Warning |
+| | | `low` | Info |
+| | 无安全等级时取 `alert.rule.severity` | `error` | Critical |
+| | | `warning` | Warning |
+| | | `note`、`none` | Info |
+| | | 空值或其他值 | Warning |
+| 密钥扫描 | 无等级字段 | - | Critical |
+| Actions 失败 | - | - | Warning |
+
+恢复事件保留告警原有等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `event` / `action` | 事件类型和动作 |
+| `repository` / `repository_id` | 仓库全名和仓库 ID |
+| `alert_number` / `alert_url` | 安全告警编号和 GitHub 中的告警链接 |
+| `check` | Dependabot 为 GHSA ID，代码扫描为规则 ID，密钥扫描为密钥类型，Actions 为工作流名称 |
+| `severity` | GitHub 原始等级（Dependabot 公告等级或代码扫描规则等级） |
+| `security_severity` | 代码扫描规则的安全等级 |
+| `package` / `ecosystem` / `manifest_path` / `ghsa_id` / `cve_id` | Dependabot 告警的依赖包、生态、清单文件和漏洞编号 |
+| `tool` / `ref` | 代码扫描工具和最近出现的分支 |
+| `validity` | 密钥是否仍有效（`active`、`inactive`、`unknown`） |
+| `workflow_path` / `branch` / `conclusion` / `trigger` | 工作流文件、分支、运行结论和触发事件 |
+| `run_id` / `run_number` / `run_attempt` / `run_url` / `head_sha` | 工作流运行 ID、编号、尝试次数、链接和提交 |
+
+## 排查问题
+---
+
+- **Recent Deliveries 显示失败**：查看该推送的 **Response**。响应非 `200` 时确认推送地址完整且包含 `integration_key`；GitHub 等待响应最长 10 秒
+- **收到 ping 但没有告警**：确认勾选了上文的 4 类事件，且仓库已开启对应的安全功能；成功、取消或跳过的工作流运行不会产生告警
+- **安全告警没有恢复**：确认在 GitHub 中已修复、忽略或关闭该告警，并在 **Recent Deliveries** 中找到对应的 `fixed`、`dismissed`、`closed_by_user` 或 `resolved` 推送
+- **Actions 失败告警一直未关闭**：GitHub 不发送恢复事件，参考上文开启超时自动关闭
+
+更多字段含义请参阅 [GitHub 的 Webhook 事件和负载](https://docs.github.com/zh/webhooks/webhook-events-and-payloads) 和 [创建 Webhook](https://docs.github.com/zh/webhooks/using-webhooks/creating-webhooks)。
