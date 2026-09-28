@@ -123,6 +123,7 @@ export const docMap = {
   NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
   HcpTerraformChange: `${integrationBase}/change-integration/hcp-terraform.mdx`,
   ArgocdChange: `${integrationBase}/change-integration/argocd.mdx`,
+  JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
