@@ -1,7 +1,7 @@
 ---
 title: "Flutter SDK 高级配置"
-description: "配置 Flutter RUM SDK 的采样率、隐私同意、事件过滤、分布式追踪和符号文件上传"
-keywords: ["RUM", "Flutter SDK", "高级配置", "采样", "隐私同意", "符号上传"]
+description: "配置 Flutter RUM SDK 的采样率、远程配置、隐私同意、事件过滤、分布式追踪和符号文件上传"
+keywords: ["RUM", "Flutter SDK", "高级配置", "采样", "远程配置", "隐私同意", "符号上传"]
 ---
 
 本文介绍 Flutter SDK 的进阶配置项。所有配置都通过 `DatadogConfiguration` 与 `DatadogRumConfiguration` 传入。
@@ -15,6 +15,60 @@ DatadogRumConfiguration(
   traceSampleRate: 20.0,      // resource 上的追踪采样率
 );
 ```
+
+## 远程配置
+
+`flashcat_flutter_plugin` 0.2.0 起，会话采样率可以在控制台 **应用管理 > 远程配置** 页签在线调整，无需改代码、重新发版。该功能默认关闭，需要在初始化时开启：
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  sessionSamplingRate: 100.0,        // 控制台未下发时使用的采样率
+  remoteConfigurationEnabled: true,
+);
+```
+
+开启后，配置由插件底层的原生 Android / iOS SDK 拉取，行为与原生端一致：
+
+- 控制台发布的采样率对**下一个新会话**生效，进行中的会话不受影响。
+- 下发的值会持久化到本地，冷启动后的第一个会话即按上次下发的采样率抽样。
+- 请求失败、超时或响应无法识别时，沿用已生效的值，不会清空；控制台停用远程配置后，恢复使用初始化时的 `sessionSamplingRate`。
+- Flutter SDK 只读取**会话采样率**与**自定义配置项**两项，其余配置项不生效。自定义配置项可通过 `getRemoteConfig()` 读取，未开启远程配置或尚未拿到配置时返回 `null`：
+
+```dart
+final custom = await DatadogSdk.instance.rum?.getRemoteConfig();
+// 数字经平台通道传回时，可能是 int 也可能是 double（取决于平台），统一按 num 读取
+final threshold = (custom?['threshold'] as num?)?.toDouble();
+```
+
+需要按业务规则决定采样时，可通过 `beforeSampling` 回调干预：每次新建会话时，它收到即将生效的采样率（`sessionSampleRate`）与控制台的自定义配置项（`custom`），返回新的采样率即可覆盖，返回 `null` 表示不干预。回调同步执行，需保持轻量；返回 0–100 以外的值、抛出异常或执行超时，都会沿用原生 SDK 的判定。未开启远程配置时回调同样会执行，此时 `sessionSampleRate` 是本地设置的值，`custom` 为 `null`。
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  remoteConfigurationEnabled: true,
+  beforeSampling: (context) {
+    // 例如：控制台自定义配置项 debugUsers 里的用户全量采集，其余沿用下发的采样率
+    final debugUsers = context.custom?['debugUsers'];
+    if (debugUsers is List && debugUsers.contains(currentUserId)) {
+      return 100;
+    }
+    return null;
+  },
+);
+```
+
+若要不受采样率限制地采集当前用户（例如排查特定用户的问题），可调用 `DatadogSdk.instance.rum?.setForcedSession()`：若当前会话未被采中，会立即结束并开启一个采集的新会话，此后直到进程结束的会话一律采集；该设置无法撤销，重启 App 后恢复。
+
+<Note>
+如果 Flutter 是挂接到一个已经初始化过的原生 SDK 上（add-to-app 场景），`remoteConfigurationEnabled` 与 `beforeSampling` 必须由原生侧在初始化 RUM 时配置，见 [iOS SDK 高级配置](/zh/rum/sdk/ios/advanced-config) 与 [Android SDK 高级配置](/zh/rum/sdk/android/advanced-config)；`getRemoteConfig()` 与 `setForcedSession()` 仍可在 Dart 侧调用。
+</Note>
+
+<Warning>
+自定义配置项会下发到客户端，任何持有 Client Token 的人都能读到。请勿在其中存放密钥、访问令牌或个人敏感信息。
+</Warning>
+
+控制台侧的配置项、发布与生效方式见 [应用管理 · 远程配置](/zh/rum/quickstart/app-management#远程配置)。
 
 ## 隐私同意
 
