@@ -122,6 +122,7 @@ export const docMap = {
   LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
   NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
   HcpTerraformChange: `${integrationBase}/change-integration/hcp-terraform.mdx`,
+  ArgocdChange: `${integrationBase}/change-integration/argocd.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
