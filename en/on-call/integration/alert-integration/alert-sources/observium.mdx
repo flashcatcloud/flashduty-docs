@@ -1,0 +1,185 @@
+---
+title: "Observium alert integration"
+description: "Send Observium alert checker and syslog alerts to Flashduty On-call through the Observium Webhook JSON transport. Alerts close automatically when the alert checker recovers."
+keywords: ["alert integration", "Observium", "Webhook JSON", "network monitoring", "SNMP"]
+---
+
+Observium pushes alerts through a contact of type **Webhook JSON**: every time an alert checker alerts, sends a reminder, or recovers, Observium posts one JSON body to Flashduty, built from the contact's JSON template. Each alert checker and entity pair maps to one Flashduty alert: it opens when the check fails and closes automatically when the check recovers. Every match of a syslog alert rule opens its own alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Observium** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Observium** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Observium
+---
+
+The **Webhook JSON** transport ships with the Observium Community Edition; no subscription is needed. Screen names below follow Observium CE 26.1.
+
+<Steps>
+<Step title="Create the contact">
+
+Sign in to Observium as an administrator, open the **Observium** menu (globe icon) in the top bar, select **Contacts**, click **Add Contact** at the top right, and fill in the form as follows:
+
+| Field | Value |
+| :--- | :--- |
+| **Transport** | `Webhook JSON` |
+| **Description** | A name of your choice, for example `Flashduty` |
+| **URL** | The full Flashduty push URL, including `?integration_key=...` |
+| **JSON passed to Webhook** | Keep the default template shown below |
+| **Fallback URL**, **Authentication token** | Leave empty |
+
+Click **Add Contact** to save.
+
+<Warning>Set **Transport** to **Webhook JSON**, not **Webhook**. The **Webhook** transport expects the receiver to return `{"status": "successful"}`. The Flashduty response has no such field, so Observium records every delivery as failed and retries it for the notification lifetime (5 minutes), and Flashduty receives duplicate events.</Warning>
+
+The default **JSON passed to Webhook** template is below. Flashduty reads its `ALERT_STATE`, `ALERT_ID`, `ALERT_SEVERITY`, `ALERT_MESSAGE`, `ALERT_URL`, `CONDITIONS`, `METRICS`, `DURATION`, `ENTITY_*`, and `DEVICE_*` fields. If you have edited the template, keep at least `ALERT_STATE` and `ALERT_ID`, and keep every value in quotes:
+
+```json
+{
+  "ALERT_STATE": "%ALERT_STATE%",
+  "ALERT_STATE_NAME": "%ALERT_STATE_NAME%",
+  "ALERT_EMOJI": "%ALERT_EMOJI%",
+  "ALERT_EMOJI_NAME": "%ALERT_EMOJI_NAME%",
+  "ALERT_STATUS": "%ALERT_STATUS%",
+  "ALERT_STATUS_CUSTOM": "%ALERT_STATUS_CUSTOM%",
+  "ALERT_SEVERITY": "%ALERT_SEVERITY%",
+  "ALERT_COLOR": "#%ALERT_COLOR%",
+  "ALERT_URL": "%ALERT_URL%",
+  "ALERT_UNIXTIME": "%ALERT_UNIXTIME%",
+  "ALERT_TIMESTAMP": "%ALERT_TIMESTAMP%",
+  "ALERT_TIMESTAMP_RFC2822": "%ALERT_TIMESTAMP_RFC2822%",
+  "ALERT_TIMESTAMP_RFC3339": "%ALERT_TIMESTAMP_RFC3339%",
+  "ALERT_ID": "%ALERT_ID%",
+  "ALERT_MESSAGE": "%ALERT_MESSAGE%",
+  "CONDITIONS": "%CONDITIONS%",
+  "METRICS": "%METRICS%",
+  "DURATION": "%DURATION%",
+  "ENTITY_URL": "%ENTITY_URL%",
+  "ENTITY_LINK": "%ENTITY_LINK%",
+  "ENTITY_NAME": "%ENTITY_NAME%",
+  "ENTITY_ID": "%ENTITY_ID%",
+  "ENTITY_TYPE": "%ENTITY_TYPE%",
+  "ENTITY_DESCRIPTION": "%ENTITY_DESCRIPTION%",
+  "DEVICE_HOSTNAME": "%DEVICE_HOSTNAME%",
+  "DEVICE_SYSNAME": "%DEVICE_SYSNAME%",
+  "DEVICE_DESCRIPTION": "%DEVICE_DESCRIPTION%",
+  "DEVICE_ID": "%DEVICE_ID%",
+  "DEVICE_URL": "%DEVICE_URL%",
+  "DEVICE_LINK": "%DEVICE_LINK%",
+  "DEVICE_HARDWARE": "%DEVICE_HARDWARE%",
+  "DEVICE_OS": "%DEVICE_OS%",
+  "DEVICE_TYPE": "%DEVICE_TYPE%",
+  "DEVICE_LOCATION": "%DEVICE_LOCATION%",
+  "DEVICE_UPTIME": "%DEVICE_UPTIME%",
+  "DEVICE_REBOOTED": "%DEVICE_REBOOTED%",
+  "TITLE": "%TITLE%"
+}
+```
+
+</Step>
+
+<Step title="Associate alert checkers">
+
+1. In the **Contacts** list, click the contact you just created to open its details
+2. Under **Associated Alert Checkers**, select the alert checkers to push and save
+3. To push syslog alerts, select the rules under **Associated Syslog Rules**
+
+Make sure **Send recovery notification** is on for each checker (edit the checker under **Alerts**). Otherwise Observium sends nothing when the check recovers, and the Flashduty alert does not close.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+The Observium Community Edition web UI has no contact test button. Send test notifications from the command line in the Observium install directory (usually `/opt/observium`), where `<contact_id>` is the contact's ID in the **Contacts** list:
+
+```bash
+./test_alert.php -c <contact_id>      # test alert notification
+./test_alert.php -c <contact_id> -r   # test recovery notification
+./test_alert.php -c <contact_id> -s   # test syslog notification
+```
+
+Test notifications use the sample data bundled with Observium, whose links all point to `observium.test`. Flashduty returns success and creates no alert.
+
+Then make a checker fire for real (for example, make a monitored device unreachable so the device up/down checker alerts) and confirm that Flashduty receives an active alert. Bring the device back and confirm that the alert closes. The Observium alerter checks alerts and sends notifications after each poll, so alerts and recoveries usually arrive within one polling cycle (5 minutes by default). If the checker has an **Alert Delay**, the alert is held back for that many checks.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `ALERT_ID` as the Alert Key for alert checker alerts. `ALERT_ID` is the row ID in the Observium `alert_table` table, which holds exactly one row per alert checker and entity, and every alert, reminder, and recovery notification carries the same value. So notifications for the same checker on the same entity land on one alert, and a new failure after recovery opens a new alert.
+
+Changes to the severity, checker message, host name, metric values, or time do not change the Alert Key. `ALERT_ID` is unique only within one Observium instance: use a separate Flashduty integration for each Observium instance.
+
+For syslog alerts, `ALERT_ID` is the syslog rule ID and no recovery is ever sent, so every match opens a new alert. Close these alerts manually in Flashduty or configure auto-close.
+
+Flashduty rejects requests without `ALERT_STATE` or `ALERT_ID`, or whose `ALERT_STATE` is not a value in the table below.
+
+## Alert lifecycle
+---
+
+Flashduty handles notifications by the `ALERT_STATE` field:
+
+| Observium `ALERT_STATE` | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `ALERT` | First alert from the checker | Trigger an alert |
+| `ALERT REMINDER` | Repeated reminder while the alert lasts | Update the alert |
+| `RECOVER` | Checker recovered | Recover the alert |
+| `SYSLOG` | Syslog rule matched | Trigger a separate alert that never recovers automatically |
+
+`ALERT_STATE` carries Observium's fixed state names and is not affected by `$config['alerts']['status_name']`. Custom names appear in `ALERT_STATE_NAME`, which Flashduty does not read.
+
+## Severity
+---
+
+The severity comes from `ALERT_SEVERITY`:
+
+| Observium `ALERT_SEVERITY` | Flashduty severity |
+| :--- | :--- |
+| `Critical`, `Emergency`, `Alert`, `Error` | Critical |
+| `Warning` | Warning |
+| `Informational`, `Notification`, `Debugging`, `Other` | Info |
+| Any other value, or empty | Critical |
+
+For alert checkers the severity is the checker's **Severity** (`Critical` or `Warning`); for syslog alerts it is the syslog priority of the log line. Recovery notifications carry the same checker severity, and the recovery event keeps it.
+
+## Alert content
+---
+
+- **Title**: `<checker message> on <entity name>`. When the entity is not the device itself (for example a port or a sensor), `(<host name>)` is appended. When the checker message is empty, `Observium alert <ALERT_ID>` is used instead
+- **Description**: `CONDITIONS` (the failed conditions), `METRICS` (current metric values), and `DURATION`, one per line
+- **Labels**: `check` (checker message), `resource` (entity name), `host` (host name), `alert_id`, `entity_type`, `entity_id`, `device_id`, `sys_name`, `os`, `hardware`, `device_type`, `location`, `severity` (original severity), `state` (raw `ALERT_STATE`), `alert_url` (the alert page in Observium)
+
+Empty fields and `%TAG%` placeholders left unreplaced by the template (such as `ENTITY_*` in syslog notifications) are not written to labels.
+
+## Troubleshooting
+---
+
+- **Observium records notifications as failed and Flashduty receives duplicate events**: the contact's **Transport** is **Webhook**. Change it to **Webhook JSON**
+- **Flashduty returns 400 with `ALERT_STATE is required` or `ALERT_ID is required`**: the contact's JSON template lacks that field. Restore the default template
+- **Flashduty returns 400 with a JSON parsing error**: check the edited template. Every `%TAG%` must be in quotes
+- **No notification is sent**: make sure the contact is associated with the checker and is not disabled. Run `./alerter.php -d` to see the delivery result
+- **No recovery**: make sure **Send recovery notification** is on for the checker
+- **Observium links in the alert do not open**: set `$config['web_url']` in `config.php` to the external address of Observium. Notifications sent from the command line use it to build links
+
+For details on transports and alert checkers, see the Observium documentation on [Transports](https://docs.observium.org/alerting_transports/) and [Alert Checkers](https://docs.observium.org/alert_checker/).
