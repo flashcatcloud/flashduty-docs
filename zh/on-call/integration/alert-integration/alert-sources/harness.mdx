@@ -1,0 +1,144 @@
+---
+title: "Harness 告警集成"
+description: "通过 Harness 流水线通知的 Webhook 方式，将流水线失败、阶段失败和触发器失败同步到 Flashduty On-call，再次成功后自动恢复。"
+keywords: ["告警集成", "Harness", "Webhook", "CI/CD", "流水线", "Pipeline", "部署"]
+---
+
+通过 Harness 流水线通知规则（Notification Rule）的 Webhook 通知方式，将 Harness CI/CD 流水线的失败事件同步到 Flashduty On-call。每条流水线、每个阶段（Stage）各对应一条 Flashduty 告警：流水线失败时触发，之后同一条流水线运行成功时恢复；阶段失败时触发，之后同一阶段运行成功时恢复。触发器（Trigger）启动流水线失败时也会产生告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Harness**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Harness**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Harness 中配置
+---
+
+Harness SaaS 的各个版本都可以在流水线上配置通知规则，需要对该流水线有 **Create/Edit** 权限。以下步骤在单条流水线上配置；如果账号开启了集中通知（Centralised Notifications），也可以在 **Account Settings → Notification Rules** 中为多条流水线统一配置，事件和通知方式的选择与下面相同。
+
+<Steps>
+<Step title="新建通知规则">
+
+1. 在 Harness 中打开需要接入的流水线，进入 **Pipeline Studio**
+2. 点击右侧的 **Notify**，选择 **Notifications**
+3. 填写规则名称（例如 `flashduty`），点击 **Continue**
+
+</Step>
+
+<Step title="选择流水线事件">
+
+在 **Pipeline Events** 中按下表勾选。失败事件和成功事件需要成对勾选，只勾选失败事件时告警不会自动恢复。
+
+| Harness 事件 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| **Pipeline Failed** | 触发该流水线的告警 |
+| **Pipeline Success** | 恢复该流水线的告警 |
+| **Stage Failed**（可选） | 触发该阶段的告警；可选择全部阶段或指定阶段 |
+| **Stage Success**（可选） | 恢复该阶段的告警；阶段范围需和 **Stage Failed** 一致 |
+| **Trigger Failed**（可选） | 触发器启动流水线失败时触发告警，不会自动恢复，见下文 |
+
+**Pipeline Start**、**Pipeline End**、**Pipeline Pause**、**Stage Start**、**Step Failed**、**Waiting for User Action**、**Pipeline Resumed** 不需要勾选，勾选了 Flashduty 也会直接返回成功、不创建告警。
+
+**Trigger Failed** 需要 Harness 开启 `PIPE_ENABLE_TRIGGER_FAILED_NOTIFICATION` 功能开关，请联系 Harness Support。
+
+</Step>
+
+<Step title="配置 Webhook 通知方式">
+
+1. 在 **Notification Method** 中选择 **Webhook**
+2. 将 Flashduty 集成的完整推送地址粘贴到 **Enter the URL to be called**，地址中需包含 `integration_key`
+3. 不需要添加请求头（Headers）
+4. 不要选择 **Notification Template**，Flashduty 按 Harness 默认的请求体解析；使用自定义模板的请求会被直接返回成功、不创建告警
+5. **Connectivity Mode** 选择 **Connect through Harness Platform**；如果只能从 Delegate 访问外网，选择 **Connect through Harness Delegate** 并指定 Delegate
+6. 点击 **Test** 确认地址可以访问，然后点击 **Submit** 保存
+
+</Step>
+
+<Step title="验证">
+
+运行一次会失败的流水线（例如在 Shell Script 步骤中执行 `exit 1`），确认 Flashduty 收到活动告警；修复后重新运行同一条流水线并成功，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 按流水线和阶段生成 Alert Key，同一对象的失败和成功事件使用同一个 Alert Key：
+
+| 对象 | 使用的字段 | 说明 |
+| :--- | :--- | :--- |
+| 流水线 | `accountIdentifier`、`orgIdentifier`、`projectIdentifier`、`pipelineIdentifier` | 同一条流水线后续的失败运行都合并到这条告警，任何一次成功就恢复 |
+| 阶段 | 流水线的上述字段和 `stageIdentifier` | 不同阶段各自一条告警，与流水线告警互不合并 |
+| 触发器 | 流水线的上述字段和 `triggerIdentifier` | 同一触发器反复失败合并到一条告警 |
+
+流水线、阶段和触发器的显示名称、执行 ID（`planExecutionId`）和错误信息变化不影响 Alert Key。缺少上表字段的失败或成功事件会被拒绝。
+
+同时勾选流水线事件和阶段事件时，一次失败会产生两条告警：一条是流水线告警，一条是失败阶段的告警。只需要一个层级时，只勾选该层级的事件。
+
+## 状态和告警等级
+---
+
+| 事件 | 状态 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `PipelineFailed` | 触发 | Critical |
+| `StageFailed` | 触发 | Warning |
+| `TriggerFailed` | 触发 | Warning |
+| `PipelineSuccess`、`StageSuccess` | 恢复 | - |
+
+## 告警不会自动恢复的情况
+---
+
+以下情况之后不会再有同一对象的成功事件，告警不会自动恢复：
+
+- 触发器失败（`TriggerFailed`）：Harness 没有对应的恢复事件
+- 流水线失败后被删除，或之后不再运行
+- 通知规则只勾选了失败事件，或阶段成功事件的阶段范围比阶段失败事件小
+
+建议在协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)，超时计时起点选 **故障触发**，超时时长建议 12 小时。流水线的正常修复一般在当天完成，未恢复的告警会在超时后关闭。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `account` / `org` / `project` | Harness 账号、组织和项目的标识符 |
+| `pipeline` / `pipeline_name` | 流水线标识符和名称 |
+| `stage` / `stage_name` | 阶段标识符和名称，仅阶段事件 |
+| `trigger` / `trigger_name` / `trigger_url` | 触发器标识符、名称和活动记录页面链接，仅触发器失败事件 |
+| `trigger_type` | 流水线的触发方式（如 `MANUAL`、`WEBHOOK`），触发器失败事件中为触发器类型 |
+| `triggered_by` | 触发流水线的用户名称 |
+| `event_type` | Harness 事件类型，如 `PipelineFailed` |
+| `execution_id` / `execution_url` | 本次执行的 ID 和执行详情页面链接 |
+| `pipeline_url` | 流水线在 Pipeline Studio 中的链接 |
+| `error_message` | Harness 给出的失败原因 |
+
+用户邮箱不会写入标签。
+
+## 排查问题
+---
+
+- **收不到告警**：确认通知规则处于启用状态，**Notification Method** 为 **Webhook**，推送地址完整且包含 `integration_key`；使用 Delegate 连接时，确认 Delegate 可以访问 Flashduty 的推送地址
+- **告警不恢复**：确认勾选了 **Pipeline Success**（或 **Stage Success**），并且之后同一条流水线有一次成功运行
+- **收到请求但没有告警**：通知规则选择了自定义 **Notification Template**，或只勾选了开始、结束、暂停、等待操作等事件，Flashduty 会返回成功但不创建告警
+- **一次失败收到两条告警**：同时勾选了流水线和阶段事件，见上文 Alert Key 部分
+
+更多事件和请求体说明请参阅 [Harness 流水线通知](https://developer.harness.io/docs/continuous-delivery/x-platform-cd-features/cd-steps/notify-users-of-pipeline-events)。
