@@ -144,6 +144,7 @@ export const docMap = {
   GhostInspector: `${alertBase}/ghost-inspector.mdx`,
   LogzIo: `${alertBase}/logz-io.mdx`,
   Loggly: `${alertBase}/loggly.mdx`,
+  Papertrail: `${alertBase}/papertrail.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
