@@ -129,6 +129,7 @@ export const docMap = {
   Emqx: `${alertBase}/emqx.mdx`,
   Rizhiyi: `${alertBase}/rizhiyi.mdx`,
   SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
+  Cfengine: `${alertBase}/cfengine.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
