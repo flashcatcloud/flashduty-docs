@@ -77,6 +77,7 @@ export const docMap = {
   StatusCake: `${alertBase}/statuscake.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
+  Tideways: `${alertBase}/tideways.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
   SplunkObservability: `${alertBase}/splunk-observability.mdx`,
