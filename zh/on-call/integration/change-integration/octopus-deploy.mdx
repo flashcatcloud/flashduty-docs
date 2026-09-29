@@ -1,0 +1,131 @@
+---
+title: "Octopus Deploy 变更集成"
+description: "通过 Octopus Deploy 订阅（Subscription）的 Webhook，将部署的排队、开始、成功、失败和取消同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Octopus Deploy", "部署", "Subscription", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Octopus Deploy 的订阅（Subscription）Webhook，将部署（Deployment）的进展同步到 Flashduty On-call。每个 Octopus 部署对应一条 Flashduty 变更，随部署从排队、执行到结束更新状态。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Octopus Deploy**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Octopus Deploy 中配置
+---
+
+<Steps>
+<Step title="创建订阅">
+
+1. 进入 **Configuration → Subscriptions**，点击 **Add Subscription**
+2. **Name**：填写便于识别的名称，例如 `Flashduty`
+
+需要具备管理订阅的权限。
+
+</Step>
+
+<Step title="选择事件">
+
+在事件过滤条件的 **Event Categories** 中选择以下五项：
+
+- Deployment queued
+- Deployment started
+- Deployment succeeded
+- Deployment failed
+- Deployment canceled
+
+按需用 Projects、Environments 等过滤条件缩小范围。
+
+</Step>
+
+<Step title="填写推送地址">
+
+在 **Webhook Notifications** 中，将 **Payload URL** 设为 Flashduty 集成的完整推送地址。Header 无需填写，Flashduty 通过推送地址中的 `integration_key` 鉴权。保存订阅。
+
+</Step>
+</Steps>
+
+Octopus Deploy 没有测试推送按钮。保存后触发一次部署，即可在 Flashduty 变更列表中看到记录。变更链接依赖 Octopus 的对外访问地址：在 **Configuration → Nodes → Configuration Settings** 中设置后，推送内容才带有服务器地址，否则变更没有链接。
+
+## 一条变更是什么
+---
+
+| Octopus 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 部署（Deployment） | 部署 ID，例如 `Deployments-12519` | 同一部署的排队、开始、结束事件是同一条变更；同一发布版本再次部署到同一环境是另一个部署，即另一条变更 |
+
+## 状态映射
+---
+
+| Octopus 事件类别 | Flashduty 变更状态 |
+|---|---|
+| Deployment queued（DeploymentQueued） | Ready |
+| Deployment started（DeploymentStarted） | Processing |
+| Deployment succeeded（DeploymentSucceeded） | Done |
+| Deployment failed（DeploymentFailed） | Failed |
+| Deployment canceled | Canceled |
+
+以下推送返回成功但不生成变更：
+
+- 不属于部署的事件类别（项目、发布、环境、部署目标等的创建和修改）
+- Deployment resumed、Deployment precondition evaluated，它们不改变部署的结果
+
+Flashduty 不认识的 `Deployment` 开头的事件类别返回 `InvalidParameter`，并在错误信息中给出类别名，其他事件不受影响。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目>: deploy <发布版本> to <环境>`，例如 `Example Project: deploy 0.1.178 to Development` |
+| 描述 | Octopus 的事件消息，例如 `Deploy to Development failed for Example Project release 0.1.178 to Development` |
+| 链接 | Octopus 中该部署的页面 |
+| 时间 | 事件在 Octopus 中的发生时间（`Occurred`） |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` / `project_id` | 项目名称 / ID |
+| `environment` / `environment_id` | 环境名称 / ID |
+| `release` / `release_id` | 发布版本号 / ID |
+| `deployment_id` | 部署 ID |
+| `space_id` | Space ID |
+| `actor` | 触发事件的用户名，自动部署为 `system` |
+| `octopus_state` | Octopus 事件类别，例如 `DeploymentFailed` |
+
+名称从事件消息中读取，读不到时对应标签为空，标题改用 ID。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Octopus 重复推送会重复记录吗？">
+
+不会。Octopus 不保证每个事件只推送一次；重复推送的事件发生时间和类别相同，Flashduty 只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `Payload.Event.RelatedDocumentIds has no Deployments- id`：部署事件中没有部署 ID，请确认推送来自 Octopus 订阅
+- `unknown deployment event category`：出现了未适配的部署事件类别，请联系我们
+- `Payload.Event.Category is missing`：推送内容不是 Octopus 订阅的格式
+
+</Accordion>
+
+<Accordion title="为什么变更没有链接？">
+
+Octopus 只有设置了对外访问地址才会在推送中带上服务器地址，见上文配置说明。
+
+</Accordion>
+</AccordionGroup>

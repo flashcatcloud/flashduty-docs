@@ -158,6 +158,7 @@ export const docMap = {
   FlagsmithChange: `${integrationBase}/change-integration/flagsmith.mdx`,
   AzureDevopsChange: `${integrationBase}/change-integration/azure-devops.mdx`,
   ArgoRolloutsChange: `${integrationBase}/change-integration/argo-rollouts.mdx`,
+  OctopusDeployChange: `${integrationBase}/change-integration/octopus-deploy.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
