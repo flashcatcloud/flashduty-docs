@@ -164,6 +164,7 @@ export const docMap = {
   CircleciChange: `${integrationBase}/change-integration/circleci.mdx`,
   BitbucketChange: `${integrationBase}/change-integration/bitbucket.mdx`,
   UnleashChange: `${integrationBase}/change-integration/unleash.mdx`,
+  RundeckChange: `${integrationBase}/change-integration/rundeck.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
