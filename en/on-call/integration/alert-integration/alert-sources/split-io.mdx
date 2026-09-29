@@ -1,0 +1,150 @@
+---
+title: "Split alert integration"
+description: "Sync Split (Harness FME) metric degradation alerts to Flashduty On-call through the Metric Alert webhook."
+keywords: ["alert integration", "Split", "Harness FME", "feature flags", "metric alerts", "webhook"]
+---
+
+Split is now part of Harness, under the name Harness Feature Management & Experimentation (FME). With FME's **Outgoing Webhook (Metric Alerts)**, alerts about a feature flag or experiment degrading a metric are synced to Flashduty On-call: an alert policy threshold is breached, or a guardrail or key metric shows a statistically significant undesired impact.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Split** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Split** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Harness FME
+---
+
+<Steps>
+<Step title="Check permissions">
+
+You need FME Administrator access and the account-level permission to edit connectors (`core_connector_edit`): Harness stores a metric alert webhook as a connector.
+
+</Step>
+
+<Step title="Add the metric alert webhook">
+
+1. In the FME navigation menu, click **FME Settings → Integrations** and select **Webhooks** in the categories menu
+2. On **Outgoing Webhook (Metric Alerts)**, click **Add** and select the project to connect
+3. Under **Environments**, select the environments that should send alerts, for example production
+4. Select the alert types that trigger a delivery (one or more):
+   - **All alert policies**
+   - **Metric alert policies**
+   - **Key metric significance**
+   - **Guardrail metric significance**
+5. Enter the full Flashduty push URL as the webhook URL
+6. Click **Save**
+
+A webhook belongs to one project. Add one per project; they can share the same push URL.
+
+</Step>
+
+<Step title="Test">
+
+Before saving, you can click **Send Test Message** to check connectivity. If the test message is not a degradation alert, Flashduty returns success and creates no alert. If it is a complete metric alert sample, Flashduty creates an alert that you close by hand.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+FME sends a delivery only when an alert fires. Nothing is sent when the alert is dismissed or auto-resolved, so Flashduty never receives a recovery event. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest **24 hours**, matching FME's default 24-hour monitoring window (if you changed the window, use its length), counted from **Incident trigger**. Closing the incident also closes its alerts.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Each FME delivery is one JSON object whose `type` is `METRIC_ALERT`. Flashduty uses these fields:
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `source.id` | Feature flag or experiment ID | Alert Key, label `source_id` |
+| `source.name` | Feature flag or experiment name | Alert title, label `source_name` |
+| `source.type` | `FEATURE_FLAG` or `EXPERIMENT` | Label `source_type` |
+| `source.url` | Feature flag or experiment link | Label `url` |
+| `data.environment.id` / `name` | Environment | Alert Key, labels `environment_id`, `env` |
+| `data.metric.id` / `name` / `url` | Metric | Alert Key, alert title, labels `metric_id`, `metric`, `metric_url` |
+| `data.alertType` | `ALERT_POLICY` or `SIGNIFICANCE` | Severity, label `alert_type` |
+| `data.direction` | `DESIRED` or `UNDESIRED` | Whether an alert is created, label `direction` |
+| `data.metricCategory.name` | Metric category | Label `metric_category` |
+| `data.alertPolicy` | Name, threshold, threshold type (empty for significance alerts) | Labels `alert_policy`, `threshold`, `threshold_type` |
+| `data.baselineTreatment` / `comparisonTreatment` | Baseline and comparison treatments | Labels `baseline_treatment`, `comparison_treatment` |
+| `data.targetingRule` | Targeting rule that fired the alert | Label `targeting_rule` |
+| `data.baselineValue` / `comparisonValue` / `absoluteImpact` / `relativeImpact` / `pValue` | Metric values, impact and p-value | Snake-case labels of the same name (`baseline_value` and so on) |
+
+The alert title is `<feature flag or experiment name> degraded <metric name> in <environment name>`. Every alert also carries the label `source=split-io`.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the feature flag or experiment ID, the environment ID and the metric ID:
+
+- When the same feature flag degrades the same metric in the same environment again (including through another treatment or targeting rule), the delivery merges into the alert that is still firing
+- When one metric fires both an alert policy alert and a significance alert, they merge into one alert
+- Different feature flags, environments or metrics each create their own alert
+- FME retries a failed delivery once after 300 milliseconds; the retry merges into the original alert
+
+Renaming the feature flag, metric, environment or alert policy does not change the Alert Key.
+
+## Severity
+---
+
+| `data.alertType` | Flashduty severity |
+| :--- | :--- |
+| `ALERT_POLICY` | Critical |
+| `SIGNIFICANCE` | Warning |
+| Any other value or empty | Warning |
+
+These deliveries return success and create no alert:
+
+- `data.direction` is `DESIRED` (the metric moved in the desired direction). Key metric significance alerts and alert policies with a threshold of 0 send both improvements and degradations
+- `type` is not `METRIC_ALERT`
+
+A `METRIC_ALERT` delivery without `source.id`, `data.environment.id` or `data.metric.id` is rejected.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why did the Flashduty alert not close after the FME alert auto-resolved?">
+
+FME's metric alert webhook sends a delivery only when an alert fires; there is no recovery event. Turn on the channel's auto-resolve timeout, or close the alert in Flashduty by hand.
+
+</Accordion>
+
+<Accordion title="Why don't significance alerts for improvements show up in Flashduty?">
+
+A delivery with `direction` set to `DESIRED` means the metric moved in the desired direction and needs no on-call action, so Flashduty creates no alert.
+
+</Accordion>
+
+<Accordion title="What is the difference between FME alert emails and the webhook?">
+
+FME can also email alerts to any address. The webhook sends structured fields, which lets Flashduty merge alerts by feature flag, environment and metric. We recommend the webhook.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: make sure the push URL is complete (including `integration_key`)
+- **FME shows an alert but Flashduty does not**: make sure the webhook includes that environment and that alert type; improvements (`DESIRED`) create no alert

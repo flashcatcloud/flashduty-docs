@@ -1,0 +1,176 @@
+---
+title: "Instatus alert integration"
+description: "Subscribe to an Instatus status page by webhook and send Instatus incidents and component outages to Flashduty On-call."
+keywords: ["alert integration", "Instatus", "status page", "third-party service status", "webhook"]
+---
+
+Use an Instatus webhook subscriber to send changes on a status page to Flashduty On-call. A Flashduty alert triggers when the status page publishes an incident or a component goes into an outage state, and recovers when the incident becomes `RESOLVED` or the component returns to `OPERATIONAL`. Scheduled maintenance does not create alerts.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Instatus** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Instatus** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Add a webhook subscriber in Instatus
+---
+
+<Steps>
+<Step title="Open the webhook subscribers">
+
+Log in to [Instatus](https://instatus.com/login), choose the status page, go to **Subscribers**, and open the **Webhook** tab.
+
+</Step>
+
+<Step title="Add the subscriber">
+
+1. Click **Add webhook subscriber**
+2. **Webhook URL**: paste the full Flashduty push URL, including `integration_key`
+3. **Email address**: enter a team email address. Instatus emails this address when the URL has a problem
+4. Save. You can then click the subscriber to give it a name
+
+Keep the default Instatus payload format and do not customize the request body for this subscriber: Flashduty parses the default format. The Webhook Secret in the form signs the `x-instatus-webhook-signature` request header; Flashduty does not verify the signature, so the default is fine. The `integration_key` in the push URL identifies the integration, so keep the URL private.
+
+One integration can follow several status pages. Alerts from different pages are told apart by page ID and never merge or close each other.
+
+</Step>
+
+<Step title="Verify">
+
+Instatus has no button that sends a test notification. To verify:
+
+1. In Instatus, go to **Incidents** and click **Add incident**. Set the status to **Investigating**, select an affected component, set it to **Major outage**, then save and notify subscribers. Flashduty shows an incident alert and a component alert, both Critical
+2. Add an update to that incident with the status **Resolved**, set the component back to **Operational**, and notify subscribers. Both alerts recover
+
+If you publish an incident or update without notifying subscribers, Instatus sends nothing and Flashduty receives nothing.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Instatus sends one JSON payload each time an incident is added or updated, a component changes status, or a maintenance is added or updated. Flashduty handles the first two:
+
+**Incident added or updated**
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `page.id` | Status page ID | Alert Key, label `page_id` |
+| `page.url` | Status page URL | Label `page_url` |
+| `page.status_description` | Overall status of the page | Label `page_status` |
+| `incident.id` | Incident ID | Alert Key, label `incident_id` |
+| `incident.name` | Incident name | Alert title |
+| `incident.status` | Incident status | Alert status, label `incident_status` |
+| `incident.impact` | Incident impact | Alert severity, label `impact` |
+| `incident.url` | Incident link | Label `incident_url` |
+| `incident.incident_updates` | Incident updates | The body of the latest update is the alert description, truncated above 8 KB |
+
+**Component status change**
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `page.id` | Status page ID | Alert Key, label `page_id` |
+| `component.id` (or `component_update.component_id`) | Component ID | Alert Key, label `component_id` |
+| `component.name` | Component name | Alert title, label `component` |
+| `component_update.new_status` | New component status | Alert severity and status, label `component_status` |
+
+Component alert titles look like `Website: major outage`. Every alert also carries the label `source=instatus`, plus `page_url` and `page_status`. The unsubscribe link in the payload (`meta.unsubscribe`) contains a subscription credential, so Flashduty does not write it to the alert.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key per payload kind:
+
+- Incident: status page ID + incident ID. Every update of one Instatus incident, from `INVESTIGATING` to `RESOLVED`, lands on the same alert
+- Component: status page ID + component ID. Every status change of one component, from outage to recovery, lands on the same alert
+
+Incident alerts and component alerts are independent. One outage usually produces both; use the channel's [alert grouping](/en/on-call/channel/noise-reduction) to group them into one Flashduty incident.
+
+Renaming an incident or component, or changing the impact, does not change the Alert Key. When the severity rises (for example a component going from `PARTIALOUTAGE` to `MAJOROUTAGE`), Flashduty opens a new alert at the higher severity and keeps the earlier alert open; the recovery delivery closes both. After an alert recovers, a new outage of the same component opens a new alert.
+
+## Status and severity
+---
+
+**Component status**
+
+| Instatus component status | Flashduty status or severity |
+| :--- | :--- |
+| `MAJOROUTAGE` | Critical |
+| `PARTIALOUTAGE` | Warning |
+| `DEGRADEDPERFORMANCE` | Info |
+| `OPERATIONAL` | Recovered |
+| `UNDERMAINTENANCE` | Ignored, no alert |
+| Empty or any other value | Warning |
+
+**Instatus incidents**
+
+The alert severity comes from the impact (`impact`, which takes the same values as component status), and the alert status from the incident status (`status`):
+
+| Instatus `impact` | Flashduty severity |
+| :--- | :--- |
+| `MAJOROUTAGE` | Critical |
+| `PARTIALOUTAGE` | Warning |
+| `DEGRADEDPERFORMANCE`, `OPERATIONAL` | Info |
+| Empty or any other value | Warning |
+
+| Instatus `status` | Flashduty status |
+| :--- | :--- |
+| `INVESTIGATING`, `IDENTIFIED`, `MONITORING` | Trigger or update the alert |
+| `RESOLVED` | Recovered |
+
+Scheduled maintenance (`maintenance` payloads with the status `NOTSTARTEDYET`, `INPROGRESS`, or `COMPLETED`) is planned change. Flashduty returns success and creates no alert.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does the alert recover while the incident is MONITORING?">
+
+No. `MONITORING` means a fix is live and still being watched. The alert stays triggered until the incident is marked `RESOLVED`.
+
+</Accordion>
+
+<Accordion title="A component went from an outage straight into maintenance. Why did the alert not recover?">
+
+`UNDERMAINTENANCE` is ignored and is not a recovery signal. The alert recovers when the component returns to `OPERATIONAL` after the maintenance, or you can close it by hand in Flashduty.
+
+</Accordion>
+
+<Accordion title="Does Flashduty verify the Instatus signature?">
+
+No. Flashduty identifies the integration by the `integration_key` in the push URL and does not read the `x-instatus-webhook-signature` header. Keep the push URL private; if it leaks, delete the integration and create a new one.
+
+</Accordion>
+
+<Accordion title="How do I stop the deliveries?">
+
+In Instatus, open the subscriber under **Subscribers → Webhook** and click **Unsubscribe**, or delete the Flashduty integration.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **No alerts in Flashduty**: check that subscribers were notified when the incident or update was published. Scheduled maintenance and `UNDERMAINTENANCE` never create alerts
+- **Flashduty returns an invalid parameter error**: check that the push URL is complete (includes `integration_key`) and that the subscriber uses the default payload format. Payloads without `page.id`, an incident ID, or a component ID are rejected
+- **Instatus emails you about failed deliveries**: check that the integration still exists and the push URL has not changed
+- **A component alert does not recover**: check that the component is back to `OPERATIONAL`. Maintenance does not close the alert
