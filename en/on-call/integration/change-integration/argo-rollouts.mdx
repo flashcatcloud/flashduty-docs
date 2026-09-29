@@ -1,0 +1,268 @@
+---
+title: "Argo Rollouts change integration"
+description: "Sync Argo Rollouts releases to Flashduty On-call through the built-in Argo Rollouts Notifications webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Argo Rollouts", "Rollout", "canary", "blue-green", "progressive delivery", "Notifications", "Webhook", "deployment events"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+The Argo Rollouts controller has built-in **Notifications** (based on Argo's notifications-engine) that send messages while a Rollout progresses. This integration provides an `argo-rollouts-notification-configmap` configuration with one webhook service, four request body templates, and four triggers. Each pod template change of a Rollout (a new release revision) becomes one Flashduty change: it is recorded as Processing when the new revision starts rolling out, updated to Done when the rollout completes, and updated to Failed when it is aborted.
+
+Both the canary and blue-green strategies are recorded. Analysis run failures, pod replica changes, and other Rollout events are not changes and are not recorded.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Argo Rollouts** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `rollout`, `namespace`, or `strategy`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Argo Rollouts
+---
+
+The steps below need Kubernetes permission to edit ConfigMaps in the Argo Rollouts controller namespace (`argo-rollouts` by default) and to edit annotations on Rollouts. The Argo Rollouts controller must be able to reach the domain of the push URL.
+
+<Steps>
+<Step title="Add the webhook service, templates, and triggers">
+
+Save the following as `flashduty-change.yaml` and replace `url` with the push URL copied above (including `?integration_key=...`):
+
+```yaml
+data:
+  service.webhook.flashduty-change: |
+    url: <push URL>
+    headers:
+    - name: Content-Type
+      value: application/json
+
+  template.flashduty-change-updated: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "updated",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  template.flashduty-change-completed: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "completed",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  template.flashduty-change-aborted: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "aborted",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  template.flashduty-change-skip-steps: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "skip_steps",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  trigger.on-rollout-updated: |
+    - send: [flashduty-change-updated]
+
+  trigger.on-rollout-completed: |
+    - send: [flashduty-change-completed]
+
+  trigger.on-rollout-aborted: |
+    - send: [flashduty-change-aborted]
+
+  trigger.on-skip-steps: |
+    - send: [flashduty-change-skip-steps]
+```
+
+Merge it into `argo-rollouts-notification-configmap` (`--type merge` only adds or updates the keys above and leaves existing configuration alone):
+
+```bash
+kubectl patch configmap argo-rollouts-notification-configmap -n argo-rollouts --type merge --patch-file flashduty-change.yaml
+```
+
+If the ConfigMap does not exist yet, first run `kubectl create configmap argo-rollouts-notification-configmap -n argo-rollouts`. If Argo Rollouts is installed with a Helm chart, put the same service, templates, and triggers into the chart's notifications configuration; otherwise the next upgrade overwrites the manual change.
+
+Notes:
+
+- Argo Rollouts derives a trigger's name from the Kubernetes event reason: `on-rollout-updated`, `on-rollout-completed`, `on-rollout-aborted`, and `on-skip-steps` fire on the matching event, so the trigger names cannot be changed and have no `when` condition
+- The `event` value in each template is fixed; Flashduty uses it to tell what happened, so do not change it
+- Every value in the templates is escaped with `toJson`; do not remove it. Do not rename the fields; `event`, `event_time`, `rollout_uid`, and `revision` must stay
+- `event_time` is the controller's time when it sends the notification (Unix seconds); Flashduty uses it to apply status updates in order
+- The service name `flashduty-change` can be changed, but the subscription annotations and the key under `webhook:` in the templates must match it
+
+<Note>
+If you installed Argo Rollouts' `notifications-install.yaml`, the triggers `on-rollout-updated`, `on-rollout-completed`, and `on-rollout-aborted` already exist (each is a single line such as `- send: [rollout-updated]`). The configuration above overwrites them, and existing Slack or email subscriptions stop receiving notifications. Keep the existing templates and write the triggers as below; the two templates are merged when sent, and each notification service uses only its own part:
+
+```yaml
+  trigger.on-rollout-updated: |
+    - send: [rollout-updated, flashduty-change-updated]
+  trigger.on-rollout-completed: |
+    - send: [rollout-completed, flashduty-change-completed]
+  trigger.on-rollout-aborted: |
+    - send: [rollout-aborted, flashduty-change-aborted]
+```
+
+`on-skip-steps` is not a built-in trigger; use it as written above.
+</Note>
+
+</Step>
+
+<Step title="Subscribe to notifications">
+
+A trigger sends only when it is subscribed. Choose a scope:
+
+- **A single Rollout**: add four annotations to the Rollout
+
+  ```bash
+  kubectl annotate rollout <rollout name> -n <namespace> \
+    'notifications.argoproj.io/subscribe.on-rollout-updated.flashduty-change=' \
+    'notifications.argoproj.io/subscribe.on-rollout-completed.flashduty-change=' \
+    'notifications.argoproj.io/subscribe.on-rollout-aborted.flashduty-change=' \
+    'notifications.argoproj.io/subscribe.on-skip-steps.flashduty-change='
+  ```
+
+- **All Rollouts**: add an entry to `subscriptions` in `argo-rollouts-notification-configmap`. If `subscriptions` already exists, append to the existing list instead of overwriting it with the merge command from the previous step
+
+  ```yaml
+  subscriptions: |
+    - recipients:
+      - flashduty-change
+      triggers:
+      - on-rollout-updated
+      - on-rollout-completed
+      - on-rollout-aborted
+      - on-skip-steps
+  ```
+
+Subscribe all four triggers together: with only the start event subscribed, changes stay in Processing.
+
+</Step>
+
+<Step title="Verify release records">
+
+Argo Rollouts has no way to send a test message. Change the image of a subscribed Rollout (for example `kubectl argo rollouts set image <rollout name> <container>=<new image>`) and confirm that a Processing change appears in the Flashduty change list, then updates to Done when the rollout completes (or after you promote it through the last step).
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+One change is one release revision of one Rollout. The change key (change_key) is `<rollout_uid>/<revision>`:
+
+- `rollout_uid` is the Rollout's `metadata.uid`. The UID Kubernetes assigns to each object is unique for the whole life of the cluster, so a Rollout with the same name in another cluster, or a Rollout deleted and recreated, is a different Rollout
+- `revision` is the Rollout's `rollout.argoproj.io/revision` annotation. Every pod template change, including a rollback to an older version, increases the revision by 1
+
+So the start, completion, and abort of one revision update the same change; two releases of the same Rollout are two changes, and a rollback is a new change. Changes that do not alter the pod template, such as replica count or rollout steps, create no new revision and record no change.
+
+Flashduty rejects a request that lacks `event`, `rollout_uid`, `revision`, or `event_time`.
+
+## Status mapping
+---
+
+| Trigger | Event (`event`) | Meaning | Flashduty change status |
+|---|---|---|---|
+| `on-rollout-updated` | `updated` | A new release revision starts (including a Rollout's first creation) | Processing |
+| `on-rollout-completed` | `completed` | The new revision was promoted to stable | Done |
+| `on-skip-steps` | `skip_steps` | Rollback to the stable revision or to a revision inside the rollback window; steps are skipped | Done |
+| `on-rollout-aborted` | `aborted` | The rollout was aborted: `kubectl argo rollouts abort`, a failed analysis, or the progress deadline (`progressDeadlineAbort`) | Failed |
+
+Done and Failed are end states; Flashduty records the change's end time. `event` values are case-sensitive, and other values are rejected.
+
+- When it rolls back to the stable revision, Argo Rollouts emits only `SkipSteps` and no `RolloutCompleted`, so `on-skip-steps` is also recorded as Done
+- A blue-green release waiting for a manual promote, or a canary release stopped at a pause step, stays in Processing
+- After an abort, if you run `kubectl argo rollouts retry` and the rollout eventually completes, the same change is updated from Failed to Done
+
+## Change content
+---
+
+- **Title**: `<namespace>/<rollout name>: rollout revision <revision> (<images>)`; images of several containers are comma-separated, and the parenthesized part is omitted when there are none
+- **Link**: Argo Rollouts has no web page for a single release, so changes have no link
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `rollout` | Rollout name |
+| `namespace` | Namespace of the Rollout |
+| `rollout_uid` | The Rollout's `metadata.uid` |
+| `revision` | Revision number of the release |
+| `strategy` | Rollout strategy, `canary` or `blueGreen` |
+| `image` | Images of the containers, comma-separated; truncated beyond 1024 bytes |
+| `event` | Latest event: `updated`, `completed`, `skip_steps`, or `aborted` |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no changes received?">
+
+- Check the Argo Rollouts controller logs (`kubectl logs -n argo-rollouts deploy/argo-rollouts`) and confirm the Rollout has a `notifications.argoproj.io/subscribe.<trigger>.flashduty-change` annotation, or that `subscriptions` contains the trigger
+- If the logs show `template 'flashduty-change-updated' is not supported`, confirm the configuration was written to `argo-rollouts-notification-configmap`; for Helm installs, check the corresponding values
+- A Rollout whose pod template did not change creates no new revision, so there is no notification
+
+</Accordion>
+
+<Accordion title="The change stays in Processing?">
+
+Not all four triggers are subscribed, or the release has not finished (a blue-green release waiting for a promote, or a canary release stopped at a pause step). Deleting a Rollout does not update its change.
+
+</Accordion>
+
+<Accordion title="Is the same notification recorded twice if it is sent again?">
+
+No. A notification with the same event and the same time is recorded once.
+
+</Accordion>
+
+<Accordion title="The logs show failed with error code 400?">
+
+Confirm the templates match this page. The response names the missing or unsupported field, for example `rollout_uid is missing`, `revision is missing`, or `unsupported event`.
+
+</Accordion>
+</AccordionGroup>
+
+For the related configuration, see the Argo Rollouts documentation on [Notifications](https://argo-rollouts.readthedocs.io/en/stable/features/notifications/), and the notifications-engine [Webhook](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/services/webhook/) service, [Triggers](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/triggers/), and [Templates](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/templates/).
