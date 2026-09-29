@@ -129,6 +129,7 @@ export const docMap = {
   OciMonitoring: `${alertBase}/oci-monitoring.mdx`,
   Hyperdx: `${alertBase}/hyperdx.mdx`,
   Consul: `${alertBase}/consul.mdx`,
+  FirebaseCrashlytics: `${alertBase}/firebase-crashlytics.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
