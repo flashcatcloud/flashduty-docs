@@ -130,6 +130,7 @@ export const docMap = {
   OciMonitoring: `${alertBase}/oci-monitoring.mdx`,
   Hyperdx: `${alertBase}/hyperdx.mdx`,
   Consul: `${alertBase}/consul.mdx`,
+  FirebaseCrashlytics: `${alertBase}/firebase-crashlytics.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
@@ -139,6 +140,15 @@ export const docMap = {
   Rizhiyi: `${alertBase}/rizhiyi.mdx`,
   SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
   Cfengine: `${alertBase}/cfengine.mdx`,
+  Mezmo: `${alertBase}/mezmo.mdx`,
+  CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
+  Bigpanda: `${alertBase}/bigpanda.mdx`,
+  Loggly: `${alertBase}/loggly.mdx`,
+  GhostInspector: `${alertBase}/ghost-inspector.mdx`,
+  LogzIo: `${alertBase}/logz-io.mdx`,
+  Catchpoint: `${alertBase}/catchpoint.mdx`,
+  Papertrail: `${alertBase}/papertrail.mdx`,
+  MonteCarlo: `${alertBase}/monte-carlo.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
