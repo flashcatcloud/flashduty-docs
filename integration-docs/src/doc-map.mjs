@@ -97,6 +97,8 @@ export const docMap = {
   Honeybadger: `${alertBase}/honeybadger.mdx`,
   PRTG: `${alertBase}/prtg.mdx`,
   Netdata: `${alertBase}/netdata.mdx`,
+  Stackrox: `${alertBase}/stackrox.mdx`,
+  Honeycomb: `${alertBase}/honeycomb.mdx`,
   Axiom: `${alertBase}/axiom.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
