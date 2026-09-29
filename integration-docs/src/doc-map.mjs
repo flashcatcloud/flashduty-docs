@@ -138,8 +138,12 @@ export const docMap = {
   Rizhiyi: `${alertBase}/rizhiyi.mdx`,
   SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
   Cfengine: `${alertBase}/cfengine.mdx`,
+  Mezmo: `${alertBase}/mezmo.mdx`,
+  CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
   Loggly: `${alertBase}/loggly.mdx`,
+  GhostInspector: `${alertBase}/ghost-inspector.mdx`,
+  LogzIo: `${alertBase}/logz-io.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {

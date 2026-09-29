@@ -1,0 +1,155 @@
+---
+title: "Mezmo alert integration"
+description: "Sync matches from a Mezmo (formerly LogDNA) log view to Flashduty On-call through a Webhook Alert."
+keywords: ["alert integration", "Mezmo", "LogDNA", "log alert", "webhook", "View", "Alert"]
+---
+
+Mezmo's (formerly LogDNA) Webhook Alert calls a webhook whenever a log view (View) matches the configured number of lines; the request body is rendered from a template you write yourself. This integration turns each match into one Flashduty alert.
+
+<Info>
+Mezmo's Webhook Alert request body carries no id that could be reused across requests, and the official docs say `autoresolve` "only applies to PagerDuty." So this is a one-shot integration: every match opens a new alert, never merges with an earlier one, and never recovers on its own. Make sure to complete the "Turn on the auto-resolve timeout" step below.
+</Info>
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Mezmo**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Mezmo** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Mezmo
+---
+
+<Steps>
+<Step title="Create or open a View">
+
+Create a View in Mezmo based on a query (for example `level:error`), or open an existing one. If you plan to reuse the same webhook setup across several Views, you can first create a [preset alert template](https://docs.mezmo.com/docs/add-alerts-to-views#configure-a-preset-alert-template) and attach it to each View.
+
+</Step>
+<Step title="Add a Webhook alert">
+
+1. Open the View's Alert dialog and select **Webhook**
+2. Set the number of matching lines and the observation window, for example "10 matches within 30 seconds"
+3. Set **Method** to **POST**
+4. Paste the full Flashduty push URL into **URL**. It must include `integration_key`
+5. Under **Headers**, add: `Content-Type: application/json`
+
+</Step>
+<Step title="Replace the default body">
+
+Mezmo pre-fills a default body; clear it and paste the template below. Every field comes from the [Body Tokens](https://docs.mezmo.com/docs/webhook-alert-integration#body-tokens) Mezmo's own docs list:
+
+```json
+{
+  "view_name": "{{ name }}",
+  "query": "{{ query }}",
+  "matches": "{{ matches }}",
+  "level": "{{ level }}",
+  "app": "{{ app }}",
+  "host": "{{ host }}",
+  "tag": "{{ tag }}",
+  "line": "{{ line }}",
+  "url": "{{ url }}"
+}
+```
+
+Before saving, click **Validate JSON** below the body editor to confirm the rendered body is still valid JSON.
+
+<Warning>
+The field names (`view_name`, `query`, …) and their case must match exactly what is shown above — Flashduty parses the request body by these names. Do not rename the Mezmo tokens inside the braces (`{{ name }}` and so on). Do not add `{{ lines }}` or `{{ line_objects }}`: the former is the raw, unescaped text of every matched line and can contain quotes or line breaks that turn the body into invalid JSON once substituted; the latter inserts an array, per Mezmo's own docs, and cannot be used as a string field's value.
+</Warning>
+
+</Step>
+<Step title="Turn on the auto-resolve timeout">
+
+Mezmo's Webhook Alert has no recovery event — the [Update Alert API](https://docs.mezmo.com/api-reference/configuration/update-alert.md) documents `autoresolve` as "This property only applies to PagerDuty," meaning the Webhook channel is not covered. Every match opens a new alert in Flashduty. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest a timeout of **12 hours**, counted from **Incident trigger**. If the underlying problem is still there, the View fires again on its next observation window and opens a fresh alert.
+
+</Step>
+<Step title="Verify">
+
+Click the **Test** link at the top of the Alert panel and confirm Flashduty returns 200 and opens an alert (Mezmo renders test data through the same template, so Flashduty cannot tell it apart from a real match — close it manually or let the auto-resolve timeout do it). Then let the View's query actually match some logs and confirm Flashduty opens the corresponding real alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Mezmo's Webhook Alert request body has no alert id, View id, or dedup key — none of the [12 documented body tokens](https://docs.mezmo.com/docs/webhook-alert-integration#body-tokens) (`name`, `matches`, `lines`, `level`, `url`, `query`, `app`, `host`, `tag`, `line`, `line_objects`, `first_line_object`) is an identifier. So Flashduty generates a random Alert Key for every delivery: each match is its own alert, never merged with and never recovering an earlier alert from the same View.
+
+## Severity
+---
+
+Mezmo's own docs describe `{{ level }}` only as "Severity level (info, warn, error, etc)" — the first matched log line's level — without a full enumeration. Flashduty maps it using the table below; any value not listed, including an empty one (the log line had no parsed level), is treated as **Warning**:
+
+| Mezmo `level` (case-insensitive) | Flashduty severity |
+| :--- | :--- |
+| `error` / `err` / `fatal` / `critical` / `crit` / `emergency` / `emerg` / `alert` | Critical |
+| `warn` / `warning` / `notice` | Warning |
+| `info` / `informational` / `debug` / `trace` / `verbose` | Info |
+| Empty or any other unrecognized value | Warning |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `view` | View name (`{{ name }}`) |
+| `query` | The View's query (`{{ query }}`) |
+| `level` | Level of the first matched log line (`{{ level }}`) |
+| `app` | App of the first matched log line (`{{ app }}`) |
+| `host` | Host of the first matched log line (`{{ host }}`) |
+| `tag` | Tag of the first matched log line (`{{ tag }}`) |
+| `matches` | Number of matched lines in this delivery (`{{ matches }}`) |
+| `url` | The first matched log line's detail page in Mezmo (`{{ url }}`) |
+
+The alert title is the View name; the description leads with the raw text of the first matched log line (`{{ line }}`), followed by the query.
+
+## FAQ
+---
+
+<AccordionGroup>
+
+<Accordion title="Why does the same View opening repeatedly create many alerts instead of updating one alert?">
+
+Mezmo's Webhook Alert request body has no id that could be reused across requests, so Flashduty cannot tell whether two deliveries describe the same problem — each match opens a new alert. This is exactly why this integration needs the auto-resolve timeout turned on.
+
+</Accordion>
+
+<Accordion title="Why doesn't the alert recover on its own?">
+
+Mezmo's own docs say `autoresolve` only applies to the PagerDuty channel; the Webhook channel has no equivalent mechanism and no documented recovery token. Turn on the channel's auto-resolve timeout, or close the alert manually in Flashduty.
+
+</Accordion>
+
+<Accordion title="Why doesn't the body use {{ lines }}?">
+
+`{{ lines }}` is the raw text of every matched line, and it can contain line breaks or double quotes; Mezmo's docs do not say whether it is escaped when substituted into a JSON string. Writing `"lines": "{{ lines }}"` directly into the template can render invalid JSON the moment a matched log contains a quote or a newline, and Flashduty would then reject that delivery. The template above uses `{{ line }}` (the first matched line only), which is enough context to act on. If you need the full multi-line content, add it yourself and confirm the escaping with **Validate JSON** first.
+
+</Accordion>
+
+<Accordion title="What if Mezmo reports the webhook request failed?">
+
+Make sure the push URL is complete, includes `integration_key`, and is not a private IP — Mezmo rejects webhook URLs pointing to (or redirecting to) `192.168.x.x`, `10.x.x.x`, or `172.16.x.x`–`172.31.x.x`.
+
+</Accordion>
+
+</AccordionGroup>
+
+For field details, see [Webhook Alert Integration](https://docs.mezmo.com/docs/webhook-alert-integration) and the [Update Alert API](https://docs.mezmo.com/api-reference/configuration/update-alert).
