@@ -109,6 +109,7 @@ export const docMap = {
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Github: `${alertBase}/github.mdx`,
+  Openstatus: `${alertBase}/openstatus.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   SumoLogic: `${alertBase}/sumo-logic.mdx`,
