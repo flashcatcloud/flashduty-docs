@@ -141,6 +141,7 @@ export const docMap = {
   CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
   GhostInspector: `${alertBase}/ghost-inspector.mdx`,
+  Papertrail: `${alertBase}/papertrail.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
