@@ -68,7 +68,13 @@ OpenNMS Horizon 通过通知（notice）告知运维人员网络中发生的事�
 
 - 请求体中的每个 `${名称}` 都需要一个同名的 `<argument>`，缺少的会被替换为空字符串。`notice_id` 是 Flashduty 识别告警的字段，不能删除
 - 推送地址如果包含 `&`（例如附加了其他查询参数），在 XML 中要写成 `&amp;`
-- 该文件修改后立即生效，无需重启 OpenNMS
+
+保存后需要让 Notifd 重新加载配置，否则下一步的目的路径向导中找不到 `flashduty` 命令。在 OpenNMS 服务器上执行 `$OPENNMS_HOME/bin/send-event.pl -p 'daemonName Notifd' uei.opennms.org/internal/reloadDaemonConfig`；官方容器镜像不带 Perl，可以改用 REST 接口发送同一事件（`<OpenNMS>` 替换为 OpenNMS 地址，按提示输入 admin 密码）：
+
+```bash
+curl -u admin -X POST -H 'Content-Type: application/json' http://<OpenNMS>:8980/opennms/rest/events \
+  -d '{"uei": "uei.opennms.org/internal/reloadDaemonConfig", "source": "flashduty", "parms": [{"parmName": "daemonName", "value": "Notifd"}]}'
+```
 
 </Step>
 
@@ -81,7 +87,7 @@ OpenNMS 按目的路径（destination path）中的每个目标用户各执行�
 3. 名称填写 `Flashduty`，点击 **Edit**，在 **Send to Selected Users** 中只选择 `flashduty`，点击 **Next Step**
 4. 命令选择 `flashduty`，**Auto Notify** 选择 **On**，点击 **Next Step**，然后点击 **Finish**
 
-**Auto Notify** 必须为 **On**：取默认值时，如果有人在 OpenNMS 中手动确认过这条通知，OpenNMS 不再发送恢复通知，Flashduty 中的告警不会关闭。
+**Auto Notify** 必须为 **On**（向导默认已选中）：取 **Off** 或 **Auto** 时，如果有人在 OpenNMS 中手动确认过这条通知，OpenNMS 不再发送恢复通知，Flashduty 中的告警不会关闭。
 
 </Step>
 
@@ -128,6 +134,15 @@ $OPENNMS_HOME/bin/send-event.pl -n <节点ID> -i <IP地址> uei.opennms.org/node
 $OPENNMS_HOME/bin/send-event.pl -n <节点ID> -i <IP地址> uei.opennms.org/nodes/nodeUp
 ```
 
+官方容器镜像不带 Perl，无法运行 `send-event.pl`，可以改用 REST 接口发送同样的事件：
+
+```bash
+curl -u admin -X POST -H 'Content-Type: application/xml' http://<OpenNMS>:8980/opennms/rest/events \
+  -d '<event><uei>uei.opennms.org/nodes/nodeDown</uei><source>flashduty</source><nodeid><节点ID></nodeid><interface><IP地址></interface></event>'
+curl -u admin -X POST -H 'Content-Type: application/xml' http://<OpenNMS>:8980/opennms/rest/events \
+  -d '<event><uei>uei.opennms.org/nodes/nodeUp</uei><source>flashduty</source><nodeid><节点ID></nodeid><interface><IP地址></interface></event>'
+```
+
 OpenNMS 没有单独测试通知命令的按钮。
 
 </Step>
@@ -165,7 +180,7 @@ OpenNMS 在 `notifd-configuration.xml` 中为中断事件配置了自动确认�
 <auto-acknowledge-alarm resolution-prefix="RESOLVED: " notify="true"/>
 ```
 
-事件的告警（alarm）被对应的清除事件清除时，OpenNMS 会确认该通知并发送恢复通知。修改后执行 `$OPENNMS_HOME/bin/send-event.pl -p 'daemonName Notifd' uei.opennms.org/internal/reloadDaemonConfig` 重新加载。仍然没有恢复通知的，请在接收该集成告警的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，**超时计时起点**选择**故障触发**，**超时时长**建议设为 24 小时。
+事件的告警（alarm）被对应的清除事件清除时，OpenNMS 会确认该通知并发送恢复通知。修改后按第一步的方法让 Notifd 重新加载配置。仍然没有恢复通知的，请在接收该集成告警的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，**超时计时起点**选择**故障触发**，**超时时长**建议设为 24 小时。
 
 ## 告警等级
 ---
@@ -183,14 +198,14 @@ OpenNMS 在 `notifd-configuration.xml` 中为中断事件配置了自动确认�
 | `Cleared` | Info |
 | 空值或其他值 | Critical |
 
-恢复通知携带原中断事件的等级，恢复事件的等级保持为告警触发时的等级。
+恢复通知中的 `severity` 是 OpenNMS 保存的数字等级编号（例如 `5` 表示 `Minor`、`6` 表示 `Major`），Flashduty 会把编号 1–7 换算回等级名称，因此恢复事件的等级与告警触发时一致。
 
 ## 告警内容
 ---
 
 - **标题**：通知主题 `subject`，去掉 `RESOLVED: ` 前缀；主题为空时为 `OpenNMS notice #<通知编号>`
 - **描述**：通知正文 `message`，去掉 `RESOLVED: ` 前缀
-- **标签**：`notice_id`、`event_id`、`event_uei`、`node_id`、`interface`、`service`、`severity`。值为空的标签不会添加
+- **标签**：`notice_id`、`event_id`、`event_uei`、`node_id`、`interface`、`service`、`severity`（等级名称，恢复通知中的数字编号会换算为名称）。值为空的标签不会添加
 
 ## 排查问题
 ---
