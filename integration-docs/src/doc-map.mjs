@@ -162,6 +162,7 @@ export const docMap = {
   JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
   BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
   CircleciChange: `${integrationBase}/change-integration/circleci.mdx`,
+  BitbucketChange: `${integrationBase}/change-integration/bitbucket.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
