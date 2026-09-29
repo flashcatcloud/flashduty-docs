@@ -140,6 +140,16 @@ export const docMap = {
   Cfengine: `${alertBase}/cfengine.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  GithubChange: `${integrationBase}/change-integration/github.mdx`,
+  GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
+  HcpTerraformChange: `${integrationBase}/change-integration/hcp-terraform.mdx`,
+  ArgocdChange: `${integrationBase}/change-integration/argocd.mdx`,
+  NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
+  VercelChange: `${integrationBase}/change-integration/vercel.mdx`,
+  JfrogArtifactoryChange: `${integrationBase}/change-integration/jfrog-artifactory.mdx`,
+  BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
+  LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
+  JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',

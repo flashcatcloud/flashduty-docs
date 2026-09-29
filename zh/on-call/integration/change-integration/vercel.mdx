@@ -1,0 +1,139 @@
+---
+title: "Vercel 变更集成"
+description: "通过 Vercel 团队 Webhook 将部署、上线和回滚同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Vercel", "Deployment", "部署事件", "Instant Rollback", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Vercel 团队的 Webhook，将部署（Deployment）和生产环境回滚（Instant Rollback）同步到 Flashduty On-call。每一次部署对应一条 Flashduty 变更，部署从创建、构建到成功、上线、失败或取消的每个状态，都会更新同一条变更。
+
+<Note>Vercel 的团队 Webhook 仅对 Pro 和 Enterprise 团队开放，Hobby 账号无法配置。</Note>
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Vercel**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Vercel 中配置
+---
+
+<Steps>
+<Step title="打开 Webhook 设置">
+
+在 Vercel 控制台切换到目标团队，进入 **Settings → Webhooks**。需要团队的 Webhook 管理权限。
+
+</Step>
+
+<Step title="选择事件">
+
+在 **Deployment Events** 中勾选：
+
+- **Deployment Created**
+- **Deployment Succeeded**
+- **Deployment Promoted**
+- **Deployment Rollback**
+- **Deployment Error**
+- **Deployment Cancelled**
+
+Project、Feature Flag、Firewall 事件不是部署变更，勾选后 Flashduty 返回成功但不会生成变更。
+
+</Step>
+
+<Step title="选择项目并填写推送地址">
+
+1. 选择要推送的项目：**All Team Projects** 或指定项目
+2. **Endpoint URL**：粘贴 Flashduty 集成的完整推送地址
+3. 点击 **Create Webhook**
+
+Vercel 创建后会显示一个 Secret，Flashduty 不需要它，通过推送地址中的 `integration_key` 鉴权。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| Vercel 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 部署 | `deployment:<deployment.id>` | 同一次部署（`dpl_` 开头的 ID）的所有事件更新同一条变更；同一项目、同一提交的两次部署是两条变更 |
+| 回滚 | `rollback:<fromDeploymentId>:<toDeploymentId>` | 一次 Instant Rollback 是一条独立变更，不修改被替换或被恢复的部署的记录 |
+
+## 状态映射
+---
+
+| Vercel 事件 | Flashduty 变更状态 |
+|---|---|
+| `deployment.created` | Ready |
+| `deployment.ready`（构建完成，Checks 执行中） | Processing |
+| `deployment.succeeded` | Done |
+| `deployment.promoted`（开始承接生产流量） | Done |
+| `deployment.error` | Failed |
+| `deployment.canceled` | Canceled |
+| `deployment.rollback` | Done |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
+
+以下推送返回成功但不生成变更：非 `deployment.` 开头的事件类型（Project、Feature Flag、Firewall 等）；与 Checks、集成动作相关的部署事件；`deployment.cleanup`（部署在保留期结束后被永久删除，不改变该部署已有的结果）。
+
+## 变更内容
+---
+
+| 字段 | 部署 | 回滚 |
+|---|---|---|
+| 标题 | `<项目>: deploy <分支> (<短 SHA>) to <环境>`，没有 Git 信息时为部署域名 | `<项目 ID>: roll back production to <恢复的部署 ID>` |
+| 描述 | Git 提交信息的第一行 | 空 |
+| 链接 | Vercel 控制台中该部署的页面 | 空（Vercel 回滚事件不带链接） |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 部署 | 回滚 |
+|---|---|---|
+| `project` | 项目名称 | — |
+| `project_id` | 项目 ID（`prj_` 开头） | 同左 |
+| `environment` | `production`、自定义环境（例如 `staging`），未指定目标时为 `preview` | `production` |
+| `ref` | Git 分支 | — |
+| `sha` | 完整提交 SHA | — |
+| `actor` | 提交者的 Git 用户名 | — |
+| `deployment_id` | 部署 ID | — |
+| `from_deployment_id` / `to_deployment_id` | — | 被替换 / 被恢复的部署 ID |
+| `state` | 最新的 Vercel 事件，例如 `succeeded` | `rollback` |
+
+`ref`、`sha`、`actor` 来自连接 GitHub、GitLab 或 Bitbucket 仓库时的部署元数据，通过 CLI 直接部署时没有这些标签。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="生产部署为什么先 Done 再收到一次 Done？">
+
+生产部署构建成功后 Vercel 先发送 `deployment.succeeded`，切换生产流量后再发送 `deployment.promoted`。两者都是 Done，更新的是同一条变更。
+
+</Accordion>
+
+<Accordion title="Vercel 重试推送会重复记录吗？">
+
+不会。Flashduty 使用 Vercel 事件自带的时间，同一事件、同一时间只记录一次。推送失败时 Vercel 会在 24 小时内重试。
+
+</Accordion>
+
+<Accordion title="对同一对部署回滚两次会怎样？">
+
+从同一个部署回滚到同一个部署时变更标识相同，第二次回滚会更新第一次的变更（最后时间更新为第二次），不会新建变更。Vercel 的回滚事件只带两个部署 ID，没有独立的回滚 ID。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported type`：收到了 Flashduty 尚未支持的部署事件（例如通过 API 订阅的 `deployment.blocked`），请只勾选上文列出的 6 个事件，或联系我们
+- `payload.deployment.id is missing`：推送内容不完整，请确认推送来自 Vercel 原生 Webhook
+
+</Accordion>
+</AccordionGroup>
