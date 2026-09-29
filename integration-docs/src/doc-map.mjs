@@ -76,6 +76,7 @@ export const docMap = {
   Rollbar: `${alertBase}/rollbar.mdx`,
   Dash0: `${alertBase}/dash0.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
+  Wormly: `${alertBase}/wormly.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
