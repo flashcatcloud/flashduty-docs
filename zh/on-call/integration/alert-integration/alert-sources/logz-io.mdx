@@ -1,0 +1,126 @@
+---
+title: "Logz.io 告警集成"
+description: "通过 Logz.io 的 Custom Endpoint，把日志告警的触发事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Logz.io", "Custom Endpoint", "Webhook", "alert_definition_id"]
+---
+
+Logz.io 的告警通知没有内置的通用 Webhook 格式：Custom Endpoint 需要用户自己填写请求体模板，Logz.io 用 Mustache 变量渲染后发送。本页给出 Flashduty 要求的固定模板；每个 Logz.io 告警定义（Alert Definition）对应一条 Flashduty 告警。
+
+Logz.io 的 Custom Endpoint 只在告警条件满足时发送通知，没有"已恢复"或"已清除"的事件：告警条件恢复正常后，Logz.io 不会再发送任何请求。Flashduty 收到的每条通知都会触发（或更新）一条告警，需要手动关闭，或按下文开启超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Logz.io**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Logz.io**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Logz.io 中配置
+---
+
+<Steps>
+<Step title="创建 Custom Endpoint">
+
+1. 登录 Logz.io，进入 **Alerts & Events → Alert endpoints**（或 **Settings → Notification endpoints**）
+2. 点击 **Add endpoint**，类型选择 **Custom Endpoint**
+3. **Method** 选择 `POST`
+4. **URL** 填写 Flashduty 集成的完整推送地址
+5. 在 **Headers** 中添加一个 header：`Content-Type` = `application/json`
+
+</Step>
+
+<Step title="填写消息体模板">
+
+把下面的 JSON 粘贴到 **Message body**：
+
+```json
+{
+  "alert_definition_id": "{{alert_definition_id}}",
+  "alert_event_id": "{{alert_event_id}}",
+  "alert_title": "{{alert_title}}",
+  "alert_description": "{{alert_description}}",
+  "alert_severity": "{{alert_severity}}",
+  "account_id": "{{account_id}}",
+  "account_name": "{{account_name}}",
+  "alert_tags": "{{alert_tags}}",
+  "alert_timeframe_start": "{{alert_timeframe_start}}",
+  "alert_timeframe_end": "{{alert_timeframe_end}}",
+  "alert_app_url": "{{alert_app_url}}"
+}
+```
+
+<Warning>
+请保留 `alert_definition_id` 和 `alert_severity` 这两个字段名和对应的双花括号变量不变；Flashduty 用 `alert_definition_id` 关联同一个告警定义反复发出的通知，缺少该字段会拒绝请求。若 `alert_title` 等字段中包含 `&`、`<`、`>` 等字符，Logz.io 会把它们转成 `&amp;`、`&lt;` 等 HTML 实体，这是 Mustache 模板的默认行为，Flashduty 会原样保留在标题里。
+</Warning>
+
+点击 **Run the test** 测试端点连通性。Logz.io 官方文档未说明测试请求会填入哪些字段的值；若测试请求中 `alert_definition_id` 或 `alert_severity` 为空，Flashduty 会返回参数错误（在 Logz.io 侧显示为测试失败），这只影响连通性验证，不会创建告警，也不影响真实告警。
+
+</Step>
+
+<Step title="在告警中选择该端点">
+
+编辑或创建一条 [Log Alert](https://app.logz.io/#/dashboard/alerts/create)，在 **Notifications → Notification endpoints** 中勾选刚创建的 Custom Endpoint。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Logz.io 的 Custom Endpoint 没有恢复事件：告警条件恢复正常后不会再收到任何通知，对应的 Flashduty 告警会一直处于触发状态。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 **24 小时**，计时起点选择 **故障触发**。若告警条件在这段时间内仍未消失，Logz.io 会在下一次评估周期重新发送通知，重新触发一条新告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_definition_id` 作为 Alert Key。Logz.io 官方文档把它定义为"Unique alert ID"（告警定义的唯一 ID），与之相对的 `alert_event_id` 是"Unique ID of the triggered alert instance"（每次触发实例的唯一 ID，每次通知都不同）。因此同一个告警定义反复触发（包括等待期结束后的重复通知、跨严重度阈值的升级通知）会落在同一条 Flashduty 告警上，而不同的告警定义各自独立。
+
+Logz.io 的 Custom Endpoint 变量中不包含分组（Group By）字段的取值：如果告警配置了按字段分组（例如按 host 分组），不同分组各自触发的通知会共用同一个 `alert_definition_id`，从而合并到同一条 Flashduty 告警上。如需区分分组，请为每个分组单独创建一条告警定义（各自拥有独立的 `alert_definition_id`），或改用一个能区分分组的下游系统。
+
+标题、描述、严重度、时间范围的变化都不会改变 Alert Key；请求缺少 `alert_definition_id` 时，Flashduty 会拒绝该请求。
+
+## 告警等级
+---
+
+| Logz.io `alert_severity` | Flashduty 等级 |
+| :--- | :--- |
+| `SEVERE` | Critical |
+| `HIGH` | Critical |
+| `MEDIUM` | Warning |
+| `LOW` | Warning |
+| `INFO` | Info |
+
+`alert_severity` 对应 Logz.io 告警配置中的 Severity Threshold（`severityThresholdTiers`），取值不区分大小写。空值或未列出的取值会被拒绝。由于 Custom Endpoint 没有恢复事件，告警状态始终等于上表中的等级，不会出现"恢复"状态。
+
+## 告警内容
+---
+
+- **标题**：`alert_title`；为空时使用 `Logz.io alert`
+- **描述**：`alert_description`
+- **标签**：`check`（标题）、`source`（固定为 `logz_io`）、`alert_definition_id`、`alert_event_id`、`account_id`、`account_name`、`alert_tags`、`alert_timeframe_start`、`alert_timeframe_end`、`alert_app_url`、`vendor_severity`（原始 `alert_severity` 取值）
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认消息体是合法 JSON，且 `alert_definition_id`、`alert_severity` 非空；确认 Headers 中已添加 `Content-Type: application/json`
+- **测试通过但真实告警没有收到**：确认告警的 **Notification endpoints** 中勾选了该 Custom Endpoint，且告警条件确实被触发
+- **告警一直不消失**：Logz.io 没有恢复通知，需要开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭
+- **多个分组的告警互相合并**：Logz.io 的 Custom Endpoint 模板不暴露分组字段，需要为每个分组单独创建告警定义
+
+更多字段含义请参阅 Logz.io 官方文档 [Notification endpoints](https://docs.logz.io/docs/user-guide/integrations/notification-endpoints/endpoints/)、[Custom endpoints](https://docs.logz.io/docs/user-guide/integrations/notification-endpoints/custom-endpoints/) 和 [Configure an alert](https://docs.logz.io/docs/user-guide/log-management/log-alerts/configure-alert/)。
