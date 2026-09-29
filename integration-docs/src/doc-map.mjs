@@ -139,6 +139,7 @@ export const docMap = {
   SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
   Cfengine: `${alertBase}/cfengine.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
+  Loggly: `${alertBase}/loggly.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
