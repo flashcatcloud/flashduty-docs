@@ -1,0 +1,208 @@
+---
+title: "OpenNMS alert integration"
+description: "Send OpenNMS Horizon node, interface, and service outage notices to Flashduty On-call through a webhook notification command. Alerts close automatically when the outage is resolved."
+keywords: ["alert integration", "OpenNMS", "OpenNMS Horizon", "webhook", "notification command", "notificationCommands.xml", "network monitoring"]
+---
+
+OpenNMS Horizon uses notices to tell operators about events in the network. This integration provides a webhook notification command that pushes every notice OpenNMS sends to Flashduty. Each OpenNMS notice maps to one Flashduty alert: it triggers when a node, interface, or service goes down, and closes when the matching recovery event auto-acknowledges the notice.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **OpenNMS** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **OpenNMS** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure OpenNMS
+---
+
+This integration uses the OpenNMS webhook notification strategy `WebhookNotificationStrategy`, which requires **OpenNMS Horizon 36.0.3 or later**. Earlier versions do not have this strategy, so upgrade first. Below, `$OPENNMS_HOME` is the OpenNMS installation directory, `/opt/opennms` in the official container image. The OpenNMS server must be able to reach the Flashduty push URL.
+
+<Steps>
+<Step title="Add the Flashduty notification command">
+
+Edit `$OPENNMS_HOME/etc/notificationCommands.xml`, add the following command before `</notification-commands>`, and replace the address in `-url` with the push URL you copied:
+
+```xml
+<command binary="false">
+  <name>flashduty</name>
+  <execute>org.opennms.netmgt.notifd.WebhookNotificationStrategy</execute>
+  <comment>Send notices to Flashduty</comment>
+  <argument streamed="false">
+    <substitution>https://api.flashcat.cloud/event/push/alert/opennms?integration_key=YOUR_INTEGRATION_KEY</substitution>
+    <switch>-url</switch>
+  </argument>
+  <argument streamed="false">
+    <substitution>{"notice_id": "${noticeid}", "event_id": "${eventID}", "event_uei": "${eventUEI}", "node_id": "${nodeid}", "interface": "${interface}", "service": "${service}", "severity": "${severity}", "subject": "${subject}", "message": "${textMessage}"}</substitution>
+    <switch>-body</switch>
+  </argument>
+  <argument streamed="false"><switch>noticeid</switch></argument>
+  <argument streamed="false"><switch>eventID</switch></argument>
+  <argument streamed="false"><switch>eventUEI</switch></argument>
+  <argument streamed="false"><switch>-nodeid</switch></argument>
+  <argument streamed="false"><switch>-interface</switch></argument>
+  <argument streamed="false"><switch>-service</switch></argument>
+  <argument streamed="false"><switch>-severity</switch></argument>
+  <argument streamed="false"><switch>-subject</switch></argument>
+  <argument streamed="false"><switch>-tm</switch></argument>
+</command>
+```
+
+Notes:
+
+- Every `${name}` in the body needs an `<argument>` with the matching name; a missing one is replaced with an empty string. `notice_id` is the field Flashduty uses to identify the alert, so do not remove it
+- If the push URL contains `&` (for example, because you appended other query parameters), write it as `&amp;` in the XML
+- Changes to this file take effect immediately, without restarting OpenNMS
+
+</Step>
+
+<Step title="Create the receiving user and destination path">
+
+OpenNMS runs the notification command once for each target user in a destination path. To push each notice only once, create a dedicated user for Flashduty:
+
+1. Select **Administration → Configure OpenNMS**, open **Configure Users** under **Configure Users, Groups and On-Call Roles**, and add the user `flashduty`. Do not give this user a duty schedule
+2. Go back to **Configure OpenNMS**, select **Configure Notifications → Configure Destination Paths** under **Event Management**, and click **New Path**
+3. Name it `Flashduty`, click **Edit**, select only `flashduty` under **Send to Selected Users**, and click **Next Step**
+4. Select the `flashduty` command, set **Auto Notify** to **On**, click **Next Step**, and then click **Finish**
+
+**Auto Notify** must be **On**. With the default value, OpenNMS does not send the resolution notice for a notice that someone has already acknowledged by hand in OpenNMS, and the Flashduty alert does not close.
+
+</Step>
+
+<Step title="Choose the event notifications to push">
+
+Under **Configure Notifications → Configure Event Notifications**, edit each event notification you want to push to Flashduty and change its destination path to `Flashduty`. To keep email as well, add a second notification for the same event that uses the `Flashduty` path. We recommend pushing these notifications, which have recovery events:
+
+| Event notification | Recovery event |
+| :--- | :--- |
+| `nodeDown` | `nodeUp` |
+| `interfaceDown` | `interfaceUp` |
+| `nodeLostService` | `nodeRegainedService` |
+
+Do not use the `Flashduty` path for informational notifications such as `nodeAdded` and `interfaceDeleted`, or for threshold **Rearmed** notifications. They have no recovery event, so each one would create an alert that never closes on its own.
+
+</Step>
+
+<Step title="(Optional) Push the event severity">
+
+OpenNMS does not pass the event severity to notification commands on its own. To tell alert severities apart in Flashduty, edit `$OPENNMS_HOME/etc/notifications.xml` and add the following line to every `<notification>` pushed to Flashduty, before `</notification>`:
+
+```xml
+<parameter name="-severity" value="%severity%"/>
+```
+
+OpenNMS replaces `%severity%` with the severity of the triggering event (`Critical`, `Major`, `Minor`, and so on). Without this line, every alert in Flashduty has Critical severity.
+
+</Step>
+
+<Step title="Turn on notifications">
+
+Notifications are off in a new OpenNMS installation. Select **Administration → Configure OpenNMS**, set **Notification Status** under **Event Management** to **On**, and click **Update**. The bell icon in the top menu bar turns green when notifications are on.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a service on a monitored node stop responding (for example, stop the HTTP service on the node), wait for OpenNMS to detect it on its next poll, and confirm that Flashduty receives an active alert. Then restore the service and confirm that the alert closes.
+
+You can also send events by hand on the OpenNMS server. Replace the node ID and IP address with the values of a monitored node:
+
+```bash
+$OPENNMS_HOME/bin/send-event.pl -n <node ID> -i <IP address> uei.opennms.org/nodes/nodeDown
+$OPENNMS_HOME/bin/send-event.pl -n <node ID> -i <IP address> uei.opennms.org/nodes/nodeUp
+```
+
+OpenNMS has no button to test a notification command on its own.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the OpenNMS notice ID `notice_id` (`${noticeid}`) as the Alert Key. The notice ID stays the same when an escalation step resends the notice and when OpenNMS sends the resolution notice after a recovery event auto-acknowledges it, so all of these land on the same alert.
+
+When the same node or service goes down again, OpenNMS creates a new notice and Flashduty creates a new alert. When one event matches several event notifications pushed to Flashduty, each notice creates its own alert.
+
+Notice IDs are unique only within one OpenNMS instance. Use a separate integration for each OpenNMS instance instead of pushing several instances to the same push URL.
+
+Flashduty rejects a request that lacks `notice_id`, and OpenNMS logs the failed push in `notifd.log`.
+
+## Alert lifecycle
+---
+
+OpenNMS configures auto-acknowledgement (`auto-acknowledge`) for outage events in `notifd-configuration.xml`: when the recovery event arrives, OpenNMS acknowledges the matching outage notice and sends the original notice again to its original recipients, with `RESOLVED: ` in front of the subject and text. Flashduty checks whether the subject starts with `RESOLVED:`:
+
+| OpenNMS push | Flashduty handling |
+| :--- | :--- |
+| A new notice | Trigger an alert |
+| The same notice resent by an escalation step | Update the existing alert |
+| A resolution notice whose subject starts with `RESOLVED:` | Recover the alert |
+
+The default auto-acknowledgements are `nodeUp`→`nodeDown`, `interfaceUp`→`interfaceDown`, `nodeRegainedService`→`nodeLostService`, `serviceResponsive`→`serviceUnresponsive`, and `wideSpreadOutageResolved`→`wideSpreadOutage`.
+
+<Warning>Keep `resolution-prefix="RESOLVED: "` on each `auto-acknowledge`. If you change or remove the prefix, resolution notices are pushed as new triggers and the alerts do not close.</Warning>
+
+To push other notices that have no auto-acknowledgement (for example, threshold alerts), add the following line inside `<notifd-configuration>` in `notifd-configuration.xml`, before all `<auto-acknowledge>` elements:
+
+```xml
+<auto-acknowledge-alarm resolution-prefix="RESOLVED: " notify="true"/>
+```
+
+When the event's alarm is cleared by its clearing event, OpenNMS acknowledges the notice and sends the resolution notice. After the change, run `$OPENNMS_HOME/bin/send-event.pl -p 'daemonName Notifd' uei.opennms.org/internal/reloadDaemonConfig` to reload. For notices that still get no resolution notice, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit) in the channel that receives this integration's alerts, set **Window timing start** to **Incident trigger**, and set the timeout to 24 hours.
+
+## Severity
+---
+
+Severity comes from `severity` in the request, which is the OpenNMS event severity that `%severity%` resolves to in the optional step:
+
+| OpenNMS event severity | Flashduty severity |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Major` | Critical |
+| `Minor` | Warning |
+| `Warning` | Warning |
+| `Normal` | Info |
+| `Indeterminate` | Info |
+| `Cleared` | Info |
+| Empty or any other value | Critical |
+
+A resolution notice carries the severity of the original outage event, so the recovery event keeps the severity the alert was triggered with.
+
+## Alert content
+---
+
+- **Title**: the notice subject `subject` without the `RESOLVED: ` prefix; `OpenNMS notice #<notice ID>` when the subject is empty
+- **Description**: the notice text `message` without the `RESOLVED: ` prefix
+- **Labels**: `notice_id`, `event_id`, `event_uei`, `node_id`, `interface`, `service`, `severity`. Labels with empty values are not added
+
+## Troubleshooting
+---
+
+The log messages below are in `$OPENNMS_HOME/logs/notifd.log`.
+
+- **Nothing is pushed**: confirm that the notification bell in the top menu bar is green, and that the event notification is **On** and uses the `Flashduty` destination path
+- **The log says `org.opennms.netmgt.notifd.WebhookNotificationStrategy` cannot be loaded**: OpenNMS is older than Horizon 36.0.3
+- **The log shows `the rendered -body is not valid JSON`**: the `-body` template was changed. Copy the command above again
+- **The log shows `Webhook returned status 4xx`**: confirm that `-url` is the full push URL, including `integration_key`
+- **The log shows `I/O problem posting to webhook`**: the OpenNMS server cannot connect to the push URL within 3 seconds. Check DNS, firewalls, and proxies. To use the system proxy, add an `<argument>` whose `<switch>` is `-useSystemProxy` and whose `<substitution>` is `true`
+- **The same notice is pushed several times**: the destination path targets a group or several users. Select only the `flashduty` user
+- **The alert does not recover**: confirm that the recovery event is in the auto-acknowledge list, that `resolution-prefix` is still `RESOLVED: `, and that **Auto Notify** on the destination path is **On**
+
+For details on the webhook notification strategy, see [Webhook Notifications](https://docs.opennms.com/horizon/latest/operation/deep-dive/notifications/strategies/webhook.html) in the OpenNMS documentation.
