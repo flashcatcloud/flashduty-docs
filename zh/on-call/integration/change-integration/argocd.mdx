@@ -1,0 +1,220 @@
+---
+title: "Argo CD 变更集成"
+description: "通过 Argo CD Notifications 的 Webhook 服务将应用同步（Sync）操作同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Argo CD", "ArgoCD", "GitOps", "Sync", "Notifications", "Webhook", "部署事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Argo CD 通过内置的 **Notifications**（`argocd-notifications-controller`）推送变更：本集成提供一段 `argocd-notifications-cm` 配置，包含一个 Webhook 服务、一个请求体模板和一个触发器。Argo CD 应用（Application）的每一次同步（Sync）操作对应一条 Flashduty 变更，同步开始时记录为 Processing，结束时更新为 Done、Failed 或 Canceled。
+
+自动同步、在界面或 CLI 中手动同步、回滚（Rollback）都是同步操作，都会记录。应用的同步失败、健康降级告警请使用 Argo CD 告警集成，两者可以同时配置。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Argo CD**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `application`、`project`、`destination_namespace`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Argo CD 中配置
+---
+
+以下操作需要能修改 Argo CD 所在命名空间（默认 `argocd`）中 ConfigMap 的 Kubernetes 权限，以及修改 Application 或 AppProject 注解的权限。Argo CD 集群需要能访问推送地址所在的域名。
+
+<Steps>
+<Step title="写入 Webhook 服务、模板和触发器">
+
+把下面的内容保存为 `flashduty-change.yaml`，将 `url` 替换为上一步复制的推送地址（包含 `?integration_key=...`）：
+
+```yaml
+data:
+  service.webhook.flashduty-change: |
+    url: <推送地址>
+    headers:
+    - name: Content-Type
+      value: application/json
+
+  template.flashduty-change: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "app_uid": {{ .app.metadata.uid | toJson }},
+            "app_name": {{ .app.metadata.name | toJson }},
+            "app_namespace": {{ .app.metadata.namespace | toJson }},
+            "project": {{ .app.spec.project | toJson }},
+            "destination": {{ dig "spec" "destination" "name" (dig "spec" "destination" "server" "" .app) .app | toJson }},
+            "destination_namespace": {{ dig "spec" "destination" "namespace" "" .app | toJson }},
+            "argocd_url": {{ .context.argocdUrl | toJson }},
+            "phase": {{ dig "status" "operationState" "phase" "" .app | toJson }},
+            "message": {{ dig "status" "operationState" "message" "" .app | toJson }},
+            "started_at": {{ dig "status" "operationState" "startedAt" "" .app | toJson }},
+            "finished_at": {{ dig "status" "operationState" "finishedAt" "" .app | toJson }},
+            "revision": {{ dig "status" "operationState" "syncResult" "revision" (dig "status" "operationState" "operation" "sync" "revision" "" .app) .app | toJson }},
+            "initiated_by": {{ dig "status" "operationState" "operation" "initiatedBy" "username" "" .app | toJson }},
+            "automated": {{ dig "status" "operationState" "operation" "initiatedBy" "automated" false .app | toJson }},
+            "dry_run": {{ dig "status" "operationState" "operation" "sync" "dryRun" false .app | toJson }}
+          }
+
+  trigger.on-flashduty-change: |
+    - when: app.status.operationState != nil and app.status.operationState.phase in ['Running']
+      oncePer: app.status.operationState?.startedAt
+      send: [flashduty-change]
+    - when: app.status.operationState != nil and app.status.operationState.phase in ['Succeeded', 'Failed', 'Error']
+      oncePer: app.status.operationState?.startedAt
+      send: [flashduty-change]
+```
+
+合并到现有的 `argocd-notifications-cm`（`--type merge` 只增改上面这些键，不影响已有配置）：
+
+```bash
+kubectl patch configmap argocd-notifications-cm -n argocd --type merge --patch-file flashduty-change.yaml
+```
+
+如果 Argo CD 通过 Helm Chart 安装，请把 `service.webhook.flashduty-change` 写到 `notifications.notifiers`，模板写到 `notifications.templates`，触发器写到 `notifications.triggers`，否则下次升级会覆盖手动修改。
+
+配置说明：
+
+- 模板中的每个值都经过 `toJson` 转义，同步信息中的引号和换行不会破坏 JSON，请不要去掉。字段名不要修改，`app_uid`、`phase` 和 `started_at` 必须保留
+- 可选字段通过 `dig` 读取，应用从未同步过、同步尚未产生结果时模板也能正常渲染
+- 触发器的两个条件分别对应同步开始和同步结束。`oncePer` 取同步操作的开始时间，保证每一次同步操作的开始和结束各发送一次，即使连续两次同步之间 Argo CD 没有观察到中间状态，请不要去掉
+- 服务名 `flashduty-change` 与告警集成使用的 `flashduty` 不同，两个集成的推送地址互不影响
+- `argocd_url` 取自 `argocd-notifications-cm` 的 `context.argocdUrl`，用于生成变更链接；未配置时变更没有链接，不影响记录
+
+</Step>
+
+<Step title="订阅通知">
+
+触发器需要被订阅后才会发送。按需要的范围选择一种方式：
+
+- **单个应用**：在 Application 上添加注解
+
+  ```bash
+  kubectl patch application <应用名> -n argocd --type merge \
+    -p '{"metadata":{"annotations":{"notifications.argoproj.io/subscribe.on-flashduty-change.flashduty-change":""}}}'
+  ```
+
+- **一个项目下的所有应用**：在 AppProject 的 `metadata.annotations` 中添加同样的注解 `notifications.argoproj.io/subscribe.on-flashduty-change.flashduty-change: ""`
+- **所有应用**：在 `argocd-notifications-cm` 的 `subscriptions` 中添加一项。如果已有 `subscriptions`（例如告警集成添加的那一项），请在原列表中追加，不要用上一步的 merge 命令整体覆盖
+
+  ```yaml
+  subscriptions: |
+    - recipients:
+      - flashduty-change
+      triggers:
+      - on-flashduty-change
+  ```
+
+订阅生效时，已经同步过的应用会立即发送一次最近一次同步的结果，Flashduty 会按该次同步原本的开始、结束时间记录为一条变更。
+
+</Step>
+
+<Step title="验证连通性">
+
+Argo CD 没有发送测试消息的按钮。可以在 `argocd-notifications-controller` Pod 中用 `argocd admin notifications template notify` 按应用当前状态发送一次通知：
+
+```bash
+kubectl exec -n argocd deploy/argocd-notifications-controller -- \
+  /usr/local/bin/argocd admin notifications template notify flashduty-change <应用名> --recipient flashduty-change
+```
+
+命令会打印请求和响应的调试日志，其中包含完整的推送地址（含 `integration_key`），请不要把输出贴到公开位置。输出中 `Received response:` 一行的状态为 `200 OK` 即表示 Flashduty 已接受请求。应用同步过时，这条通知就是最近一次同步的结果，与该次同步已有的记录合并，不会新增变更；应用从未同步过时，Flashduty 直接忽略。
+
+</Step>
+
+<Step title="验证同步记录">
+
+同步一个已订阅的应用（在界面点击 **Sync**，或执行 `argocd app sync <应用名>`），确认 Flashduty 的变更列表中出现一条 Processing 的变更，同步结束后更新为 Done 或 Failed。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+一条变更对应一个应用的一次同步操作，变更标识（change_key）为 `<app_uid>/<started_at>`：
+
+- `app_uid` 是应用的 `metadata.uid`。Kubernetes 为每个对象分配的 UID 在集群的整个生命周期内唯一，不同 Argo CD 实例中同名的应用、删除后重建的应用都是不同的应用
+- `started_at` 是同步操作的开始时间（`status.operationState.startedAt`，按 UTC 记录）。Argo CD 在同步开始时写入这个时间，重试期间保持不变，一个应用同一时刻只运行一个同步操作
+
+因此同一次同步的开始、失败重试和最终结果更新同一条变更；同一个应用的两次同步是两条变更，即使同步的是同一个版本。应用名称、项目、版本和同步信息的变化不会改变变更标识。
+
+请求缺少 `app_uid` 或 `started_at`，或者时间不是 RFC 3339 格式时，Flashduty 会拒绝该请求。
+
+## 状态映射
+---
+
+| Argo CD 同步阶段（`phase`） | Flashduty 变更状态 |
+|---|---|
+| `Running`、`Terminating` | Processing |
+| `Succeeded` | Done |
+| `Failed`、`Error` | Failed |
+| `Failed`，信息为 `Operation terminated`（在界面点击 **Terminate** 或执行 `argocd app terminate-op`） | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。因同步超时被 Argo CD 终止的操作（信息包含 `triggered by controller sync timeout`）记为 Failed。
+
+同步阶段区分大小写，其他值会被拒绝。以下推送返回成功但不生成变更：应用还没有同步操作（`phase` 为空）、试运行（Dry Run）同步。
+
+同步开始时记录的时间是 `started_at`，结束时是 `finished_at`。Argo CD 失败后自动重试期间，同步阶段保持 `Running`，不会提前记为 Failed。
+
+## 变更内容
+---
+
+- **标题**：`<应用名>: sync <版本> to <目标命名空间>`。版本为 Git 提交时显示前 7 位，Helm Chart 版本等其他值原样显示；没有版本或目标命名空间时省略对应部分
+- **链接**：`<argocdUrl>/applications/<应用名>`，配置了 `context.argocdUrl` 时才有
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `application` | 应用名 |
+| `app_uid` | 应用的 `metadata.uid` |
+| `app_namespace` | Application 对象所在的命名空间 |
+| `project` | 应用所属的 Argo CD 项目 |
+| `destination` | 目标集群名称，未设置名称时为集群地址 |
+| `destination_namespace` | 目标命名空间 |
+| `revision` | 同步的版本（Git 提交或 Chart 版本） |
+| `actor` | 发起同步的用户；自动同步为 `automated` |
+| `phase` | 最新的同步阶段 |
+| `message` | 最新的同步信息，例如失败原因，超过 1024 字节时截断 |
+
+值为空的字段不会写入标签。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 查看 `argocd-notifications-controller` 的日志（`kubectl logs -n argocd deploy/argocd-notifications-controller`），确认应用上有 `notifications.argoproj.io/subscribe.on-flashduty-change.flashduty-change` 注解，或 `subscriptions` 中包含 `on-flashduty-change`
+- 日志中出现 `template 'flashduty-change' is not supported` 或 `trigger 'on-flashduty-change' is not configured` 时，确认配置已写入 `argocd-notifications-cm`，Helm 安装请检查对应的 values
+
+</Accordion>
+
+<Accordion title="只收到了同步结束，没有收到同步开始？">
+
+同步在几秒内完成时，Argo CD 可能没有观察到 `Running` 阶段，只发送结束通知。Flashduty 会直接按结束状态记录这条变更。
+
+</Accordion>
+
+<Accordion title="重复发送同一条通知会重复记录吗？">
+
+不会。同一阶段、同一时间的事件只记录一次。
+
+</Accordion>
+
+<Accordion title="日志中出现 failed with error code 400？">
+
+确认模板与本文一致，所有值都经过 `toJson`。响应内容会指出缺少或不支持的字段，例如 `app_uid is missing`、`started_at is missing`、`unsupported phase`。
+
+</Accordion>
+</AccordionGroup>
+
+相关配置请参阅 Argo CD 文档 [Webhook](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/services/webhook/)、[Triggers](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/triggers/)、[Templates](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/templates/) 和 [Subscriptions](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/subscriptions/)。

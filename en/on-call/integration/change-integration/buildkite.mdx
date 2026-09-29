@@ -1,0 +1,123 @@
+---
+title: "Buildkite change integration"
+description: "Sync Buildkite pipeline builds to Flashduty On-call through a Buildkite webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Buildkite", "build", "deployment", "Webhook", "CI/CD"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Buildkite organization's webhook notification service to sync pipeline builds to Flashduty On-call. Each build becomes one Flashduty change; every state of the build, from scheduled and running through failing to passed, failed, or canceled, updates that same change.
+
+We recommend sending only deployment pipelines: select those pipelines in the webhook, or use branch filtering to send builds of release branches only.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Buildkite** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `pipeline` or `ref`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Buildkite
+---
+
+<Steps>
+<Step title="Add a webhook notification service">
+
+In your Buildkite organization, go to **Settings → Notification Services** and click **Add** next to **Webhook**. You need organization admin permission.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **Description**: a name you can recognize, such as `Flashduty`
+2. **Webhook URL**: paste the complete Flashduty integration Push URL
+3. **Token**: keep the default; Flashduty authenticates with the `integration_key` in the Push URL
+
+</Step>
+
+<Step title="Select events and pipelines">
+
+1. Under **Events**, select `build.scheduled`, `build.running`, `build.failing`, `build.finished`, and `build.skipped`
+2. Under **Pipelines**, choose the pipelines to send (all, specific pipelines, or the pipelines of specific teams or clusters)
+3. To send only some branches, enter branch patterns under **Branch filtering**; leave it empty for all branches
+4. Click **Add Webhook Notification** to save
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+One build is one change. Its change identifier (change_key) is the build's `build.id`, a UUID unique across Buildkite. Every `build.*` event of the same build updates the same change; two builds of the same pipeline and branch are two changes, and a rebuild creates a new build and a new change.
+
+## Status mapping
+---
+
+Flashduty takes the status from `build.state` in the delivery:
+
+| Buildkite build state | Flashduty change status |
+|---|---|
+| blocked (waiting on a block step) | Planned |
+| creating, scheduled, waiting | Ready |
+| running, failing, waiting_failed, canceling | Processing |
+| passed | Done |
+| failed | Failed |
+| canceled, skipped, not_run | Canceled |
+
+Done, Failed, and Canceled are end states; Flashduty records the change's end time when one arrives. A build waiting on a block step is delivered as `build.finished` with state `passed` and `blocked` set to `true`; Flashduty records it as Planned and updates it to the final status when the build continues and finishes.
+
+These deliveries return success but create no change: `ping` and other non-build events such as `job.*`, `agent.*`, and `cluster_token.*`.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<pipeline name>: build #<build number> on <branch>` |
+| Description | The build message, usually the commit message |
+| Link | The build's page in Buildkite |
+
+Use labels for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `pipeline` | Pipeline slug |
+| `repo` | The pipeline's repository URL |
+| `ref` | The build's branch |
+| `sha` | The build's commit SHA (absent until Buildkite resolves the commit) |
+| `actor` | Name of the user who triggered the build |
+| `source` | How the build was triggered: `webhook`, `api`, `ui`, `trigger_job`, or `schedule` |
+| `build_id` | Build UUID |
+| `build_number` | Build number within the pipeline |
+| `state` | The latest Buildkite build state; `blocked` while waiting on a block step |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no build changes arriving?">
+
+- Make sure the webhook has the `build.*` events selected; `job.*` or `agent.*` events alone create no changes
+- Make sure the build's pipeline and branch are within the webhook's **Pipelines** and **Branch filtering** settings
+- At the bottom of the webhook settings page, click **Load recent requests** to see the last 20 deliveries and Flashduty's responses
+
+</Accordion>
+
+<Accordion title="Does a repeated delivery record a duplicate?">
+
+No. An event with the same state and time is recorded only once.
+
+</Accordion>
+
+<Accordion title="Why does a delivery return InvalidParameter?">
+
+- `unsupported build.state`: Flashduty received a build state it does not support yet; contact us
+- `build.id is missing`: the delivery is incomplete; make sure it comes from Buildkite's webhook notification service
+
+</Accordion>
+</AccordionGroup>
