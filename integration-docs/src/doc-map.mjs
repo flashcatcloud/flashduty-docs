@@ -75,6 +75,7 @@ export const docMap = {
   Coralogix: `${alertBase}/coralogix.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
+  Wormly: `${alertBase}/wormly.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
