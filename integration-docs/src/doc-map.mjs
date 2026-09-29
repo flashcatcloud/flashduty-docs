@@ -140,6 +140,7 @@ export const docMap = {
   Cfengine: `${alertBase}/cfengine.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
   Mezmo: `${alertBase}/mezmo.mdx`,
+  CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
