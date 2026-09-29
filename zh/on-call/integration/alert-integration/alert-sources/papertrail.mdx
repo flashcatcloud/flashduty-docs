@@ -1,0 +1,145 @@
+---
+title: "Papertrail 告警集成"
+description: "通过 Webhook 将 Papertrail 保存搜索命中的日志同步到 Flashduty On-call。"
+keywords: ["告警集成", "Papertrail", "SolarWinds", "Saved Search", "Webhook", "日志告警"]
+---
+
+Papertrail（SolarWinds 旗下的日志聚合服务）用 **Saved Search（保存搜索）** 描述一条持续匹配日志的查询，命中时可以调用 **Webhook** 告警。Papertrail 官方文档没有定义任何"已恢复"状态：每次轮询命中新的日志都是独立事件，不会关联到更早的一次。本集成的转换规则：
+
+- 同一个保存搜索的一次推送，无论命中多少条日志，都只生成一条 Flashduty 告警
+- 同一个保存搜索的下一次推送会生成新的一条告警，不会与上一条合并
+- 不同的保存搜索各自独立
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Papertrail**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Papertrail**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Papertrail 中配置
+---
+
+<Steps>
+<Step title="创建保存搜索并附加告警">
+
+1. 登录 Papertrail，进入 **Events**，输入要匹配的搜索条件
+2. 点击 **Save Search**，命名后选择 **Save & Setup an Alert**；也可以在 Dashboard 中为已有的保存搜索点击编辑图标，选择 **New Alert**
+
+</Step>
+<Step title="选择 Webhook 目标">
+
+1. 在 Alert 配置页选择 **Webhook** 作为通知方式
+2. **URL** 粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
+3. **Frequency** 选择轮询间隔（`minute` / `hour` / `day`）：间隔越短，同一个保存搜索一有新的匹配就越快生成新告警
+4. 确认未开启 **Send only counts**（仅发送计数）。开启后请求里不再包含具体日志和事件 ID，Flashduty 无法识别，会拒绝请求
+5. 保存
+
+推送地址不需要额外的签名或认证头，Flashduty 通过地址中的 `integration_key` 识别集成，请像保管密钥一样保管推送地址。
+
+</Step>
+<Step title="开启超时自动关闭">
+
+Papertrail 的保存搜索告警没有恢复事件，也没有严重程度：只要保存搜索还在命中新的日志，就会不断生成新的告警。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，计时起点选择 **故障触发**。建议超时时长至少 30 分钟，留出响应人员确认的时间；若 Frequency 选择了 `hour` 或 `day`，请相应调长为所选 Frequency 的 2-3 倍（例如 `1 hour` 时设置 3 小时），避免问题仍在发生、下一次推送还没到达时告警就先自动关闭。
+
+</Step>
+<Step title="验证">
+
+Papertrail 官方文档没有提到 Webhook 的测试发送按钮。请让保存搜索的查询条件真实命中一条新日志（例如临时降低阈值或触发一次真实事件），确认 Flashduty 收到对应的告警。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Flashduty 按 Papertrail 官方文档的固定格式解析请求：请求体为 `application/x-www-form-urlencoded`，只有一个表单字段 `payload`，值是一段 JSON：
+
+```json
+{
+  "events": [
+    {
+      "id": 7711561783320576,
+      "source_name": "abc",
+      "hostname": "abc",
+      "program": "CROND",
+      "severity": "Info",
+      "message": "message body"
+    }
+  ],
+  "saved_search": {
+    "id": 42,
+    "name": "Important stuff",
+    "query": "cron OR server1",
+    "html_search_url": "https://papertrailapp.com/searches/42"
+  },
+  "max_id": 7711582041804800,
+  "min_id": 7711561783320576,
+  "frequency": "1 minute"
+}
+```
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `saved_search.id` | 保存搜索的 ID，在整个生命周期中稳定 | Alert Key 的一部分，标签 `saved_search_id` |
+| `saved_search.name` | 保存搜索名称 | 告警标题，标签 `check` |
+| `saved_search.query` | 搜索条件 | 告警描述，标签 `query` |
+| `saved_search.html_search_url` | 该搜索在 Papertrail 中的链接 | 告警描述，标签 `search_url` |
+| `max_id` | 本次推送命中的最新一条日志的 ID，每次新推送都会更高 | Alert Key 的一部分，标签 `max_id` |
+| `min_id` | 本次推送命中的最早一条日志的 ID | 标签 `min_id` |
+| `frequency` | 该告警配置的轮询间隔 | 标签 `frequency` |
+| `events[]` | 本次推送命中的日志，单次最多 25,000 条 / 10 MB | 汇总进告警描述（最多摘录前 5 条），标签 `event_count` 记录总数，`resource`/`source_name`/`program` 取自第一条命中日志 |
+| `counts[]`（"Send only counts" 模式） | 按来源分组的计数，不包含具体日志和 ID | 不支持，收到时 Flashduty 拒绝请求，请在 Papertrail 中关闭该选项 |
+
+## Alert Key
+---
+
+Flashduty 使用 `saved_search.id` 与 `max_id` 组合作为 Alert Key。`saved_search.id` 官方文档定义为保存搜索的稳定标识，在同一个保存搜索的每次推送中都不会变化；`max_id` 是本次推送里最新一条日志的 ID，Papertrail 后续每次新的推送都会带来更高的 `max_id`。两者组合后，同一个保存搜索的连续两次推送一定产生不同的 Alert Key，各自开出独立的告警；缺少 `saved_search.id` 或 `max_id` 的推送会被拒绝。
+
+## 告警等级
+---
+
+Papertrail 的保存搜索告警没有严重程度字段，所有命中都以 **Critical** 等级触发。请求体里每条日志自带的 `severity`（如 `Info`、`Error`）是该条日志本身的 syslog 级别，同一次推送里可能包含多种取值，不代表这条告警的紧急程度，因此不参与等级判断，仅体现在告警描述里摘录的日志内容中。
+
+## 常见问题
+---
+
+<AccordionGroup>
+
+<Accordion title="为什么两次告警之间隔了很久，中间的日志去哪了？">
+
+Papertrail 按 **Frequency** 轮询：如果同一个保存搜索在一个轮询周期内多次命中，会合并进同一次推送、同一条告警的描述里（最多摘录前 5 条，其余在描述中显示"... and N more"）。只有跨越了下一个轮询周期的命中，才会触发新的推送和新的告警。
+
+</Accordion>
+
+<Accordion title="告警为什么一直不关闭？">
+
+Papertrail 没有恢复事件。请开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭该告警。
+
+</Accordion>
+
+<Accordion title="开启了 Send only counts 之后请求失败怎么办？">
+
+"Send only counts" 模式下请求里不再包含具体的日志和事件 ID，Flashduty 无法识别，会返回错误。请回到 Papertrail 的告警设置中关闭该选项。
+
+</Accordion>
+
+</AccordionGroup>
+
+更多字段含义请参阅 [Papertrail Alerts](https://www.papertrail.com/help/alerts/) 和 [Papertrail Web hooks](https://www.papertrail.com/help/web-hooks/)。

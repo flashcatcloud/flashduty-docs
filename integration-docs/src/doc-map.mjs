@@ -146,6 +146,7 @@ export const docMap = {
   GhostInspector: `${alertBase}/ghost-inspector.mdx`,
   LogzIo: `${alertBase}/logz-io.mdx`,
   Catchpoint: `${alertBase}/catchpoint.mdx`,
+  Papertrail: `${alertBase}/papertrail.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
