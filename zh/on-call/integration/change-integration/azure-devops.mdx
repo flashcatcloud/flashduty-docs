@@ -1,0 +1,157 @@
+---
+title: "Azure DevOps 变更集成"
+description: "通过 Azure DevOps Service Hooks 将流水线运行（Pipelines run）和经典发布（Release）阶段部署同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Azure DevOps", "Pipelines", "Release", "Service Hooks", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Azure DevOps 的 Service Hooks（Web Hooks），将两类对象同步到 Flashduty On-call：
+
+- **流水线运行（Pipeline run）**：一次运行对应一条 Flashduty 变更，从开始运行到成功、失败或取消。
+- **经典发布的阶段部署（Release deployment）**：一个 Release 在某个阶段（Stage）的一次部署对应一条变更，从部署开始到完成。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Azure DevOps**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `pipeline`、`project`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Azure DevOps 中配置
+---
+
+<Steps>
+<Step title="创建 Service Hooks 订阅">
+
+1. 进入项目，打开 **Project settings → Service hooks**
+2. 点击 **Create subscription**，选择服务 **Web Hooks**，点击 **Next**
+
+需要项目管理员权限（Project Administrators）。
+
+</Step>
+
+<Step title="选择触发事件">
+
+按需为每个事件各创建一个订阅：
+
+| 触发事件（Trigger on this type of event） | 记录的对象 |
+|---|---|
+| **Run state changed** | 流水线运行 |
+| **Release deployment started** | 发布阶段部署（开始） |
+| **Release deployment completed** | 发布阶段部署（完成） |
+
+可以用 **Filters** 限定流水线、Release 定义或阶段。不要订阅 **Build completed** 和 **Run stage state changed**，Flashduty 会忽略它们。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **URL**：粘贴 Flashduty 集成的完整推送地址
+2. **Basic authentication username / password**：留空，Flashduty 通过推送地址中的 `integration_key` 鉴权
+3. **Resource details to send**：选择 **All**。选择 Minimal 或 None 时推送内容缺少运行 ID、Release 和阶段名称，Flashduty 会返回 400
+4. **Messages to send**、**Detailed messages to send**：保持默认即可。Flashduty 用消息的 Text 作为变更描述，用 Markdown 消息中的链接作为 Release 事件的链接（Release 事件没有单独的链接字段）；未发送对应格式时，描述或链接为空
+5. 点击 **Test** 验证，再点击 **Finish**
+
+</Step>
+</Steps>
+
+点击 **Test** 发送的是示例推送，Flashduty 返回成功但不生成变更。
+
+## 一条变更是什么
+---
+
+| Azure DevOps 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 流水线运行 | `run:<运行 ID>` | 运行 ID 即 Run 页面链接中的 `buildId`。同一次运行的开始、取消中、完成属于同一条变更；重新运行是新的运行，是新的变更 |
+| 发布阶段部署 | `release:<Release ID>/<阶段名称>` | 同一个 Release 在同一个阶段重新部署，仍属于同一条变更，状态会被后一次部署覆盖。不同 Release、同一 Release 的不同阶段，是不同变更 |
+
+<Note>Azure DevOps 的运行 ID 只在组织内唯一。多个 Azure DevOps 组织请分别创建 Flashduty 集成。</Note>
+
+## 状态映射
+---
+
+**流水线运行**（Run state changed）
+
+| state | result | Flashduty 变更状态 |
+|---|---|---|
+| `inProgress` | - | Processing |
+| `canceling` | - | Processing |
+| `completed` | `succeeded` | Done |
+| `completed` | `failed` | Failed |
+| `completed` | `canceled` | Canceled |
+
+**发布阶段部署**
+
+| 事件 / 部署状态 | Flashduty 变更状态 |
+|---|---|
+| Deployment started | Processing |
+| Deployment completed，`succeeded` | Done |
+| Deployment completed，`partiallySucceeded` | Done |
+| Deployment completed，`failed` | Failed |
+| Deployment completed，`canceled` | Canceled |
+| Deployment completed，`rejected`（审批被拒绝） | Canceled |
+
+无法识别的状态值会让推送返回 400（`unknown run state`、`unknown run result`、`unknown deployment status`），原始状态保留在变更事件的 `state` 标签中。
+
+以下推送返回成功但不生成变更：
+
+- **Build completed**、**Run stage state changed** 以及其他事件类型
+- Service Hooks 的 **Test** 推送
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | 流水线：`<流水线名称>: run <运行 ID>`；发布：`<项目名称>: deploy <Release 名称> to <阶段名称>` |
+| 描述 | Azure DevOps 事件的文本消息 |
+| 链接 | 流水线运行页面；发布事件为事件消息中的阶段页面 |
+| 变更时间 | 运行结束时为运行的完成时间，其余为事件的创建时间 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `kind` | `pipeline_run` 或 `release_deployment` |
+| `pipeline`、`pipeline_id`、`run_id` | 流水线名称、流水线 ID、运行 ID（流水线运行） |
+| `project`、`release`、`release_id`、`environment` | 项目名称、Release 名称、Release ID、阶段名称（发布） |
+| `state` | Azure DevOps 的原始状态，例如 `completed/succeeded`、`queued`、`succeeded`。每个事件的值不同，不建议用于路由 |
+
+流水线运行的事件不包含项目名称，因此没有 `project` 标签。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="重复推送会重复记录吗？">
+
+不会。Azure DevOps 重试推送时内容与原推送相同，Flashduty 只记录一次。
+
+</Accordion>
+
+<Accordion title="为什么 Build completed 没有生成变更？">
+
+Flashduty 只记录 Pipelines 的运行状态事件（Run state changed）和 Release 的部署事件。经典（Classic）构建流水线不发送 Run state changed，如需记录请改用 YAML 流水线。
+
+</Accordion>
+
+<Accordion title="同一个 Release 重新部署到同一阶段，为什么没有新的变更？">
+
+Release 部署事件不带部署 ID，Flashduty 用 Release ID 和阶段名称标识一次部署，重新部署会更新同一条变更。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `resource.run.id is missing`、`resource.release.id is missing`、`resource.environment.name is missing`：**Resource details to send** 没有选择 **All**，或推送不是来自 Azure DevOps Service Hooks
+- `unknown run state`、`unknown run result`、`unknown deployment status`：出现了 Flashduty 尚未识别的状态值
+- `invalid createdDate`：推送中的时间字段格式不正确
+
+</Accordion>
+</AccordionGroup>

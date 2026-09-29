@@ -156,6 +156,7 @@ export const docMap = {
   UnleashChange: `${integrationBase}/change-integration/unleash.mdx`,
   RundeckChange: `${integrationBase}/change-integration/rundeck.mdx`,
   FlagsmithChange: `${integrationBase}/change-integration/flagsmith.mdx`,
+  AzureDevopsChange: `${integrationBase}/change-integration/azure-devops.mdx`,
   ArgoRolloutsChange: `${integrationBase}/change-integration/argo-rollouts.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
