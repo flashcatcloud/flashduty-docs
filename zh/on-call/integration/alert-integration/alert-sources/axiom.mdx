@@ -1,0 +1,138 @@
+---
+title: "Axiom 告警集成"
+description: "通过 Axiom 的自定义 Webhook 通知方式（Custom webhook notifier）将 Monitor 的触发与恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Axiom", "Monitor", "Notifier", "Webhook"]
+---
+
+通过 Axiom 的 Custom webhook notifier 将 Monitor 告警同步到 Flashduty On-call。Axiom 用 `.MonitorID` 标识 Monitor，开启 **Notify by group** 时通知还带有分组值；Flashduty 用 Monitor ID 加分组值生成 Alert Key：同一个 Monitor（或同一分组）的触发通知和恢复通知会更新同一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Axiom**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Axiom**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Axiom 中配置
+---
+
+<Steps>
+<Step title="创建 Custom webhook notifier">
+
+1. 在 Axiom 中打开 **Monitors** 页签，点击右侧的 **Manage notifiers**
+2. 点击右上角 **New notifier**，名称填写 `Flashduty`
+3. 选择 **Custom webhook**，**Webhook URL** 粘贴 Flashduty 集成的完整推送地址
+4. 请求体保持 Axiom 的默认模板，不要修改；如果之前改过，请替换为下方的模板
+5. 无需添加请求头，点击 **Create**
+
+Axiom 默认模板如下，Flashduty 按这个结构解析：
+
+```json
+{
+  "action": "{{.Action}}",
+  "event": {
+    "monitorID": "{{.MonitorID}}",
+    "body": "{{.Body}}",
+    "description": "{{.Description}}",
+    "queryEndTime": "{{.QueryEndTime}}",
+    "queryStartTime": "{{.QueryStartTime}}",
+    "timestamp": "{{.Timestamp}}",
+    "title": "{{.Title}}",
+    "value": {{.Value}},
+    "matchedEvent": {{jsonObject .MatchedEvent}},
+    "groupKeys": {{jsonArray .GroupKeys}},
+    "groupValues": {{jsonArray .GroupValues}}
+  }
+}
+```
+
+<Warning>
+请保留 `action`、`event.monitorID`、`event.groupKeys` 和 `event.groupValues`。缺少 `monitorID` 时 Flashduty 会拒绝请求，因为无法把恢复关联到原告警；`action` 只接受 `Open` 和 `Closed`。
+</Warning>
+
+</Step>
+
+<Step title="将 Notifier 添加到 Monitor">
+
+1. 打开 **Monitors**，编辑已有 Monitor 或点击 **New monitor**
+2. 点击 **Add notifier**，选择 `Flashduty`
+3. 保存 Monitor
+
+Threshold monitor 和 Anomaly monitor 的查询按非时间字段分组时，建议开启 **Notify by group**：每个越过阈值的分组单独触发、单独恢复，在 Flashduty 中也是各自独立的告警。
+
+</Step>
+
+<Step title="为 Match monitor 开启超时自动关闭">
+
+Match monitor 每匹配到一条事件就发送一次 `Open` 通知，不会发送 `Closed`。同一个 Match monitor 的通知合并到同一条 Flashduty 告警，但这条告警不会自动恢复。如果协作空间接收 Match monitor 的告警，请开启[超时自动关闭](/zh/on-call/channel/create-edit)，超时计时起点选择 **故障触发**，超时时长建议设置为 **1 小时**。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让 Threshold monitor 的条件真正满足（例如临时把阈值调低），确认 Flashduty 收到活动告警；再把阈值改回，等待 Monitor 下一次运行后确认原告警恢复。Axiom 在 Monitor 进入告警状态和退出告警状态时各发送一次通知，期间不重复发送。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用 `event.monitorID` 生成 Alert Key；通知带有分组（`event.groupKeys` 非空）时，把分组名和分组值也纳入 Alert Key。Axiom 文档将 `.MonitorID` 定义为通知所属 Monitor 的唯一标识；开启 **Notify by group** 后，每个分组单独触发，通知中带有对应的分组值。
+
+- 同一个 Monitor（或同一分组）的 `Open` 和 `Closed` 通知更新同一条 Flashduty 告警
+- 同一个 Monitor 的不同分组是不同的 Flashduty 告警
+- Monitor 名称、描述、当前值和时间的变化都不会改变 Alert Key
+
+## 状态和告警等级
+---
+
+Axiom 的通知不带告警等级，Flashduty 将所有 Axiom 告警设为 Critical。需要其他等级时，可以通过[告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 按 `check` 或 `monitor_id` 标签调整。
+
+| `action` | Flashduty 处理 |
+| :--- | :--- |
+| `Open` | 触发或更新告警，等级为 Critical |
+| `Closed` | 恢复原告警 |
+| 空值或其他值 | 拒绝请求 |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | Monitor 名称（`event.title`） |
+| `monitor_id` | `event.monitorID` |
+| `monitor_description` | Monitor 描述 |
+| `action` | `Open` 或 `Closed` |
+| `value` | 触发或恢复时的查询值（仅 Threshold/Anomaly monitor） |
+| `query_start_time`、`query_end_time` | 本次运行的查询时间范围 |
+| `group_keys`、`group_values` | 分组名和分组值（开启 Notify by group 时） |
+| 分组名 | 每个分组名作为一个标签，值为分组值 |
+| 匹配事件的字段 | Match monitor 匹配到的事件的顶层字段 |
+
+告警描述为通知的 `event.body`：Threshold monitor 为当前值与阈值的比较说明，Match monitor 为匹配到的事件。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认请求体仍是上文的默认模板，`monitorID` 和 `action` 非空
+- **告警没有恢复**：Match monitor 不发送恢复通知，请开启超时自动关闭；Threshold monitor 在下一次运行不再越过阈值时才发送 `Closed`
+- **多个分组合并成了一条告警**：确认 Monitor 开启了 **Notify by group**；未开启时 Axiom 按整个 Monitor 发送通知
+
+更多信息请参阅 Axiom 文档 [Custom webhook notifier](https://axiom.co/docs/monitor-data/custom-webhook-notifier)、[Threshold monitors](https://axiom.co/docs/monitor-data/threshold-monitors) 和 [Match monitors](https://axiom.co/docs/monitor-data/match-monitors)。

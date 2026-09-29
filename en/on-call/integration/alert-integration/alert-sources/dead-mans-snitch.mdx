@@ -1,0 +1,138 @@
+---
+title: "Dead Man's Snitch alert integration"
+description: "Send Dead Man's Snitch missing, errored, and recovery notifications to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Dead Man's Snitch", "cron", "heartbeat monitoring", "webhook"]
+---
+
+Use the Dead Man's Snitch Webhooks integration to send snitch status notifications to Flashduty On-call. When a scheduled job does not check in during an interval, Dead Man's Snitch sends a missing notification (`snitch.missing`) and a Flashduty alert triggers. When the job checks in again, Dead Man's Snitch sends a recovery notification (`snitch.reporting`) and the alert recovers.
+
+According to the Dead Man's Snitch pricing page, integrations are available from the Private Eye plan up. Error Notices (`snitch.errored`) are available only on the Surveillance Van plan.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Dead Man's Snitch** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Dead Man's Snitch** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Dead Man's Snitch
+---
+
+<Steps>
+<Step title="Add a webhook integration">
+
+1. Sign in to Dead Man's Snitch and click **Integrations** in the top navigation bar
+2. In the list of available integrations, click **Add Webhook**
+3. Paste the full Flashduty push URL (including `integration_key`) into the **Hook URL** field and click **Save**
+
+</Step>
+
+<Step title="Filter by tag (optional)">
+
+By default, an integration receives notifications for every snitch in the current case. To send only some snitches to Flashduty:
+
+1. On the **Integrations** page, click the filter icon next to the webhook
+2. Add one or more tags and click **Save**
+
+After that, only snitches that carry at least one of these tags are sent to Flashduty. Remove all tags to send every snitch again.
+
+</Step>
+
+<Step title="Verify">
+
+1. Create a snitch with the hourly interval and open its check-in URL (for example `https://nosnch.in/<token>`) in a browser for the first check-in
+2. Do not check in during the next full interval. When the interval ends (about one minute past the hour), Dead Man's Snitch sends a missing notification and an active alert appears in Flashduty
+3. Open the check-in URL again. Dead Man's Snitch sends a recovery notification and the alert in Flashduty recovers
+
+If your plan includes Error Notices, you can also report a non-zero exit status with `curl -d s=1 https://nosnch.in/<token>` to trigger an errored notification, then check in normally with `curl -d s=0 https://nosnch.in/<token>`.
+
+</Step>
+</Steps>
+
+## Payload fields
+---
+
+Dead Man's Snitch sends the following fields as JSON:
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `type` | Event type: `snitch.missing`, `snitch.errored`, `snitch.reporting`, or `snitch.paused` | Alert status, label `event_type` |
+| `data.snitch.token` | Unique identifier of the snitch, the token in its check-in URL | Builds the Alert Key (not shown) |
+| `data.snitch.name` | Snitch name | Alert title, label `snitch` |
+| `data.snitch.notes` | Snitch notes, ideally instructions for responders | Alert description, truncated beyond 8 KB |
+| `data.snitch.tags` | Tags set on the snitch | Label `tags` (comma-separated) |
+| `data.snitch.status` | New state of the snitch: `healthy`, `missing`, `errored`, or `paused` | Label `snitch_status` |
+| `data.snitch.previous_status` | Previous state of the snitch, which can also be `pending` before the first check-in | Label `previous_status` |
+
+The alert title is the snitch name followed by its state, for example `Nightly Backup is missing`. When the name is empty, `Snitch` is used. Every alert also carries the label `source=dead-mans-snitch`.
+
+## Alert Key
+---
+
+The token is the check-in credential of the snitch: anyone who holds it can check in to the snitch. Flashduty therefore never shows the token in alerts and uses the MD5 hash of the token as the Alert Key:
+
+- The missing, errored, and recovery notifications of one snitch land on the same alert
+- Renaming a snitch or changing its notes or tags does not change the Alert Key
+
+The token stays the same for the whole life of a snitch. After an alert recovers, the next time the same snitch goes missing a new alert is created; the recovered alert is not reopened. Deleting a snitch and creating it again produces a new token that is no longer linked to the old alert.
+
+## Status and severity
+---
+
+Dead Man's Snitch webhooks carry no severity. Flashduty maps them as follows:
+
+| Dead Man's Snitch `type` | Meaning | Flashduty status or severity |
+| :--- | :--- | :--- |
+| `snitch.missing` | No check-in during the last interval | Critical |
+| `snitch.errored` | The job checked in and reported an error (non-zero exit status) | Critical |
+| `snitch.reporting` | The job checked in again after missing or erroring, or for the first time after creation | Recovered, previous severity Critical |
+| `snitch.paused` | The snitch was paused | No alert |
+
+`type` is case-insensitive. Requests without `data.snitch.token`, or with an empty or other `type`, are rejected.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a snitch that stays missing send repeated notifications?">
+
+Yes. Until the snitch is paused or checks in again, Dead Man's Snitch sends one missing notification for every failed interval. These notifications have the same Alert Key as the original alert and are merged into that active alert instead of creating new ones.
+
+</Accordion>
+
+<Accordion title="Does pausing a snitch close the alert?">
+
+No. Pausing is a manual action: when Flashduty receives `snitch.paused` it creates no alert and does not close existing ones. A paused snitch unpauses automatically on its next check-in and sends `snitch.reporting`, which recovers the alert. If the snitch will not check in again, close the alert in Flashduty manually.
+
+</Accordion>
+
+<Accordion title="Why is there no alert when a new snitch checks in for the first time?">
+
+The first check-in of a new snitch also sends `snitch.reporting`. There is no active alert to recover at that point, so this notification creates nothing.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: make sure the push URL is complete (it includes `integration_key`) and the request body contains `type` and `data.snitch.token`
+- **No notifications arrive**: make sure your plan includes integrations. If the webhook has tag filters, make sure the snitch carries one of those tags
+- **No errored notifications arrive**: Error Notices are available only on the Surveillance Van plan, and the job must report its exit status when it checks in (`s=$?`) or run through the Dead Man's Snitch Field Agent
+- **The alert does not recover**: Dead Man's Snitch does not guarantee the order of notifications. If a recovery notification arrives before the missing notification, the alert does not recover automatically; close it in Flashduty manually

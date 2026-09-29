@@ -1,0 +1,193 @@
+---
+title: "Pandora FMS alert integration"
+description: "Send Pandora FMS module alert triggers and recoveries to Flashduty On-call through a custom alert command."
+keywords: ["alert integration", "Pandora FMS", "Alert command", "Alert recovery", "_id_alert_", "curl"]
+---
+
+Use a custom Pandora FMS alert command to send module alert triggers and recoveries to Flashduty On-call. Each Pandora FMS module alert maps to one Flashduty alert: the alert triggers when the module alert fires, repeated firings merge into the same alert, and the alert recovers when the module no longer meets the alert template's condition.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Pandora FMS** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Pandora FMS** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Pandora FMS
+---
+
+Pandora FMS alert actions run a command on the Pandora FMS server. The steps below create an alert command that pushes with `curl`, create an action that uses the command, and then add the action to module alerts.
+
+<Note>
+The Pandora FMS server that executes alerts needs `curl` installed and HTTPS access to the domain in the push URL.
+</Note>
+
+<Steps>
+<Step title="Create the alert command">
+
+1. Sign in to the Pandora FMS console as an administrator, go to **Management → Alerts → Commands**, and click **Create**
+2. Set **Name** to `Flashduty`
+3. Set **Command** to the command below. Keep it on one line and do not rename the fields:
+
+```text
+curl -sS -m 10 "_field1_" --data-urlencode "event=_field2_" --data-urlencode "id_alert=_id_alert_" --data-urlencode "alert_name=_alert_name_" --data-urlencode "alert_priority=_alert_priority_" --data-urlencode "alert_times_fired=_alert_times_fired_" --data-urlencode "agent=_agent_" --data-urlencode "id_agent=_id_agent_" --data-urlencode "address=_address_" --data-urlencode "agent_group=_agentgroup_" --data-urlencode "module=_module_" --data-urlencode "id_module=_id_module_" --data-urlencode "module_description=_moduledescription_" --data-urlencode "module_status=_modulestatus_" --data-urlencode "data=_data_" --data-urlencode "timestamp=_timestamp_"
+```
+
+4. Fill in the field descriptions and values as follows:
+
+| Field | Description | Values |
+| :--- | :--- | :--- |
+| **Field 1** | `Flashduty push URL` | Leave empty |
+| **Field 2** | `Event` | `alert_fired,Alert fired;alert_recovered,Alert recovered` |
+
+5. Click **Create** to save
+
+Every macro sits inside double quotes. Pandora FMS shell-quotes the value when it replaces the macro, and `curl --data-urlencode` then URL-encodes it, so spaces, quotes, and non-ASCII text in agent names or module descriptions reach Flashduty unchanged.
+
+</Step>
+
+<Step title="Create the alert action">
+
+1. Go to **Management → Alerts → Actions** and click **Create**
+2. Set **Name** to `Flashduty`, set **Group** to the groups that should use the action (**All** for every group), and set **Command** to the `Flashduty` command from the previous step
+3. Fill in the fields as follows. Fill in both the **Triggering** and **Recovery** columns:
+
+| Field | Triggering | Recovery |
+| :--- | :--- | :--- |
+| **Field 1** (Flashduty push URL) | The full push URL of the Flashduty integration | The full push URL of the Flashduty integration |
+| **Field 2** (Event) | `Alert fired` (`alert_fired`) | `Alert recovered` (`alert_recovered`) |
+
+4. Click **Create** to save
+
+</Step>
+
+<Step title="Make sure the alert template has recovery enabled">
+
+Go to **Management → Alerts → Templates**, open the template you use, and in step 3 **Advanced fields** make sure **Alert recovery** is enabled. The built-in **Critical condition** and **Warning condition** templates have it enabled by default. With **Alert recovery** disabled, Pandora FMS runs no action when the module recovers, and the Flashduty alert does not close automatically.
+
+</Step>
+
+<Step title="Add the action to module alerts">
+
+1. Go to **Management → Alerts → Module Alerts** and create a module alert, or open an existing one
+2. Select the **Agent**, **Module**, and **Template**, and add `Flashduty` under **Actions**
+3. Save
+
+You can also add an alert for a module from the agent's **Alerts** tab and select the `Flashduty` action. For an existing module alert, just add the `Flashduty` action; existing actions such as email are not affected.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Put a module that has an alert into its alert condition (for example, lower the Critical threshold of a CPU module) and confirm that Flashduty receives an active alert. Restore the threshold, wait for the next data collection, and confirm that the alert closes.
+
+</Step>
+</Steps>
+
+<Warning>
+The action's **Field 2** must be `alert_recovered` in the **Recovery** column. If the Recovery column is empty, Pandora FMS falls back to the alert template's recovery field (the built-in templates' Field 2 recovery value is an email subject), Flashduty rejects that recovery as a parameter error, and the alert does not close.
+</Warning>
+
+## Pushed content
+---
+
+The command POSTs the following fields as an `application/x-www-form-urlencoded` form:
+
+| Field | Pandora FMS macro | In Flashduty |
+| :--- | :--- | :--- |
+| `event` | `_field2_`, `alert_fired` or `alert_recovered` from the action | Trigger or recovery |
+| `id_alert` | `_id_alert_`, the module alert ID | Alert Key, label `alert_id` |
+| `alert_name` | `_alert_name_`, the alert template name | Alert title, label `check` |
+| `alert_priority` | `_alert_priority_`, the template priority (numeric) | Severity, label `priority` |
+| `alert_times_fired` | `_alert_times_fired_`, the number of times the alert fired | Label `times_fired` |
+| `agent` | `_agent_`, the agent alias | Alert title, label `resource` |
+| `id_agent` | `_id_agent_`, the agent ID | Label `agent_id` |
+| `address` | `_address_`, the agent IP address | Label `host` |
+| `agent_group` | `_agentgroup_`, the agent's group | Label `agent_group` |
+| `module` | `_module_`, the module name | Alert title, label `module` |
+| `id_module` | `_id_module_`, the module ID | Label `module_id` |
+| `module_description` | `_moduledescription_`, the module description | Alert description |
+| `module_status` | `_modulestatus_`, the module's current status | Alert description, label `module_status` |
+| `data` | `_data_`, the data that fired the alert | Alert description, label `data` |
+| `timestamp` | `_timestamp_`, the alert time | Alert description |
+
+The alert title is `<template name>: <agent> / <module>`. When some fields are missing the rest are used, and when all are empty the title is `Pandora FMS alert <id_alert>`.
+
+## Alert Key
+---
+
+Flashduty uses `id_alert` (the Pandora FMS macro `_id_alert_`) as the Alert Key. The Pandora FMS documentation describes this macro as "Alert identifier, useful for correlating the alert in third-party tools": it is the ID of the module alert created when a template is assigned to a module. The trigger, repeated firings, and recovery of one module alert carry the same ID, so they land on the same Flashduty alert. One template assigned to two modules makes two module alerts with different IDs, which produce different Flashduty alerts. Changing the template name, priority, agent alias, or data does not change the Alert Key.
+
+Module alert IDs are unique only within one Pandora FMS installation. Use a separate Flashduty integration for each installation (including each node under a Metaconsole), so that alerts with the same ID in different installations do not merge into one alert.
+
+Only module alerts carry `_id_alert_`. Event alerts, log alerts, and correlated alerts have no module alert ID and Flashduty rejects them as a parameter error, so do not add the `Flashduty` action to them.
+
+## Status and severity
+---
+
+`event` decides whether the alert triggers or recovers, and `alert_priority` (the alert template's **Priority**) decides the severity:
+
+| `alert_priority` | Pandora FMS priority | Flashduty severity |
+| :--- | :--- | :--- |
+| `4` | Critical | Critical |
+| `6` | Major | Critical |
+| `3` | Warning | Warning |
+| `5` | Minor | Warning |
+| `0`, `1`, `2` | Maintenance, Informational, Normal | Info |
+| Any other value or empty | | Warning |
+
+When `event` is `alert_recovered` the alert recovers, and its severity still comes from the template priority. Requests with an empty or any other `event` are rejected, so a request whose state cannot be determined never enters the wrong alert lifecycle.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why does the action need an Event field?">
+
+Pandora FMS runs the same action when an alert fires and when it recovers, and no macro tells which one it is. Only action fields can take separate **Triggering** and **Recovery** values, so `alert_fired` and `alert_recovered` in **Field 2** tell Flashduty whether the run is a trigger or a recovery.
+
+</Accordion>
+
+<Accordion title="Does forcing an alert (Force) create an alert?">
+
+Forcing a module alert that has not fired sends `alert_times_fired` `0`. Flashduty treats such a request as a test, returns success, and creates no alert. Forcing an alert that has already fired merges into that alert and does not create a new one.
+
+</Accordion>
+
+<Accordion title="Do repeated firings create multiple alerts?">
+
+No. Repeated firings of one module alert before it recovers carry the same `id_alert` and merge into the same Flashduty alert. How often it fires again is controlled by the template's **Max number of alerts** and the action's **Threshold**.
+
+</Accordion>
+
+<Accordion title="The alert recovered in Pandora FMS but did not close in Flashduty?">
+
+Check, in order: the alert template has **Alert recovery** enabled; the action's **Field 2** is `alert_recovered` in the **Recovery** column; the module alert is not in Standby (alerts in Standby run no actions).
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Pandora FMS does not push**: run `curl -sS <push URL>` on the Pandora FMS server to confirm the network path, and make sure the action's **Group** covers the agent's group
+- **Flashduty returns a parameter error**: make sure the command is pasted in full on one line, the action's **Field 2** is `alert_fired` and `alert_recovered` in the two columns, and the action is only added to module alerts
+- **The alert does not recover**: see the FAQ "The alert recovered in Pandora FMS but did not close in Flashduty?" above
+
+For macros and alert configuration, see the Pandora FMS documentation [Alerts](https://pandorafms.com/manual/!current/en/documentation/pandorafms/management_and_operation/01_alerts).

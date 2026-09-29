@@ -1,0 +1,208 @@
+---
+title: "OpenNMS 告警集成"
+description: "通过 OpenNMS Horizon 的 Webhook 通知命令将节点、接口和服务中断通知同步到 Flashduty On-call，中断恢复时自动关闭告警。"
+keywords: ["告警集成", "OpenNMS", "OpenNMS Horizon", "Webhook", "通知命令", "notificationCommands.xml", "网络监控"]
+---
+
+OpenNMS Horizon 通过通知（notice）告知运维人员网络中发生的事件。本集成提供一个 Webhook 通知命令，OpenNMS 每发出一条通知，就把它推送到 Flashduty。每条 OpenNMS 通知对应一条 Flashduty 告警：节点、接口或服务中断时触发，对应的恢复事件自动确认（auto-acknowledge）该通知时关闭告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **OpenNMS**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **OpenNMS**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 OpenNMS 中配置
+---
+
+本集成使用 OpenNMS 的 Webhook 通知策略 `WebhookNotificationStrategy`，需要 **OpenNMS Horizon 36.0.3 及以上版本**。更早的版本没有该策略，请先升级。以下 `$OPENNMS_HOME` 指 OpenNMS 的安装目录，官方容器镜像中为 `/opt/opennms`。OpenNMS 服务器需要能访问 Flashduty 推送地址。
+
+<Steps>
+<Step title="添加 Flashduty 通知命令">
+
+编辑 `$OPENNMS_HOME/etc/notificationCommands.xml`，在 `</notification-commands>` 之前加入以下命令，并把 `-url` 中的地址替换为上一步复制的推送地址：
+
+```xml
+<command binary="false">
+  <name>flashduty</name>
+  <execute>org.opennms.netmgt.notifd.WebhookNotificationStrategy</execute>
+  <comment>Send notices to Flashduty</comment>
+  <argument streamed="false">
+    <substitution>https://api.flashcat.cloud/event/push/alert/opennms?integration_key=YOUR_INTEGRATION_KEY</substitution>
+    <switch>-url</switch>
+  </argument>
+  <argument streamed="false">
+    <substitution>{"notice_id": "${noticeid}", "event_id": "${eventID}", "event_uei": "${eventUEI}", "node_id": "${nodeid}", "interface": "${interface}", "service": "${service}", "severity": "${severity}", "subject": "${subject}", "message": "${textMessage}"}</substitution>
+    <switch>-body</switch>
+  </argument>
+  <argument streamed="false"><switch>noticeid</switch></argument>
+  <argument streamed="false"><switch>eventID</switch></argument>
+  <argument streamed="false"><switch>eventUEI</switch></argument>
+  <argument streamed="false"><switch>-nodeid</switch></argument>
+  <argument streamed="false"><switch>-interface</switch></argument>
+  <argument streamed="false"><switch>-service</switch></argument>
+  <argument streamed="false"><switch>-severity</switch></argument>
+  <argument streamed="false"><switch>-subject</switch></argument>
+  <argument streamed="false"><switch>-tm</switch></argument>
+</command>
+```
+
+说明：
+
+- 请求体中的每个 `${名称}` 都需要一个同名的 `<argument>`，缺少的会被替换为空字符串。`notice_id` 是 Flashduty 识别告警的字段，不能删除
+- 推送地址如果包含 `&`（例如附加了其他查询参数），在 XML 中要写成 `&amp;`
+- 该文件修改后立即生效，无需重启 OpenNMS
+
+</Step>
+
+<Step title="创建接收用户和目的路径">
+
+OpenNMS 按目的路径（destination path）中的每个目标用户各执行一次通知命令。为了每条通知只推送一次，请为 Flashduty 单独创建一个用户：
+
+1. 选择 **Administration → Configure OpenNMS**，在 **Configure Users, Groups and On-Call Roles** 中进入 **Configure Users**，添加用户 `flashduty`。不要为该用户设置值班时间表（duty schedule）
+2. 返回 **Configure OpenNMS**，在 **Event Management** 下选择 **Configure Notifications → Configure Destination Paths**，点击 **New Path**
+3. 名称填写 `Flashduty`，点击 **Edit**，在 **Send to Selected Users** 中只选择 `flashduty`，点击 **Next Step**
+4. 命令选择 `flashduty`，**Auto Notify** 选择 **On**，点击 **Next Step**，然后点击 **Finish**
+
+**Auto Notify** 必须为 **On**：取默认值时，如果有人在 OpenNMS 中手动确认过这条通知，OpenNMS 不再发送恢复通知，Flashduty 中的告警不会关闭。
+
+</Step>
+
+<Step title="选择推送的事件通知">
+
+在 **Configure Notifications → Configure Event Notifications** 中，编辑需要推送到 Flashduty 的事件通知，把目的路径改为 `Flashduty`（需要同时保留邮件时，可以为同一个事件再添加一条使用 `Flashduty` 路径的通知）。建议推送以下有恢复事件的通知：
+
+| 事件通知 | 恢复事件 |
+| :--- | :--- |
+| `nodeDown` | `nodeUp` |
+| `interfaceDown` | `interfaceUp` |
+| `nodeLostService` | `nodeRegainedService` |
+
+`nodeAdded`、`interfaceDeleted` 等信息类通知，以及阈值的 **Rearmed** 通知，不要使用 `Flashduty` 路径：它们没有恢复事件，每条都会产生一条不会自动关闭的告警。
+
+</Step>
+
+<Step title="（可选）推送事件等级">
+
+OpenNMS 不会自动把事件等级传给通知命令。需要在 Flashduty 中区分告警等级时，编辑 `$OPENNMS_HOME/etc/notifications.xml`，在每条推送到 Flashduty 的 `<notification>` 中、`</notification>` 之前加入：
+
+```xml
+<parameter name="-severity" value="%severity%"/>
+```
+
+OpenNMS 会把 `%severity%` 替换为触发事件的等级（`Critical`、`Major`、`Minor` 等）。不加这一行时，Flashduty 中的告警等级均为 Critical。
+
+</Step>
+
+<Step title="开启通知">
+
+新安装的 OpenNMS 默认关闭通知。选择 **Administration → Configure OpenNMS**，在 **Event Management** 下将 **Notification Status** 设为 **On**，点击 **Update**。顶部菜单栏的铃铛图标变为绿色即表示已开启。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个被监控节点上的服务停止响应（例如停止节点上的 HTTP 服务），等待 OpenNMS 轮询发现后，确认 Flashduty 收到活动告警；恢复该服务后，确认原告警关闭。
+
+也可以在 OpenNMS 服务器上手动发送事件，把其中的节点 ID 和 IP 地址替换为已监控节点的值：
+
+```bash
+$OPENNMS_HOME/bin/send-event.pl -n <节点ID> -i <IP地址> uei.opennms.org/nodes/nodeDown
+$OPENNMS_HOME/bin/send-event.pl -n <节点ID> -i <IP地址> uei.opennms.org/nodes/nodeUp
+```
+
+OpenNMS 没有单独测试通知命令的按钮。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 OpenNMS 的通知编号 `notice_id`（`${noticeid}`）作为 Alert Key。同一条通知在升级（escalation）时重发，或被恢复事件自动确认后发送恢复通知时，通知编号都不变，因此落在同一条告警上。
+
+同一个节点或服务再次中断时，OpenNMS 会创建新的通知，Flashduty 相应产生新的告警。同一个事件匹配多条推送到 Flashduty 的事件通知时，每条通知各产生一条告警。
+
+通知编号只在一个 OpenNMS 实例内唯一。多个 OpenNMS 实例请分别使用不同的集成，不要推送到同一个推送地址。
+
+请求缺少 `notice_id` 时，Flashduty 会拒绝该请求，OpenNMS 在 `notifd.log` 中记录推送失败。
+
+## 告警生命周期
+---
+
+OpenNMS 在 `notifd-configuration.xml` 中为中断事件配置了自动确认（`auto-acknowledge`）：恢复事件到达时，OpenNMS 确认对应的中断通知，并把原通知再次发送给原来的接收人，主题和正文前加上 `RESOLVED: `。Flashduty 按主题是否以 `RESOLVED:` 开头处理：
+
+| OpenNMS 推送 | Flashduty 处理 |
+| :--- | :--- |
+| 新通知 | 触发告警 |
+| 升级步骤重发的同一条通知 | 更新已有告警 |
+| 主题以 `RESOLVED:` 开头的恢复通知 | 恢复告警 |
+
+默认的自动确认包括 `nodeUp`→`nodeDown`、`interfaceUp`→`interfaceDown`、`nodeRegainedService`→`nodeLostService`、`serviceResponsive`→`serviceUnresponsive`，以及 `wideSpreadOutageResolved`→`wideSpreadOutage`。
+
+<Warning>请保留 `auto-acknowledge` 的 `resolution-prefix="RESOLVED: "`。修改或删除该前缀后，恢复通知会被当作新的触发推送，告警不会关闭。</Warning>
+
+推送其他没有自动确认的通知（例如阈值告警）时，可以在 `notifd-configuration.xml` 的 `<notifd-configuration>` 下、所有 `<auto-acknowledge>` 之前加入：
+
+```xml
+<auto-acknowledge-alarm resolution-prefix="RESOLVED: " notify="true"/>
+```
+
+事件的告警（alarm）被对应的清除事件清除时，OpenNMS 会确认该通知并发送恢复通知。修改后执行 `$OPENNMS_HOME/bin/send-event.pl -p 'daemonName Notifd' uei.opennms.org/internal/reloadDaemonConfig` 重新加载。仍然没有恢复通知的，请在接收该集成告警的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，**超时计时起点**选择**故障触发**，**超时时长**建议设为 24 小时。
+
+## 告警等级
+---
+
+告警等级来自请求中的 `severity`，即可选步骤中 `%severity%` 取到的 OpenNMS 事件等级：
+
+| OpenNMS 事件等级 | Flashduty 等级 |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Major` | Critical |
+| `Minor` | Warning |
+| `Warning` | Warning |
+| `Normal` | Info |
+| `Indeterminate` | Info |
+| `Cleared` | Info |
+| 空值或其他值 | Critical |
+
+恢复通知携带原中断事件的等级，恢复事件的等级保持为告警触发时的等级。
+
+## 告警内容
+---
+
+- **标题**：通知主题 `subject`，去掉 `RESOLVED: ` 前缀；主题为空时为 `OpenNMS notice #<通知编号>`
+- **描述**：通知正文 `message`，去掉 `RESOLVED: ` 前缀
+- **标签**：`notice_id`、`event_id`、`event_uei`、`node_id`、`interface`、`service`、`severity`。值为空的标签不会添加
+
+## 排查问题
+---
+
+以下日志位于 `$OPENNMS_HOME/logs/notifd.log`。
+
+- **没有任何推送**：确认顶部菜单栏的通知铃铛为绿色，事件通知的状态为 **On** 且目的路径为 `Flashduty`
+- **日志提示无法加载 `org.opennms.netmgt.notifd.WebhookNotificationStrategy`**：OpenNMS 版本低于 Horizon 36.0.3
+- **日志出现 `the rendered -body is not valid JSON`**：`-body` 模板被改动过，请重新复制上文的命令
+- **日志出现 `Webhook returned status 4xx`**：确认 `-url` 是完整推送地址且包含 `integration_key`
+- **日志出现 `I/O problem posting to webhook`**：OpenNMS 服务器无法在 3 秒内连接推送地址，请检查 DNS、防火墙和代理。需要走系统代理时，在命令中加入一个 `<switch>` 为 `-useSystemProxy`、`<substitution>` 为 `true` 的 `<argument>`
+- **同一条通知推送了多次**：目的路径中选择了用户组或多个用户，改为只选择 `flashduty` 用户
+- **告警没有恢复**：确认恢复事件在自动确认列表中、`resolution-prefix` 仍为 `RESOLVED: `，并且目的路径的 **Auto Notify** 为 **On**
+
+Webhook 通知策略的说明请参阅 OpenNMS 文档 [Webhook Notifications](https://docs.opennms.com/horizon/latest/operation/deep-dive/notifications/strategies/webhook.html)。
