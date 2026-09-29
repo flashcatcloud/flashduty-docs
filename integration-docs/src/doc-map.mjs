@@ -141,6 +141,7 @@ export const docMap = {
   Bigpanda: `${alertBase}/bigpanda.mdx`,
   Mezmo: `${alertBase}/mezmo.mdx`,
   CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
+  GhostInspector: `${alertBase}/ghost-inspector.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
