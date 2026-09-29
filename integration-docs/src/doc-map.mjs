@@ -150,6 +150,8 @@ export const docMap = {
   BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
   LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
   JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
+  CircleciChange: `${integrationBase}/change-integration/circleci.mdx`,
+  BitbucketChange: `${integrationBase}/change-integration/bitbucket.mdx`,
   UnleashChange: `${integrationBase}/change-integration/unleash.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
