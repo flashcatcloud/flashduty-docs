@@ -159,6 +159,7 @@ export const docMap = {
   Catchpoint: `${alertBase}/catchpoint.mdx`,
   Papertrail: `${alertBase}/papertrail.mdx`,
   MonteCarlo: `${alertBase}/monte-carlo.mdx`,
+  Limacharlie: `${alertBase}/limacharlie.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {

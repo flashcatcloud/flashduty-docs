@@ -1,0 +1,123 @@
+---
+title: "LimaCharlie 告警集成"
+description: "通过 Webhook 输出将 LimaCharlie 检测与响应（D&R）规则产生的检测事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "LimaCharlie", "EDR", "D&R", "Detection", "Webhook", "detect_id"]
+---
+
+通过 LimaCharlie 的 Webhook 输出（Output），将 D&R 规则命中后产生的检测（Detection）同步到 Flashduty On-call。每条检测对应一条 Flashduty 告警。
+
+LimaCharlie 检测只在命中时发送一次，没有对应的恢复通知，因此告警不会自动恢复。请在协作空间中开启超时自动关闭，见下文 [告警不会恢复](#告警不会恢复)。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **LimaCharlie**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **LimaCharlie**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 LimaCharlie 中配置
+---
+
+<Steps>
+<Step title="新增 Webhook 输出">
+
+1. 登录 LimaCharlie 控制台，选择目标组织，进入 **Outputs**
+2. 点击 **Add Output**，**Stream** 选择 **Detections**，**Destination** 选择 **Webhook**（逐条发送，不要选 Webhook Bulk）
+3. **Name** 填写 `flashduty`
+4. **dest_host** 粘贴 Flashduty 集成的完整推送地址，含 `integration_key` 参数
+5. **secret_key** 填写任意字符串。LimaCharlie 会用它计算请求头 `lc-signature`，Flashduty 不校验该请求头
+
+保存后，组织内每条检测都会向该地址发送一次 POST，请求体为 LimaCharlie 的检测 JSON。
+
+</Step>
+
+<Step title="确认有 D&R 规则产生检测">
+
+Webhook 输出只转发检测。请确认组织中已启用会产生检测的 D&R 规则（自建规则或托管规则集）。只想转发部分检测时，可以在输出上设置分类或标签过滤。
+
+</Step>
+
+<Step title="验证连通性">
+
+LimaCharlie 建议先把 Stream 临时设为 **Audit**，再编辑该输出触发一条审计事件。Flashduty 对非检测的请求返回 200，不创建告警，因此这一步只验证地址可达。确认后把 Stream 改回 **Detections**。
+
+真实验证需要让 D&R 规则命中一次，确认 Flashduty 收到对应告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用检测的 `detect_id` 作为 Alert Key。LimaCharlie 官方文档将其定义为唯一的检测标识；同一条检测被重发时 `detect_id` 不变，会合并到同一条告警，不同检测各自成为独立告警。
+
+`cat`（检测名称）、`priority` 和时间不参与 Alert Key。请求中没有 `detect_id` 但有 `cat` 时，Flashduty 会返回参数错误。
+
+## 告警等级
+---
+
+LimaCharlie 只提供可选的整数 `priority`（0 到 10），没有等级定义，下表是 Flashduty 的划分：
+
+| `priority` | Flashduty 等级 |
+| :--- | :--- |
+| 7 到 10 | Critical |
+| 4 到 6 | Warning |
+| 1 到 3 | Info |
+| 0、缺省或非数字 | Warning |
+
+## 字段映射
+---
+
+| Flashduty | LimaCharlie 字段 |
+| :--- | :--- |
+| 标题 | `cat`，有主机名时追加 ` (routing.hostname)` |
+| 描述 | 检测名称、传感器主机名、`source_rule` 和 `link`（处置手册链接） |
+| 标签 | `detect_id`、`source`（`rule_source`）、`source_rule`（`rule`）、`routing` 中的 `sid`、`oid`、`event_type`、`hostname`、`ext_ip`、`int_ip`，以及 `namespace`、`priority`、`link`、`author` |
+
+命中的原始事件（`detect`）和提取的 IOC（`detect_data`）不写入标签。
+
+## 告警不会恢复
+---
+
+检测是一次性事件，LimaCharlie 不会发送恢复通知。请在接收该集成的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时，并按团队处理检测的时效调整。
+
+## 排查问题
+---
+
+<AccordionGroup>
+<Accordion title="LimaCharlie 提示输出失败或被临时停用">
+
+输出失败时 LimaCharlie 会临时停用它，一段时间后自动恢复，也可以编辑输出配置来立即重新启用。请确认 `dest_host` 是完整的推送地址，并在 LimaCharlie 的 Platform Logs 的 Errors 中查看 `outputs/<输出名>` 的错误详情。
+
+</Accordion>
+
+<Accordion title="没有收到告警">
+
+确认输出的 Stream 是 **Detections**，且使用的是 **Webhook** 而不是 Webhook Bulk。Audit、Event、Deployment 流的请求会被 Flashduty 接收但不创建告警。
+
+</Accordion>
+
+<Accordion title="Flashduty 返回参数错误">
+
+请求体必须是 JSON，且 `detect_id` 非空。使用了 `custom_transform` 改写请求体时，请保留 `cat` 和 `detect_id` 字段。
+
+</Accordion>
+</AccordionGroup>
+
+更多字段含义请参阅 LimaCharlie 文档中的 [Webhook 输出](https://docs.limacharlie.io/5-integrations/outputs/destinations/webhook/) 和输出流结构说明。
