@@ -166,6 +166,7 @@ export const docMap = {
   BitbucketChange: `${integrationBase}/change-integration/bitbucket.mdx`,
   UnleashChange: `${integrationBase}/change-integration/unleash.mdx`,
   RundeckChange: `${integrationBase}/change-integration/rundeck.mdx`,
+  FlagsmithChange: `${integrationBase}/change-integration/flagsmith.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
