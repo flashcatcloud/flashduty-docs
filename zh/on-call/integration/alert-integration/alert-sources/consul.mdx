@@ -1,0 +1,227 @@
+---
+title: "HashiCorp Consul 告警集成"
+description: "通过 Consul Agent 的 checks 类型 Watch 和 HTTP handler，将 Consul 健康检查的异常和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Consul", "HashiCorp Consul", "Watch", "健康检查", "http_handler_config"]
+---
+
+通过 Consul 自带的 Watch 机制，把 Consul 健康检查（health check）的状态推送到 Flashduty On-call。每个节点上的每个健康检查对应一条 Flashduty 告警：检查变为 `warning` 或 `critical` 时触发告警，变回 `passing` 时告警自动恢复。
+
+本集成适用于开源版和企业版 Consul，只需要在一个 Consul Agent 上添加一段 Watch 配置，不需要安装额外的脚本或插件。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警路由到不同的协作空间时，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+  2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+  3. 选择 **HashiCorp Consul**，点击 **保存**
+  4. 打开生成的集成卡片，复制 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据 Payload 将告警路由到不同的协作空间时，选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+  2. 选择 **HashiCorp Consul**，填写集成名称
+  3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+  4. 点击 **保存**，复制生成的 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## 工作方式
+---
+
+Consul 的 `checks` 类型 Watch 在任意一个被监听的健康检查发生变化时（包括状态和输出内容的变化），把**所有**被监听检查的当前状态作为一个 JSON 数组 POST 到推送地址。Flashduty 把数组中的每个检查转换为一个事件：
+
+- `warning`、`critical` 的检查触发告警，已有告警时合并到同一条告警
+- `passing` 的检查恢复对应的告警；没有对应告警时不做任何处理
+- 维护模式（`consul maint`）产生的 `_node_maintenance` 和 `_service_maintenance:<服务 ID>` 检查属于计划内变更，不会创建告警
+
+Watch 加载后会立即发送一次当前状态，所以已经处于 `warning` 或 `critical` 的检查会马上产生告警。
+
+## 前提条件
+---
+
+- **网络**：运行 Watch 的 Consul Agent 需要能访问 Flashduty 推送地址（如 `https://api.flashcat.cloud`）。
+- **权限**：需要能修改该 Agent 的配置目录（例如 `/etc/consul.d`）并执行 `consul reload`。
+- **ACL**：如果开启了 ACL，Watch 使用的 Token 需要有全部节点和服务的读权限，见下方步骤。
+
+## 在 Consul 中配置
+---
+
+<Steps>
+<Step title="选择运行 Watch 的 Agent">
+
+Watch 查询的是整个数据中心的健康检查，在**一个** Agent 上配置即可，可以是某台 Server，也可以是一台专用的 Client。在多个 Agent 上配置同一个 Watch 不会产生重复告警（同一检查的事件会合并），但每条告警的事件数会成倍增加。
+
+</Step>
+
+<Step title="添加 Watch 配置">
+
+在该 Agent 的配置目录中新建文件 `flashduty-watch.json`，写入下方内容，并把 `path` 替换为 Flashduty 集成的完整推送地址（包含 `integration_key` 参数）：
+
+```json
+{
+  "watches": [
+    {
+      "type": "checks",
+      "handler_type": "http",
+      "http_handler_config": {
+        "path": "https://api.flashcat.cloud/event/push/alert/consul?integration_key=<集成密钥>",
+        "method": "POST",
+        "timeout": "10s"
+      }
+    }
+  ]
+}
+```
+
+- 不要设置 `state` 参数。设置 `"state": "critical"` 后，检查恢复时会从数组中消失，Flashduty 收不到 `passing`，告警无法自动恢复。
+- 只关心部分检查时，可以用 `filter` 参数缩小范围，例如 `"filter": "ServiceName == \"web\" or CheckID == \"serfHealth\""`；也可以用 `"service": "web"` 只监听一个服务的检查（不包含节点级检查，例如 `serfHealth`）。
+- 开启了 ACL 时，在 Watch 中增加 `"token": "<ACL Token>"`。该 Token 的策略至少需要：
+
+  ```hcl
+  node_prefix "" { policy = "read" }
+  service_prefix "" { policy = "read" }
+  ```
+
+</Step>
+
+<Step title="重新加载配置">
+
+```bash
+consul reload
+```
+
+使用 Docker 部署时，把配置文件放入挂载到容器 `/consul/config` 的目录，再执行：
+
+```bash
+docker exec <容器名> consul reload
+```
+
+加载成功后，Agent 会立即向 Flashduty 发送一次所有检查的当前状态。Agent 日志中出现 `http watch handler failed with output` 时，说明 Flashduty 拒绝了请求，日志中带有 HTTP 状态码和原因。
+
+</Step>
+
+<Step title="验证告警和恢复">
+
+Consul 没有测试通知按钮，可以注册一个 TTL 检查来验证。TTL 检查注册后默认是 `critical`，会立即产生一条告警：
+
+```bash
+curl -X PUT --data '{"ID": "flashduty-test", "Name": "Flashduty test", "TTL": "30m"}' \
+  http://127.0.0.1:8500/v1/agent/check/register
+```
+
+把检查置为 `passing`，告警随之恢复：
+
+```bash
+curl -X PUT http://127.0.0.1:8500/v1/agent/check/pass/flashduty-test
+```
+
+验证完成后删除该检查：
+
+```bash
+curl -X PUT http://127.0.0.1:8500/v1/agent/check/deregister/flashduty-test
+```
+
+开启了 ACL 时，为每条命令加上 `-H "X-Consul-Token: <ACL Token>"`。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `Partition`、`Node` 和 `CheckID` 共同生成 Alert Key。
+
+- `Node` 是检查所在的节点名。
+- `CheckID` 是检查的 ID。Consul 规定同一节点上的 `CheckID` 唯一；服务检查的默认 ID 形如 `service:<服务 ID>`，节点存活检查为 `serfHealth`。
+- `Partition` 是 Consul 企业版的管理分区（Admin Partition），开源版为空。
+
+检查的状态、名称、输出和备注变化都不会改变 Alert Key。Agent 重启后重新发送的同一检查，Alert Key 也不变。
+
+Watch 只返回所在数据中心的检查，且 Payload 中不含数据中心名称。多个数据中心使用同一个集成时，如果不同数据中心有同名节点，这些节点上相同 ID 的检查会合并为同一条告警。建议每个数据中心使用一个单独的集成。
+
+## 状态和告警等级
+---
+
+| Consul `Status` | Flashduty 状态 | Flashduty 告警等级 |
+| :--- | :--- | :--- |
+| `critical` | 触发 | Critical |
+| `warning` | 触发 | Warning |
+| `passing` | 恢复 | 沿用恢复前的等级 |
+
+检查在 `warning` 和 `critical` 之间变化时，Flashduty 按告警等级分别建立告警：`warning` 变为 `critical` 会新建一条 Critical 告警，`passing` 会同时恢复两条告警。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `host`、`resource` | 节点名 `Node` |
+| `check` | 检查名称 `Name` |
+| `check_id` | 检查 ID `CheckID` |
+| `check_type` | 检查类型 `Type`，例如 `http`、`tcp`、`ttl` |
+| `service`、`service_id` | 所属服务的 `ServiceName`、`ServiceID`（节点级检查为空） |
+| `service_tags` | 服务标签，逗号分隔 |
+| `status` | Consul 状态 |
+| `namespace`、`partition` | 企业版的命名空间和管理分区 |
+| `source` | 固定为 `consul` |
+
+告警标题为 `<检查名称> on <节点名>`，告警描述为检查的 `Output` 和 `Notes`。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="检查或节点被删除后，告警没有恢复怎么办？">
+
+处于 `warning` 或 `critical` 的检查被注销（deregister）或节点离开集群后，它不再出现在 Watch 发送的数组中，Flashduty 收不到恢复，需要手动关闭对应的告警。经常下线节点的环境可以在协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)。
+
+</Accordion>
+
+<Accordion title="推送失败会重试吗？">
+
+不会。Consul 的 HTTP handler 请求失败后不重试。但下一次任意检查发生变化时，Watch 会重新发送所有检查的当前状态，漏掉的触发或恢复会在那时补上。
+
+</Accordion>
+
+<Accordion title="为什么一条告警的事件数一直在增加？">
+
+任何一个被监听的检查变化（包括输出内容变化）都会让 Watch 发送一次全部检查，处于异常状态的检查每次都会合并一个事件到它的告警中。可以用 `filter` 或 `service` 参数只监听需要值班处理的检查。
+
+</Accordion>
+
+<Accordion title="Agent 日志提示 request body exceeds 1 MiB limit 怎么办？">
+
+单次推送的数组不能超过 1 MiB。检查数量很多时，请用 `filter` 或 `service` 参数把检查拆分到多个 Watch 中，每个 Watch 可以使用同一个推送地址。
+
+</Accordion>
+
+<Accordion title="支持 PagerDuty 集成中使用的 consul-alerts 吗？">
+
+不需要。consul-alerts 是第三方守护进程；本集成直接使用 Consul 官方的 Watch 机制，不需要额外部署组件。
+
+</Accordion>
+</AccordionGroup>
+
+更多参数请参阅 Consul 文档 [Watches](https://developer.hashicorp.com/consul/docs/automate/watch) 和 [Check API](https://developer.hashicorp.com/consul/api-docs/agent/check)。
