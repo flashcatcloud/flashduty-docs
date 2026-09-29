@@ -6,7 +6,7 @@ keywords: ["变更集成", "Jenkins", "Notification 插件", "构建", "部署�
 
 <Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
 
-通过 Jenkins 的 [Notification 插件](https://plugins.jenkins.io/notification/)，将任务（Job）的构建同步到 Flashduty On-call。每一次构建对应一条 Flashduty 变更；构建从排队、开始执行到结束的每个阶段，都会更新同一条变更。
+通过 Jenkins 的 [Notification 插件](https://plugins.jenkins.io/notification/)，将任务（Job）的构建同步到 Flashduty On-call。每一次构建对应一条 Flashduty 变更；构建开始执行和结束时，都会更新同一条变更。
 
 Jenkins 无法区分一次构建是否发布了变更，因此只需在**执行部署的任务**上配置通知，不要在单纯编译、测试的任务上配置。
 
@@ -36,6 +36,8 @@ Jenkins 无法区分一次构建是否发布了变更，因此只需在**执行�
 
 进入 **Manage Jenkins → Plugins → Available plugins**，搜索 **Notification** 并安装。需要 Jenkins 管理员权限。
 
+该插件还依赖 **JUnit** 插件，但安装时不会自动带上。如果 **Manage Jenkins → Plugins → Installed plugins** 中没有 JUnit，请一并安装。缺少 JUnit 时插件不发送任何推送，构建日志中会出现 `NoClassDefFoundError: hudson/tasks/test/AbstractTestResultAction`。
+
 </Step>
 
 <Step title="在部署任务上添加通知地址">
@@ -43,8 +45,8 @@ Jenkins 无法区分一次构建是否发布了变更，因此只需在**执行�
 1. 打开部署任务，点击 **Configure**，找到 **Job Notifications** 区域，点击 **Add Endpoint**
 2. **Format**：选择 `JSON`
 3. **Protocol**：选择 `HTTP`
-4. **Event**：选择 `All Events`，Flashduty 才能看到排队、开始和结束的完整过程
-5. **URL Source**：选择 `Plain Text`，**URL** 粘贴 Flashduty 集成的完整推送地址。不希望在任务配置中明文显示地址时，可选择 `Credentials Store`，把推送地址保存为 Secret text 凭据后引用其 ID
+4. **Event**：选择 `All Events`，Flashduty 才能同时看到构建开始和结束
+5. **URL Source**：选择 `Credentials Store`，把 Flashduty 集成的完整推送地址保存为 **Secret text** 凭据，并在 **URL** 中选择该凭据。选择 `Plain Text` 时，插件会在每次构建的日志中打印完整推送地址，包括 `integration_key`
 6. **Branch** 保持默认的 `.*`，其余选项保持默认，点击 **Save**
 
 任务配置由 Jenkinsfile 管理（例如多分支流水线）时，在 Jenkinsfile 的 `properties` 中添加同样的配置，可通过流水线页面的 **Pipeline Syntax → Snippet Generator** 选择 `properties: Set job properties` 生成代码。
@@ -73,7 +75,6 @@ Jenkins 无法区分一次构建是否发布了变更，因此只需在**执行�
 
 | 构建阶段（phase） | 构建结果（status） | Flashduty 变更状态 |
 |---|---|---|
-| QUEUED | — | Ready |
 | STARTED | — | Processing |
 | COMPLETED、FINALIZED | SUCCESS | Done |
 | COMPLETED、FINALIZED | UNSTABLE | Done |
@@ -83,6 +84,8 @@ Jenkins 无法区分一次构建是否发布了变更，因此只需在**执行�
 Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。COMPLETED 表示构建步骤执行完毕，FINALIZED 表示构建后操作（例如归档制品）也已完成，两者结果相同。
 
 UNSTABLE 表示构建步骤全部执行完成，但测试或质量检查报告了问题，因此记为 Done；可以通过 `result` 标签筛选出这类变更。
+
+插件只在构建开始时发送 QUEUED，构建在队列中等待期间不会推送。Flashduty 接收 QUEUED 但不记录，因此变更在构建开始时出现。
 
 在流水线中调用 `notifyEndpoints` 步骤且 `phase` 为 `NONE` 时，推送返回成功但不生成变更。
 
@@ -106,7 +109,7 @@ UNSTABLE 表示构建步骤全部执行完成，但测试或质量检查报告�
 | `phase` | 最新的构建阶段 |
 | `result` | 构建结果，结束后才有 |
 
-`branch` 和 `commit` 只在构建检出代码之后的推送中出现，排队和开始阶段没有。请按 `job` 配置路由规则，否则同一次构建的前后事件可能进入不同的协作空间。
+只有在 **Source Code Management** 中配置了 Git 的自由风格任务才会推送 `branch` 和 `commit`；流水线（Pipeline）任务用 `git` 步骤检出时，推送中不含这两个字段。构建开始时的推送可能带着本次检出之前的值，请以构建结束时的值为准。请按 `job` 配置路由规则，否则同一次构建的前后事件可能进入不同的协作空间。
 
 ## 常见问题
 ---
@@ -117,13 +120,14 @@ UNSTABLE 表示构建步骤全部执行完成，但测试或质量检查报告�
 - 确认 **Format** 选择的是 `JSON`，**Protocol** 选择的是 `HTTP`
 - 确认 **Manage Jenkins → System** 中已填写 **Jenkins URL**
 - 查看构建日志中是否有 `Notifying endpoint` 或 `Failed to notify endpoint`
+- 构建日志中出现 `NoClassDefFoundError: hudson/tasks/test/AbstractTestResultAction` 时，说明缺少 JUnit 插件，安装后即可
 - **Branch** 不是 `.*` 时，只有带 `BRANCH_NAME` 环境变量且分支匹配的构建才会推送
 
 </Accordion>
 
 <Accordion title="为什么一次构建有两个结束事件？">
 
-插件在构建完成（COMPLETED）和构建后操作完成（FINALIZED）时各推送一次，两者结果相同，变更状态不变。只想接收一次时，可以把 **Event** 改为 `Job Finalized`，但这样就看不到排队和执行中的阶段。
+插件在构建完成（COMPLETED）和构建后操作完成（FINALIZED）时各推送一次，两者结果相同，变更状态不变；两次推送在同一秒内到达时，第二次不会重复记录。只想接收一次时，可以把 **Event** 改为 `Job Finalized`，但这样就看不到执行中的阶段。
 
 </Accordion>
 

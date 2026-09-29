@@ -6,7 +6,7 @@ keywords: ["change integration", "Jenkins", "Notification plugin", "build", "dep
 
 <Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
 
-Use the Jenkins [Notification plugin](https://plugins.jenkins.io/notification/) to sync job builds to Flashduty On-call. Each build becomes one Flashduty change; every phase of the build, from queued and started to finished, updates that same change.
+Use the Jenkins [Notification plugin](https://plugins.jenkins.io/notification/) to sync job builds to Flashduty On-call. Each build becomes one Flashduty change; the build's start and finish update that same change.
 
 Jenkins cannot tell whether a build changed anything, so add the notification only to **jobs that deploy**, not to jobs that only compile or test.
 
@@ -36,6 +36,8 @@ Go to **Manage Jenkins → System** and make sure **Jenkins URL** under **Jenkin
 
 Go to **Manage Jenkins → Plugins → Available plugins**, search for **Notification**, and install it. You need Jenkins administrator permission.
 
+The plugin also needs the **JUnit** plugin, which Jenkins does not install with it. If **Manage Jenkins → Plugins → Installed plugins** does not list JUnit, install it too. Without JUnit, no notification is sent and the build log shows `NoClassDefFoundError: hudson/tasks/test/AbstractTestResultAction`.
+
 </Step>
 
 <Step title="Add the endpoint to a deployment job">
@@ -43,8 +45,8 @@ Go to **Manage Jenkins → Plugins → Available plugins**, search for **Notific
 1. Open the deployment job, click **Configure**, find the **Job Notifications** section, and click **Add Endpoint**
 2. **Format**: select `JSON`
 3. **Protocol**: select `HTTP`
-4. **Event**: select `All Events`, so Flashduty sees the whole build: queued, started, and finished
-5. **URL Source**: select `Plain Text` and paste the complete Flashduty integration Push URL into **URL**. To keep the URL out of the job configuration, select `Credentials Store` instead, save the Push URL as a Secret text credential, and reference its ID
+4. **Event**: select `All Events`, so Flashduty sees the build both start and finish
+5. **URL Source**: select `Credentials Store`, save the complete Flashduty integration Push URL as a **Secret text** credential, and select that credential in **URL**. With `Plain Text`, the plugin prints the full Push URL, including `integration_key`, in the log of every build
 6. Keep **Branch** at the default `.*`, leave the other options at their defaults, and click **Save**
 
 If the job configuration is managed by a Jenkinsfile (for example, a multibranch pipeline), add the same settings to the Jenkinsfile's `properties`. You can generate the code on the pipeline's **Pipeline Syntax → Snippet Generator** page by selecting `properties: Set job properties`.
@@ -73,7 +75,6 @@ Each build is one change. Its change key (change_key) is `<full build URL>#<queu
 
 | Build phase (phase) | Build result (status) | Flashduty change status |
 |---|---|---|
-| QUEUED | — | Ready |
 | STARTED | — | Processing |
 | COMPLETED, FINALIZED | SUCCESS | Done |
 | COMPLETED, FINALIZED | UNSTABLE | Done |
@@ -83,6 +84,8 @@ Each build is one change. Its change key (change_key) is `<full build URL>#<queu
 Done, Failed, and Canceled are end states; Flashduty records the change's end time when one arrives. COMPLETED means the build steps have finished; FINALIZED means post-build actions (such as archiving artifacts) have finished too. Both carry the same result.
 
 UNSTABLE means every build step ran, but tests or quality checks reported problems, so it is recorded as Done; use the `result` label to filter these changes.
+
+The plugin sends QUEUED only when the build starts, never while the build waits in the queue. Flashduty accepts QUEUED without recording it, so a change appears when its build starts.
 
 A `notifyEndpoints` step in a pipeline with `phase` set to `NONE` is accepted without creating a change.
 
@@ -106,7 +109,7 @@ Labels can be used in routes and to filter the change list:
 | `phase` | The latest build phase |
 | `result` | The build result, present once the build has finished |
 
-`branch` and `commit` appear only in notifications sent after the build checks out code, not in the queued and started phases. Route on `job`; otherwise the early and late events of one build can land in different channels.
+`branch` and `commit` are sent only by freestyle jobs that use Git under **Source Code Management**. A Pipeline job that checks out with the `git` step does not send them. A notification sent when the build starts can carry the values from before this build's checkout, so rely on the values at the end of the build. Route on `job`; otherwise the early and late events of one build can land in different channels.
 
 ## FAQ
 ---
@@ -117,13 +120,14 @@ Labels can be used in routes and to filter the change list:
 - Make sure **Format** is `JSON` and **Protocol** is `HTTP`
 - Make sure **Jenkins URL** is set under **Manage Jenkins → System**
 - Look for `Notifying endpoint` or `Failed to notify endpoint` in the build log
+- `NoClassDefFoundError: hudson/tasks/test/AbstractTestResultAction` in the build log means the JUnit plugin is missing. Install it
 - When **Branch** is not `.*`, only builds that have a `BRANCH_NAME` environment variable matching it send notifications
 
 </Accordion>
 
 <Accordion title="Why does one build have two end events?">
 
-The plugin sends one notification when the build completes (COMPLETED) and another when post-build actions finish (FINALIZED). Both carry the same result, so the change status does not change. To receive only one, set **Event** to `Job Finalized`, but then the queued and running phases are not shown.
+The plugin sends one notification when the build completes (COMPLETED) and another when post-build actions finish (FINALIZED). Both carry the same result, so the change status does not change. When both arrive within the same second, the second one is not recorded. To receive only one, set **Event** to `Job Finalized`, but then the running phase is not shown.
 
 </Accordion>
 
