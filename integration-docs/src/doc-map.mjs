@@ -171,6 +171,7 @@ export const docMap = {
   Papertrail: `${alertBase}/papertrail.mdx`,
   Catchpoint: `${alertBase}/catchpoint.mdx`,
   MonteCarlo: `${alertBase}/monte-carlo.mdx`,
+  Limacharlie: `${alertBase}/limacharlie.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
