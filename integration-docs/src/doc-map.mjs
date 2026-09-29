@@ -138,6 +138,7 @@ export const docMap = {
   Rizhiyi: `${alertBase}/rizhiyi.mdx`,
   SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
   Cfengine: `${alertBase}/cfengine.mdx`,
+  Mezmo: `${alertBase}/mezmo.mdx`,
   CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
   GhostInspector: `${alertBase}/ghost-inspector.mdx`,
