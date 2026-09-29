@@ -75,6 +75,7 @@ export const docMap = {
   Pingdom: `${alertBase}/pingdom.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
   Uptimeobserver: `${alertBase}/uptimeobserver.mdx`,
+  Rbltracker: `${alertBase}/rbltracker.mdx`,
   Gitguardian: `${alertBase}/gitguardian.mdx`,
   Dash0: `${alertBase}/dash0.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
