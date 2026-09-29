@@ -140,6 +140,7 @@ export const docMap = {
   Cfengine: `${alertBase}/cfengine.mdx`,
   CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
+  GhostInspector: `${alertBase}/ghost-inspector.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
