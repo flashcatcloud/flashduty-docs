@@ -1,0 +1,129 @@
+---
+title: "Odown alert integration"
+description: "Send Odown check down, recovery, and SSL certificate expiry notifications to Flashduty On-call through a webhook channel."
+keywords: ["alert integration", "Odown", "Uptime", "webhook", "SSL", "ALERT_FAILURE", "ALERT_RECOVERY"]
+---
+
+Use an Odown webhook channel to send check down (`ALERT_FAILURE`), recovery (`ALERT_RECOVERY`), and SSL certificate expiry (`ALERT_EXPIRED_SSL`) notifications to Flashduty On-call. Each Odown check maps to one down alert: the alert triggers when the check goes down and recovers when the check is up again. SSL expiry notifications are point-in-time events and never recover.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Odown** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Odown** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Odown
+---
+
+<Steps>
+<Step title="Add a webhook channel">
+
+1. Sign in to Odown, go to **Alert Settings** for the account, click **Add more channels**, and choose **Webhook**
+2. Paste the complete Flashduty push URL as the webhook URL
+3. Use the test buttons next to the webhook URL in the editor to check the URL: Flashduty answers with success and creates no alert
+4. Save the channel
+
+</Step>
+
+<Step title="Attach the channel to your checks">
+
+Make the checks you want to send use the new webhook channel. Odown sends `ALERT_FAILURE` when a check goes down, `ALERT_RECOVERY` when it recovers, and `ALERT_EXPIRED_SSL` as the certificate approaches expiry.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Let a check actually fail (for example, point it at an unreachable address temporarily) and confirm Flashduty receives an active alert. Then restore the target and confirm the same alert recovers.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Odown POSTs each event as JSON. Flashduty parses it directly, so no template is needed:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `event` | `ALERT_FAILURE`, `ALERT_RECOVERY`, or `ALERT_EXPIRED_SSL` | Trigger, recovery, or SSL expiry alert; label `event` |
+| `check.id` | Check ID | Alert Key; label `check_id` |
+| `check.name` | Check name | Alert title; label `check` |
+| `check.url` | Monitored URL | Label `resource` |
+| `check.method` | Request method | Label `method` |
+| `alert.status_code` | Returned HTTP status code | Label `status_code` |
+| `alert.responseTime` | Response time | Label `response_time` |
+| `alert.run_location` | Region that ran the check | Label `run_location` |
+| `alert.ssl_days_remaining` | Days until the certificate expires (SSL events only) | Label `ssl_days_remaining` |
+| `alert.ssl_expired_date` | Certificate expiry date (SSL events only) | Label `ssl_expired_date` |
+| `alert.ssl_check_domain` | Certificate domain (SSL events only) | Label `ssl_check_domain` |
+
+The alert title is the check name, or the monitored URL when the name is empty. SSL expiry alert titles start with `SSL certificate expiring:`.
+
+## Alert Key
+---
+
+- Down and recovery: Flashduty uses `check.id` as the Alert Key. `ALERT_FAILURE` and `ALERT_RECOVERY` for the same check carry the same `check.id`, so they land on one alert, while different checks produce different alerts. Renaming a check or a change in status code or run location does not change the Alert Key.
+- SSL expiry: the Alert Key is `check.id` plus `:ssl_expiry`. It is separate from the check's down alert, so a recovery does not close the certificate alert, and repeated expiry notices for one check merge into one alert.
+
+A request without `check.id` is rejected with a parameter error, because a recovery could not be matched to its alert.
+
+## Status and severity
+---
+
+Odown notifications carry no severity.
+
+| Odown `event` | Flashduty status or severity |
+| :--- | :--- |
+| `ALERT_FAILURE` | Critical |
+| `ALERT_RECOVERY` | Recovery, with the original severity Critical |
+| `ALERT_EXPIRED_SSL` | Warning |
+
+A request with an empty or unknown `event` is rejected, so a request whose state is unclear never lands in the wrong alert lifecycle.
+
+## Turn on the auto-resolve timeout for one-shot alerts
+---
+
+An SSL expiry notice has no matching close notification, so these alerts do not recover automatically in Flashduty. Turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) and set it to 7 days, or close the alert by hand after you renew the certificate.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does the webhook test button create an alert?">
+
+No. The test buttons in the Odown editor send the sample check from the Odown docs (named `Check name`, URL `https://example.com`). Flashduty recognizes it, answers with success, and creates no alert. If a real check happens to use that exact name and URL, its notifications are ignored too.
+
+</Accordion>
+
+<Accordion title="Do repeated down notifications create several alerts?">
+
+No. Notifications for one check carry the same `check.id` and merge into one alert.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Odown reports a failed delivery**: check that the webhook URL is the complete push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: check that the request is an Odown JSON notification with non-empty `check.id` and `event`
+- **The alert does not recover**: check that the check still uses the same webhook channel when it recovers; the recovery and down notifications must carry the same `check.id`
+
+For the field reference, see the Odown docs [Using Webhooks](https://odown.com/docs/alerting/webhooks/).
