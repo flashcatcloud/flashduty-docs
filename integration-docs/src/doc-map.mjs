@@ -112,6 +112,7 @@ export const docMap = {
   Hackerone: `${alertBase}/hackerone.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
+  Instatus: `${alertBase}/instatus.mdx`,
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Komodor: `${alertBase}/komodor.mdx`,
