@@ -161,6 +161,7 @@ export const docMap = {
   VercelChange: `${integrationBase}/change-integration/vercel.mdx`,
   JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
   BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
+  CircleciChange: `${integrationBase}/change-integration/circleci.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
