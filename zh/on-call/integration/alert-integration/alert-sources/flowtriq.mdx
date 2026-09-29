@@ -1,0 +1,114 @@
+---
+title: "Flowtriq 告警集成"
+description: "通过 Webhook 告警渠道将 Flowtriq 检测到的 DDoS 攻击事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Flowtriq", "Webhook", "DDoS", "DDoS 检测", "攻击告警"]
+---
+
+通过 Flowtriq 的 Webhook 告警渠道，将 DDoS 攻击事件同步到 Flashduty On-call。每次攻击（Flowtriq 中的一个 Incident）对应一条 Flashduty 告警：检测到攻击时触发，攻击持续期间更新峰值流量，攻击结束（自动或手动标记为已解决）时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Flowtriq**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Flowtriq**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Flowtriq 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 告警渠道">
+
+1. 登录 Flowtriq 控制台，进入 **Alert Channels**
+2. 添加一个类型为 **Webhook** 的渠道，**URL** 填入 Flashduty 集成的完整推送地址（HTTPS，地址中需包含 `integration_key`）
+3. **Secret** 留空即可。Flowtriq 设置 Secret 后会在 `X-Flowtriq-Signature` 请求头中附带 HMAC-SHA256 签名，Flashduty 通过地址中的 `integration_key` 认证，不校验该签名
+
+</Step>
+
+<Step title="保存并测试">
+
+1. 保存渠道后，点击渠道上的 **Test** 按钮。Flowtriq 会推送一条 `test` 事件，Flashduty 返回成功但不会创建告警
+2. 如果您使用了 Flowtriq 的升级策略（Escalation Policy），需要把该 Webhook 渠道加入对应步骤，否则没有升级策略时所有渠道会在事件发生时立即触发
+
+</Step>
+
+<Step title="验证真实事件">
+
+在受监控的节点上触发一次攻击检测（例如 Flowtriq 快速入门中的 `ftagent --test` 合成攻击事件），确认 Flashduty 收到活动告警，攻击结束后确认告警自动恢复。
+
+</Step>
+</Steps>
+
+Flowtriq 对失败的推送最多重试 3 次（间隔 10 秒、60 秒、5 分钟），单次请求超时 10 秒，返回非 2xx 状态码视为失败。
+
+## 事件与恢复
+---
+
+Flowtriq 在每个 Incident 事件发生时向 Webhook 推送，事件类型在 `event_type` 中：
+
+| `event_type` | 含义 | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| `attack_start` | 检测到攻击，新建 Incident | 触发告警 |
+| `attack_update` | 攻击持续中，峰值 PPS/BPS 更新 | 更新同一条告警 |
+| `attack_end` | 攻击已解决（自动或手动） | 恢复告警 |
+| `test` | 在控制台手动测试 | 不创建告警，直接返回成功 |
+
+其他事件类型（包括 Flowtriq 后续新增的类型）不会创建告警，Flashduty 收到后直接返回成功。
+
+## Alert Key
+---
+
+Flashduty 使用 `incident.uuid` 作为 Alert Key 的依据：同一次攻击的开始、更新和结束事件共用同一个 Alert Key，因此结束事件会恢复对应的告警。Flowtriq 自己的 PagerDuty 渠道也以 Incident UUID 作为去重键，并在攻击结束时自动恢复。`incident.uuid` 缺失时使用 `incident.id`，两者都缺失的事件会被拒绝。标题、等级、峰值流量等字段变化不会改变 Alert Key。
+
+## 告警等级
+---
+
+| `incident.severity` | Flashduty 等级 |
+| :--- | :--- |
+| `critical` | Critical |
+| `high`、`medium` | Warning |
+| `low` | Info |
+| 空或其他值 | Warning |
+
+恢复事件的等级保持攻击期间的最后一次等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `event` | 本次推送的事件类型 |
+| `incident_uuid` / `incident_id` | Incident 的 UUID 和数字 ID |
+| `attack_family` | 攻击类型，如 `udp_flood` |
+| `severity_raw` | Flowtriq 原始等级 |
+| `peak_pps` / `peak_bps` | 峰值包速率和比特率 |
+| `source_ip_count` | 攻击源 IP 数量 |
+| `host` / `resource` | 受攻击节点的名称和 IP |
+| `url` | Flowtriq 中该 Incident 的页面链接 |
+
+告警描述取自 Flowtriq 的 AI 摘要（`ai_summary`）。
+
+## 排查问题
+---
+
+- **Flowtriq 显示推送失败**：确认 URL 完整且包含 `integration_key`，并且是 HTTPS 地址；失败记录可在 Flowtriq 的 Incident 详情页通知日志中查看
+- **告警没有恢复**：确认 Flowtriq 渠道推送了 `attack_end` 事件。恢复依赖攻击开始和结束事件中的 `incident.uuid` 一致，若长时间未恢复，请在 Flashduty 中手动关闭该告警
+- **测试成功但没有告警**：`test` 事件不会创建告警，属于预期行为
+
+更多字段含义请参阅 [Flowtriq Webhook 文档](https://flowtriq.com/docs?section=webhooks)。

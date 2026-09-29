@@ -80,6 +80,7 @@ export const docMap = {
   StatusCake: `${alertBase}/statuscake.mdx`,
   Tideways: `${alertBase}/tideways.mdx`,
   Wormly: `${alertBase}/wormly.mdx`,
+  Flowtriq: `${alertBase}/flowtriq.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
