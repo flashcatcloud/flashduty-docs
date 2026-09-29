@@ -121,6 +121,7 @@ export const docMap = {
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
   OciMonitoring: `${alertBase}/oci-monitoring.mdx`,
   Hyperdx: `${alertBase}/hyperdx.mdx`,
+  Consul: `${alertBase}/consul.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
