@@ -118,6 +118,7 @@ export const docMap = {
   SplitIo: `${alertBase}/split-io.mdx`,
   Firefly: `${alertBase}/firefly.mdx`,
   Hackerone: `${alertBase}/hackerone.mdx`,
+  Kuvasz: `${alertBase}/kuvasz.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
   Instatus: `${alertBase}/instatus.mdx`,
