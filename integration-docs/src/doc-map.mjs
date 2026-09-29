@@ -120,6 +120,7 @@ export const docMap = {
   Opennms: `${alertBase}/opennms.mdx`,
   CertSpotter: `${alertBase}/cert-spotter.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
+  Twilio: `${alertBase}/twilio.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
   OciMonitoring: `${alertBase}/oci-monitoring.mdx`,
   Hyperdx: `${alertBase}/hyperdx.mdx`,
