@@ -1,0 +1,143 @@
+---
+title: "Simple Observability 告警集成"
+description: "通过 Webhook 通知渠道，将 Simple Observability 的规则、服务器、任务和端点告警及其恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Simple Observability", "Webhook", "服务器监控", "端点监控", "定时任务监控"]
+---
+
+通过 Simple Observability 的 Webhook 通知渠道，把告警规则、服务器心跳、定时任务和端点（Endpoint）的告警与恢复通知同步到 Flashduty On-call。每个被监控对象对应一条 Flashduty 告警：触发时创建，重复通知合并，收到恢复通知时关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Simple Observability**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Simple Observability**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Simple Observability 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 渠道">
+
+1. 登录 Simple Observability，进入 **Channels** 页面，点击 **Add Channel**
+2. 渠道类型选择 **Webhook**
+3. 将 Flashduty 集成的完整推送地址粘贴到 endpoint URL
+4. 保存渠道
+5. 点击渠道上的 **Test** 验证地址：Flashduty 返回成功，不会创建告警
+
+</Step>
+
+<Step title="让告警使用该渠道">
+
+在告警规则、服务器、定时任务和端点的通知设置中选择刚创建的 Webhook 渠道。
+
+</Step>
+
+<Step title="验证生命周期">
+
+触发一次真实告警（例如让某个端点不可达），确认 Flashduty 出现活动告警；再恢复该对象，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+Simple Observability 要求接收端返回 2xx 状态码，否则 Simple Observability 只记录一条错误，官方文档未说明重试策略。请使用完整的推送地址，包含 `integration_key`。
+</Warning>
+
+## 推送内容
+---
+
+Webhook 以 JSON 格式 POST，Flashduty 直接解析，无需配置模板。`event_type` 决定告警属于哪类对象：
+
+| `event_type` | 对象 | 标识字段 | 触发状态 | 恢复状态 |
+| :--- | :--- | :--- | :--- | :--- |
+| `RULE_ALERT` | 告警规则 | `data.rule.id` | `FIRING` | `RESOLVED` |
+| `SYSTEM_ALERT` | 服务器 | `data.server.id` | `SERVER_DOWN` | `SERVER_UP` |
+| `ENDPOINT_ALERT` | 端点 | `data.endpoint.id` | `ENDPOINT_DOWN` | `ENDPOINT_UP` |
+| `JOB_ALERT` | 定时任务 | `data.job.id` | `FAIL`、`MISSED`、`TIMEOUT` | `SUCCESS` |
+| `TEST` | 渠道测试 | 无 | 无 | 无 |
+
+其他字段在 Flashduty 中的对应：
+
+| 字段 | 在 Flashduty 中 |
+| :--- | :--- |
+| `title` | 告警标题 |
+| `description` | 告警描述 |
+| `severity` | 告警等级，原值保存在标签 `vendor_severity` |
+| `status`、`event_type` | 标签 `status`、`event_type` |
+| `url` | 标签 `dashboard_url` |
+| 对象的 `id`、`name` | 标签 `rule_id` / `server_id` / `endpoint_id` / `job_id` 及对应的 `*_name`，名称同时作为 `check` |
+| 规则的 `threshold` | 标签 `threshold` |
+| 端点的 `url`、`method`、`last_status` | 标签 `endpoint_url`、`endpoint_method`、`last_status` |
+| 任务的 `server`、`schedule` | 标签 `job_server`、`job_schedule` |
+
+## Alert Key
+---
+
+Flashduty 使用「对象类型 + 对象 ID」作为 Alert Key，例如 `endpoint:<data.endpoint.id>`。同一个规则、服务器、端点或任务的触发和恢复通知落在同一条告警上；不同对象生成不同告警，即使 ID 相同但类型不同也不会互相影响。修改名称、等级、描述或时间不会改变 Alert Key。
+
+请求中缺少对应的对象 ID 时，Flashduty 返回参数错误，因为无法可靠地把恢复关联到原告警。`event_type` 或 `status` 不在上表中时同样被拒绝。
+
+<Note>
+Simple Observability 官方文档只给出了各类型的触发示例，没有逐条说明恢复通知携带相同的对象 ID。Flashduty 按各类型统一的数据结构关联触发与恢复；如果你发现恢复后告警没有关闭，请联系我们并附上恢复通知的请求体。
+</Note>
+
+## 状态和告警等级
+---
+
+| Simple Observability `severity` | Flashduty 等级 |
+| :--- | :--- |
+| `CRITICAL`、`ERROR` | Critical |
+| `WARNING` | Warning |
+| `INFO`、`SUCCESS` | Info |
+| 空值或其他值 | 服务器、端点宕机为 Critical；规则和任务告警为 Warning |
+
+规则和任务告警的 `severity` 为空，因此按 Warning 处理。恢复通知（`RESOLVED`、`SERVER_UP`、`ENDPOINT_UP`、`SUCCESS`）会关闭同一 Alert Key 的告警。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="任务每次成功运行都会推送吗？">
+
+取决于你在 Simple Observability 中的通知设置。`JOB_ALERT` 的 `SUCCESS` 被当作恢复通知：任务此前失败过，则关闭原告警。如果不希望收到成功通知，在 Simple Observability 中关闭任务成功的通知即可。
+
+</Accordion>
+
+<Accordion title="渠道测试会创建告警吗？">
+
+不会。测试请求的 `event_type` 为 `TEST`，Flashduty 返回成功但不创建告警。
+
+</Accordion>
+
+<Accordion title="一条规则同时命中多台主机怎么办？">
+
+规则告警按规则 ID 生成一条 Flashduty 告警，命中的主机和数值在 Simple Observability 的告警详情页中查看，可通过标签 `dashboard_url` 跳转。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Simple Observability 报错**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：错误信息会指出缺少的对象 ID 或不支持的 `event_type`、`status`
+- **告警没有恢复**：确认恢复通知使用同一个 Webhook 渠道，且对象 ID 与触发通知一致
+
+字段说明请参阅 Simple Observability 官方文档 [Webhook](https://simpleobservability.com/docs/alerts/webhook)。

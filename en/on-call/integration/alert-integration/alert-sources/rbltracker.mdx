@@ -1,0 +1,158 @@
+---
+title: "RBLTracker alert integration"
+description: "Send RBLTracker (Generator Labs) blocklist listings, certificate expiry and errors, and monitoring agent timeouts to Flashduty On-call through a webhook."
+keywords: ["alert integration", "RBLTracker", "Generator Labs", "blocklist", "RBL", "certificate monitoring", "webhook"]
+---
+
+RBLTracker (Generator Labs) monitors whether your mail server IPs and domains appear on RBL blocklists. It also offers certificate monitoring and monitoring agents. Through its webhooks, you can send these events to Flashduty On-call:
+
+- A host is listed on, or delisted from, a blocklist
+- A certificate is about to expire, has errors, keeps changing fingerprint, or was replaced
+- A monitoring agent stops checking in
+
+Events that come in trigger and resolve pairs map to one Flashduty alert: the trigger event opens it, and the paired resolve event recovers it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **RBLTracker**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **RBLTracker** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure RBLTracker
+---
+
+<Steps>
+<Step title="Add a webhook">
+
+1. Sign in to the RBLTracker (Generator Labs) portal, go to **Development → Webhooks**, and click **Add Webhook**
+2. Enter a recognizable **Display Name**, such as `Flashduty`
+3. Paste the full Flashduty push URL into **Endpoint URL**. The URL must include `integration_key`
+4. Under **Events**, select the events to send (see the table below) and save
+
+| Category | Event | Effect in Flashduty |
+| :--- | :--- | :--- |
+| RBL monitoring | `rbl.host.listed` | Triggers or updates the alert |
+| RBL monitoring | `rbl.host.delisted` | Recovers the alert |
+| Certificate monitoring | `cert.expiration.trigger` | Triggers or updates the alert |
+| Certificate monitoring | `cert.expiration.resolve` | Recovers the alert |
+| Certificate monitoring | `cert.error.trigger` | Triggers or updates the alert |
+| Certificate monitoring | `cert.error.resolve` | Recovers the alert; updates it while errors remain |
+| Certificate monitoring | `cert.flapping` | Triggers the alert |
+| Certificate monitoring | `cert.flapping.resolve` | Recovers the alert |
+| Certificate monitoring | `cert.changed` | Triggers an alert that never recovers on its own |
+| Monitoring agent | `agent.timeout` | Triggers the alert |
+| Monitoring agent | `agent.timeout.resolve` | Recovers the alert |
+
+<Warning>
+Select each trigger event together with its resolve event. Otherwise the alert does not recover. For example, if you select `rbl.host.listed` without `rbl.host.delisted`, the Flashduty alert stays open after the host is delisted.
+</Warning>
+
+You do not need to select billing events (`billing.*`) or `rbl.host.check.started` and `rbl.host.check.completed`. Flashduty acknowledges them with a success response but creates no alert.
+
+</Step>
+
+<Step title="Send a test and verify">
+
+In the Webhooks list, click **Send Test** on the webhook and choose an event type. RBLTracker shows the response code and timing; `200` means the URL is reachable.
+
+The RBLTracker API reference uses the fixed event SID `TA67bca97cf42743beac24264790faf6dd` in its examples. When Flashduty receives a delivery with that SID, it returns success and creates no alert. If a test delivery does create an alert, the test used a different SID; close that alert manually in Flashduty.
+
+To verify the full lifecycle, add a test host that you know is listed, confirm that Flashduty shows an active alert for `rbl.host.listed`, and confirm that the alert recovers after the host is delisted.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the SID of the object in the RBLTracker event as the Alert Key, with a prefix per event category:
+
+| Event category | Alert Key | Source field |
+| :--- | :--- | :--- |
+| RBL listed / delisted | `rbl:<host.sid>` | `host.sid` |
+| Certificate expiration | `cert-expiration:<monitor.sid>` | `monitor.sid` |
+| Certificate errors | `cert-error:<monitor.sid>` | `monitor.sid` |
+| Certificate flapping | `cert-flapping:<monitor.sid>` | `monitor.sid` |
+| Agent timeout | `agent:<agent.sid>` | `agent.sid` |
+| Certificate replaced (`cert.changed`) | A digest of `monitor.sid` and `new_fingerprint` | `monitor.sid`, `new_fingerprint` |
+
+In the official RBLTracker API reference, `rbl.host.listed` and `rbl.host.delisted` for one host carry the same `host.sid`, certificate events carry `monitor.sid`, and agent events carry `agent.sid`. `cert.flapping` is described only in prose, without a full example, so Flashduty reads `monitor.sid` from it as it does for the other certificate events.
+
+Changes to the host name, the number of blocklists, the check SID (`check_sid`), or the event SID (`event_sid`) never change the Alert Key. An event without the matching SID is rejected.
+
+## Status and severity
+---
+
+The event type sets the alert status; the table above shows which events recover. RBLTracker does not send a severity, so Flashduty sets it by event type:
+
+| Event | Flashduty severity | Notes |
+| :--- | :--- | :--- |
+| `rbl.host.listed` | Warning | A listing hurts mail delivery but is not an outage |
+| `cert.expiration.trigger` | Critical at 5 days or fewer (including expired), Warning at 30 days or fewer, otherwise Info | RBLTracker sends one event at 60, 30, 15, 5, and 0 days remaining, so the same alert escalates |
+| `cert.error.trigger` | Critical if an error `severity` is `error` or `critical`, otherwise Warning | The highest severity among the errors wins |
+| `cert.error.resolve` | Updates the severity from `current_errors` while errors remain; recovers when none remain | Resolving some errors does not close the alert |
+| `cert.flapping` | Warning | The certificate fingerprint changed three or more times within an hour |
+| `cert.changed` | Info | The certificate was replaced without a renewal |
+| `agent.timeout` | Warning | The agent stopped checking in, so monitoring has a blind spot |
+
+## Auto-close for one-shot events
+---
+
+`cert.changed` is a single notification, and RBLTracker never sends a matching resolve event. Each certificate replacement on a monitor creates its own alert, and these alerts do not recover on their own. Turn on the [auto-close timeout](/en/on-call/channel/create-edit) for the channel and set it to **24 hours**.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Event category: `rbl_listing`, `cert_expiration`, `cert_error`, `cert_flapping`, `cert_changed`, `agent_timeout` |
+| `resource` | Host address, monitor address, or agent name |
+| `event_type` | Event type of this delivery |
+| `host_sid` / `host_name` | SID and name of the RBL-monitored host |
+| `host` | Host address (RBL) or monitor address (certificate) |
+| `listed_total` | Number of blocklists that currently list the host |
+| `blocklists` | Names of the blocklists that list the host |
+| `check_sid` | SID of the check that produced the event |
+| `monitor_sid` / `monitor_name` | SID and name of the certificate monitor |
+| `expiry_days` | Days until the certificate expires; negative means expired |
+| `error_codes` | Certificate error codes |
+| `flap_count` / `stable_fingerprint` / `alt_fingerprint` | Number of fingerprint changes and the two fingerprints |
+| `previous_fingerprint` / `new_fingerprint` | Certificate fingerprints before and after a `cert.changed` replacement |
+| `agent_sid` / `agent_name` | SID and name of the agent |
+| `timeout_minutes` | Agent timeout threshold in minutes |
+| `instances` | Identifiers of the agent instances that timed out |
+
+## Delivery and retries
+---
+
+RBLTracker sends `application/json` POST requests, and a 2xx response from Flashduty counts as delivered. A failed delivery (non-2xx, timeout, or connection error) is retried after 30 seconds and again after 2 minutes with the same event SID, so retries do not create duplicate alerts. After 10, 20, and 30 consecutive failures RBLTracker pauses the webhook for 1 hour, 6 hours, and 1 day; after 40 it disables the webhook and you must re-enable it under **Development → Webhooks**.
+
+Every delivery carries an `X-Webhook-Signature` header. Flashduty authenticates requests with the `integration_key` in the push URL and does not verify that header.
+
+## Troubleshooting
+---
+
+- **RBLTracker shows a failed delivery**: confirm the Endpoint URL is complete and includes `integration_key`, and check the response code in the **Send Test** result
+- **Flashduty returns an invalid parameter error**: the body must be an RBLTracker JSON delivery; events without `host.sid`, `monitor.sid`, or `agent.sid` are rejected
+- **The alert does not recover**: confirm you also selected the matching resolve event. `cert.error.resolve` recovers the alert only when `current_errors` is empty, and `cert.changed` never recovers, so turn on auto-close
+- **The alert updates repeatedly while the host is listed**: the API reference says `rbl.host.listed` is sent when a check finds the host listed; repeated deliveries for one host merge into the same alert
+- **The webhook was disabled**: RBLTracker disables a webhook after 40 consecutive failures. Fix the URL and re-enable it under **Development → Webhooks**
+
+For field details, see [RBLTracker Webhooks](https://docs.generatorlabs.com/using-web-hooks/) and the [Webhook API reference](https://docs.generatorlabs.com/api/v4/).

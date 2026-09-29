@@ -1,0 +1,132 @@
+---
+title: "Monitive 告警集成"
+description: "通过监控项 Webhook 将 Monitive（uptimemonitoring.com）的宕机、抖动和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Monitive", "uptimemonitoring.com", "Uptime", "Webhook", "monitor_id"]
+---
+
+通过 Monitive（uptimemonitoring.com）监控项的 Webhook，把宕机（`monitor.down`）、抖动（`monitor.flapping`）和恢复（`monitor.up`）通知同步到 Flashduty On-call。每个监控项对应一条 Flashduty 告警：监控项宕机时触发，抖动通知更新同一条告警，监控项恢复时关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Monitive**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Monitive**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Monitive 中配置
+---
+
+Monitive 的 Webhook 按监控项配置，每个监控项只有一个 Webhook 位置，需要对每个要接入的监控项分别设置。
+
+<Steps>
+<Step title="为监控项设置 Webhook">
+
+任选一种方式，把 Flashduty 的完整推送地址设为监控项的 Webhook URL：
+
+- 控制台：登录 [app.uptimemonitoring.com](https://app.uptimemonitoring.com)，打开监控项，在 **Webhook** 区域填入推送地址并保存
+- API：调用 `PUT /api/v1/monitors/{monitorID}/webhook`
+
+```bash
+curl -X PUT https://api.uptimemonitoring.com/api/v1/monitors/$MONITOR_ID/webhook \
+  -H "Authorization: Bearer $UPTIMEMONITORING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"<Flashduty 推送地址>"}'
+```
+
+已有 Webhook 时，重新设置只替换 URL，签名密钥保持不变。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让监控项真正宕机（例如把它指向一个返回 5xx 的地址），确认 Flashduty 收到活动告警；再恢复目标，确认原告警恢复。Monitive 在跨区域复检确认后才会切换状态，通常需要一到数分钟。
+
+</Step>
+</Steps>
+
+<Note>
+Monitive 每次投递都带 `X-UptimeMonitoring-Signature`（HMAC-SHA256）请求头。Flashduty 不校验该签名，推送地址中的 `integration_key` 即为凭证，请勿泄露。投递失败（非 2xx 或超时）时，Monitive 会按 1 分钟、5 分钟、30 分钟、2 小时的间隔最多重试 5 次。
+</Note>
+
+## 推送内容
+---
+
+Monitive 以 `application/json` 格式 POST 以下字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `event` | `monitor.down`、`monitor.flapping` 或 `monitor.up` | 触发、更新或恢复，标签 `event` |
+| `monitor_id` | 监控项 ID | Alert Key，标签 `monitor_id` |
+| `monitor_name` | 监控项名称 | 告警标题，标签 `check` |
+| `monitor_url` | 被监控地址，可能缺省 | 标签 `resource` |
+| `reason` | 宕机或抖动原因，如 `http_5xx`、`timeout` | 标签 `reason` |
+| `occurred_at` | 状态变化时间 | 写入描述 |
+| `account_id`、`delivery_id`、`attempt` | 账号、投递序号、重试次数 | 不保存 |
+
+告警标题使用监控项名称；名称为空时依次使用被监控地址、`Monitive monitor <monitor_id>`。
+
+## Alert Key
+---
+
+Flashduty 使用 `monitor_id` 作为 Alert Key。同一个监控项的宕机、抖动和恢复通知携带相同的 `monitor_id`，因此落在同一条告警上；不同监控项即使名称和地址相同，也会生成不同的告警。重命名监控项、修改地址或原因不会改变 Alert Key。`delivery_id` 每次状态变化都不同，因此不参与 Alert Key。
+
+请求中缺少 `monitor_id` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。`event` 不是上述三个值的请求会被确认并忽略，不创建告警。
+
+## 状态和告警等级
+---
+
+Monitive 的通知不带告警等级。宕机属于服务中断信号，按 Critical 处理；抖动按 Warning 处理。
+
+| Monitive `event` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `monitor.down` | Critical |
+| `monitor.flapping` | Warning |
+| `monitor.up` | 恢复，原等级沿用告警上一次的等级 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="抖动告警什么时候恢复？">
+
+Monitive 的文档说明抖动记录在流量稳定后结束，但没有说明此时会发送哪个 Webhook 事件。Flashduty 按同一个监控项处理：后续的 `monitor.up` 会关闭这条告警。如果监控项抖动后没有收到 `monitor.up`，告警会保持打开，建议在协作空间中开启 **超时自动关闭**（例如 24 小时），配置方法参阅[超时自动关闭](/zh/on-call/channel/create-edit)。
+
+</Accordion>
+
+<Accordion title="重试会产生重复告警吗？">
+
+不会。重试投递携带相同的 `monitor_id`，会合并到同一条告警中。
+
+</Accordion>
+
+<Accordion title="免费版可以使用吗？">
+
+Webhook 包含在免费版中，每个监控项一个 Webhook，免费版最多 50 个监控项。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 没有收到告警**：在 Monitive 中查询 `GET /api/v1/webhook-deliveries?monitor_id=<id>`，确认投递状态和响应码
+- **Flashduty 返回参数错误**：确认请求体是 Monitive 的 JSON，且 `monitor_id` 非空
+- **告警没有恢复**：确认 `monitor.up` 投递成功，且监控项的 Webhook 地址没有被改成另一个集成
+
+字段说明请参阅 Monitive 官方文档 [Webhooks](https://uptimemonitoring.com/docs/webhooks/)。

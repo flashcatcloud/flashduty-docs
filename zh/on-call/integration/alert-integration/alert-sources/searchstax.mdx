@@ -1,0 +1,129 @@
+---
+title: "SearchStax 告警集成"
+description: "通过 SearchStax Managed Search 的 Webhook 将指标告警同步到 Flashduty On-call，告警关闭时自动关闭 Flashduty 告警。"
+keywords: ["告警集成", "SearchStax", "Managed Search", "Solr", "Webhook", "搜索服务"]
+---
+
+SearchStax Managed Search 的 Webhook 由您定义请求体：在 Webhook 的 **Payload** 中填写一段 JSON，值使用 SearchStax 预定义变量（如 `$ALERT_ID`）。本文给出这段 JSON 模板，并把 Webhook 同时关联到告警的触发和关闭两个下拉框。告警触发时 Flashduty 打开一条告警，SearchStax 告警关闭时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **SearchStax**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **SearchStax**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 SearchStax 中配置
+---
+
+Webhook 和告警的管理需要 SearchStax 账号的所有者（Account Owner）、管理员（Admin）或技术联系人（Technical Contact）权限。
+
+<Steps>
+<Step title="创建 Webhook">
+
+在 SearchStax Managed Search 控制台左侧导航选择 **Webhooks**，点击 **Create Webhook**，填写：
+
+| 字段 | 填写内容 |
+| :--- | :--- |
+| **Name** | 自定义名称，例如 `Flashduty`；告警页面的下拉框中显示这个名称 |
+| **URL** | 完整的推送地址，包含 `?integration_key=...` |
+| **Payload** | 下方的 JSON 模板 |
+
+Payload 模板：
+
+```json
+{
+  "alert_id": "$ALERT_ID",
+  "alert_status": "$ALERT_STATUS",
+  "alert_title": "$ALERT_TITLE",
+  "alert_type": "$ALERT_TYPE",
+  "alert_metric": "$ALERT_METRIC",
+  "current_value": "$ALERT_CURRENT_VALUE",
+  "threshold_operator": "$ALERT_THRESHOLD_OPERATOR",
+  "threshold_value": "$ALERT_THRESHOLD_VALUE",
+  "date": "$DATE",
+  "deployment_name": "$DEPLOYMENT_NAME",
+  "deployment_uid": "$DEPLOYMENT_UID",
+  "hostname": "$HOSTNAME"
+}
+```
+
+字段名不要修改，`alert_id` 和 `alert_status` 必须保留。如果编辑器提供以表单形式（form）编码请求体的选项，保持关闭，Flashduty 只接收 JSON。点击 **Update** 保存。
+
+</Step>
+
+<Step title="把 Webhook 关联到告警">
+
+进入要同步的告警（或新建告警），在 Webhook 下拉框中，**触发（trigger）** 和 **关闭（resolve）** 两处都选择上一步创建的 Webhook。两处必须选择同一个 Webhook：`$ALERT_STATUS` 会在触发时为 `OPEN`、关闭时为 `CLOSED`，Flashduty 靠它区分触发和恢复。
+
+如果需要在告警持续期间重复通知，用告警的 `repeat_every` 和 `max_alerts` 设置，重复通知会更新同一条 Flashduty 告警。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让指标越过阈值（例如为测试告警设置一个很低的阈值），确认 Flashduty 收到告警；指标回落、SearchStax 告警关闭后，确认原告警关闭。SearchStax 的 Webhook 没有测试按钮，验证只能靠真实告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_id`（`$ALERT_ID`）作为 Alert Key。SearchStax 把它描述为告警的内部编号，触发和关闭使用同一个 Webhook 模板，因此 `OPEN` 和 `CLOSED` 消息落在同一条 Flashduty 告警上。
+
+SearchStax 的告警是部署级规则：一条 `host` 为 `*` 的告警规则同时监控集群所有节点，所有节点共用同一个 `$ALERT_ID`，Flashduty 中只会有一条对应告警。需要按节点分别告警时，为每个节点创建一条独立的 SearchStax 告警。
+
+告警标题、指标值和时间的变化不会改变 Alert Key。请求缺少 `alert_id` 或 `alert_status`，或这两个字段仍是未替换的 `$...` 变量时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Flashduty 按 `alert_status` 字段（`$ALERT_STATUS`，不区分大小写）处理消息：
+
+| SearchStax `alert_status` | 含义 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `OPEN` | 告警触发，或按 `repeat_every` 重复通知 | 触发或更新告警 |
+| `CLOSED` | 告警已关闭 | 恢复告警 |
+
+其他值会被拒绝。
+
+## 告警等级
+---
+
+SearchStax 的告警没有等级，所有告警默认为 **Warning**。如需其他等级，在推送地址后追加 `&severity=Critical`（或 `Info`）。恢复事件保留原告警的等级。
+
+## 告警内容
+---
+
+- **标题**：告警名称（`$ALERT_TITLE`）；缺少时为 `SearchStax alert <alert_id>`
+- **描述**：`指标 当前值 比较符 阈值`，例如 `os.SystemCpuLoad 0.01 > 10.0`
+- **标签**：`check`（告警名称）、`resource`（节点名称）、`alert_id`、`alert_status`、`alert_type`、`alert_metric`、`current_value`、`threshold_operator`、`threshold_value`、`deployment_name`、`deployment_uid`、`hostname`
+
+值为空的字段不会写入标签。
+
+## 排查问题
+---
+
+- **Flashduty 提示请求体不是合法 JSON**：确认 Payload 与模板一致，且没有开启表单编码
+- **告警没有发出**：确认告警的 Webhook 下拉框已选择该 Webhook，且 Webhook 没有被 **Paused**；URL 使用 `https`，证书为自签名时才需要勾选 **Ignore SSL Validation**
+- **告警没有恢复**：确认关闭（resolve）下拉框选择了同一个 Webhook，且模板中的 `alert_status` 为 `$ALERT_STATUS`
+- **多个节点的告警互相覆盖**：这是 `host` 为 `*` 的规则共用同一个 `$ALERT_ID` 的结果，按节点创建独立告警
+
+变量的含义请参阅 SearchStax 文档 [Webhooks](https://www.searchstax.com/docs/searchstax-cloud-webhooks/) 和 [Alerts API](https://www.searchstax.com/docs/searchstax-cloud-alerts-api/)。
