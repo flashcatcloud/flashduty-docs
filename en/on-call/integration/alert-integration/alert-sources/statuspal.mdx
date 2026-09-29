@@ -1,0 +1,150 @@
+---
+title: "Statuspal alert integration"
+description: "Use Statuspal webhooks to send status page incidents and Statuspal-monitored services going down or up to Flashduty On-call."
+keywords: ["alert integration", "Statuspal", "status page", "webhook", "service monitoring"]
+---
+
+Use Statuspal outbound webhooks to send changes on your status page to Flashduty On-call:
+
+- An alert triggers when an incident is created on your Statuspal status page, and recovers when the Statuspal incident ends or is deleted
+- An alert triggers when a service with Statuspal's built-in monitoring goes `down`, and recovers when it is `up` again
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Statuspal** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Statuspal** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Statuspal
+---
+
+<Steps>
+<Step title="Create a webhook">
+
+1. Sign in to Statuspal as an admin and open the admin console of the status page you want to connect
+2. Click **Webhooks** in the sidebar, then click **New Webhook**
+
+</Step>
+
+<Step title="Enter the push URL and events">
+
+1. **URL**: paste the full Flashduty push URL, including `integration_key`
+2. **Events**: select these events
+   - `incident.created`
+   - `incident.updated`
+   - `incident.deleted`
+   - `service.monitored_status.updated` (sent only for services with Statuspal's built-in monitoring enabled)
+3. Click **Create**
+
+Webhooks are configured per status page. Several status pages can push to one integration, or you can create one integration per status page to route them separately.
+
+</Step>
+
+<Step title="Verify">
+
+After creating the webhook, click **Send test request**. Statuspal shows Flashduty's response on the page. Statuspal does not document the body of the test request: if it creates an alert in Flashduty, close that alert manually.
+
+You can also verify with a real incident: create an incident on the status page and a Warning alert appears in Flashduty; resolve the incident and the alert recovers.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Statuspal pushes JSON. The `event` field is the event type, and `data.object` is the Statuspal incident or service:
+
+**Incidents (`incident.created`, `incident.updated`, `incident.deleted`)**
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `data.object.id` | Incident ID | Alert Key, label `incident_id` |
+| `data.object.l_title` | Incident title in each language | Alert title (English first, otherwise the first title; falls back to `data.object.title` when neither is present) |
+| `data.object.ends_at` | Incident end time | Recovers the alert when set, label `ends_at` |
+| `data.object.starts_at` | Incident start time | Label `starts_at` |
+| `data.object.service_ids` | IDs of the affected services | Label `service_ids` (comma-separated) |
+
+**Service monitoring status (`service.monitored_status.updated`)**
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `data.object.id` | Service ID | Alert Key, label `service_id` |
+| `data.object.name` | Service name | Alert title, label `service` |
+| `data.monitored_status` | Monitoring status, `up` or `down` | Alert status, label `monitored_status` |
+| `data.object.parent_id` | ID of the parent service group | Label `parent_id` |
+| `data.object.current_incident_type` | Current incident type of the service | Label `current_incident_type` |
+
+Service alert titles look like `API is down`. Every alert also carries the labels `source=statuspal` and `event` (the event type pushed).
+
+## Alert Key
+---
+
+- Incident: the incident ID. Every push for one Statuspal incident, from creation through updates to its end, lands on the same alert
+- Service: the service ID. The `down` and `up` pushes for one service land on the same alert
+
+Incident alerts and service alerts are independent. When a service goes down and Statuspal opens an incident automatically, you get a service alert and an incident alert; use the channel's [alert grouping](/en/on-call/channel/noise-reduction) to group them into one Flashduty incident. Renaming an incident or a service does not change the Alert Key.
+
+## Status and severity
+---
+
+Statuspal payloads carry no incident type (major, minor) or severity, so every incident alert is Warning.
+
+| Statuspal push | Flashduty status or severity |
+| :--- | :--- |
+| `incident.created` or `incident.updated` with empty `ends_at` | Triggers or updates the alert, Warning |
+| `incident.updated` with `ends_at` set | Recovers |
+| `incident.deleted` | Recovers |
+| `service.monitored_status.updated` with `down` | Triggers the alert, Critical |
+| `service.monitored_status.updated` with `up` | Recovers |
+| Any other `monitored_status` value | Rejected as an invalid parameter |
+| Any other event type | Accepted, no alert |
+
+A maintenance has an end time from the moment it is created, so Flashduty treats its pushes as recoveries. There is no matching triggered alert, so no alert is created.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does the alert recover while the incident is in Monitoring?">
+
+No. The alert recovers only when the incident is resolved (it gets an end time) or deleted.
+
+</Accordion>
+
+<Accordion title="Why is every incident alert Warning?">
+
+Statuspal webhooks do not send the incident type or severity. To change the severity per service, rewrite it by the `service_ids` label or the alert title with an [Alert Pipeline](/en/on-call/integration/alert-integration/alert-pipelines) on the integration.
+
+</Accordion>
+
+<Accordion title="Do I need service.monitored_status.updated without Statuspal monitoring?">
+
+No. This event is sent only for services with Statuspal's built-in monitoring enabled; selecting it creates no extra alerts.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Send test request shows an error**: make sure the push URL is complete (including `integration_key`) and the integration still exists
+- **Flashduty returns an invalid parameter error**: the payload has no `data.object.id`, or `monitored_status` is neither `up` nor `down`
+- **An incident alert does not recover**: make sure the incident is resolved in Statuspal and the webhook includes `incident.updated`
+- **A service alert does not recover**: make sure the webhook includes `service.monitored_status.updated` and the service monitor is back `up`

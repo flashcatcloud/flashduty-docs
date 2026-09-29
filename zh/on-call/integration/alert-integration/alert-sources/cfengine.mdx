@@ -1,0 +1,150 @@
+---
+title: "CFEngine 告警集成"
+description: "通过 Mission Portal 自定义动作脚本将 CFEngine Enterprise 告警同步到 Flashduty On-call，告警解除时自动关闭。"
+keywords: ["告警集成", "CFEngine", "Mission Portal", "Custom action", "自定义动作"]
+---
+
+CFEngine Enterprise 的 Mission Portal 没有 Webhook 通知方式，但告警可以关联自定义动作（Custom action）脚本：告警触发、解除以及发送提醒时，Hub 会执行该脚本，并把告警参数文件的路径作为唯一参数传给它。本集成提供一个脚本，把这个参数文件原样推送到 Flashduty。每条 CFEngine 告警对应一条 Flashduty 告警：触发时打开，解除时自动关闭。
+
+<Note>告警和自定义动作只在 CFEngine Enterprise（含 25 台主机以内的免费版）的 Mission Portal 中提供，CFEngine Community 没有这项功能。</Note>
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **CFEngine**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **CFEngine**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 CFEngine 中配置
+---
+
+以下步骤基于 CFEngine Enterprise 3.27。上传和关联自定义动作脚本需要 Mission Portal 的 admin 角色。脚本只依赖 Hub 上的 `bash` 和 `curl`。
+
+<Steps>
+<Step title="准备自定义动作脚本">
+
+在本地创建文件 `flashduty_custom_action.sh`，把 `<推送地址>` 替换为 Flashduty 集成的完整推送地址：
+
+```bash
+#!/bin/bash
+# Sends a CFEngine alert to a Flashduty CFEngine integration.
+# CFEngine passes one argument: the path of the alert parameter file.
+FLASHDUTY_URL='<推送地址>'
+
+curl --silent --show-error --fail --max-time 10 \
+  -H 'Content-Type: text/plain' \
+  --data-binary @"$1" \
+  "$FLASHDUTY_URL"
+```
+
+脚本不解析参数文件，按原样发送全部 `KEY='VALUE'` 行，由 Flashduty 解析。Flashduty 拒绝请求或网络不通时，`curl` 以非零退出码结束。
+
+</Step>
+
+<Step title="上传脚本">
+
+1. 登录 Mission Portal，点击右上角 **Settings**，进入 **Custom notification scripts**
+2. 点击 **Add a script**，上传 `flashduty_custom_action.sh`，填写名称（例如 `Flashduty`）和描述
+3. 点击 **Save**
+
+</Step>
+
+<Step title="为告警关联脚本">
+
+在 **Dashboard** 中新建告警或编辑已有告警，在通知设置中勾选 **Custom action**，再勾选上一步上传的 `Flashduty` 脚本并保存。一个脚本可以关联多条告警，每条需要推送到 Flashduty 的告警都要关联它。
+
+如需告警持续触发期间也推送，在告警中勾选 **Set reminders**，选择提醒间隔。提醒同样会执行脚本，Flashduty 会把它合并到已有告警上。
+
+</Step>
+
+<Step title="验证">
+
+在 Hub 上用一个参数文件手动运行脚本，确认链路连通。先创建 `alert_parameters_test`：
+
+```bash
+ALERT_ID='999999'
+ALERT_NAME='Flashduty test'
+ALERT_SEVERITY='low'
+ALERT_STATUS='fail'
+ALERT_FAILED_HOST='1'
+ALERT_TOTAL_HOST='1'
+ALERT_CONDITION_NAME='Flashduty test'
+ALERT_CONDITION_DESCRIPTION='Connectivity test from the CFEngine hub.'
+ALERT_CONDITION_TYPE='policy'
+```
+
+运行 `bash flashduty_custom_action.sh alert_parameters_test`，Flashduty 中会出现一条 Info 告警。把文件中的 `ALERT_STATUS` 改为 `'success'` 再运行一次，这条告警会关闭。测试文件使用了一个不属于任何真实告警的 `ALERT_ID`，不会影响真实告警。
+
+CFEngine 没有「发送测试通知」按钮。要验证真实告警，可以让告警条件实际满足一次（例如修改一个受策略管理的文件，让 Promise 状态变为 Repaired），等待 Hub 下一次检查告警后确认 Flashduty 收到告警；条件解除后确认告警关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用 CFEngine 的告警编号 `ALERT_ID` 作为 Alert Key。CFEngine 文档说明它是告警的唯一编号；同一条告警的触发、提醒和解除推送都携带相同的 `ALERT_ID`，因此落在同一条 Flashduty 告警上。告警名称、等级、失败主机数和时间的变化都不会改变 Alert Key。
+
+`ALERT_ID` 只在一个 Hub 内唯一。有多个 Hub 时，请为每个 Hub 创建单独的 Flashduty 集成，避免不同 Hub 上编号相同的告警互相合并或关闭。
+
+请求缺少 `ALERT_ID`，或 `ALERT_STATUS` 不是 `fail` / `success` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+一条 CFEngine 告警覆盖它定义的所有主机，Flashduty 为它生成一条告警，失败主机数写在描述和标签中。
+
+| CFEngine 推送 | `ALERT_STATUS` | Flashduty 处理 |
+| :--- | :--- | :--- |
+| 告警触发 | `fail` | 触发告警 |
+| 触发期间的提醒 | `fail` | 更新已有告警 |
+| 告警解除 | `success` | 恢复告警 |
+
+## 告警等级
+---
+
+告警等级取自创建告警时选择的严重度 `ALERT_SEVERITY`：
+
+| CFEngine 严重度 | Flashduty 等级 |
+| :--- | :--- |
+| `high` | Critical |
+| `medium` | Warning |
+| `low` | Info |
+| 其他值或为空 | Warning |
+
+恢复事件保留告警的严重度作为等级。
+
+## 告警内容
+---
+
+- **标题**：告警名称 `ALERT_NAME`
+- **描述**：条件描述 `ALERT_CONDITION_DESCRIPTION`，以及 `Triggered on <失败主机数> of <主机总数> hosts.`
+- **标签**：`check`（告警名称），以及参数文件中的其余参数，键名转为小写，例如 `alert_id`、`alert_name`、`alert_severity`、`alert_failed_host`、`alert_total_host`、`alert_condition_name`、`alert_condition_type`；策略、清单（Inventory）和软件更新类条件的参数也按同样规则写入，例如 `alert_policy_condition_filteritemname`
+
+时间戳参数（`ALERT_LAST_CHECK`、`ALERT_LAST_EVENT_TIME`、`ALERT_LAST_STATUS_CHANGE`）、`ALERT_STATUS` 和条件描述不写入标签，空值参数也不写入。每条告警最多 50 个标签；标签过多时，按名称排序后超出部分不写入。
+
+## 排查问题
+---
+
+- **脚本报 HTTP 4xx**：确认 `FLASHDUTY_URL` 是完整推送地址且包含 `integration_key`
+- **Mission Portal 中选不到脚本**：确认当前用户属于 admin 角色，且脚本已在 **Custom notification scripts** 中保存
+- **告警没有推送**：确认告警关联了脚本；脚本只在告警状态变化和提醒时执行，关联前已经触发的告警要等下一次状态变化或提醒
+- **告警没有恢复**：确认 CFEngine 中该告警已解除；在 CFEngine 中删除后重新创建的告警是另一条告警，删除前未关闭的 Flashduty 告警需要手动关闭
+
+参数文件中各参数的含义请参阅 CFEngine 文档 [Custom actions for alerts](https://docs.cfengine.com/docs/3.27/web-ui/custom-actions-for-alerts/)。

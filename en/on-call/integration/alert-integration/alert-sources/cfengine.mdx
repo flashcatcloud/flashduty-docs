@@ -1,0 +1,150 @@
+---
+title: "CFEngine alert integration"
+description: "Send CFEngine Enterprise alerts to Flashduty On-call through a Mission Portal custom action script. Alerts close automatically when the CFEngine alert clears."
+keywords: ["alert integration", "CFEngine", "Mission Portal", "Custom action"]
+---
+
+The CFEngine Enterprise Mission Portal has no webhook notification method, but an alert can be associated with a custom action script: when the alert triggers, clears, or sends a reminder, the hub runs the script and passes it one argument, the path of the alert parameter file. This integration provides a script that posts that parameter file to Flashduty as is. Each CFEngine alert maps to one Flashduty alert: it opens when the alert triggers and closes automatically when it clears.
+
+<Note>Alerts and custom actions are only available in the Mission Portal of CFEngine Enterprise (including the free edition for up to 25 hosts). CFEngine Community does not have them.</Note>
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **CFEngine** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **CFEngine** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure CFEngine
+---
+
+The steps below are based on CFEngine Enterprise 3.27. Uploading custom action scripts and associating them with alerts requires the admin role in Mission Portal. The script only needs `bash` and `curl` on the hub.
+
+<Steps>
+<Step title="Prepare the custom action script">
+
+Create a file named `flashduty_custom_action.sh` on your workstation and replace `<push URL>` with the full push URL of the Flashduty integration:
+
+```bash
+#!/bin/bash
+# Sends a CFEngine alert to a Flashduty CFEngine integration.
+# CFEngine passes one argument: the path of the alert parameter file.
+FLASHDUTY_URL='<push URL>'
+
+curl --silent --show-error --fail --max-time 10 \
+  -H 'Content-Type: text/plain' \
+  --data-binary @"$1" \
+  "$FLASHDUTY_URL"
+```
+
+The script does not parse the parameter file. It sends every `KEY='VALUE'` line as is, and Flashduty parses them. If Flashduty rejects the request or the network is unreachable, `curl` exits with a non-zero code.
+
+</Step>
+
+<Step title="Upload the script">
+
+1. Log in to Mission Portal, click **Settings** in the top right, and open **Custom notification scripts**
+2. Click **Add a script**, upload `flashduty_custom_action.sh`, and enter a name (for example `Flashduty`) and a description
+3. Click **Save**
+
+</Step>
+
+<Step title="Associate the script with alerts">
+
+On the **Dashboard**, create an alert or edit an existing one, tick **Custom action** in the notification settings, tick the `Flashduty` script uploaded in the previous step, and save. One script can be associated with many alerts; associate it with every alert that should reach Flashduty.
+
+To keep notifying while an alert stays triggered, choose a reminder interval after ticking **Set reminders** in the alert. Reminders also run the script, and Flashduty merges them into the existing alert.
+
+</Step>
+
+<Step title="Verify">
+
+Run the script by hand on the hub with a parameter file to confirm connectivity. First create `alert_parameters_test`:
+
+```bash
+ALERT_ID='999999'
+ALERT_NAME='Flashduty test'
+ALERT_SEVERITY='low'
+ALERT_STATUS='fail'
+ALERT_FAILED_HOST='1'
+ALERT_TOTAL_HOST='1'
+ALERT_CONDITION_NAME='Flashduty test'
+ALERT_CONDITION_DESCRIPTION='Connectivity test from the CFEngine hub.'
+ALERT_CONDITION_TYPE='policy'
+```
+
+Run `bash flashduty_custom_action.sh alert_parameters_test`. An Info alert appears in Flashduty. Change `ALERT_STATUS` in the file to `'success'` and run it again; the alert closes. The test file uses an `ALERT_ID` that belongs to no real alert, so it does not affect real alerts.
+
+CFEngine has no "send test notification" button. To verify a real alert, make the alert condition actually hold once (for example, change a file managed by policy so that the promise status becomes Repaired), wait for the hub's next alert check, and confirm that Flashduty receives the alert. After the condition clears, confirm that the alert closes.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the CFEngine alert ID `ALERT_ID` as the Alert Key. The CFEngine documentation describes it as the alert's unique ID. The trigger, reminder, and clear deliveries of one alert carry the same `ALERT_ID`, so they land on the same Flashduty alert. Changes to the alert name, severity, failed host count, or timestamps do not change the Alert Key.
+
+`ALERT_ID` is only unique within one hub. If you run several hubs, create a separate Flashduty integration for each hub, so that alerts with the same ID on different hubs do not merge into or close each other.
+
+Flashduty rejects a request that has no `ALERT_ID`, or whose `ALERT_STATUS` is not `fail` or `success`.
+
+## Alert lifecycle
+---
+
+One CFEngine alert covers all the hosts it is defined for. Flashduty creates one alert for it and records the failed host count in the description and labels.
+
+| CFEngine delivery | `ALERT_STATUS` | Flashduty action |
+| :--- | :--- | :--- |
+| Alert triggered | `fail` | Trigger an alert |
+| Reminder while triggered | `fail` | Update the existing alert |
+| Alert cleared | `success` | Recover the alert |
+
+## Alert severity
+---
+
+The severity comes from the severity selected when the alert was created, `ALERT_SEVERITY`:
+
+| CFEngine severity | Flashduty severity |
+| :--- | :--- |
+| `high` | Critical |
+| `medium` | Warning |
+| `low` | Info |
+| Other or empty | Warning |
+
+A recovery event keeps the alert's severity.
+
+## Alert content
+---
+
+- **Title**: the alert name `ALERT_NAME`
+- **Description**: the condition description `ALERT_CONDITION_DESCRIPTION`, followed by `Triggered on <failed hosts> of <total hosts> hosts.`
+- **Labels**: `check` (the alert name), plus the other parameters in the file with lowercase keys, for example `alert_id`, `alert_name`, `alert_severity`, `alert_failed_host`, `alert_total_host`, `alert_condition_name`, `alert_condition_type`. Parameters of policy, inventory, and software update conditions follow the same rule, for example `alert_policy_condition_filteritemname`
+
+Timestamp parameters (`ALERT_LAST_CHECK`, `ALERT_LAST_EVENT_TIME`, `ALERT_LAST_STATUS_CHANGE`), `ALERT_STATUS`, and the condition description are not written to labels, and neither are empty parameters. Each alert holds at most 50 labels; if there are more, the ones beyond the limit in name order are dropped.
+
+## Troubleshooting
+---
+
+- **The script reports HTTP 4xx**: confirm that `FLASHDUTY_URL` is the full push URL and includes `integration_key`
+- **The script cannot be selected in Mission Portal**: confirm that the current user has the admin role and that the script is saved under **Custom notification scripts**
+- **Alerts are not pushed**: confirm that the alert is associated with the script. The script only runs when the alert changes state or sends a reminder, so an alert that was already triggered before the association waits for its next state change or reminder
+- **The alert does not recover**: confirm that the alert has cleared in CFEngine. An alert deleted and recreated in CFEngine is a different alert; close any Flashduty alert left open from before the deletion by hand
+
+For the meaning of each parameter in the file, see the CFEngine documentation [Custom actions for alerts](https://docs.cfengine.com/docs/3.27/web-ui/custom-actions-for-alerts/).
