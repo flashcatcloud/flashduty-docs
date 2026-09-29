@@ -1,0 +1,131 @@
+---
+title: "GitGuardian 告警集成"
+description: "通过 Custom webhook 将 GitGuardian 检测到的密钥泄露事件（Incident）的触发、更新和关闭同步到 Flashduty On-call。"
+keywords: ["告警集成", "GitGuardian", "密钥泄露", "Incident", "Webhook", "Secrets Detection"]
+---
+
+通过 GitGuardian 的 Custom webhook 目的地，将密钥泄露事件（Incident）同步到 Flashduty On-call。每个 GitGuardian Incident 对应一条 Flashduty 告警：新检测到、出现新的泄露位置、严重程度或有效性变化、重新打开时触发或更新这条告警，Incident 被标记为已解决（Resolved）或已忽略（Ignored）时告警恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **GitGuardian**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **GitGuardian**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 GitGuardian 中配置
+---
+
+需要在 GitGuardian 工作区中有管理集成的权限。
+
+<Steps>
+<Step title="创建 Custom webhook">
+
+1. 进入 GitGuardian 控制台，点击 **Settings → Workspace → Integrations → Destinations → Custom webhook**
+2. 个人工作区：新建 webhook，填写名称，并将 Flashduty 集成的完整推送地址粘贴到目标 URL，地址中需包含 `integration_key`
+3. 企业工作区：在团队层级新建 webhook。要接收工作区内所有 Incident，在 **All-incidents team** 下创建；只接收某个团队的 Incident，则在该团队下创建
+
+GitGuardian 会为 webhook 生成一个签名令牌（signature token）。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验签名，无需在 Flashduty 中填写该令牌。
+
+</Step>
+
+<Step title="选择事件">
+
+勾选以下事件：
+
+| GitGuardian 事件 | `action` | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| New incident detected | `incident_triggered` | 触发告警 |
+| New occurrence detected | `new_occurrence` | 触发或更新告警 |
+| Incident Validity changed | `incident_validity_changed` | 触发或更新告警 |
+| Incident Severity changed | `incident_severity_changed` | 触发或更新告警，等级随之变化 |
+| Risk score updated（Business 套餐） | `incident_risk_score_updated` | 触发或更新告警 |
+| Incident regression | `incident_regression` | 触发或更新告警 |
+| Incident reopened | `incident_reopened` | 触发或更新告警 |
+| Incident resolved | `incident_resolved` | 恢复告警 |
+| Incident ignored | `incident_ignored` | 恢复告警 |
+
+<Warning>
+必须勾选 **Incident resolved** 和 **Incident ignored**，否则 Flashduty 中的告警不会随 Incident 的处理而恢复。
+</Warning>
+
+分派、评论、反馈、访问权限、公开分享和 Honeytoken 事件不会改变告警状态，Flashduty 收到后返回成功但不创建告警，无需勾选。
+
+如只需要值班处理高风险泄露，可在 webhook 的过滤规则中按严重程度、有效性、密钥类型或标签限制推送范围；未设置规则时，所有 Incident 都会推送。
+
+</Step>
+
+<Step title="验证生命周期">
+
+在工作区中触发一个新的 Incident，确认 Flashduty 收到活动告警；然后在 GitGuardian 中将该 Incident 标记为 **Resolved**，确认原告警恢复。
+
+在 GitGuardian 中发送测试消息只验证地址可达：Flashduty 会返回成功，但不会创建告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Incident 的 `id`（Webhook 中的 `incident.id`）作为 Alert Key。GitGuardian 官方 Webhook 示例中，同一个 Incident 的 New incident、New occurrence、Resolved、Ignored 和 Reopened 事件携带相同的 `incident.id`。
+
+严重程度、有效性、事件发生次数和检测器名称的变化都不会改变 Alert Key。缺少 `incident.id` 的 Incident 事件会被拒绝。
+
+## 状态和告警等级
+---
+
+告警状态由 `action` 决定：`incident_resolved` 和 `incident_ignored` 为恢复，上表中其余事件为触发。Incident 被重新打开后会以同一个 Alert Key 触发新的告警。
+
+告警等级由 `incident.severity` 决定：
+
+| GitGuardian 严重程度 | Flashduty 等级 |
+| :--- | :--- |
+| `high` | Critical |
+| `medium` | Warning |
+| `low` | Info |
+| `unknown`、空值或其他值 | Warning |
+
+`unknown` 表示 GitGuardian 尚未评级，Flashduty 按 Warning 处理。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `incident_id` | Incident ID，即 Alert Key |
+| `incident_url` | GitGuardian 中的 Incident 链接 |
+| `check` / `detector` | 检测器显示名 / 检测器名称，如 AWS Keys / `aws_iam` |
+| `action` | 本次推送的事件类型 |
+| `status` | Incident 状态 |
+| `severity_raw` | GitGuardian 原始严重程度 |
+| `validity` | 密钥有效性：`valid`、`invalid`、`no_checker`、`not_checked` |
+| `occurrence_count` | 泄露位置数量 |
+| `secret_revoked` | 密钥是否已撤销 |
+| `team` | 触发推送的 GitGuardian 团队 |
+| `repository` / `filepath` / `occurrence_url` | `new_occurrence` 事件中新泄露位置的仓库、文件路径和链接 |
+
+## 排查问题
+---
+
+- **告警没有创建**：确认已勾选对应事件，并检查 webhook 的过滤规则是否排除了该 Incident。GitGuardian 说明 webhook 为尽力投递，不保证送达
+- **告警没有恢复**：确认已勾选 **Incident resolved** 和 **Incident ignored**
+- **Flashduty 返回参数错误**：确认目标 URL 完整且包含 `integration_key`
+- **Incident 被忽略后又被重新打开**：会以同一个 Alert Key 生成新的告警
+
+更多字段含义请参阅 [GitGuardian Custom webhook](https://docs.gitguardian.com/platform/configure-alerting/notifiers-integrations/custom-webhook)。

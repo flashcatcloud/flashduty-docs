@@ -1,0 +1,93 @@
+---
+title: "Circonus 告警集成"
+description: "通过联系组的 Webhook 将 Circonus 规则集的告警和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Circonus", "Webhook", "联系组", "alert_id"]
+---
+
+通过 Circonus 联系组的 Webhook 联系方式，将规则集（Ruleset）触发的告警同步到 Flashduty On-call。每个 Circonus 告警（`alert_id`）对应一条 Flashduty 告警；告警清除时，Circonus 发送的恢复通知会关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Circonus**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Circonus**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Circonus 中配置
+---
+
+<Steps>
+<Step title="在联系组中添加 Webhook">
+
+1. 在 Circonus 中进入 **Alerts → Contacts**，打开（或新建）要接收告警的联系组
+2. 添加一个 Webhook（HTTP POST）联系方式
+3. 将 Flashduty 推送地址粘贴为 URL，并在末尾追加 `&format=json`，例如：
+
+```text
+https://api.flashcat.cloud/event/push/alert/circonus?integration_key=<your_key>&format=json
+```
+
+<Warning>
+必须带上 `format=json`。Circonus 文档说明：URL 中包含 `?format=json` 时才以 JSON 发送，否则以 query string 格式发送，Flashduty 无法解析。推送地址本身已含 `?`，因此这里使用 `&`。
+</Warning>
+
+</Step>
+
+<Step title="为各告警等级指定联系组">
+
+联系组按告警等级（Severity 1 到 5）分别配置。在规则集（Ruleset）的规则中，把该联系组指定给需要通知的等级，并保证恢复通知也发给同一联系组。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让规则真正命中，确认 Flashduty 收到活动告警；再让指标恢复正常，确认原告警恢复。Webhook 的通知格式固定，Circonus 文档说明不支持自定义告警格式。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用每条告警的 `alert_id` 作为 Alert Key。Circonus 的告警链接为 `...fault-detection?alert_id=<id>`，恢复通知在原告警的全部字段之外仅追加 `clear_value` 和 `clear_time`，所以触发和恢复携带同一个 `alert_id`。
+
+一次请求的 `alerts` 数组可以包含多条告警，每条告警各生成一个 Flashduty 事件。规则、指标、等级、数值和时间的变化都不会改变 Alert Key。缺少 `alert_id` 的请求会被拒绝，因为无法可靠关联后续恢复。
+
+## 状态和告警等级
+---
+
+Circonus 告警等级为 1 到 5，1 最严重。
+
+| Circonus `severity` | Flashduty 等级 |
+| :--- | :--- |
+| `1`、`2` | Critical |
+| `3` | Warning |
+| `4`、`5` | Info |
+| 空值或其他值 | Warning |
+
+带有 `clear_time` 或 `clear_value` 的通知视为恢复，恢复事件保留原等级。请求体中没有 `alerts` 或 `alerts` 为空时，Flashduty 返回成功且不创建告警。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 带有 `&format=json`，且每条告警的 `alert_id` 非空
+- **告警没有恢复**：确认联系组已被指定给该规则的对应等级，并且 Circonus 已清除该告警；恢复通知的 `alert_id` 必须与触发时一致
+- **收不到通知**：检查规则集的等待时间（Circonus 会先在界面创建告警，等待设定的分钟数后才通知联系组）、维护窗口，以及联系组是否指定了该等级
+
+更多字段含义请参阅 [Circonus 联系组文档](https://docs.circonus.com/circonus/alerts/contact-groups/)。

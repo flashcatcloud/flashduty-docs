@@ -1,0 +1,119 @@
+---
+title: "LangSmith alert integration"
+description: "Send LangSmith threshold alerts on error count, latency, cost and feedback score to Flashduty On-call through an alert rule webhook."
+keywords: ["alert integration", "LangSmith", "LangChain", "webhook", "alert_rule_id", "LLM observability"]
+---
+
+When a metric crosses its threshold, a LangSmith alert rule can POST a notification to a webhook URL. Flashduty parses these notifications directly, and each LangSmith alert rule maps to one Flashduty alert.
+
+LangSmith's documentation describes no "resolved" notification: once the metric falls back within the threshold, nothing more is sent. Every notification Flashduty receives triggers (or updates) an alert, so close alerts manually or turn on the auto-resolve timeout as described below.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of two ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **LangSmith** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **LangSmith** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure in LangSmith
+---
+
+<Steps>
+<Step title="Create an alert rule with a webhook">
+
+1. Sign in to LangSmith, open the tracing project to monitor, go to the **Alerts** page, and create an alert rule: pick the metric (error count, feedback score, latency or cost), the threshold and the aggregation window (5 or 15 minutes)
+2. Under **Notification Settings**, choose **Webhook** and fill in:
+   - **URL**: the full push URL of the Flashduty integration
+   - **Headers**: leave empty
+   - **Request Body Template**: leave empty. LangSmith merges the fields listed under "Payload" below into the request body as top-level keys; it does no template substitution
+3. Save the alert rule
+
+</Step>
+
+<Step title="Check connectivity">
+
+Click **Send Test Alert**. LangSmith does not validate the receiver's response, so the UI reports success even if Flashduty returns an error; check the Flashduty console for the alert instead. If the test payload has no `alert_rule_id`, Flashduty returns success and creates no alert. If it does carry one, an alert is created; close it manually.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+A LangSmith webhook has no recovery notification: after the metric falls back, nothing more is sent and the Flashduty alert stays triggered. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit) with a duration of **1 hour** and the timer start set to **Stop merging new alerts**. If LangSmith sends again while the metric stays above the threshold, the alert stays open; an alert with no new notification within the timeout is closed.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+LangSmith POSTs these fields as `application/json`, and Flashduty parses them directly:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `alert_rule_id` | Alert rule UUID | Alert Key, label `alert_rule_id` |
+| `alert_rule_name` | Alert rule name | Alert title, label `check` |
+| `alert_rule_description` | Alert rule description | Alert description |
+| `alert_rule_type` | Rule type, currently `threshold` | Label `alert_rule_type` |
+| `alert_rule_attribute` | Monitored metric: `error_count`, `feedback_score`, `latency`, `cost` | Label `alert_rule_attribute` |
+| `project_name` | Project name | Label `project` |
+| `workspace_name` | Workspace name | Label `workspace` |
+| `alert_rule_url` | Link to the alert rule | Label `alert_rule_url` |
+| `runs_url` | Link to the runs that triggered the alert | Label `runs_url`, added to the description |
+| `triggered_metric_value` | Metric value at trigger time | Label `triggered_metric_value`, added to the description |
+| `triggered_threshold` | Configured threshold | Label `triggered_threshold`, added to the description |
+| `timestamp` | Trigger time | Not stored |
+
+The alert title is the rule name; if it is empty, `LangSmith alert <alert_rule_id>` is used.
+
+## Alert Key
+---
+
+Flashduty uses `alert_rule_id` as the Alert Key. LangSmith documents it as the UUID identifying the alert, and every firing of one rule carries the same `alert_rule_id`, so repeated notifications while the metric stays above the threshold merge into one alert and different rules stay separate. Changing the rule name, threshold or metric value does not change the Alert Key.
+
+A request without `alert_rule_id` is treated as a test notification: Flashduty returns success and creates no alert.
+
+## Status and severity
+---
+
+LangSmith notifications carry no severity, so Flashduty treats every one as Warning. A threshold breach does not mean the service is down, so the default is not Critical.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why does the alert never recover on its own?">
+
+The LangSmith webhook only fires when the metric crosses the threshold and sends nothing when it falls back. Turn on the channel's auto-resolve timeout, or close the alert manually in Flashduty.
+
+</Accordion>
+
+<Accordion title="Send Test Alert succeeds but no alert appears in Flashduty?">
+
+LangSmith does not validate the receiver's response. Flashduty drops a test payload that has no `alert_rule_id`, which is expected; real alerts are sent only when the metric actually crosses the threshold.
+
+</Accordion>
+
+<Accordion title="Can self-hosted LangSmith use this?">
+
+Yes. The LangSmith documentation requires Helm chart 0.10.3 or later for alerts on self-hosted deployments, and the deployment must be able to reach the Flashduty push URL.
+
+</Accordion>
+</AccordionGroup>
+
+For more on the fields, see the LangSmith documentation: [Alerts webhook](https://docs.langchain.com/langsmith/alerts-webhook) and [Alerts](https://docs.langchain.com/langsmith/alerts).
