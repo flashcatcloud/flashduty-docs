@@ -1,0 +1,220 @@
+---
+title: "Argo CD change integration"
+description: "Sync Argo CD application sync operations to Flashduty On-call through an Argo CD Notifications webhook service, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Argo CD", "ArgoCD", "GitOps", "Sync", "Notifications", "Webhook", "deployment events"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Argo CD pushes changes through its built-in **Notifications** (`argocd-notifications-controller`). This integration provides an `argocd-notifications-cm` configuration with one webhook service, one request body template, and one trigger. Each sync operation of an Argo CD Application becomes one Flashduty change: it is recorded as Processing when the sync starts and updated to Done, Failed, or Canceled when it ends.
+
+Automated syncs, manual syncs from the UI or CLI, and rollbacks are all sync operations and are all recorded. For sync-failed and health-degraded alerts, use the Argo CD alert integration; both integrations can be configured side by side.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Argo CD** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `application`, `project`, or `destination_namespace`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Argo CD
+---
+
+The steps below need Kubernetes permission to edit ConfigMaps in the Argo CD namespace (`argocd` by default) and to edit annotations on Applications or AppProjects. The Argo CD cluster must be able to reach the domain of the push URL.
+
+<Steps>
+<Step title="Add the webhook service, template, and trigger">
+
+Save the following as `flashduty-change.yaml` and replace `url` with the push URL copied above (including `?integration_key=...`):
+
+```yaml
+data:
+  service.webhook.flashduty-change: |
+    url: <push URL>
+    headers:
+    - name: Content-Type
+      value: application/json
+
+  template.flashduty-change: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "app_uid": {{ .app.metadata.uid | toJson }},
+            "app_name": {{ .app.metadata.name | toJson }},
+            "app_namespace": {{ .app.metadata.namespace | toJson }},
+            "project": {{ .app.spec.project | toJson }},
+            "destination": {{ dig "spec" "destination" "name" (dig "spec" "destination" "server" "" .app) .app | toJson }},
+            "destination_namespace": {{ dig "spec" "destination" "namespace" "" .app | toJson }},
+            "argocd_url": {{ .context.argocdUrl | toJson }},
+            "phase": {{ dig "status" "operationState" "phase" "" .app | toJson }},
+            "message": {{ dig "status" "operationState" "message" "" .app | toJson }},
+            "started_at": {{ dig "status" "operationState" "startedAt" "" .app | toJson }},
+            "finished_at": {{ dig "status" "operationState" "finishedAt" "" .app | toJson }},
+            "revision": {{ dig "status" "operationState" "syncResult" "revision" (dig "status" "operationState" "operation" "sync" "revision" "" .app) .app | toJson }},
+            "initiated_by": {{ dig "status" "operationState" "operation" "initiatedBy" "username" "" .app | toJson }},
+            "automated": {{ dig "status" "operationState" "operation" "initiatedBy" "automated" false .app | toJson }},
+            "dry_run": {{ dig "status" "operationState" "operation" "sync" "dryRun" false .app | toJson }}
+          }
+
+  trigger.on-flashduty-change: |
+    - when: app.status.operationState != nil and app.status.operationState.phase in ['Running']
+      oncePer: app.status.operationState?.startedAt
+      send: [flashduty-change]
+    - when: app.status.operationState != nil and app.status.operationState.phase in ['Succeeded', 'Failed', 'Error']
+      oncePer: app.status.operationState?.startedAt
+      send: [flashduty-change]
+```
+
+Merge it into the existing `argocd-notifications-cm` (`--type merge` only adds or updates the keys above and leaves the rest of the configuration alone):
+
+```bash
+kubectl patch configmap argocd-notifications-cm -n argocd --type merge --patch-file flashduty-change.yaml
+```
+
+If Argo CD is installed with the Helm chart, put `service.webhook.flashduty-change` under `notifications.notifiers`, the template under `notifications.templates`, and the trigger under `notifications.triggers`; otherwise the next upgrade overwrites manual edits.
+
+Notes:
+
+- Every value in the template is escaped with `toJson`, so quotes and line breaks in sync messages cannot break the JSON. Do not remove it. Do not rename fields; `app_uid`, `phase`, and `started_at` are required
+- Optional fields are read with `dig`, so the template renders even when the application has never synced or the sync has no result yet
+- The two trigger conditions cover the start and the end of a sync. `oncePer` is the sync operation's start time, so the start and the end of every sync operation are each sent once, even when Argo CD does not observe the state between two consecutive syncs. Do not remove it
+- The service name `flashduty-change` differs from `flashduty` used by the alert integration, so the two integrations' push URLs do not interfere
+- `argocd_url` comes from `context.argocdUrl` in `argocd-notifications-cm` and is used to build the change link. Without it, changes have no link but are still recorded
+
+</Step>
+
+<Step title="Subscribe to notifications">
+
+A trigger sends only after it is subscribed. Choose one scope:
+
+- **One application**: add an annotation to the Application
+
+  ```bash
+  kubectl patch application <app name> -n argocd --type merge \
+    -p '{"metadata":{"annotations":{"notifications.argoproj.io/subscribe.on-flashduty-change.flashduty-change":""}}}'
+  ```
+
+- **All applications in a project**: add the same annotation `notifications.argoproj.io/subscribe.on-flashduty-change.flashduty-change: ""` to the AppProject's `metadata.annotations`
+- **All applications**: add an entry to `subscriptions` in `argocd-notifications-cm`. If `subscriptions` already exists (for example the entry added by the alert integration), append to the existing list instead of overwriting it with the merge command above
+
+  ```yaml
+  subscriptions: |
+    - recipients:
+      - flashduty-change
+      triggers:
+      - on-flashduty-change
+  ```
+
+When the subscription takes effect, each application that has synced before immediately sends the result of its latest sync, and Flashduty records it as one change with that sync's original start and end times.
+
+</Step>
+
+<Step title="Test connectivity">
+
+Argo CD has no button for sending a test message. From the `argocd-notifications-controller` Pod, use `argocd admin notifications template notify` to send one notification based on the application's current state:
+
+```bash
+kubectl exec -n argocd deploy/argocd-notifications-controller -- \
+  /usr/local/bin/argocd admin notifications template notify flashduty-change <app name> --recipient flashduty-change
+```
+
+The command prints debug logs of the request and response, including the full push URL with its `integration_key`, so do not paste the output anywhere public. A `200 OK` status on the `Received response:` line means Flashduty accepted the request. For an application that has synced before, this notification is the result of its latest sync and merges into that sync's existing record without adding a change; for an application that has never synced, Flashduty ignores it.
+
+</Step>
+
+<Step title="Verify sync records">
+
+Sync a subscribed application (click **Sync** in the UI, or run `argocd app sync <app name>`). Confirm that a Processing change appears in the Flashduty change list and is updated to Done or Failed when the sync ends.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+One change is one sync operation of one application. Its change key (change_key) is `<app_uid>/<started_at>`:
+
+- `app_uid` is the application's `metadata.uid`. Kubernetes assigns every object a UID that is unique over the whole lifetime of the cluster, so same-named applications in different Argo CD instances, and an application deleted and recreated, are different applications
+- `started_at` is the sync operation's start time (`status.operationState.startedAt`, recorded in UTC). Argo CD writes it when the sync starts and keeps it through retries, and an application runs only one sync operation at a time
+
+So the start, the failed retries, and the final result of one sync update the same change, and two syncs of the same application are two changes, even when they sync the same revision. Changes to the application name, project, revision, or sync message do not change the change key.
+
+Flashduty rejects a request that lacks `app_uid` or `started_at`, or whose times are not in RFC 3339 format.
+
+## Status mapping
+---
+
+| Argo CD sync phase (`phase`) | Flashduty change status |
+|---|---|
+| `Running`, `Terminating` | Processing |
+| `Succeeded` | Done |
+| `Failed`, `Error` | Failed |
+| `Failed` with the message `Operation terminated` (**Terminate** in the UI, or `argocd app terminate-op`) | Canceled |
+
+Done, Failed, and Canceled are end states; Flashduty records the change's end time. An operation that Argo CD terminates because of the sync timeout (the message contains `triggered by controller sync timeout`) is recorded as Failed.
+
+Sync phases are case-sensitive, and other values are rejected. The following deliveries return success without creating a change: an application with no sync operation yet (empty `phase`), and dry-run syncs.
+
+The recorded time is `started_at` when a sync starts and `finished_at` when it ends. While Argo CD retries a failed sync automatically, the phase stays `Running`, so the change is not marked Failed early.
+
+## Change content
+---
+
+- **Title**: `<app name>: sync <revision> to <destination namespace>`. A Git commit shows its first 7 characters; other values, such as a Helm chart version, are shown as is. The revision or destination namespace part is omitted when empty
+- **Link**: `<argocdUrl>/applications/<app name>`, only when `context.argocdUrl` is configured
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `application` | Application name |
+| `app_uid` | The application's `metadata.uid` |
+| `app_namespace` | Namespace of the Application object |
+| `project` | Argo CD project of the application |
+| `destination` | Destination cluster name, or the cluster address when no name is set |
+| `destination_namespace` | Destination namespace |
+| `revision` | Synced revision (Git commit or chart version) |
+| `actor` | User who started the sync; `automated` for automated syncs |
+| `phase` | Latest sync phase |
+| `message` | Latest sync message, such as the failure reason, truncated beyond 1024 bytes |
+
+Empty fields are not written as labels.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no changes received?">
+
+- Check the `argocd-notifications-controller` logs (`kubectl logs -n argocd deploy/argocd-notifications-controller`) and confirm that the application has the `notifications.argoproj.io/subscribe.on-flashduty-change.flashduty-change` annotation, or that `subscriptions` includes `on-flashduty-change`
+- If the logs show `template 'flashduty-change' is not supported` or `trigger 'on-flashduty-change' is not configured`, confirm the configuration is in `argocd-notifications-cm`; for Helm installs, check the corresponding values
+
+</Accordion>
+
+<Accordion title="Only the end of a sync arrived, not the start?">
+
+When a sync finishes within a few seconds, Argo CD may not observe the `Running` phase and sends only the end notification. Flashduty records the change directly in its end state.
+
+</Accordion>
+
+<Accordion title="Is the same notification recorded twice if it is sent again?">
+
+No. An event with the same phase and the same time is recorded only once.
+
+</Accordion>
+
+<Accordion title="The logs show failed with error code 400?">
+
+Confirm the template matches this page and every value goes through `toJson`. The response names the missing or unsupported field, such as `app_uid is missing`, `started_at is missing`, or `unsupported phase`.
+
+</Accordion>
+</AccordionGroup>
+
+For related configuration, see the Argo CD documentation on [Webhook](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/services/webhook/), [Triggers](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/triggers/), [Templates](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/templates/), and [Subscriptions](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/subscriptions/).
