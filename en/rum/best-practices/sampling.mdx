@@ -22,7 +22,9 @@ flashcatRum.init({
 });
 ```
 
-A sampled session reports all of its data (page views, resources, errors, user actions, and so on); an unsampled session reports nothing — **including errors**. This is the first key point about sampling: with a 20% sampling rate, if an error affects users in the other 80%, you will not see it on the platform.
+A sampled session reports all of its data (page views, resources, errors, user actions, and so on); an unsampled session reports nothing by default — **including errors**. This is the first key point about sampling: with a 20% sampling rate, if an error affects users in the other 80%, you will not see it on the platform.
+
+Browser applications can turn this default around with **Error session capture** under **Remote Configuration → Data collection** in the console: the SDK still collects unsampled sessions but holds them locally instead of uploading, and the moment such a session reports an error it sends the data covering up to one minute before the error plus everything after it. A session that never errors is never uploaded, never stored, and never billed. This breaks the absolute reading of "unsampled means completely silent", at the price of these sessions carrying detail that only starts at the buffered window — see [Remote Configuration](/en/rum/quickstart/app-management#configuration-values).
 
 `sessionReplaySampleRate` is a **second-stage sample** applied on top of collected sessions: with `sessionSampleRate: 20` and `sessionReplaySampleRate: 10`, sessions with replay recordings account for 2% of total traffic.
 
@@ -32,7 +34,9 @@ Understanding the following four rules resolves most "I configured the sampling 
 
 ### 1. The unit is the session, not the user or the event
 
-The sampling decision happens **when a session starts**: the SDK flips a coin once with probability `sessionSampleRate`. If the session wins the draw, it is reported in full; otherwise it stays completely silent. There is no such thing as "20% of events within a session get reported" — session data is either complete or absent.
+The sampling decision happens **when a session starts**: the SDK flips a coin once with probability `sessionSampleRate`. If the session wins the draw, it is reported in full; otherwise it stays completely silent by default. There is no such thing as "20% of events within a session get reported" — session data is either complete or absent.
+
+There is exactly one exception. When a Browser application turns on **Error session capture** or **Error session replay capture** under **Remote Configuration → Data collection**, an unsampled session is buffered on the client and uploaded only if it errors — the data covering up to one minute before the error, plus what follows. Such an **error-captured session** is neither complete nor absent: its detail starts at the buffered window. With both switches off, session data still has only those two states. The session detail timeline marks the start of the detail for these sessions, see [Viewing sessions](/en/rum/session-replay/session-viewing#devtools).
 
 The same user's session may be sampled today and not sampled tomorrow. The default sampling mechanism is **not anchored to specific users**.
 
@@ -309,7 +313,11 @@ The base rule uses `hash(userId) % 100` instead of `Math.random()`, which brings
 
 ## Best practice 3: full error capture with proportional sampling for the rest
 
-A common requirement is "cut data volume to 20%, but never miss an error". Setting `sessionSampleRate` to 20 will not do it: sampling works per session, and a session that loses the draw reports nothing at all — errors included (rule 1). You would lose roughly four fifths of your errors along with the volume. The correct shape is to collect every session so no error is lost, then bucket on a stable key inside `beforeSend` so only the winning share keeps full data:
+A common requirement is "cut data volume to 20%, but never miss an error". Setting `sessionSampleRate` to 20 will not do it: sampling works per session, and a session that loses the draw reports nothing at all by default — errors included (rule 1). You would lose roughly four fifths of your errors along with the volume.
+
+If the requirement is simply "no error missed, everything else converged", and you would rather not write bucketing logic in your application, a Browser application can start with the platform-side switches: turn on **Error session capture** under **Remote Configuration → Data collection** (add **Error session replay capture** if you need the recording too), and an unsampled session then sends only the detail covering up to one minute before the error plus what follows; a session that never errors is never stored or billed. What you give up is a complete picture — an error-captured session is only the opening of the scene.
+
+To keep the **full picture for a share of sessions**, bucket in your own application as below: collect every session so no error is lost, then bucket on a stable key inside `beforeSend` so only the winning share keeps full data:
 
 - **Error events**: always kept — 100% of errors
 - **Failed requests**: always kept — 100% of API failures (HTTP 5xx and request failures are resource events, not error events)
@@ -524,7 +532,7 @@ Sampling is an independent probabilistic draw, not a quota (rule 3). The more tr
 <Accordion title="Can I report only errors and nothing else?">
 Strictly reporting only errors is not possible — view events are the backbone of a session and cannot be turned off. But you can get very close, by combining two independent controls:
 
-- **The sampling rate decides which sessions are collected.** It operates on whole sessions, and an unsampled session reports nothing at all, errors included (rule 1). So lowering the sampling rate is not a way to save volume — it drops your errors along with everything else.
+- **The sampling rate decides which sessions are collected.** It operates on whole sessions, and an unsampled session reports nothing at all by default, errors included (rule 1). So lowering the sampling rate is not a way to save volume — it drops your errors along with everything else, unless you turn on **Error session capture**, which makes an unsampled session send a slice of detail only when it errors.
 - **The event switches decide which events each collected session reports.** `trackResources`, `trackLongTasks`, `trackUserInteractions` and `trackWebVitals` are independent of sampling and apply to every session that is collected.
 
 So the right configuration for "show me errors and as little else as possible" is: set `sessionSampleRate` to 100 so no error is missed, then use the event switches to suppress non-error data. Resource events are usually the bulk of the volume, so trimming them pays off the most.
@@ -565,5 +573,5 @@ If your goal is "errors first, but keep the evidence", use [best practice 3](#be
 </Accordion>
 
 <Accordion title="I want to cut data volume to 20% but still capture every error — how do I configure that?">
-Setting `sessionSampleRate` to 20 will not do it — a session that loses the draw reports nothing, errors included (rule 1). Collect every session so no error is lost, then bucket by session or user so only a share of them keep full data. The full recipe is in [best practice 3](#best-practice-3-full-error-capture-with-proportional-sampling-for-the-rest).
+Setting `sessionSampleRate` to 20 will not do it — a session that loses the draw reports nothing by default, errors included (rule 1). A Browser application has two ways out: turn on **Error session capture**, so an unsampled session sends only the detail covering up to one minute before the error (a session that never errors is never stored); or bucket by session or user so only a share of sessions keep full data. The full recipe is in [best practice 3](#best-practice-3-full-error-capture-with-proportional-sampling-for-the-rest).
 </Accordion>
