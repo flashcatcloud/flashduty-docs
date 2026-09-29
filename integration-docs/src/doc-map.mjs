@@ -85,6 +85,7 @@ export const docMap = {
   Tideways: `${alertBase}/tideways.mdx`,
   Wormly: `${alertBase}/wormly.mdx`,
   Flowtriq: `${alertBase}/flowtriq.mdx`,
+  Obkio: `${alertBase}/obkio.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
   Tideways: `${alertBase}/tideways.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,
