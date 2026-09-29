@@ -1,0 +1,128 @@
+---
+title: "Unleash 变更集成"
+description: "通过 Unleash Webhook 集成将功能开关（Feature Flag）的变更同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Unleash", "Feature Flag", "功能开关", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Unleash 的 Webhook 集成，将功能开关（Flag）的变更同步到 Flashduty On-call。Unleash 的每一条事件（Event）对应一条 Flashduty 变更，例如打开或关闭某个环境、添加或修改激活策略（Strategy）、修改变体（Variant）、归档 Flag。
+
+Unleash 推送的是已经生效的变更，因此每条变更都直接记录为 **Done**。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Unleash**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`、`flag`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Unleash 中配置
+---
+
+<Steps>
+<Step title="新建 Webhook 集成">
+
+1. 进入 Unleash 管理界面，选择 **Integrations**
+2. 在 **Webhook** 一项点击 **New integration**
+
+需要有管理集成的权限。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Webhook URL**：粘贴 Flashduty 集成的完整推送地址
+2. **Content-Type**：保持默认的 `application/json`
+3. **Authorization**、**Extra HTTP Headers**：无需填写，Flashduty 通过推送地址中的 `integration_key` 鉴权
+4. **Body template**：留空。留空时 Unleash 推送完整的事件 JSON，Flashduty 按该格式解析
+
+</Step>
+
+<Step title="选择事件和范围">
+
+1. **Events**：勾选以下事件，其余事件会被忽略
+   - `feature-created`、`feature-updated`、`feature-archived`、`feature-revived`
+   - `feature-environment-enabled`、`feature-environment-disabled`
+   - `feature-strategy-add`、`feature-strategy-update`、`feature-strategy-remove`
+   - `feature-variants-updated`
+2. **Projects**、**Environments**：不选表示全部，也可以只选生产环境等需要关注的范围
+3. 点击 **Save**
+
+</Step>
+</Steps>
+
+Unleash 没有测试推送按钮。保存后在任一 Flag 上做一次变更（例如打开某个环境），即可在 Flashduty 变更列表中看到记录。
+
+## 一条变更是什么
+---
+
+| Unleash 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 事件（Event） | 事件的 `id` | 每次操作产生一条事件，对应一条 Flashduty 变更；同一个 Flag 先打开再关闭是两条变更 |
+
+事件 `id` 在一个 Unleash 实例内递增。请为每个 Unleash 实例单独创建一个集成；多个实例共用一个集成时，不同实例的相同 `id` 会被当作同一条变更。
+
+## 状态映射
+---
+
+| Unleash 事件 | Flashduty 变更状态 |
+|---|---|
+| `feature-created`、`feature-updated`、`feature-archived`、`feature-revived`、`feature-environment-enabled`、`feature-environment-disabled`、`feature-strategy-add`、`feature-strategy-update`、`feature-strategy-remove`、`feature-variants-updated` | Done |
+
+以下推送返回成功但不生成变更：
+
+- 变更请求（Change request）相关事件，例如 `change-request-created`、`change-request-approved`、`change-request-applied`。变更请求应用后，Unleash 会为其中每个 Flag 变更各推送一条上表中的事件，这些事件会被记录
+- 标签、过期标记、描述与类型、项目迁移等不改变 Flag 求值结果的事件
+- 项目、环境、用户、分群等其他资源的事件，以及缺少 `type` 的推送
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<Flag 名称> in <环境>: <动作>`，例如 `new-feature in production: enabled`；不涉及环境的事件（例如创建 Flag）不带环境 |
+| 描述 | 空 |
+| 链接 | 空。Unleash 推送的事件不含页面地址 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目 ID |
+| `environment` | 环境名称，例如 `production`；不涉及环境的事件没有此标签 |
+| `flag` | Flag 名称 |
+| `strategy` | 激活策略名称，例如 `flexibleRollout`（仅策略事件） |
+| `actor` | 操作者，仅在操作者是 API Token 或服务账号时有值；用户的邮箱不会写入标签 |
+| `event_type` | Unleash 事件类型，例如 `feature-environment-enabled` |
+| `event_id` | Unleash 事件 ID |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Unleash 重试推送会重复记录吗？">
+
+不会。推送失败（50x 或网络错误）时 Unleash 会重试一次，重试内容与原推送相同，Flashduty 只记录一次。Unleash 不保证推送顺序，Flashduty 使用事件自身的时间（`createdAt`）作为变更时间。
+
+</Accordion>
+
+<Accordion title="为什么没有收到变更请求（Change request）的通知？">
+
+变更请求本身不改变线上行为，应用之后才生效。应用时 Unleash 会为其中每个 Flag 变更推送对应的 `feature-*` 事件，Flashduty 记录的是这些事件。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `id is missing`、`featureName is missing`：推送内容不完整。请确认 **Body template** 留空
+- `invalid createdAt`：事件时间格式不正确
+- 请求体不是 JSON：请确认 **Content-Type** 为 `application/json`，且 **Body template** 渲染结果是合法 JSON
+
+</Accordion>
+</AccordionGroup>

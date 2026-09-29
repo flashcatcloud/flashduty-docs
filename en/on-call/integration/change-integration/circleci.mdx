@@ -1,0 +1,130 @@
+---
+title: "CircleCI change integration"
+description: "Sync CircleCI workflow results to Flashduty On-call through a CircleCI outbound webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "CircleCI", "workflow", "CI/CD", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a CircleCI project's outbound webhook to sync workflow results to Flashduty On-call. Each workflow becomes one Flashduty change, recorded once when the workflow ends.
+
+CircleCI sends the `workflow-completed` event only when a workflow ends and has no start event, so a change has no Processing state and is recorded directly with its end state: Done, Failed, or Canceled.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **CircleCI** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project`, `ref`, or `workflow`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure CircleCI
+---
+
+<Steps>
+<Step title="Open the project's Webhooks settings">
+
+1. In the CircleCI web app, open your organization and select **Projects**. In the target project's menu, choose **Project Settings**
+2. In the sidebar, select **Webhooks** and click **Add Webhook**
+
+Webhooks are configured per project, and a project can have at most 5. Add one to each project you want to sync.
+
+</Step>
+
+<Step title="Enter the push URL and event">
+
+1. **Webhook name**: a recognizable name, for example `Flashduty`
+2. **URL**: paste the full push URL of the Flashduty integration
+3. **Certificate Validation**: keep it enabled
+4. **Secret token**: leave it empty. Flashduty authenticates with the `integration_key` in the push URL and does not verify `circleci-signature`
+5. **Select an event**: select `workflow-completed`
+
+Selecting `job-completed` as well is harmless: job events do not produce changes and are ignored.
+
+</Step>
+
+<Step title="Send a test">
+
+Click **Test Ping Event**. Flashduty returns success and records no change. Then run a workflow and the change appears in the Flashduty change list.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| CircleCI object | Change key (change_key) | Notes |
+|---|---|---|
+| Workflow | `workflow.id` | Each workflow of a pipeline run has its own ID and becomes one Flashduty change; two runs on the same project and branch are two changes |
+
+## Status mapping
+---
+
+| CircleCI `workflow.status` | Flashduty change status |
+|---|---|
+| `success` | Done |
+| `failed` | Failed |
+| `error` | Failed |
+| `unauthorized` | Failed |
+| `canceled` | Canceled |
+
+These deliveries return success and record nothing:
+
+- `job-completed` (job-level events)
+- `ping` (the test event)
+- any other event type
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project>: <workflow name> on <branch or tag> (<short SHA>)`, for example `webhook-service: build-test-deploy on main (1dc6aa6)` |
+| Description | First line of the commit message (commit subject) |
+| Link | The workflow's page in CircleCI |
+| Change time | The workflow's end time (`workflow.stopped_at`) |
+
+Labels for routing and filtering the change list:
+
+| Label | Description |
+|---|---|
+| `project` | Project name |
+| `project_slug` | Project slug, for example `github/<org>/<repo>` |
+| `organization` | Organization name |
+| `workflow` | Workflow name |
+| `workflow_id` | Workflow ID |
+| `pipeline_id` | Pipeline ID |
+| `pipeline_number` | Pipeline number |
+| `ref` | Branch or tag |
+| `sha` | Full commit SHA |
+| `actor` | Commit author name; the triggering username for GitLab or GitHub App projects |
+| `circleci_state` | The raw CircleCI workflow status |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why is there no running state for a workflow?">
+
+CircleCI outbound webhooks report only that a workflow or job has ended and send no start event. The change appears with its final status when the workflow ends.
+
+</Accordion>
+
+<Accordion title="Does a CircleCI retry record the change twice?">
+
+No. CircleCI retries later after a non-2xx response with the same content, and Flashduty deduplicates on the workflow end time, so the change is recorded once.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `workflow.id is missing`: the payload is incomplete; make sure it comes from a native CircleCI webhook
+- `unknown workflow.status`: a workflow status that is not mapped yet; contact us to add it
+- `invalid workflow.stopped_at` or `invalid happened_at`: a timestamp field is malformed
+
+</Accordion>
+</AccordionGroup>
