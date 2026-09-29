@@ -145,6 +145,7 @@ export const docMap = {
   Loggly: `${alertBase}/loggly.mdx`,
   GhostInspector: `${alertBase}/ghost-inspector.mdx`,
   LogzIo: `${alertBase}/logz-io.mdx`,
+  Catchpoint: `${alertBase}/catchpoint.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
