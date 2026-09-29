@@ -1,0 +1,144 @@
+---
+title: "Hookdeck 告警集成"
+description: "通过 Hookdeck 项目的 Webhook 通知将 Hookdeck Issue（投递失败、请求被拒、转换错误、队列积压）同步到 Flashduty On-call，Issue 解决时自动恢复。"
+keywords: ["告警集成", "Hookdeck", "Issue", "Webhook 通知", "投递失败"]
+---
+
+Hookdeck 在投递失败、请求被来源拒绝、转换（Transformation）出错或队列积压时会打开一个 Issue。通过 Hookdeck 项目的 Webhook 通知，将 Issue 同步到 Flashduty On-call：每个 Issue 对应一条 Flashduty 告警，Issue 打开时触发，在 Hookdeck 中被标记为 Resolved 或 Ignored 时恢复，再次出现时重新触发。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Hookdeck**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Hookdeck**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Hookdeck 中配置
+---
+
+Hookdeck 的 Webhook 通知先发到项目中的一个来源（Source），再由连接（Connection）转发到目的地（Destination）。因此先建一条把通知转发到 Flashduty 的连接，再在项目设置中打开 Webhook 通知。
+
+<Steps>
+<Step title="创建转发到 Flashduty 的连接">
+
+1. 在 Hookdeck Dashboard 中打开 **Connections** 页面，点击 **+ Connection**
+2. 新建一个来源，名称填 `hookdeck`，类型保持默认的 Webhook
+3. 新建一个 HTTP 目的地，名称填 `flashduty`，**URL** 粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
+4. 目的地的认证方式保持默认即可，Flashduty 通过地址中的 `integration_key` 鉴权
+5. 连接名称填 `flashduty`，点击 **+ Create**
+
+</Step>
+
+<Step title="打开 Webhook 通知">
+
+1. 打开 **Settings** → **Project** → **General**，找到通知设置
+2. 打开 **Webhook Notifications** 开关
+3. 在 **Webhook topics** 中勾选 `issue.opened` 和 `issue.updated`。不需要勾选 `event.successful`，Flashduty 收到后会直接忽略
+4. 在 **Webhook source** 中选择上一步创建的 `hookdeck` 来源
+5. 点击 **Save**
+
+只勾选 `issue.opened` 时，Flashduty 收不到 Issue 被解决的通知，告警不会自动恢复。
+
+</Step>
+
+<Step title="检查 Issue Triggers">
+
+1. 打开 **Issues** → **Issue Triggers**，确认需要告警的 Issue 类型都有启用的触发器。每个项目默认有四个触发器：投递失败（首次投递失败即打开）、转换 `warn` 级别日志、队列积压超过 10 分钟、所有来源拒绝的请求
+2. 投递类触发器的 **Strategy** 为 `first_attempt` 时，首次投递失败就会打开 Issue，即使后续重试成功。只关心重试全部失败的情况时，可改为 `last_attempt`
+3. 建议让投递类触发器不覆盖上面创建的 `flashduty` 连接（例如在连接范围中填 `!flashduty`）。否则 Flashduty 推送失败时会再打开一个 Issue，并再次发往同一个失败的地址
+
+</Step>
+
+<Step title="验证">
+
+1. 新建一个测试连接，目的地 URL 填 `https://mock.hookdeck.com?status=500`（Hookdeck 的模拟接口，总是返回 HTTP 500），向该连接的来源 URL（在 Hookdeck 中打开来源即可看到）发送一个请求：
+
+```bash
+curl -X POST '<来源 URL>' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"flashduty.test"}'
+```
+
+2. 在 Hookdeck **Issues** 页面看到新的投递 Issue 后，确认 Flashduty 收到一条 Critical 告警
+3. 在 Issues 页面将该 Issue 的状态改为 **Resolved**，确认原告警恢复
+4. 验证完成后删除测试连接
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Hookdeck 的 Issue ID（`issue.id`，形如 `iss_...`）作为 Alert Key。同一个 Issue 在打开、确认、解决、重新打开时 ID 不变，因此状态更新通知会作用于打开时创建的告警。
+
+Issue 的错误码、响应状态码、首次/最近出现时间、连接名称等变化不会改变 Alert Key。缺少 `issue.id` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+告警等级由 Issue 类型（`issue.type`）决定：
+
+| Issue 类型 | 含义 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `delivery` | 向目的地投递失败 | Critical |
+| `request` | 来源拒绝了传入的请求（验证失败、无连接等） | Critical |
+| `transformation` | 转换代码输出了 warn / error / fatal 日志 | Warning |
+| `backpressure` | 目的地的预计排队时间超过阈值 | Warning |
+| 其他或为空 | | Warning |
+
+状态由 `issue.status` 决定：
+
+| `issue.status` | 状态 |
+| :--- | :--- |
+| `OPENED` | 触发（包括已解决的 Issue 再次出现、重新打开） |
+| `ACKNOWLEDGED` | 触发，更新原告警 |
+| `RESOLVED` | 恢复，告警等级保持打开时的等级 |
+| `IGNORED` | 恢复。被忽略的 Issue 再次出现时不会重新打开，也不会再通知 |
+
+其他状态值会被拒绝并返回参数错误。只有 `issue.opened` 和 `issue.updated` 两个主题会生成告警，其他主题（如 `event.successful`）会被接收并忽略。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `issue_id` | Issue ID，即 Alert Key |
+| `issue_type` | `delivery`、`request`、`transformation`、`backpressure` |
+| `issue_status` | Issue 当前状态 |
+| `project_id` | Hookdeck 项目 ID |
+| `resource` | Issue 关联的对象：连接名称，没有时依次取连接 ID、转换 ID、来源 ID、目的地 ID |
+| `connection` / `connection_id` | 投递失败的连接名称（`来源 -> 连接`）和 ID |
+| `source_name` / `source_id` | 来源名称和 ID |
+| `destination_name` / `destination_id` | 目的地名称和 ID |
+| `error_code` / `response_status` | 投递失败的错误码（如 `TIMEOUT`）或目的地返回的 HTTP 状态码 |
+| `rejection_cause` | 请求被拒绝的原因，如 `VERIFICATION_FAILED` |
+| `transformation_id` / `log_level` | 出错的转换及日志级别 |
+| `delay` | 队列积压阈值（毫秒） |
+
+通知中附带的失败请求内容（请求头、请求体）不会写入标签。
+
+## 排查问题
+---
+
+- **收不到告警**：确认项目设置中 Webhook 通知已打开且选择了正确的来源，`flashduty` 连接没有被暂停；在 Hookdeck 中查看该连接的事件，确认 Flashduty 返回 200
+- **告警没有恢复**：确认 Webhook topics 勾选了 `issue.updated`，并在 Hookdeck 中将 Issue 标记为 Resolved 或 Ignored。只关闭（Dismiss）Issue 不会改变其状态
+- **同一问题重复出现告警**：被忽略（Ignored）的 Issue 不会再通知；已解决的 Issue 再次出现时会重新打开并重新触发同一个 Alert Key 的告警
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并且请求来自 Hookdeck Webhook 通知（请求体中有 `topic` 字段）
+
+更多说明请参阅 [Hookdeck Issues & Notifications](https://hookdeck.com/docs/issues) 和 [Issue Triggers](https://hookdeck.com/docs/issue-triggers)。
