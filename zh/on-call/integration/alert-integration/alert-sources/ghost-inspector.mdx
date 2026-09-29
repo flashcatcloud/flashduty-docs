@@ -1,0 +1,94 @@
+---
+title: "Ghost Inspector 告警集成"
+description: "通过 Webhook 将 Ghost Inspector 测试的失败和恢复结果同步到 Flashduty On-call。"
+keywords: ["告警集成", "Ghost Inspector", "Webhook", "自动化测试", "端到端测试"]
+---
+
+通过 Ghost Inspector 的 Webhook，将测试用例的运行结果同步到 Flashduty On-call。每个测试对应一条 Flashduty 告警：测试运行失败时触发，同一个测试之后再次运行并通过时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Ghost Inspector**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Ghost Inspector**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Ghost Inspector 中配置
+---
+
+Ghost Inspector 的通知设置分为账号（Organization）、测试套件（Suite）、单个测试（Test）三个层级，下层默认继承上层设置，也可以单独覆盖。按需要的粒度选择其一配置即可；配置在账号或套件层级可以一次覆盖其下所有测试。
+
+<Steps>
+<Step title="添加 Webhook">
+
+1. 打开需要接入的测试、所属套件，或账号设置页
+2. 点击 **Settings → Notifications**
+3. 在 **Webhooks** 中新增一条，粘贴 Flashduty 集成的完整推送地址（地址中需包含 `integration_key`）
+4. 保存
+
+</Step>
+<Step title="验证生命周期">
+
+1. 手动运行一次会失败的测试（例如临时改错一个断言步骤），确认 Flashduty 收到 Critical 告警
+2. 改回正确的步骤，再次运行该测试直到通过，确认原告警恢复
+
+Ghost Inspector 没有独立的「测试通知」按钮：每次测试运行（无论通过或失败）都会推送一条结果，Flashduty 只在测试失败时开出新告警，通过时才去关闭对应的活动告警——如果通过时没有对应的活动告警，则不会产生任何记录。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用测试的 `test._id` 作为 Alert Key，即 Webhook 请求体中 `data.test._id` 字段。Ghost Inspector 每次运行同一个测试都会带上相同的 `test._id`（区别于 `data._id`——这是每次运行结果自身的 ID，每次都不同），因此一个测试的失败和之后的恢复能可靠关联到同一条告警。测试名称、浏览器、地域、起止 URL 等字段的变化不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+Ghost Inspector 不区分告警等级，只有通过或失败两种结果：
+
+| Ghost Inspector `passing` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `false` | Critical |
+| `true` | 恢复 |
+
+缺少 `passing` 字段的请求会被拒绝，避免把无法判断状态的请求当作失败处理。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `test_id` | 测试的 `test._id` |
+| `result_id` | 本次运行结果的 `_id` |
+| `suite_id` / `suite_name` | 所属测试套件的 ID 和名称（未加入套件的测试没有这两个标签） |
+| `organization_id` | Ghost Inspector 账号 ID |
+| `browser` | 运行使用的浏览器，如 `chrome-79` |
+| `region` | 运行所在地域，如 `us-east-1` |
+| `start_url` / `end_url` | 测试开始和结束时访问的页面 |
+| `passing` | 本次运行是否通过 |
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认推送地址包含 `integration_key`，且 Payload 中包含 `data.test._id` 和 `data.passing`
+- **告警没有恢复**：确认恢复用的是同一个测试，且配置了 Webhook 的层级（测试 / 套件 / 账号）确实覆盖了这个测试
+- **测试通过但没有新告警，这是预期行为**：一次没有对应活动告警的通过结果不会创建任何记录
+
+更多字段含义请参阅 [Ghost Inspector Test Webhooks](https://docs.ghostinspector.com/api/webhooks/) 和 [Notifications & Alerts](https://docs.ghostinspector.com/notification/)。

@@ -1,0 +1,126 @@
+---
+title: "Logz.io alert integration"
+description: "Send Logz.io log alert triggers to Flashduty On-call through a Custom Endpoint."
+keywords: ["alert integration", "Logz.io", "Custom Endpoint", "webhook", "alert_definition_id"]
+---
+
+Logz.io alert notifications have no built-in generic webhook format: a Custom Endpoint needs a request body template you write yourself, which Logz.io renders with Mustache variables and sends. This page gives the exact template Flashduty requires. Each Logz.io alert definition maps to one Flashduty alert.
+
+A Logz.io Custom Endpoint only fires while the alert condition is met — there is no "resolved" or "cleared" event. Once the condition returns to normal, Logz.io sends nothing more. Every notification Flashduty receives triggers (or updates) an alert that you close by hand, or through the auto-resolve timeout described below.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Logz.io** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Logz.io** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Logz.io
+---
+
+<Steps>
+<Step title="Create a Custom Endpoint">
+
+1. Sign in to Logz.io and go to **Alerts & Events → Alert endpoints** (or **Settings → Notification endpoints**)
+2. Click **Add endpoint** and choose type **Custom Endpoint**
+3. Set **Method** to `POST`
+4. For **URL**, enter the full Flashduty push URL
+5. Under **Headers**, add `Content-Type` = `application/json`
+
+</Step>
+
+<Step title="Fill in the message body">
+
+Paste the following JSON into **Message body**:
+
+```json
+{
+  "alert_definition_id": "{{alert_definition_id}}",
+  "alert_event_id": "{{alert_event_id}}",
+  "alert_title": "{{alert_title}}",
+  "alert_description": "{{alert_description}}",
+  "alert_severity": "{{alert_severity}}",
+  "account_id": "{{account_id}}",
+  "account_name": "{{account_name}}",
+  "alert_tags": "{{alert_tags}}",
+  "alert_timeframe_start": "{{alert_timeframe_start}}",
+  "alert_timeframe_end": "{{alert_timeframe_end}}",
+  "alert_app_url": "{{alert_app_url}}"
+}
+```
+
+<Warning>
+Keep the `alert_definition_id` and `alert_severity` field names and their double-brace variables exactly as shown. Flashduty uses `alert_definition_id` to link repeated notifications from the same alert definition; a request missing it is rejected. If `alert_title` or another field contains `&`, `<`, or `>`, Logz.io's default Mustache escaping turns them into `&amp;`, `&lt;`, and so on — Flashduty keeps them as-is in the title.
+</Warning>
+
+Click **Run the test** to check connectivity. Logz.io's own documentation does not say which field values a test request fills in. If the test request has an empty `alert_definition_id` or `alert_severity`, Flashduty returns a parameter error (shown as a failed test in Logz.io). This only affects the connectivity check — it creates no alert and does not affect real alerts.
+
+</Step>
+
+<Step title="Select the endpoint on an alert">
+
+Edit or create a [log alert](https://app.logz.io/#/dashboard/alerts/create) and, under **Notifications → Notification endpoints**, select the Custom Endpoint you created.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+A Logz.io Custom Endpoint has no recovery event: once the alert condition returns to normal, no further notification is sent, and the matching Flashduty alert stays open. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest a timeout of **24 hours**, counted from **Incident trigger**. If the condition is still present after that, Logz.io's next evaluation sends a new notification that opens a new alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `alert_definition_id` as the Alert Key. Logz.io's own documentation describes it as the "Unique alert ID" (the alert definition's ID), as opposed to `alert_event_id`, the "Unique ID of the triggered alert instance" — which changes on every notification. So repeated firings of the same alert definition (including the repeat after the wait period ends, and escalation notifications across severity thresholds) land on the same Flashduty alert, while different alert definitions stay separate.
+
+Logz.io's Custom Endpoint variables do not expose the value of a group-by field. If an alert definition is configured to group by a field (for example, by host), notifications for different groups share the same `alert_definition_id` and merge onto the same Flashduty alert. To keep groups separate, create one alert definition per group (each with its own `alert_definition_id`), or route to a downstream system that can distinguish groups.
+
+Changes to the title, description, severity, or timeframe never change the Alert Key. A request without `alert_definition_id` is rejected.
+
+## Severity
+---
+
+| Logz.io `alert_severity` | Flashduty severity |
+| :--- | :--- |
+| `SEVERE` | Critical |
+| `HIGH` | Critical |
+| `MEDIUM` | Warning |
+| `LOW` | Warning |
+| `INFO` | Info |
+
+`alert_severity` corresponds to the severity threshold (`severityThresholdTiers`) configured on the Logz.io alert; the value is matched case-insensitively. An empty or unlisted value is rejected. Because the Custom Endpoint never sends a recovery event, the alert status always equals the severity above — there is no "recovered" state.
+
+## Alert content
+---
+
+- **Title**: `alert_title`; falls back to `Logz.io alert` when empty
+- **Description**: `alert_description`
+- **Labels**: `check` (the title), `source` (fixed to `logz_io`), `alert_definition_id`, `alert_event_id`, `account_id`, `account_name`, `alert_tags`, `alert_timeframe_start`, `alert_timeframe_end`, `alert_app_url`, `vendor_severity` (the raw `alert_severity` value)
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: make sure the message body is valid JSON, `alert_definition_id` and `alert_severity` are not empty, and the `Content-Type: application/json` header is set
+- **The test succeeds but a real alert never arrives**: make sure the alert's **Notification endpoints** include this Custom Endpoint, and that the alert condition actually triggered
+- **The alert never goes away**: Logz.io sends no recovery notification. Turn on the channel's auto-resolve timeout, or close the alert in Flashduty by hand
+- **Alerts from different groups merge together**: the Custom Endpoint template does not expose the group-by field; create one alert definition per group instead
+
+For more on the fields above, see Logz.io's own documentation: [Notification endpoints](https://docs.logz.io/docs/user-guide/integrations/notification-endpoints/endpoints/), [Custom endpoints](https://docs.logz.io/docs/user-guide/integrations/notification-endpoints/custom-endpoints/), and [Configure an alert](https://docs.logz.io/docs/user-guide/log-management/log-alerts/configure-alert/).
