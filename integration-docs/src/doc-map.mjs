@@ -112,6 +112,7 @@ export const docMap = {
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Openstatus: `${alertBase}/openstatus.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
+  DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
