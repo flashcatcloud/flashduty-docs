@@ -86,6 +86,7 @@ export const docMap = {
   Axiom: `${alertBase}/axiom.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Logrocket: `${alertBase}/logrocket.mdx`,
   RedgateSqlMonitor: `${alertBase}/redgate-sql-monitor.mdx`,
   Gitlab: `${alertBase}/gitlab.mdx`,
   Hookdeck: `${alertBase}/hookdeck.mdx`,
