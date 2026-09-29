@@ -117,6 +117,7 @@ export const docMap = {
   Openstatus: `${alertBase}/openstatus.mdx`,
   PandoraFms: `${alertBase}/pandora-fms.mdx`,
   Opennms: `${alertBase}/opennms.mdx`,
+  CertSpotter: `${alertBase}/cert-spotter.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
   Hyperdx: `${alertBase}/hyperdx.mdx`,
