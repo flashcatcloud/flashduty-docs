@@ -8,7 +8,8 @@ Each document lists the operation's request body as flattened field paths:
 which is the shape a reader scans fastest, and the same path a client uses to
 address the field. Documents are keyed by md5("openapi/<METHOD> <path>") and
 tagged `source: openapi`, next to the `public` documents upload.sh builds from
-the pages.
+the pages. They carry no `locale`: they are fetched by id, and a document
+outside every locale stays out of the locale-filtered documentation search.
 
 Usage: openapi_docs.py <spec.json>   (prints a JSON array of documents)
 """
@@ -50,7 +51,11 @@ def walk(spec, node, path, out, depth=0):
         return
     for sub in node.get("allOf", []):
         walk(spec, sub, path, out, depth + 1)
-    for sub in node.get("oneOf") or node.get("anyOf") or []:
+    # Alternative shapes share one field path, so each is headed by its number:
+    # listed flat, two shapes' constraints would read as one contradictory list.
+    for i, sub in enumerate(node.get("oneOf") or node.get("anyOf") or [], 1):
+        title = one_line(resolve(spec, sub).get("title"))
+        out.append(f"{path or '(请求体)'}  形态 {i}{'：' + title if title else ''}")
         walk(spec, sub, path, out, depth + 1)
     required = set(node.get("required", []))
     for name, sub in node.get("properties", {}).items():
@@ -91,7 +96,6 @@ def documents(spec):
                 "source": "openapi",
                 "path": path,
                 "title": summary or operation,
-                "locale": "zh-CN",
                 "url": "",
                 "content": " ".join(text.split()),
                 "body": text,
