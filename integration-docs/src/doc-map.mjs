@@ -162,6 +162,7 @@ export const docMap = {
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
+  GiteaChange: `${integrationBase}/change-integration/gitea.mdx`,
   GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
   LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
   NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
@@ -171,6 +172,14 @@ export const docMap = {
   VercelChange: `${integrationBase}/change-integration/vercel.mdx`,
   JenkinsChange: `${integrationBase}/change-integration/jenkins.mdx`,
   BuildkiteChange: `${integrationBase}/change-integration/buildkite.mdx`,
+  CircleciChange: `${integrationBase}/change-integration/circleci.mdx`,
+  BitbucketChange: `${integrationBase}/change-integration/bitbucket.mdx`,
+  UnleashChange: `${integrationBase}/change-integration/unleash.mdx`,
+  RundeckChange: `${integrationBase}/change-integration/rundeck.mdx`,
+  FlagsmithChange: `${integrationBase}/change-integration/flagsmith.mdx`,
+  AzureDevopsChange: `${integrationBase}/change-integration/azure-devops.mdx`,
+  ArgoRolloutsChange: `${integrationBase}/change-integration/argo-rollouts.mdx`,
+  OctopusDeployChange: `${integrationBase}/change-integration/octopus-deploy.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
