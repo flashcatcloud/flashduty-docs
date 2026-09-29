@@ -112,6 +112,7 @@ export const docMap = {
   Sematext: `${alertBase}/sematext.mdx`,
   Fortimonitor: `${alertBase}/fortimonitor.mdx`,
   Uptrends: `${alertBase}/uptrends.mdx`,
+  Searchstax: `${alertBase}/searchstax.mdx`,
   Hetrixtools: `${alertBase}/hetrixtools.mdx`,
   Mackerel: `${alertBase}/mackerel.mdx`,
   Thousandeyes: `${alertBase}/thousandeyes.mdx`,
