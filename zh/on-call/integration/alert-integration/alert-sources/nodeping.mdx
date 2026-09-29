@@ -1,0 +1,138 @@
+---
+title: "NodePing 告警集成"
+description: "通过 Webhook 联系方式将 NodePing 检查的宕机和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "NodePing", "Uptime", "Webhook", "Contact", "uuid"]
+---
+
+通过 NodePing 联系人（Contact）中的 Webhook 联系方式，把检查（Check）的宕机（`down`）和恢复（`up`）通知同步到 Flashduty On-call。每个 NodePing 检查对应一条 Flashduty 告警：检查宕机时触发，检查恢复时关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **NodePing**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **NodePing**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 NodePing 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 联系方式">
+
+1. 登录 NodePing，进入 **Checks & Contacts → Contacts**，点击 **Add new contact**
+2. **Name** 可填写 `Flashduty`
+3. 在联系方式的类型下拉框中选择 **Webhook**
+4. 请求方法保持 **GET**（默认值），将 Flashduty 集成的完整推送地址粘贴到 URL 输入框
+5. 不需要填写 Query Strings、Headers 或 Body，点击 **Save**
+
+<Note>
+NodePing 的 Webhook 通知仅在 Professional 和 Premiere 套餐中提供（可先开通 15 天免费试用）。
+</Note>
+
+</Step>
+
+<Step title="关联检查">
+
+进入 **Checks & Contacts → Checks**，编辑需要接入的检查，在通知（Notifications）区域选择刚创建的 `Flashduty` Webhook 联系方式并保存。也可以把它加入联系人组或通知配置（Notification Profile），再关联到多个检查。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个检查真正宕机（例如临时把目标改成一个不可访问的地址），确认 Flashduty 收到活动告警；再恢复检查目标，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+请求方法必须保持 **GET**，并且不要自定义 Query Strings 或 Body。只有在只填写 URL 时，NodePing 才会把下文的默认字段追加到查询字符串中，Flashduty 依靠这些字段识别检查和状态。
+</Warning>
+
+## 推送内容
+---
+
+NodePing 以 GET 请求把以下字段追加到推送地址的查询字符串中，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `uuid` | 检查的 UUID | Alert Key，标签 `check_uuid` |
+| `label` | 检查名称 | 告警标题，标签 `check` |
+| `event` | `down`、`up` 或 `first` | 触发、恢复或忽略，标签 `event` |
+| `t` | 检查类型，例如 `HTTP`、`PING`、`SMTP` | 标签 `check_type` |
+| `tg` | 检查目标，通常是 URL 或服务器名 | 标签 `resource`，写入描述 |
+| `sc` | 检查结果码 | 标签 `result_code`，写入描述 |
+| `m` | 检查结果附带的消息 | 写入描述 |
+| `rt` | 本次检查耗时（毫秒） | 写入描述 |
+| `location` | 执行检查的探测点 | 标签 `location` |
+| `i` | 检查间隔（分钟） | 标签 `interval` |
+| `_id` | 本次检查结果的 ID，每次通知都不同 | 不使用 |
+
+告警标题使用检查名称；检查名称为空时依次使用检查目标、`NodePing check <uuid>`。
+
+## Alert Key
+---
+
+Flashduty 使用检查的 `uuid` 作为 Alert Key。同一个检查的宕机和恢复通知携带相同的 `uuid`，因此会落在同一条告警上；不同检查即使名称和目标相同，也会生成不同的告警。修改检查名称、目标或结果码不会改变 Alert Key。
+
+`_id` 是单次检查结果的 ID，每次通知都会变化，所以不用于关联告警。请求中缺少 `uuid` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+NodePing 的通知不区分告警等级，Flashduty 统一按 Critical 处理。
+
+| NodePing `event` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `down` | Critical |
+| `up` | 恢复，原等级为 Critical |
+| `first` | 不创建告警，直接返回成功 |
+
+`first` 表示监控已开始、这个 Webhook 已登记为通知目标，与故障无关，所以 Flashduty 只返回成功。`event` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么选择 GET，而不是像其他集成一样用 POST 和 JSON 模板？">
+
+只填写 URL 时，NodePing 会自动带上完整的检查信息，不需要编写和维护模板；NodePing 文档也没有说明模板中的值是否会做 JSON 转义，检查名称或消息中的引号、换行可能让请求体变成非法 JSON。因此 Flashduty 的 NodePing 集成只接收默认的 GET 请求。
+
+</Accordion>
+
+<Accordion title="配置了延迟通知或通知时间窗，Flashduty 会怎样？">
+
+NodePing 按联系方式上的延迟（Delay）和时间窗（Schedule）决定是否推送。检查在延迟结束前恢复时，NodePing 不会发送宕机通知，Flashduty 也不会产生告警。为了让恢复通知能关闭告警，宕机和恢复通知应推送到同一个 Webhook 联系方式，且不要单独屏蔽 `up` 通知。
+
+</Accordion>
+
+<Accordion title="联系方式已关联，但真实告警没收到？">
+
+请确认检查已启用、Webhook 联系方式没有被静音（Mute），并且宕机状态已经过检查灵敏度（Sensitivity）设置的复查次数。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **NodePing 推送失败**：确认 URL 是完整的推送地址，且包含 `integration_key`；请求方法为 GET
+- **Flashduty 返回参数错误**：确认没有自定义 Query Strings 或 Body，请求中的 `uuid`、`event` 非空
+- **告警没有恢复**：确认恢复时检查仍关联同一个 Webhook 联系方式，且没有屏蔽 `up` 通知
+
+字段说明请参阅 NodePing 官方文档 [Webhook Notifications](https://nodeping.com/nodepingnotifications.html#webhooks)。
