@@ -1,0 +1,175 @@
+---
+title: "SolarWinds Platform (Orion) alert integration"
+description: "Send SolarWinds Platform (Orion) alerts to Flashduty On-call through the alert's HTTP request actions. Alerts close automatically when they reset in SolarWinds."
+keywords: ["alert integration", "SolarWinds", "Orion", "SolarWinds Platform", "NPM", "SAM", "network monitoring"]
+---
+
+SolarWinds Platform (formerly Orion Platform, self-hosted, including products such as NPM and SAM) pushes alerts through the **Send a GET or POST Request to a Web Server** alert action: when an alert triggers, its trigger action runs, and when it resets, its reset action runs. Both actions post one JSON body to Flashduty, built from the body templates on this page. Each alert definition and triggered object pair in SolarWinds maps to one Flashduty alert: it opens when the alert triggers and closes automatically when it resets.
+
+<Note>This page covers self-hosted SolarWinds Platform (Orion). For the SaaS product SolarWinds Observability, use the [SolarWinds Alert Events](/en/on-call/integration/alert-integration/alert-sources/solarwinds) integration.</Note>
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **SolarWinds Platform (Orion)** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **SolarWinds Platform (Orion)** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure SolarWinds Platform
+---
+
+The steps below need a SolarWinds Platform account with **Allow Alert Management Rights**. The SolarWinds server must be able to reach the domain of the Flashduty push URL over HTTPS (port 443).
+
+<Steps>
+<Step title="Open the alert">
+
+In the SolarWinds Platform Web Console, go to **Alerts & Activity → Alerts** and click **Manage Alerts**. In **Alert Manager**, select an existing alert and click **Edit Alert**, or click **Add New Alert** to create one.
+
+Under **Reset Condition**, keep a reset condition that can actually happen, such as the default **Reset this alert when trigger condition is no longer true**. With **No reset condition**, the alert never resets and the Flashduty alert never closes automatically.
+
+</Step>
+
+<Step title="Add the trigger action">
+
+Go to **Trigger Actions**, click **Add Action**, select **Send a GET or POST Request to a Web Server**, click **Configure Action**, and fill in the form as follows:
+
+| Field | Value |
+| :--- | :--- |
+| **Name of action** | A name of your choice, for example `Flashduty - Trigger` |
+| **URL** | The full push URL, including `?integration_key=...` |
+| **Method** | **Use HTTP/S POST** |
+| **Body to POST** | Paste the trigger body template below |
+| **ContentType** | `application/json` (available in Orion Platform 2020.2 and later) |
+| **Authentication** | **None** |
+
+Trigger body template:
+
+```json
+{
+  "action": "trigger",
+  "alert_object_id": "${N=Alerting;M=AlertObjectID}",
+  "alert_id": "${N=Alerting;M=AlertID}",
+  "alert_name": "${N=Alerting;M=AlertName}",
+  "severity": "${N=Alerting;M=Severity}",
+  "object_type": "${N=Alerting;M=ObjectType}",
+  "object": "${N=SwisEntity;M=Caption}",
+  "alert_details_url": "${N=Alerting;M=AlertDetailsUrl}",
+  "alert_message": "${N=Alerting;M=AlertMessage}"
+}
+```
+
+Do not rename the fields; `action` and `alert_object_id` are required. Under **Execution Settings**, leave **Repeat this action every X minutes until the alert is acknowledged** unchecked so the same alert is not pushed again and again. Click **Add Action** to save.
+
+</Step>
+
+<Step title="Add the reset action">
+
+Go to **Reset Actions**, click **Add Action**, and again select **Send a GET or POST Request to a Web Server**. Use the same URL, Method, ContentType, and Authentication as the trigger action, name it for example `Flashduty - Reset`, and paste the reset body template below into **Body to POST**. It differs from the trigger template only in the `action` field:
+
+```json
+{
+  "action": "reset",
+  "alert_object_id": "${N=Alerting;M=AlertObjectID}",
+  "alert_id": "${N=Alerting;M=AlertID}",
+  "alert_name": "${N=Alerting;M=AlertName}",
+  "severity": "${N=Alerting;M=Severity}",
+  "object_type": "${N=Alerting;M=ObjectType}",
+  "object": "${N=SwisEntity;M=Caption}",
+  "alert_details_url": "${N=Alerting;M=AlertDetailsUrl}",
+  "alert_message": "${N=Alerting;M=AlertMessage}"
+}
+```
+
+Click **Add Action**, click **Next** to reach the **Summary** page, and click **Submit**.
+
+<Warning>Without a reset action, SolarWinds does not notify Flashduty when the alert resets, and the Flashduty alert does not close.</Warning>
+
+</Step>
+
+<Step title="Assign the actions to more alerts (optional)">
+
+In **Alert Manager**, select the other alerts you want to push to Flashduty, choose **Assign Action → Assign Trigger Action**, select `Flashduty - Trigger`, and click **Assign**. Then choose **Assign Action → Assign Reset Action** and assign `Flashduty - Reset`.
+
+</Step>
+
+<Step title="Test">
+
+In the alert's **Trigger Actions**, click **Simulate** next to `Flashduty - Trigger`, select an object, and click **Execute**. SolarWinds ignores the trigger condition, renders the template for that object, and sends the request, so Flashduty opens an alert for that object. Then, under **Reset Actions**, **Simulate** `Flashduty - Reset` for the same object; the alert closes.
+
+You can also let the alert trigger for real (for example by lowering a threshold temporarily) and confirm Flashduty receives it, then restore the threshold, wait for the alert to reset, and confirm the Flashduty alert closes. SolarWinds evaluates conditions at the alert's **Evaluation Frequency**, so triggers and resets usually arrive within one or two evaluation intervals.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `alert_object_id` (`${N=Alerting;M=AlertObjectID}`) as the Alert Key. SolarWinds assigns one fixed AlertObjectID to each alert definition and triggered object pair (for example "Node is down" on one switch). The trigger, repeated notifications, and the reset on that object all carry the same ID, so they land on one Flashduty alert; if the alert triggers again after a reset, a new Flashduty alert opens. When the same alert definition triggers on different objects, each object has its own AlertObjectID and gets its own alert.
+
+Changes to the alert name, severity, object name, or alert message do not change the Alert Key. Do not replace `alert_object_id` with `${N=Alerting;M=AlertID}`: AlertID is the ID of the alert definition, which is the same for every object, so a reset on one object would close the alerts of the others.
+
+Flashduty rejects a request that is missing `action` or `alert_object_id`, or whose `alert_object_id` is still the unrendered `${N=Alerting;M=AlertObjectID}`.
+
+## Alert lifecycle
+---
+
+Flashduty handles each notification by its `action` field (case-insensitive):
+
+| `action` | Sent when | Flashduty handling |
+| :--- | :--- | :--- |
+| `trigger` | A trigger action runs: the alert triggers, or an action in an escalation level runs | Triggers an alert or updates the existing one |
+| `reset` | A reset action runs: the reset condition is met | Recovers the alert |
+
+Acknowledging an alert in SolarWinds does not run any action, so the Flashduty alert does not change.
+
+## Severity
+---
+
+The severity comes from the alert definition's **Severity of Alert** (`${N=Alerting;M=Severity}`), case-insensitive:
+
+| SolarWinds severity | Flashduty severity |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Serious` | Critical |
+| `Warning` | Warning |
+| `Notice` | Info |
+| `Informational` | Info |
+| Any other value or empty | Warning |
+
+The reset notification carries the alert definition's severity, and the recovery event keeps it.
+
+## Alert content
+---
+
+- **Title**: `<alert name> on <object name>`. Without an object name, only the alert name is used; if both are missing, the title is `SolarWinds alert <alert_object_id>`
+- **Description**: the alert message rendered from `${N=Alerting;M=AlertMessage}`, that is, the **Message displayed when this alert is triggered** in the alert's **Trigger Actions**
+- **Labels**: `alert_object_id`, `alert_id` (alert definition ID), `check` (alert name), `resource` (object name), `object_type` (object type, such as `Node` or `Interface`), `severity` (raw severity), and `alert_details_url` (link to the alert details page in SolarWinds)
+
+Empty fields are not written as labels. When a variable does not apply to the object type, SolarWinds may leave the `${...}` variable as-is, and Flashduty treats it as empty.
+
+## Troubleshooting
+---
+
+- **Simulate reports "Failed to execute HTTP request"**: make sure **URL** is the full push URL including the `integration_key` parameter, that the SolarWinds server can reach it (proxy, firewall), and paste the rendered body into a JSON validator to check its format
+- **Flashduty reports that the body is not valid JSON**: SolarWinds does not JSON-escape variable values. If the alert name, object name, or alert message contains a straight double quote `"` or a backslash `\`, the body becomes invalid JSON. Remove these characters from the alert message (use curly or single quotes if you need quotes), or delete the `alert_message` line from the templates
+- **Alert does not recover**: make sure the alert has `Flashduty - Reset` under **Reset Actions**, the reset condition is not **No reset condition**, and `action` in the reset template is `reset`
+- **Repeated notifications for the same problem**: uncheck **Repeat this action every X minutes until the alert is acknowledged** in the trigger action's **Execution Settings**
+- **Several SolarWinds servers**: AlertObjectID is unique only within one SolarWinds database. Create a separate Flashduty integration for each independent SolarWinds Platform deployment instead of sharing one push URL
+
+For details on the action and the variables, see the SolarWinds documentation: [Send a GET or POST request](https://documentation.solarwinds.com/en/success_center/orionplatform/content/core-using-get-or-post-url-functions-sw1058.htm), [Reset actions](https://documentation.solarwinds.com/en/success_center/orionplatform/content/core-setting-reset-actions-sw1022.htm), and [General alert variables](https://documentation.solarwinds.com/en/success_center/orionplatform/content/core-general-alert-variables-sw1121.htm).
