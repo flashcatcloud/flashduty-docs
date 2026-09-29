@@ -1,0 +1,119 @@
+---
+title: "LangSmith 告警集成"
+description: "通过 LangSmith 告警规则的 Webhook，把 LLM 应用的错误数、延迟、成本等阈值告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "LangSmith", "LangChain", "Webhook", "alert_rule_id", "LLM 可观测"]
+---
+
+LangSmith 的告警规则（Alert Rule）在指标越过阈值时，可通过 Webhook 把通知 POST 到指定地址。Flashduty 直接解析这些通知，每条 LangSmith 告警规则对应一条 Flashduty 告警。
+
+LangSmith 的文档没有描述"已恢复"通知：指标回落到阈值以内后不会再收到任何请求，Flashduty 收到的每条通知都会触发（或更新）一条告警，需要手动关闭，或按下文开启超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **LangSmith**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **LangSmith**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 LangSmith 中配置
+---
+
+<Steps>
+<Step title="创建告警规则并添加 Webhook">
+
+1. 登录 LangSmith，进入需要监控的项目（Tracing Project），打开 **Alerts** 页面，新建告警规则，选择指标（错误数、反馈分数、延迟或成本）、阈值和聚合窗口（5 分钟或 15 分钟）
+2. 在 **Notification Settings** 中选择 **Webhook**，填写：
+   - **URL**：Flashduty 集成的完整推送地址
+   - **Headers**：无需填写
+   - **Request Body Template**：留空即可。LangSmith 会把下文"推送内容"中的字段作为顶层键自动合并到请求体，不做模板替换
+3. 保存告警规则
+
+</Step>
+
+<Step title="验证连通性">
+
+点击 **Send Test Alert** 发送测试通知。LangSmith 不校验接收端的响应，界面无论 Flashduty 是否返回错误都会提示成功，请以 Flashduty 控制台中是否收到告警为准。测试通知不含 `alert_rule_id` 时，Flashduty 返回成功且不创建告警；若测试通知携带了 `alert_rule_id`，会产生一条告警，手动关闭即可。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+LangSmith 的 Webhook 没有恢复通知：指标回落后不会再收到任何请求，对应的 Flashduty 告警会一直处于触发状态。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 **1 小时**，计时起点选择 **停止合入新告警**。指标持续超过阈值期间 LangSmith 若再次发送通知，告警会随之保持打开；超时后仍未收到新通知的告警会被关闭。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+LangSmith 以 `application/json` POST 以下字段，Flashduty 直接解析：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `alert_rule_id` | 告警规则 UUID | Alert Key，标签 `alert_rule_id` |
+| `alert_rule_name` | 告警规则名称 | 告警标题，标签 `check` |
+| `alert_rule_description` | 告警规则描述 | 告警描述 |
+| `alert_rule_type` | 规则类型，目前为 `threshold` | 标签 `alert_rule_type` |
+| `alert_rule_attribute` | 监控指标：`error_count`、`feedback_score`、`latency`、`cost` | 标签 `alert_rule_attribute` |
+| `project_name` | 项目名称 | 标签 `project` |
+| `workspace_name` | 工作区名称 | 标签 `workspace` |
+| `alert_rule_url` | 告警规则链接 | 标签 `alert_rule_url` |
+| `runs_url` | 触发告警的运行记录链接 | 标签 `runs_url`，写入描述 |
+| `triggered_metric_value` | 触发时的指标值 | 标签 `triggered_metric_value`，写入描述 |
+| `triggered_threshold` | 配置的阈值 | 标签 `triggered_threshold`，写入描述 |
+| `timestamp` | 触发时间 | 不保存 |
+
+告警标题使用规则名称；规则名称为空时使用 `LangSmith alert <alert_rule_id>`。
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_rule_id` 作为 Alert Key。LangSmith 文档把它定义为标识告警的 UUID，同一条规则每次触发都带相同的 `alert_rule_id`，因此持续超阈值期间的重复通知合并到同一条告警，不同规则各自独立。修改规则名称、阈值或指标值不会改变 Alert Key。
+
+请求中没有 `alert_rule_id` 时，Flashduty 视为测试通知，返回成功且不创建告警。
+
+## 状态和告警等级
+---
+
+LangSmith 的通知不带告警等级，Flashduty 统一按 Warning 处理；该阈值告警不代表服务已经中断，因此不默认为 Critical。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么告警不会自动恢复？">
+
+LangSmith 的 Webhook 只在指标越过阈值时发送，指标回落后不发送任何通知。请开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭告警。
+
+</Accordion>
+
+<Accordion title="Send Test Alert 显示成功，但 Flashduty 没有告警？">
+
+LangSmith 不校验接收端的响应。测试通知不含 `alert_rule_id` 时 Flashduty 会丢弃它，这是预期行为；真实告警需要指标确实越过阈值后才会发送。
+
+</Accordion>
+
+<Accordion title="自托管的 LangSmith 可以使用吗？">
+
+可以。LangSmith 文档要求自托管部署使用 Helm chart 0.10.3 或更高版本才有告警功能，且部署需要能访问 Flashduty 推送地址。
+
+</Accordion>
+</AccordionGroup>
+
+更多字段含义请参阅 LangSmith 官方文档 [Alerts webhook](https://docs.langchain.com/langsmith/alerts-webhook) 和 [Alerts](https://docs.langchain.com/langsmith/alerts)。
