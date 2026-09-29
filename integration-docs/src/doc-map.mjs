@@ -113,6 +113,7 @@ export const docMap = {
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Github: `${alertBase}/github.mdx`,
   Openstatus: `${alertBase}/openstatus.mdx`,
+  PandoraFms: `${alertBase}/pandora-fms.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
   Hyperdx: `${alertBase}/hyperdx.mdx`,
