@@ -106,6 +106,7 @@ export const docMap = {
   Kentik: `${alertBase}/kentik.mdx`,
   Hackerone: `${alertBase}/hackerone.mdx`,
   Tailscale: `${alertBase}/tailscale.mdx`,
+  SplitIo: `${alertBase}/split-io.mdx`,
   Firefly: `${alertBase}/firefly.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
