@@ -1,0 +1,105 @@
+---
+title: "OpenStatus 告警集成"
+description: "通过 Webhook 通知渠道将 OpenStatus 监控的故障、降级和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "OpenStatus", "Webhook", "拨测", "可用性监控"]
+---
+
+通过 OpenStatus 的 Webhook 通知渠道将监控告警同步到 Flashduty On-call。每个 OpenStatus 监控对应一条 Flashduty 告警：监控报错或降级时触发，监控恢复时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **OpenStatus**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **OpenStatus**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 OpenStatus 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 通知渠道">
+
+1. 登录 OpenStatus 控制台，在左侧栏打开 **Notifications**，点击 **Create Notification Channel**
+2. 渠道类型选择 **Webhook**
+3. **Name** 可填写 `Flashduty`
+4. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
+5. **Request Headers** 留空即可，OpenStatus 固定以 `application/json` 发送
+6. 在 **Monitors** 中勾选需要告警的监控，保存
+
+</Step>
+
+<Step title="发送测试">
+
+在同一个表单中点击 **Send Test**。测试消息使用固定的示例监控（`monitor.id` 为 `1`、名称为 `test`、地址为 `http://openstat.us`），Flashduty 返回成功，不会生成告警。OpenStatus 提示 **Test sent** 即表示推送地址可用。
+
+</Step>
+
+<Step title="验证告警生命周期">
+
+1. 新建一个监控，URL 填写 `https://openstat.us/500`（始终返回 500），并关联上一步的通知渠道
+2. 等待至少一半探测区域报错后，确认 Flashduty 收到 Critical 告警
+3. 将监控 URL 改回正常地址，等待探测区域恢复，确认原告警恢复
+4. 验证完成后删除该测试监控
+
+</Step>
+</Steps>
+
+<Tip>
+OpenStatus 在至少一半探测区域报错时才发送 `error` 通知，恢复同样需要一半区域成功，因此告警到达时间取决于监控的检查频率。免费版的检查频率最短为 10 分钟，且只能创建 1 个通知渠道。
+</Tip>
+
+## Alert Key
+---
+
+Flashduty 用 `monitor.id`（OpenStatus 监控 ID）计算 Alert Key。同一个监控的 `error`、`degraded` 和 `recovered` 通知携带相同的 `monitor.id`，因此会落在同一条告警上：监控从报错变为降级时，原告警更新为 Warning，监控恢复后告警关闭。
+
+监控名称、URL、状态码、响应时间、错误信息和检查时间的变化都不会改变 Alert Key。请求缺少 `monitor.id` 时 Flashduty 会拒绝，因为无法关联后续恢复。
+
+<Note>
+`monitor.id` 在一个 OpenStatus 实例内唯一。如果您同时使用 OpenStatus 云服务和自托管实例，请为每个实例分别创建 Flashduty 集成，避免不同实例的监控 ID 重复。
+</Note>
+
+## 状态和告警等级
+---
+
+| OpenStatus `status` | Flashduty 处理 | 告警等级 |
+| :--- | :--- | :--- |
+| `error` | 触发或更新告警 | Critical |
+| `degraded` | 触发或更新告警 | Warning |
+| `recovered` | 恢复告警 | - |
+| **Send Test** 的示例监控 | 返回成功，不生成告警 | - |
+
+空值或其他 `status` 会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 告警内容
+---
+
+- **标题**：监控名称 `monitor.name`，为空时使用 `OpenStatus monitor <monitor.id>`
+- **描述**：`errorMessage`
+- **标签**：`check`（监控名称）、`resource`（监控地址 `monitor.url`）、`source`（固定为 `openstatus`）、`monitor_id`、`status`、`status_code`、`latency_ms`
+
+## 排查问题
+---
+
+- **Send Test 失败**：确认 **Webhook URL** 是完整推送地址且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求中有 `monitor.id` 和 `status`；本集成只接收 OpenStatus Webhook 渠道的 JSON 格式
+- **没有收到告警**：确认该通知渠道的 **Monitors** 中勾选了对应监控，且监控已在一半以上的探测区域报错
+- **告警没有恢复**：确认监控已在一半以上的探测区域恢复，且恢复时该监控仍关联该通知渠道
+
+字段含义请参阅 [OpenStatus Notification Reference](https://www.openstatus.dev/docs/reference/notification)。

@@ -1,0 +1,138 @@
+---
+title: "Axiom alert integration"
+description: "Use an Axiom custom webhook notifier to send monitor triggers and recoveries to Flashduty On-call."
+keywords: ["alert integration", "Axiom", "Monitor", "Notifier", "Webhook"]
+---
+
+Use an Axiom custom webhook notifier to send monitor alerts to Flashduty On-call. Axiom identifies a monitor by `.MonitorID`, and with **Notify by group** turned on the notification also carries the group values. Flashduty builds the Alert Key from the monitor ID plus the group values, so the trigger and recovery notifications of one monitor (or one group) update the same Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Axiom** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Axiom** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Route** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Axiom
+---
+
+<Steps>
+<Step title="Create a custom webhook notifier">
+
+1. In Axiom, open the **Monitors** tab and click **Manage notifiers** on the right
+2. Click **New notifier** in the top right and name it `Flashduty`
+3. Select **Custom webhook** and paste the full Flashduty push URL into **Webhook URL**
+4. Keep Axiom's default body template unchanged. If you edited it before, replace it with the template below
+5. No headers are needed. Click **Create**
+
+Axiom's default template is shown below; Flashduty parses this structure:
+
+```json
+{
+  "action": "{{.Action}}",
+  "event": {
+    "monitorID": "{{.MonitorID}}",
+    "body": "{{.Body}}",
+    "description": "{{.Description}}",
+    "queryEndTime": "{{.QueryEndTime}}",
+    "queryStartTime": "{{.QueryStartTime}}",
+    "timestamp": "{{.Timestamp}}",
+    "title": "{{.Title}}",
+    "value": {{.Value}},
+    "matchedEvent": {{jsonObject .MatchedEvent}},
+    "groupKeys": {{jsonArray .GroupKeys}},
+    "groupValues": {{jsonArray .GroupValues}}
+  }
+}
+```
+
+<Warning>
+Keep `action`, `event.monitorID`, `event.groupKeys`, and `event.groupValues`. Flashduty rejects a request without `monitorID` because it could not match the recovery to the original alert. `action` accepts only `Open` and `Closed`.
+</Warning>
+
+</Step>
+
+<Step title="Add the notifier to monitors">
+
+1. Open **Monitors**, then edit a monitor or click **New monitor**
+2. Click **Add notifier** and select `Flashduty`
+3. Save the monitor
+
+When a threshold or anomaly monitor's query groups by a non-time field, turn on **Notify by group**: each group that crosses the threshold triggers and recovers on its own, and becomes a separate alert in Flashduty.
+
+</Step>
+
+<Step title="Turn on auto-close for match monitors">
+
+A match monitor sends an `Open` notification for every matching event and never sends `Closed`. Notifications from one match monitor merge into one Flashduty alert, but that alert does not recover on its own. If the channel receives match monitor alerts, turn on the [auto-close timeout](/en/on-call/channel/create-edit), set the timing start to **Incident trigger**, and set the timeout to **1 hour**.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a threshold monitor's condition actually hold (for example, lower the threshold temporarily) and confirm that Flashduty receives an active alert. Then restore the threshold, wait for the monitor's next run, and confirm that the alert recovers. Axiom sends one notification when a monitor enters the alert state and one when it exits, with nothing in between.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from `event.monitorID`. When the notification carries groups (`event.groupKeys` is not empty), the group names and values are part of the Alert Key too. Axiom's documentation defines `.MonitorID` as the unique identifier of the monitor the notification belongs to; with **Notify by group** on, each group triggers separately and the notification carries that group's values.
+
+- The `Open` and `Closed` notifications of one monitor (or one group) update the same Flashduty alert
+- Different groups of one monitor are different Flashduty alerts
+- Changes to the monitor name, description, current value, or times do not change the Alert Key
+
+## Status and severity
+---
+
+Axiom notifications carry no severity, so Flashduty sets every Axiom alert to Critical. To use another severity, adjust it by the `check` or `monitor_id` label with an [Alert Pipeline](/en/on-call/integration/alert-integration/alert-pipelines).
+
+| `action` | Flashduty handling |
+| :--- | :--- |
+| `Open` | Triggers or updates the alert with severity Critical |
+| `Closed` | Recovers the original alert |
+| Empty or any other value | Rejects the request |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Monitor name (`event.title`) |
+| `monitor_id` | `event.monitorID` |
+| `monitor_description` | Monitor description |
+| `action` | `Open` or `Closed` |
+| `value` | Query value at trigger or recovery (threshold and anomaly monitors only) |
+| `query_start_time`, `query_end_time` | Query time range of the run |
+| `group_keys`, `group_values` | Group names and values (with Notify by group) |
+| Group names | One label per group name, set to the group value |
+| Matched event fields | Top-level fields of the event a match monitor matched |
+
+The alert description is the notification's `event.body`: for a threshold monitor, the current value compared with the threshold; for a match monitor, the matched event.
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: confirm the body is still the default template above and `monitorID` and `action` are not empty
+- **The alert does not recover**: match monitors send no recovery, so turn on auto-close. A threshold monitor sends `Closed` only when a later run no longer crosses the threshold
+- **Several groups merged into one alert**: confirm **Notify by group** is on for the monitor. Without it, Axiom notifies for the monitor as a whole
+
+For more information, see the Axiom documentation: [Custom webhook notifier](https://axiom.co/docs/monitor-data/custom-webhook-notifier), [Threshold monitors](https://axiom.co/docs/monitor-data/threshold-monitors), and [Match monitors](https://axiom.co/docs/monitor-data/match-monitors).
