@@ -139,6 +139,7 @@ export const docMap = {
   SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
   Cfengine: `${alertBase}/cfengine.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
+  Mezmo: `${alertBase}/mezmo.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
