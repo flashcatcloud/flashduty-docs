@@ -111,6 +111,7 @@ export const docMap = {
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Openstatus: `${alertBase}/openstatus.mdx`,
+  Opennms: `${alertBase}/opennms.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
