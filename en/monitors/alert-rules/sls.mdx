@@ -31,15 +31,16 @@ This mode is suitable for scenarios requiring threshold comparison on aggregated
   - `sls.timespan.value`: (Optional) Time span value, default is 15.
   - `sls.timespan.unit`: (Optional) Time span unit, supports `s` (seconds), `m` (minutes), `h` (hours), `d` (days). Default is `m`.
 3. **Field Mapping**:
-  - **Label Fields**: Fields used to distinguish different alert objects. In the above example, it's `host`. This field can be left empty; Monitors will automatically treat all fields except value fields as label fields.
-  - **Value Fields**: Numeric fields used for threshold evaluation. In the above example, it's `error_cnt`.
+  - **Value fields**: Select `error_cnt` for threshold evaluation.
+  - **Label fields**: Select `host` to identify the alert object. After you select label fields, other non-value fields are carried with the alert as additional information.
+  - See [Query Result Field Mapping](/en/monitors/alert-rules/query-result-fields) for the complete behavior.
 4. **Threshold Conditions**:
   - Use `$A.field_name` to reference values.
   - Example: `Critical: $A.error_cnt > 50`, `Warning: $A.error_cnt > 10`.
 
 ### How It Works
 
-The engine calls SLS API, specifying time range (like last 15 minutes), executing SQL query. After getting results, it groups by "label fields", extracts "value fields" to compare against thresholds.
+Monitors runs the SLS query for the configured time range, distinguishes alert objects by their label fields, and evaluates thresholds with their value fields. If Label fields is empty, every returned field except the value fields becomes a label.
 
 ### Recovery Logic
 
@@ -48,6 +49,7 @@ The engine calls SLS API, specifying time range (like last 15 minutes), executin
 | **Auto Recovery** | When values no longer satisfy any alert threshold, automatically recovers |
 | **Specific Recovery Condition** | Configure recovery expression (e.g., `$A.error_cnt < 5`) |
 | **Recovery Query** | Independent SQL for recovery evaluation, supports `${label_name}` variables |
+| **Manual Close** | Keep the alert active until it is closed manually |
 
 ## 2. Data Exists Mode
 
@@ -74,10 +76,17 @@ This mode is suitable for scenarios where filter logic is written directly in SQ
 
 - **Recovery When Data Disappears**: When query result is empty, determines recovery
 - **Recovery Query**: Supports configuring additional query statements
+- **Manual Close**: Keep the alert active until it is closed manually
 
 ## 3. No Data Mode
 
 This mode is used to monitor scenarios where "data is expected but actually missing".
+
+SLS is a cloud log service data source and does not support per-series no-data detection. It keeps only one condition, **Alert when all queries return no data**:
+
+- The UI shows a single condition card, "Alert when all queries return no data", backed by the `alert_on_empty_result` and `alert_on_empty_result_severity` fields.
+- The per-series card, "Alert if previously found data is now missing", is not rendered for SLS rules, so its config field `check_nodata.enabled` cannot be set at all.
+- Tencent Cloud CLS also disables this condition, and enforces it in the backend (submitting `check_nodata.enabled` is rejected with a 400); SLS is currently disabled by the frontend, without a backend guard.
 
 ### Configuration
 
@@ -86,7 +95,32 @@ This mode is used to monitor scenarios where "data is expected but actually miss
     ```sql
     * | SELECT host, max(__time__) as last_seen GROUP BY host
     ```
-2. **Evaluation Rules**: If a `host` appeared in previous cycles but cannot be found in current and N consecutive cycles, triggers "No Data" alert.
+2. **Evaluation Rules**: The alert fires when all queries return empty results for N consecutive checks. N comes from the **Trigger condition** shared by the tab.
+
+### Existing Rules with Per-Series Detection Enabled
+
+For an existing SLS rule that has per-series no-data detection enabled, opening its edit page turns that condition off automatically (`check_nodata.enabled` is loaded as off) and shows a toast:
+
+<Warning>
+This datasource type does not support "Alert if previously found data is now missing"; the check has been turned off automatically and takes effect on save
+</Warning>
+
+The rule detail page is read-only and does not show this toast. The condition is turned off inside the edit page: as long as you do not open the edit page, the rule's config does not change; once you open it and save, the off state is written back to the rule. The automatic turn-off applies to this condition only, so at save time:
+
+- If the rule still has other enabled conditions (threshold evaluation, data exists), the "at least one must be enabled" validation does not block this downgrade, and per-series detection stops working with that save — which is exactly why the toast above is shown.
+- If this was the rule's only condition, the save is blocked by the "Threshold evaluation, Data missing, Data exists at least one must be enabled" validation, and you must change the configuration explicitly before it can be saved.
+
+After opening such a rule, switch its no-data detection to "Alert when all queries return no data", make sure at least one alert condition is enabled, and then save.
+
+### Recovery Logic
+
+The **recovery mode** of "Alert when all queries return no data" is not configurable. The engine fixes it to **Recovers automatically once any query returns data again**, shown as read-only text in the UI:
+
+| Recovery mode | Description |
+|------|------|
+| `Recovers automatically once any query returns data again` | A fixed value, not an option; there is no dropdown for it in the UI |
+
+The former recovery-mode dropdown (`End automatically when data reappears` / `End when data reappears or the timeout expires` / `Manual close only`) exists only inside the per-series card, so it is unavailable for SLS. The only configurable items shared by the conditions on the no-data tab are the trigger and recovery settings (`Trigger mode`, `Trigger condition`, `Recovery condition`).
 
 ## 4. Advanced Configuration
 
@@ -106,6 +140,19 @@ Default queries data from the last 15 minutes. Adjustable via parameters:
 <Warning>
 Do not use `__time__` for filtering in SQL; the engine automatically sets time range based on parameters.
 </Warning>
+</Accordion>
+
+<Accordion title="Maximum returned rows">
+In raw log search mode, `sls.lines` controls the maximum number of log rows returned by a single query. Each returned row can produce one alert.
+
+| Scenario | Behavior |
+|------|------|
+| **New rules** | Defaults to `1` — only the latest row in the time window is returned |
+| **Valid range** | An integer between 1 and 100 |
+| **Empty** | Means this rule has never had this setting, so Edge falls back to its old default of 100 rows |
+| **Out of range or not an integer** | Explicit validation error on save (prompts for an integer between 1 and 100); never silently corrected |
+
+Applies to raw log search only. Aliyun ignores this setting when the query contains SQL.
 </Accordion>
 
 <Accordion title="Debug Parameters">

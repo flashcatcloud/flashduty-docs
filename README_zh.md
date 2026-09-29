@@ -3,7 +3,7 @@
 [English](https://github.com/flashcatcloud/flashduty-docs/blob/main/README.md) | 中文
 
 [![Mintlify](https://img.shields.io/badge/Built_with-Mintlify-8B5CF6?style=flat-square)](https://mintlify.com/)
-[![Docs](https://img.shields.io/badge/Live-docs.flashcat.cloud-blue?style=flat-square)](https://docs.flashcat.cloud)
+[![Docs](https://img.shields.io/badge/Live-docs.flashduty.com-blue?style=flat-square)](https://docs.flashduty.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 [Flashduty](https://flashcat.cloud/) 官方文档站，中英双语，基于 [Mintlify](https://mintlify.com/) 构建。覆盖 On-call 故障管理、RUM 真实用户监控、Monitors 告警规则三大产品模块，共 **390+** 页文档。
@@ -131,7 +131,7 @@ flashduty-docs/
 
 | 资源 | 链接 |
 |------|------|
-| Flashduty 文档站 | [docs.flashcat.cloud](https://docs.flashcat.cloud) |
+| Flashduty 文档站 | [docs.flashduty.com](https://docs.flashduty.com) |
 | Flashduty 控制台 | [console.flashcat.cloud](https://console.flashcat.cloud/) |
 | Flashduty 官网 | [flashcat.cloud](https://flashcat.cloud/) |
 | MCP Server | [flashduty-mcp-server](https://github.com/flashcatcloud/flashduty-mcp-server) |

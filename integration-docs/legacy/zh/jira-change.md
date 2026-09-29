@@ -2,7 +2,7 @@
 title: "Jira 事件集成指引"
 description: "通过 webhook 的方式同步 Jira Issue 事件到 Flashduty，实现变更事件收集。"
 date: "2025-05-19T10:00:00+08:00"
-url: "https://docs.flashcat.cloud/zh/flashduty/jira-integration-guide"
+url: "https://docs.flashduty.com/zh/flashduty/jira-integration-guide"
 ---
 
 通过 webhook 的方式同步 Jira Issue 事件到 Flashduty，实现变更事件收集。

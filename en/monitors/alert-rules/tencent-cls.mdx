@@ -1,0 +1,84 @@
+---
+title: "Tencent CLS"
+description: "Configure alert rules for Tencent Cloud Log Service (CLS) data sources"
+---
+
+Monitors retrieves data through the Tencent Cloud Log Service (CLS) search and analysis APIs and triggers alerts based on query results. Each query locates logs by "region + log topic"; the query mode supports raw log search (raw) and SQL analysis (analysis).
+
+## Core Concepts
+
+| Config Item | Description |
+|--------|------|
+| **Query Resource** | Each query must specify `tencent_cls.region` (region) and `tencent_cls.topic_id` (log topic); logsets are used only for filtering in the UI and are neither saved nor executed |
+| **Query Mode** | `raw` log search returns log lines; `analysis` SQL analysis returns aggregated rows. The backend executes exactly what is stored and never infers it from the expression |
+| **Search Syntax** | Raw log search uses the syntax set by `tencent_cls.syntax`: `CQL` or `Lucene` |
+| **Time Range** | Controlled by parameters; no need to write time filters in the query statement |
+| **Execution Identifier** | Only the log topic ID is used at execution time; the topic name is for display only |
+
+## Query Parameters
+
+| Parameter | Description | Default |
+|------|------|--------|
+| `tencent_cls.region` | (Required) Region code, e.g., `ap-guangzhou`. Changing the region clears the selected log topic | `ap-guangzhou` |
+| `tencent_cls.topic_id` | (Required) Log topic ID. You can search by name or paste the ID directly | - |
+| `tencent_cls.query_mode` | Query mode: `raw` log search / `analysis` SQL analysis | `raw` |
+| `tencent_cls.syntax` | Search syntax: `CQL` / `Lucene`, used for raw log search | `cql` |
+| `tencent_cls.timespan.value` | Time span value | `15` |
+| `tencent_cls.timespan.unit` | Time span unit: `s` (seconds), `m` (minutes), `h` (hours), `d` (days) | `m` |
+| `tencent_cls.limit` | Maximum number of returned rows, raw mode only, 1-100 | `1` |
+
+The region dropdown offers a list of commonly used regions (e.g., ap-guangzhou, ap-shanghai, ap-beijing); it is a suggestion, not a whitelist. You can also type a region code that is not on the list. A region code must start with a lowercase letter, contain only lowercase letters, digits, and hyphens, include at least one hyphen (for example, `ap-nanjing` or `na-siliconvalley`), and be at most 64 characters long.
+
+<Warning>
+**Tencent Cloud finance zones are not supported.** Regions ending in `-fsi` (for example, `ap-shanghai-fsi`) are rejected outright — both saving and previewing fail. This is a Flashduty-side restriction, not a Tencent Cloud one.
+</Warning>
+
+Once a region code passes the shape check above, whether the region actually exists and whether your key has permission in it are still decided by Tencent Cloud.
+
+## Query Modes
+
+### Raw Log Search (raw)
+
+Searches logs with CQL or Lucene syntax and returns matching log lines. Each returned line can produce one alert.
+
+- The time window is capped at **6 hours**.
+- `tencent_cls.limit` controls the maximum number of log lines returned by a single query; you can set 1-100. New rules store `1` by default, and Edge also uses 1 when the parameter is absent.
+- The query editor disables keyword autocompletion: raw mode is CQL/Lucene, and SQL keyword suggestions would only mislead.
+
+### SQL Analysis (analysis)
+
+Aggregates logs with SQL and returns aggregated rows, suitable for threshold and data-exists evaluation.
+
+- The time window is capped at **24 hours**.
+- `tencent_cls.limit` is not allowed; including it is rejected by the backend.
+
+## Time Range
+
+The default query window is the last 15 minutes (`tencent_cls.timespan.value=15`, `tencent_cls.timespan.unit=m`). The time window limit depends on the query mode: up to 6 hours for raw log search and 24 hours for SQL analysis. Exceeding the limit is reported by the form immediately ("The time window cannot exceed N hours") rather than at save time.
+
+## Data Source and Topic Requirements
+
+### Single Data Source Binding
+
+Tencent CLS rules can bind exactly **one data source** and do not support name patterns. When creating a rule, the data source picker is single-select and the name-pattern input is hidden. An invalid configuration is rejected on save with "This data source type can bind only one data source" or "This data source type does not support name patterns. Clear them and pick one data source."
+
+### Topic Index Requirement
+
+A log topic must have indexing enabled for search and SQL analysis to return results. Topics without indexing are tagged "Index not enabled" in the topic list; after you select such a topic, the editor warns: "This topic has no index configured, so neither search nor SQL analysis will return results. Configure an index in the Tencent Cloud console first." Queries against such topics keep returning empty results.
+
+### Topic ID Execution
+
+The topic picker supports searching by name or pasting a topic ID directly. Only the topic ID is saved into the rule and used at execution time; the logset filter is display-only and never saved. When editing an existing rule whose topic has been deleted, the UI reports "Topic does not exist or has been deleted" and you need to pick a topic again.
+
+## No Data Detection
+
+Tencent CLS does not support per-series no-data detection:
+
+- Only one condition card is supported: "**Alert when all queries return no data**".
+- The "Alert if previously found data is now missing" option is not available — enabling it submits `check_nodata.enabled`, which the backend rejects with a 400 — so the card does not appear in the UI.
+- The **recovery mode** is not configurable: there are no options, and the engine fixes it to "Recovers automatically once any query returns data again", shown as read-only text in the UI. "Manual close only" does not exist here — the recovery-mode dropdown (`End automatically when data reappears` / `End when data reappears or the timeout expires` / `Manual close only`) is rendered only inside the per-series card, which never appears for CLS rules, so none of the three is selectable.
+
+## Recovery Queries and Related Queries
+
+- **Recovery queries**: With "Recover when the expression matches" in threshold mode or "Recover when the recovery query returns data" in data-exists mode, the recovery query needs the same region, topic, and query-mode parameters, and is evaluated like the main query.
+- **Related queries**: Related queries support the same Tencent CLS parameters and can attach related information to alerts.

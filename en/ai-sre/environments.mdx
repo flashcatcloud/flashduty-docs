@@ -6,7 +6,7 @@ sidebarTitle: Environments
 ---
 
 <Info>
-  **Private beta**: AI SRE is currently in private beta. Pro or higher accounts can apply for free beta access through the [AI SRE private beta application form](https://c9xudyniiq.feishu.cn/share/base/form/shrcn0ngCfdoygiaHnAT80BfZiH); after approval, Flashduty will add your account to the whitelist. Features and the UI may change during the beta.
+  AI SRE is available to accounts on an On-call Pro or higher subscription, with no application needed. Starting September 16, 2026, 08:00 Beijing time, it must be activated in the console before use and is billed on actual usage; see [billing terms](/en/compliance/ai-sre-credit-package-purchase-agreement).
 </Info>
 
 ## Overview
@@ -26,7 +26,7 @@ AI SRE provides two types of Environments:
   </Card>
 </CardGroup>
 
-The default selection logic is: **AI SRE uses an online BYOC Runner that the current member can use first; otherwise it uses the cloud Sandbox.** Usable Runners include account-scoped Runners and team-scoped Runners that belong to one of the current member's teams. You can also pin a session to the cloud Sandbox, or to a specific Runner, from the environment selector in the chat input.
+The default selection logic is: **AI SRE uses an online BYOC Runner that the current member can use first; otherwise it uses the cloud Sandbox.** Usable Runners include Shared-scope (account-level) Runners and team-scoped Runners that belong to one of the current member's teams. You can also pin a session to the cloud Sandbox, or to a specific Runner, from the environment selector in the chat input.
 
 <Note>
 The console record is called an **Environment**. The process running on your machine is called a **Runner**. One BYOC Environment maps to one Runner process; cloud Sandbox instances are managed by the system per session.
@@ -50,6 +50,38 @@ The cloud Sandbox cannot reach your VPC, dedicated line, private databases, priv
 </Warning>
 
 For lifecycle, egress boundaries, and session-selection details, see [Sandbox](/en/ai-sre/sandbox).
+
+## Cloud environment templates
+
+---
+
+A cloud environment template is a reusable, predefined configuration for the Flashduty-managed cloud Sandbox: egress policy, environment variables, and a setup script. If a session's cloud Sandbox has no template bound, it starts with the system default configuration; once a template is bound, new Sandboxes start with that template's configuration.
+
+Go to **Environments** in the AI SRE sidebar and switch to the **Cloud** tab at the top to view, create, edit, or delete cloud environment templates.
+
+### Create a cloud environment template
+
+| Field | Required | Description |
+|---|---|---|
+| Name | Yes | Must be unique within the account, up to 128 characters. |
+| Scope | Yes | Shared-scope templates are visible to the whole account. Team-scoped templates are visible and editable only by that team. |
+| Network access | No, defaults to "Allow all" | The dropdown shows three options — "Default allowlist," "Custom (your domain list)," and "Allow all" — but currently only **"Allow all"** can be selected. "Default allowlist" and "Custom" are shown in the UI but disabled; this is a known limitation, not yet available. In other words, creating or editing a cloud environment template today always leaves the Sandbox it's bound to with fully open egress. |
+| Environment variables | No | `.env` format (`KEY=value`, one per line, multi-line quoted values supported), up to 32 KB, with a live byte counter in the UI. |
+| Setup script | No | A Bash script, up to 64 KB, with a live byte counter in the UI. |
+
+<Warning>
+Environment variables are visible in plaintext to everyone who uses this cloud environment template — do not put secrets or credentials here.
+</Warning>
+
+The setup script runs inside a **fresh sandbox (Ubuntu 24.04, running as root)**, **before the agent starts** — typically used to `apt install` packages the agent needs.
+
+### Delete a cloud environment template
+
+Deleting a cloud environment template does not affect sessions currently using it — bound sessions fall back to the system default configuration and keep working; new Sandboxes created afterward use the system default configuration.
+
+<Note>
+Cloud environment templates only configure egress, environment variables, and the setup script for the **cloud Sandbox**. BYOC Runner egress is governed by your own machine and firewall — see [BYOC Runner](#byoc-runner) below. For the cloud Sandbox's own lifecycle and egress boundary, see [Sandbox](/en/ai-sre/sandbox).
+</Note>
 
 ## BYOC Runner
 
@@ -82,7 +114,7 @@ Go to **Environments** in the AI SRE sidebar and create a self-hosted Environmen
 | Field | Required | Description |
 |---|---|---|
 | Name | No | Unique within the account, up to 128 characters. If left blank, the first Runner heartbeat auto-fills it with the machine hostname; if that hostname already exists, the Environment ID suffix is appended. |
-| Scope | Yes | Account scope is visible to the whole account. Team scope is visible and editable only by that team. See [Scope](#scope). |
+| Scope | Yes | Shared scope is visible to the whole account. Team scope is visible and editable only by that team. Scope is fixed when you create the Environment and cannot be changed later; to move it, create another Environment in the target scope and deploy a Runner again. See [Scope](#scope). |
 | Tags | No | Tags used for task routing, comma-separated, for example `linux, docker, gpu`. |
 
 After creation, the **setup guide** opens with this Environment's Token, install command, upgrade command, and uninstall command. The key button on a list row, or the "Setup guide" entry for a pending row, opens the same modal.
@@ -110,6 +142,7 @@ The setup guide automatically fills in the real `TOKEN` and `URL`. The examples 
     ```bash
     docker run -d \
       --name flashduty-runner \
+      --restart=always \
       -e FLASHDUTY_RUNNER_TOKEN=<your-token> \
       -e FLASHDUTY_RUNNER_URL=<connect-url> \
       -v /var/flashduty/workspace:/workspace \
@@ -117,6 +150,8 @@ The setup guide automatically fills in the real `TOKEN` and `URL`. The examples 
     ```
 
     Docker access depends on container mounts. If the Runner needs kubeconfig, cloud CLI credentials, or the Docker socket, add the required `-v` / `-e` options before the image name.
+
+    The `--restart=always` flag brings the container back up automatically after a host reboot; if the container is already running, run `docker update --restart=always flashduty-runner` to apply the same restart policy without recreating it.
   </Tab>
   <Tab title="Manual / macOS">
     Install the binary first, then start the process manually:
@@ -136,6 +171,62 @@ The setup guide automatically fills in the real `TOKEN` and `URL`. The examples 
 <Note>
 Both `connect-url` and `install_script_url` are returned by the backend; the frontend does not hardcode them. Private or air-gapped deployments can replace the install-script distribution source with an internal mirror, but the mirror must serve `install.sh`, `releases/latest`, and `releases/download/<version>/...` release assets.
 </Note>
+
+### Connect to a private endpoint with a self-signed certificate
+
+By default, Runner verifies the certificate chain and hostname of its control WebSocket. If a private deployment uses a self-signed certificate, prefer adding its CA to the trust store of the Runner host or container. Disable verification only when you cannot install the CA and the endpoint is inside a trusted private network.
+
+| Configuration | Value | Default | Description |
+|---|---|---|---|
+| Environment variable | `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true` | `false` | Works with systemd, Docker, and other process managers |
+| Command-line flag | `--insecure-skip-tls-verify` | Disabled | Intended for manual runs; command-line flags take precedence over environment variables |
+
+<Tabs>
+  <Tab title="Linux (systemd)">
+    Edit `/etc/flashduty-runner/env` and add the private endpoint and TLS setting:
+
+    ```bash
+    FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws
+    FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true
+    ```
+
+    Restart Runner so it loads the new environment variables:
+
+    ```bash
+    sudo systemctl restart flashduty-runner
+    ```
+  </Tab>
+  <Tab title="Docker">
+    Pass the environment variable when you create the container:
+
+    ```bash
+    docker run -d \
+      --name flashduty-runner \
+      --restart=always \
+      -e FLASHDUTY_RUNNER_TOKEN=<your-token> \
+      -e FLASHDUTY_RUNNER_URL=wss://private.example.com/safari/environment/ws \
+      -e FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY=true \
+      -v /var/flashduty/workspace:/workspace \
+      registry.flashcat.cloud/public/flashduty-runner:latest
+    ```
+  </Tab>
+  <Tab title="Manual / macOS">
+    Pass the command-line flag at startup:
+
+    ```bash
+    flashduty-runner run \
+      --token <your-token> \
+      --url wss://private.example.com/safari/environment/ws \
+      --insecure-skip-tls-verify
+    ```
+
+    If the environment variable is already set to `true`, pass `--insecure-skip-tls-verify=false` to explicitly restore certificate verification.
+  </Tab>
+</Tabs>
+
+<Warning>
+When enabled, Runner no longer verifies the certificate chain or hostname of the control WebSocket, so an attacker could impersonate the control endpoint. This setting affects only the Runner-to-AI-SRE control WebSocket. It does not change TLS settings for MCP, A2A, or other HTTPS requests made during task execution. Runner logs an explicit warning at startup when verification is disabled.
+</Warning>
 
 ### Linux service user
 
@@ -167,22 +258,39 @@ After the Runner starts, it continuously sends heartbeats. List statuses mean:
 |---|---|
 | Pending | The Environment exists, but the Runner has never connected. |
 | Online | The Runner is currently connected, heartbeat is healthy, and it can accept work. |
+| Degraded | The Runner is still connected and its heartbeat is healthy, but its executor can't keep up — tasks are queuing up or taking too long to return. **You can keep using it, but responses will be slower**. |
 | Offline | The Runner connected before, but its heartbeat is currently lost. |
 
-The backend compares Runner versions during heartbeats. When a newer version is available, the Runner receives an upgrade notification and downloads, verifies, and replaces itself. Re-running the install command also upgrades manually. Uninstall commands are in the setup guide: `--uninstall` removes the service while preserving config, and `--purge` removes config and data.
+`degraded` is computed **in real time** and isn't persisted: it's re-evaluated from current signals on every read, so it never needs to be manually cleared. It's driven by two kinds of signal —
+
+- newer Runner versions report their own executor health probe and backlog count in the heartbeat, and degraded is judged directly from those;
+- older Runner versions that don't report these metrics use a fallback rule instead: **3 consecutive** task timeouts against the same Environment mark it degraded (only timeouts longer than 20 seconds count, so a caller's own short timeout isn't misjudged).
+
+Recovery is automatic too: for newer Runner versions, the status returns to `Online` as soon as the heartbeat is healthy again (probe passes and no backlog); for older Runner versions, any single successful task resets the counter, or it recovers automatically after 30 minutes of sustained quiet.
+
+<Tip>
+When you see `Degraded`, first check CPU, memory, and disk load on the Runner's host, and whether a long-running task is monopolizing the executor. It doesn't block the session, but staying in this state for a while means that host can't keep up with its current task volume.
+</Tip>
+
+The backend compares Runner versions during heartbeats. When a newer version is available, the Runner receives an upgrade notification and downloads, verifies, and replaces itself. Re-running the install command also upgrades manually.
+
+Uninstall commands are also in the setup guide, and differ by installation method:
+
+- **Linux (systemd) / manual install**: the install script's `--uninstall` flag (removes the service while preserving config) and `--purge` flag (removes config and data).
+- **Docker install**: uninstalling is a container command, unrelated to the install script's flags — `docker rm -f flashduty-runner` (removes the container, keeps the `/var/flashduty/workspace` data) and `docker rm -f flashduty-runner && rm -rf /var/flashduty/workspace` (full removal, including the workspace data).
 
 ## Permission Configuration
 
 ---
 
-By default, Runner uses an allow-all rule:
+By default, Runner uses an allow-all rule — the same trust model as running the AI model directly in your own shell:
 
 ```yaml
 permission:
   "*": "allow"
 ```
 
-When you want to narrow which commands the Runner may execute, create a YAML file on the Runner machine and point the Runner to it with `--permission-config` or `FLASHDUTY_RUNNER_PERMISSION_CONFIG`. Permission configuration is a local Runner file; it is not edited in the console form.
+When you want to narrow which commands the Runner may execute, create a YAML file on the Runner machine and point the Runner to it with the `--permission-config` flag or the `FLASHDUTY_RUNNER_PERMISSION_CONFIG` environment variable. Permission configuration is a local Runner file; it is not edited in the console form.
 
 For a Linux (systemd) install, add this to `/etc/flashduty-runner/env`:
 
@@ -204,51 +312,9 @@ flashduty-runner run \
   --permission-config /etc/flashduty-runner/permission.yaml
 ```
 
-A common read-only troubleshooting config looks like this:
-
-```yaml
-permission:
-  "*": "deny"
-  "kubectl get *": "allow"
-  "kubectl describe *": "allow"
-  "kubectl logs *": "allow"
-  "ls": "allow"
-  "ls *": "allow"
-  "cat *": "allow"
-  "head *": "allow"
-  "tail *": "allow"
-  "grep *": "allow"
-  "pwd": "allow"
-  "whoami": "allow"
-  "date": "allow"
-```
-
-Rule semantics:
-
-- `permission` is the top-level key; beneath it is a flat `glob pattern: allow|deny` map;
-- when no config file is set, Runner allows all commands;
-- once a config file is set, a missing file, invalid YAML, or empty `permission` map makes Runner refuse to start, avoiding an accidental fallback to allow-all;
-- commands are matched after shell normalization, so spacing differences do not affect matching;
-- rules are ordered by specificity: the longer literal prefix before `*` wins, and `*` is always the fallback;
-- Runner checks commands inside pipelines, command substitution, process substitution, and arithmetic expansion;
-- write redirects are checked as synthetic commands such as `> /path`, `>> /path`, and `&> /path`; read redirects are not blocked by themselves.
-
 <Tip>
 Permission configuration loads at Runner startup. Restart the Runner after editing the YAML file.
 </Tip>
-
-## Permission Configuration
-
----
-
-By default, the Runner allows any command — the same trust model as running the AI model directly in your own shell. If you need to restrict which commands the Runner may execute, point it at a YAML rules file with the `--permission-config` flag or the `FLASHDUTY_RUNNER_PERMISSION_CONFIG` environment variable:
-
-```bash
-flashduty-runner run --token <your-token> --permission-config /etc/flashduty-runner/permission.yaml
-
-# Or via environment variable
-export FLASHDUTY_RUNNER_PERMISSION_CONFIG=/etc/flashduty-runner/permission.yaml
-```
 
 The rules file's top-level key is `permission`, mapping **glob patterns to `allow`/`deny`**:
 
@@ -260,11 +326,14 @@ permission:
   "cat *": "allow"
 ```
 
-- Rules apply everywhere a command can appear — inside pipelines (`cmd1 | cmd2`), `$(...)`/backtick command substitution, process substitution, and write-redirect targets (so `echo x > /etc/passwd` is gated the same way as running a command).
-- **The most specific rule wins**: the pattern with the longest literal prefix before its first `*` is tried first; the catch-all `"*"` is always tried last, and the first matching rule applies.
-- The file is loaded **once, at Runner startup** — edit the rules and restart the Runner for changes to take effect; there is no hot reload.
-- If the flag/env var is set but the file is missing, malformed, or defines no rules under the `permission` key, the Runner **refuses to start** (fails closed) rather than silently allowing every command: pointing the Runner at a permission config is a deliberate request to restrict it, so a broken config should surface as an error, not a silent security gap.
-- Leaving the flag/env var unset is the default and is equivalent to allowing all commands.
+Rule semantics:
+
+- Leaving `--permission-config` / `FLASHDUTY_RUNNER_PERMISSION_CONFIG` unset is the default and is equivalent to allowing all commands;
+- rules apply everywhere a command can appear — inside pipelines (`cmd1 | cmd2`), `$(...)`/backtick command substitution, process substitution, arithmetic expansion, and write-redirect targets (so `echo x > /etc/passwd` is gated the same way as running a command; read redirects are not blocked by themselves);
+- commands are matched after shell normalization, so spacing differences do not affect matching;
+- **the most specific rule wins**: the pattern with the longest literal prefix before its first `*` is tried first; the catch-all `"*"` is always tried last, and the first matching rule applies;
+- the file is loaded **once, at Runner startup** — edit the rules and restart the Runner for changes to take effect; there is no hot reload;
+- if the flag/env var is set but the file is missing, malformed, or defines no rules under the `permission` key, the Runner **refuses to start** (fails closed) rather than silently allowing every command: pointing the Runner at a permission config is a deliberate request to restrict it, so a broken config should surface as an error, not a silent security gap.
 
 <AccordionGroup>
 <Accordion title="Strict mode (recommended for shared environments)" icon="lock">
@@ -300,11 +369,15 @@ permission:
   "cat *": "allow"
   "head *": "allow"
   "tail *": "allow"
+  "ls": "allow"
   "ls *": "allow"
   "grep *": "allow"
   "ps *": "allow"
   "df *": "allow"
   "free *": "allow"
+  "pwd": "allow"
+  "whoami": "allow"
+  "date": "allow"
 ```
 </Accordion>
 </AccordionGroup>
@@ -312,6 +385,15 @@ permission:
 <Note>
 Command permission is currently configured only through this file — there is no console UI for it yet.
 </Note>
+
+### File-system boundary
+
+Permission configuration governs **commands**; the agent's **file read/write tools** follow their own path semantics, matching `bash`:
+
+- **Relative paths** are confined to the workspace root with symlink-escape protection — through a relative path the agent can only read and write files inside the workspace.
+- **Absolute paths** are passed through to the host filesystem by design, matching `bash`.
+
+So the real file-access boundary is the **OS user** the Runner runs as, plus the deployment isolation (the systemd user and directory protections, or Docker mounts and container boundary) — not the permission configuration file.
 
 ## Selecting an environment in a session
 
@@ -323,7 +405,7 @@ The environment selector at the bottom of the chat input decides where a new ses
 |---|---|
 | **Auto** | The default for new sessions. Uses an online Runner the current member can use; otherwise falls back to the cloud Sandbox. |
 | **Cloud Sandbox · Default** | Forces the system-managed cloud Sandbox and ignores self-hosted Runners. |
-| **Self-hosted Environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected. |
+| **Self-hosted Environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected; Runners in **Degraded** status **remain selectable**, and selecting one shows a "Degraded — you can continue, but responses may be slower" notice. |
 
 <Warning>
 Environment selection is locked once per session: the Environment determined when the session sends its first message is recorded and reused for all later turns. Changing the selector afterward does not change that session. To switch environments, start a new session.
@@ -335,21 +417,21 @@ When you open a historical session, the selector shows the Environment that sess
 
 ---
 
-Each BYOC Environment has account-level or team-level scope:
+Each BYOC Environment has Shared or team-level scope:
 
 | Scope | Visibility |
 |---|---|
-| Account | Visible, selectable, and usable by all members in the account. |
+| Shared | Visible, selectable, and usable by all members in the account. |
 | Team | Visible, editable, selectable, and usable only by members of that team. |
 
 Edit permissions follow the unified rule:
 
-1. Account owners and account admins can edit any Environment.
-2. Team members can edit team-scoped Environments for their team.
+1. Team-scoped Environments can be acted on only by members of that team — organization admins must join the team first.
+2. Shared-scope Environments can be acted on only by organization admins.
 3. There is no "creator extra permission"; you do not need to be the creator if the rules above allow the edit.
 
 <Note>
-The account remains the runtime security boundary, but team scope also participates in Runner selection. When the system auto-selects a Runner, or when a session is pinned to a Runner by ID, it only uses account-scoped Runners or team-scoped Runners that belong to one of the current member's teams. This prevents a member from landing a session on a team Runner they cannot use.
+The account remains the runtime security boundary, but team scope also participates in Runner selection. When the system auto-selects a Runner, or when a session is pinned to a Runner by ID, it only uses Shared-scope Runners or team-scoped Runners that belong to one of the current member's teams. This prevents a member from landing a session on a team Runner they cannot use.
 </Note>
 
 ## Troubleshooting
@@ -364,6 +446,9 @@ When troubleshooting Runner issues, start with the **Status** and **Last heartbe
 </Accordion>
 <Accordion title="Runner stays Pending" icon="wrench">
   Pending means this Environment has never connected successfully. Confirm that the install command completed, the Token belongs to this Environment, and the `URL` is reachable from the target machine. If you configured permissions, also confirm that the file exists and the YAML parses.
+</Accordion>
+<Accordion title="Logs show certificate signed by unknown authority" icon="shield-xmark">
+  The private endpoint's certificate is not trusted by Runner. Prefer adding the CA that issued the certificate to the trust store of the Runner host or container. If the endpoint uses a self-signed certificate inside a trusted private network, you can instead explicitly enable `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY` as described above. Restart the service for a systemd deployment, recreate the container with the new environment variable for Docker, or restart the process for a manual deployment.
 </Accordion>
 <Accordion title="Session times out or does not respond" icon="server">
   If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment. Restore that Runner, or start a new session and choose Auto or cloud Sandbox. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.

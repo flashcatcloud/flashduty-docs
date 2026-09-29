@@ -2,7 +2,7 @@
 title: "Jira Issue Events"
 description: "Sync Jira Issue events to Flashduty via webhooks to collect change events."
 date: "2025-05-19T10:00:00+08:00"
-url: "https://docs.flashcat.cloud/en/flashduty/jira-integration-guide"
+url: "https://docs.flashduty.com/en/flashduty/jira-integration-guide"
 ---
 
 Synchronize Jira Issue events to Flashduty via webhooks to collect change events.

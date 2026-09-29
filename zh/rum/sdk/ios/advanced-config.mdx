@@ -370,12 +370,38 @@ configuration.trackBackgroundEvents = YES;
 | `trackBackgroundEvents` | Bool | 可选 | 是否追踪后台事件，默认 `false` |
 | `trackFrustrations` | Bool | 可选 | 是否追踪用户挫败感（如错误点击），默认 `true` |
 | `trackLongTasks` | Bool | 可选 | 是否追踪长任务，默认 `true` |
+| `longTaskThreshold`       | TimeInterval               | 否   | 长任务阈值（秒），默认 0.1 秒                                     |
+| `appHangThreshold`        | TimeInterval?              | 否   | App Hang 检测阈值（秒），**默认 `nil`，即不开启**，详见下方说明   |
+| `vitalsUpdateFrequency`   | VitalsFrequency            | 否   | 性能指标更新频率，可选：`.frequent`、`.average`、`.rare`、`.never` |
 
 </Accordion>
 
 </AccordionGroup>
-| `longTaskThreshold`       | TimeInterval               | 否   | 长任务阈值(秒),默认 0.1 秒                                        |
-| `vitalsUpdateFrequency`   | VitalsFrequency            | 否   | 性能指标更新频率,可选: `.frequent`, `.average`, `.rare`, `.never` |
+
+### App Hang 检测
+
+App Hang 指主线程被阻塞、界面无法响应用户操作的时间段。在 iOS 应用中，它是分析看板**无响应时长率**指标的唯一数据来源。
+
+<Warning>
+`appHangThreshold` **默认为 `nil`，即 App Hang 检测处于关闭状态**。不显式配置该参数，iOS 应用不会上报任何 App Hang 数据，分析看板中的「无响应时长率」将始终为空。
+</Warning>
+
+```swift
+RUM.enable(
+    with: RUM.Configuration(
+        applicationID: "<APPLICATION_ID>",
+        appHangThreshold: 0.25    // 超过 250ms 的主线程阻塞会被记录
+    )
+)
+```
+
+配置要点：
+
+- 最小允许值为 `0.1` 秒，低于该值会被自动提升到 0.1 秒。生产环境建议 **0.25–0.5 秒**：阈值过低会产生大量噪音数据。
+- SDK 以 2.5% 的容差检测，持续时间非常接近阈值的卡顿可能不会被上报。
+- 需要同时开启崩溃采集，否则 App Hang 错误不会带上堆栈信息。
+- 挂死到应用被系统终止的 App Hang 会被记为致命错误，计入崩溃次数并影响无崩溃率；未致命的 App Hang 只记为 `error.category = App Hang` 的错误。
+- Android 侧无对应配置项：主线程冻结的判定阈值固定为 5 秒。
 
 ### 自动追踪视图
 
@@ -566,7 +592,7 @@ DDRUMConfiguration *configuration = [[DDRUMConfiguration alloc] initWithApplicat
 }];
 ```
 
-从 error、resource 或 action 映射器返回 `nil` 将完全丢弃该事件;该事件不会发送到 Flashduty。从 view 事件映射器返回的值不能为 `nil`（要丢弃视图,请自定义 `UIKitRUMViewsPredicate` 的实现;详见[追踪视图自动化](https://docs.flashcat.cloud/zh/flashduty/rum/ios-sdk-integration#自动追踪视图)）。
+从 error、resource 或 action 映射器返回 `nil` 将完全丢弃该事件;该事件不会发送到 Flashduty。从 view 事件映射器返回的值不能为 `nil`（要丢弃视图,请自定义 `UIKitRUMViewsPredicate` 的实现;详见[追踪视图自动化](https://docs.flashduty.com/zh/flashduty/rum/ios-sdk-integration#自动追踪视图)）。
 
 根据事件的类型,只有某些特定的属性可以被修改:
 
@@ -700,6 +726,57 @@ configuration.sessionSampleRate = 90;
 ```
 
 被采样的会话将不收集任何视图及其相关遥测数据。
+
+## 远程配置
+
+SDK 0.6.0 起，会话采样率可以在控制台 **应用管理 > 远程配置** 页签在线调整，无需改代码、重新发版。该功能默认关闭，需要在初始化时开启：
+
+```swift
+import DatadogRUM
+
+RUM.enable(
+    with: RUM.Configuration(
+        applicationID: "<RUM_APPLICATION_ID>",
+        sessionSampleRate: 100,             // 控制台未下发时使用的采样率
+        remoteConfigurationEnabled: true
+    )
+)
+```
+
+```objective-c
+@import DatadogObjc;
+
+DDRUMConfiguration *configuration = [[DDRUMConfiguration alloc] initWithApplicationID:@"<RUM_APPLICATION_ID>"];
+configuration.remoteConfigurationEnabled = YES;
+
+[RUM enableWith:configuration];
+```
+
+开启后的行为：
+
+- SDK 在 `RUM.enable()` 时向 RUM 接入端点请求一次配置，之后每次新建会话时再请求。控制台发布的采样率对**下一个新会话**生效，进行中的会话不受影响。
+- 下发的值会持久化到本地，冷启动后的第一个会话即按上次下发的采样率抽样。
+- 请求失败、超时或响应无法识别时，沿用已生效的值，不会清空；控制台停用远程配置后，恢复使用初始化时的 `sessionSampleRate`。
+- iOS SDK 只读取**会话采样率**与**自定义配置项**两项，其余配置项不生效。自定义配置项可通过 `RUMMonitor.shared().getRemoteConfig()` 读取，未开启远程配置或控制台未设置时返回 `nil`。
+
+需要按业务规则决定采样时，可通过 `beforeSampling` 回调干预：每次新建会话时，它收到即将生效的采样率（`sessionSampleRate`）与控制台的自定义配置项（`custom`），返回新的采样率即可覆盖，返回 `nil` 表示不干预。回调在会话创建过程中同步执行，需保持轻量、不可阻塞；返回 0–100 以外的值会被忽略。
+
+```swift
+RUM.enable(
+    with: RUM.Configuration(
+        applicationID: "<RUM_APPLICATION_ID>",
+        remoteConfigurationEnabled: true,
+        beforeSampling: { context in
+            // 例如：内部账号全量采集，其余沿用控制台下发的采样率
+            isInternalUser ? 100 : nil
+        }
+    )
+)
+```
+
+若要不受采样率限制地采集当前用户（例如排查特定用户的问题），可调用 `RUMMonitor.shared().setForcedSession()`：此后新建的会话一律采集，直到进程结束；已在进行中的会话不会被重新判定。
+
+控制台侧的配置项、发布与生效方式见 [应用管理 · 远程配置](/zh/rum/quickstart/app-management)。
 
 ## 集成 RUM 与分布式追踪
 

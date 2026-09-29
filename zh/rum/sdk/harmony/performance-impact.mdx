@@ -1,0 +1,137 @@
+---
+title: "HarmonyOS SDK 性能影响"
+description: "了解 Flashduty HarmonyOS RUM SDK 对应用 CPU、内存、启动时间、包体积和网络使用的影响，以及性能优化建议。"
+keywords: ["HarmonyOS SDK", "性能影响", "RUM", "性能优化", "内存使用", "CPU"]
+---
+
+## 概述
+
+在将任何 SDK 集成到 HarmonyOS 应用时，了解其性能影响对于维护良好的用户体验至关重要。Flashduty RUM SDK 在设计时充分考虑了性能因素：纯 ArkTS 实现、按功能拆分为独立模块，并对各项资源占用设置了明确上限。
+
+<Check>
+SDK 的事件落盘与上传均为异步操作并批量执行，不会同步阻塞 UI 线程。
+</Check>
+
+## 性能基准
+
+HarmonyOS SDK 采用模块化设计，五个模块均为纯 ArkTS 实现，不包含 native 库，因此没有多 ABI 带来的体积放大问题。各模块的 HAR 包大小实测如下：
+
+| 模块 | HAR 包大小 | 说明 |
+| --- | --- | --- |
+| `@flashcatcloud/core` | 约 42 KB | 核心：初始化、批处理、上传 |
+| `@flashcatcloud/rum` | 约 44 KB | RUM 核心功能（view/action/resource/error） |
+| `@flashcatcloud/trace` | 约 16 KB | 链路追踪与网络请求追踪 |
+| `@flashcatcloud/crash` | 约 27 KB | 崩溃和卡死采集 |
+| `@flashcatcloud/axios` | 约 9 KB | `@ohos/axios` 请求追踪 |
+
+按接入口径汇总：
+
+| 接入口径 | HAR 包大小合计 |
+| --- | --- |
+| 基础 RUM（`core` + `rum`） | 约 86 KB |
+| 全量五模块 | 约 137 KB |
+
+<Note>
+以上数据基于 HarmonyOS SDK 0.5.1 在 OHPM 上架的 HAR 产物测得。HAR 为压缩归档格式，实际应用安装包的增量还会受编译方式和混淆配置影响。
+
+运行时开销（CPU、内存、启动时间）与设备性能、事件量和 SDK 配置强相关，下文按机制说明各项开销的来源与上限。
+</Note>
+
+### 性能影响详解
+
+<AccordionGroup>
+<Accordion title="CPU 使用率" icon="microchip">
+SDK 对 CPU 的影响主要来自：
+
+- 事件组装和落盘
+- 数据批处理和压缩
+- 网络请求上报
+
+以上均为异步操作并批量执行，不会同步阻塞 UI 线程。
+
+此外，几类在其他平台上常见的后台开销在 HarmonyOS SDK 中天然为零：
+
+- 不做 vitals 轮询采集（无定时采样任务）
+- 不做长任务（long task）检测
+- 无 SDK 内部遥测上报
+- Native 崩溃和卡死通过系统 `hiAppEvent` 在下次启动时回放采集，运行时没有额外监控开销
+</Accordion>
+
+<Accordion title="内存使用" icon="memory">
+SDK 使用有上限的内存缓冲区暂存待落盘的事件数据，缓冲区写满后自动淘汰最旧的数据，不会随时间无限增长。
+</Accordion>
+
+<Accordion title="启动时间" icon="rocket">
+SDK 初始化过程经过优化，启动时间影响控制在毫秒级。
+
+<Tip>
+建议在 `AbilityStage.onCreate` 中尽早初始化 SDK，以便捕获完整的应用启动过程。
+</Tip>
+</Accordion>
+
+<Accordion title="包体积" icon="box">
+SDK 采用模块化设计，您可以根据需要只引入必要的功能模块——不需要崩溃采集就不安装 `@flashcatcloud/crash`，不使用 `@ohos/axios` 就不安装 `@flashcatcloud/axios`。各模块体积见上文实测表。
+</Accordion>
+
+<Accordion title="网络使用" icon="wifi">
+SDK 采用以下策略优化网络使用：
+
+- **批量上报**：事件先落盘缓存，按批次发送，减少网络请求次数
+- **数据压缩**：上报正文达到 512 字符即自动启用 zlib（deflate）压缩，压缩率通常可达 5–10 倍
+- **上传节奏可控**：上传周期、批次时长和单周期批次上限均可配置，见[性能优化建议](#性能优化建议)
+</Accordion>
+</AccordionGroup>
+
+## 性能优化建议
+
+如果您对性能有特殊要求，可以考虑以下优化措施：
+
+<Steps>
+<Step title="调整采样率">
+通过配置采样率减少收集的事件数量：
+
+```ts
+import { RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
+  .setSessionSampleRate(80) // 采样 80% 的会话
+  .build();
+```
+</Step>
+
+<Step title="按需接入功能">
+只安装并启用必要的功能模块。与其他平台不同，HarmonyOS SDK 的默认配置本身就偏保守：
+
+- 交互追踪（`setTrackUserInteractions`）默认关闭，不开启则没有自动 action 采集的开销
+- vitals 采集、长任务检测、SDK 内部遥测不存在于 HarmonyOS SDK 中，无需手动关闭
+</Step>
+
+<Step title="配置上传节奏">
+如果应用自身有延迟敏感的网络请求，可以调整上传周期（`setUploadFrequency`）、批次时长（`setBatchSize`）和单周期批次上限（`setBatchProcessingLevel`），降低 SDK 上传与业务请求争抢网络的概率，且不损失任何事件。这三个参数与 Android SDK 同名同值，配置方法见[高级配置：降低上传对业务请求的影响](/zh/rum/sdk/harmony/advanced-config#降低上传对业务请求的影响)。
+</Step>
+</Steps>
+
+## 离线数据存储
+
+SDK 在设备离线时会将数据存储到本地，网络恢复后再上传。存储空间使用受到严格限制：
+
+<Check>
+- 每个功能模块的磁盘缓存上限为 4 MB，超出后最旧的数据先被清除
+- 单个批次文件上限 512 KB
+- 数据最长保留 23 小时，过期自动清理
+- 不会因缓存数据过多影响设备存储空间
+</Check>
+
+## 相关文档
+
+<CardGroup cols={2}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/harmony/sdk-integration">
+  了解如何接入 SDK
+</Card>
+<Card title="高级配置" icon="sliders" href="/zh/rum/sdk/harmony/advanced-config">
+  了解如何配置 SDK 的高级功能
+</Card>
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/harmony/data-collection">
+  了解 SDK 收集的数据类型
+</Card>
+</CardGroup>

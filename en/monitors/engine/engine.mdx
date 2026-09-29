@@ -55,6 +55,12 @@ The page automatically generates install and upgrade commands based on your sele
 </Step>
 </Steps>
 
+<Note>
+The Linux install and upgrade commands fetch the install script from `https://static.flashcat.cloud/monitedge/install.sh`. The script is hosted on a public CDN (Aliyun OSS), requires no `Referer` header, and is refreshed with every stable release; the script URL in the generated command is fixed, and there is no parameter to point it at a different script source.
+
+Offline or intranet deployments must mirror `install.sh` together with the `releases/download/<vX.Y.Z>/` artifacts and `checksums.txt` it references, and replace the script URL in the command. The artifact download URL inside the script is not parameterized, so a mirror path that differs from the public one requires adapting the script itself.
+</Note>
+
 ### Deployment method comparison
 
 | Deployment Method | Use Case |
@@ -62,6 +68,25 @@ The page automatically generates install and upgrade commands based on your sele
 | **Linux** | Direct installation on physical or virtual machines, managed via systemd |
 | **Docker** | Containerized deployment for environments with Docker already set up |
 | **Kubernetes** | Cloud-native environments, deployed as a Deployment |
+
+### Automatic upgrades
+
+The alert engine on a Linux deployment supports server-pushed automatic upgrades. When you pick **Linux** as the deployment method, the page shows this note:
+
+> The alert engine on Linux supports server-pushed automatic upgrades. When enabled, no manual upgrade command is needed; the command above remains available as a manual fallback.
+
+Whether a version is pushed is decided platform-side — the console has no switch. Once you have deployed with the installation configuration above, a Linux instance upgrades itself when a push arrives; while push upgrades are not enabled, keep copying the generated **upgrade command** and running it on the target machine.
+
+| Item | Description |
+|------|-------------|
+| **Applicable deployment methods** | Linux (systemd) only; Docker and Kubernetes deployments do not take part in automatic upgrades and are still upgraded by changing the image version |
+| **How it runs** | After the engine receives a target version in a heartbeat reply, it downloads and verifies the artifact itself, atomically replaces the binary, and continues running the new version — no command to run on the host at any point |
+| **Upgrade success** | The replaced process enters a probation window of about 180 seconds; the first successful heartbeat counts as a successful upgrade and completes it |
+| **Failure rollback** | If no heartbeat succeeds within the probation window (for example the new version cannot complete authentication or protocol exchange), or the new version keeps starting without committing a heartbeat (at most 3 boot attempts), the engine automatically rolls back to the previous version |
+| **Retry behavior** | A target version that rolled back on this host is not attempted again until a newer version is published; after a failed attempt the same version is not retried for about 30 minutes |
+| **Opting out** | The `--alerter.disableAutoUpdate` startup flag makes a single instance stop accepting automatic upgrades; container environments and unwritable binary directories are skipped automatically as well |
+
+Automatic upgrades require the engine to reach the artifact mirror, which is a public mirror by default; in offline or private-network environments point `--alerter.updateMirror` at an internal mirror. See "Automatic upgrade flags" in [Engine CLI flag reference](#engine-cli-flag-reference).
 
 ## API Key management
 
@@ -103,19 +128,32 @@ The `monitedge` binary is configured via command-line flags. The following flags
 |------|---------|-------------|
 | `alerter.serverURL` | `https://api.flashcat.cloud` | FlashDuty SaaS endpoint address |
 | `alerter.serverAPIKey` | — (required) | API Key used to authenticate with the SaaS |
-| `alerter.serverConcurrency` | `64` | Number of concurrent worker goroutines that push alert events to the SaaS |
 | `alerter.serverTimeout` | `30s` | Per-request timeout for a single push attempt |
-| `alerter.serverRetry` | `2` | Maximum number of retries after a failed push attempt |
-| `alerter.serverSleep` | `3s` | Wait time between retry attempts |
+| `alerter.alertRuleDeliveryWorkers` | `64` | Number of delivery workers for ordinary alert rule events. Events are partitioned to per-worker queues by alert key, so events of the same alert are always delivered serially by the same worker |
+| `alerter.alertRuleEventQueueSize` | `2048` | Event queue capacity of each delivery worker |
+| `alerter.alertRuleEventBatchSize` | `200` | Maximum number of events per delivery batch, at most 200. Queued events are batched and sent once a batch fills up or when no new event arrives |
+| `alerter.alertRuleDeliveryResponseBytes` | `8MB` | Maximum response size of the delivery endpoint; a larger response fails the request |
+| `alerter.serverSleep` | `3s` | Initial backoff interval after a failed batch delivery; it doubles after each failure, up to 30 seconds |
+
+Firing / repeat / recovery events of ordinary alert rules are sent by the batched delivery service (alertruledelivery) to `POST /monit/api/edge/alert-rule/v1/events` on the SaaS side: events first enter each worker's queue, then are merged into batches of at most 200 events and 4 MB per batch.
+
+**Retry strategy**: Batch delivery uses exponential backoff — the first failure waits `alerter.serverSleep` (default 3 s), then the wait doubles after every failure up to a maximum of 30 s, with no limit on the number of retries, until delivery succeeds or the engine instance shuts down. Compared with the old fixed-interval retry, exponential backoff avoids high-frequency futile retries during brief network congestion.
 
 <Note>
-On startup, the engine spawns exactly `alerter.serverConcurrency` worker goroutines. All workers consume from the same internal queue and push events to the SaaS in parallel. If the value is set below 1, the engine clamps it to 1 (single worker, serial delivery).
+Earlier versions used `alerter.serverConcurrency` and `alerter.serverRetry` to control concurrent consumption of an in-memory queue (fixed-interval, limited retries). That consumer is no longer started; ordinary alert rule delivery has switched to the batched service above, so these two flags no longer take effect and do not need to be configured.
 </Note>
-
-**Retry strategy**: The current strategy uses fewer retries with a longer per-attempt timeout (30 s timeout, 2 retries). Earlier versions used a high-retry, short-timeout strategy (10 s timeout, 40 retries). The current approach avoids a flood of retries during brief network congestion, relying on each attempt having enough time to complete before giving up.
 
 **Tuning guidance**:
 
-- **High-throughput deployments** (many alert rules, high alert frequency): increase `alerter.serverConcurrency` (e.g. 128) to reduce queue backlog during alert storms.
-- **Constrained network or CPU**: lower `alerter.serverConcurrency` (e.g. 16–32) to limit outbound connections and avoid competing with other traffic.
-- **High packet-loss or unreliable networks**: consider a higher `alerter.serverRetry` (e.g. 5) and a shorter `alerter.serverTimeout` (e.g. 10s) so failures are detected and retried more quickly.
+- **High-throughput deployments** (many alert rules, high alert frequency): increase `alerter.alertRuleDeliveryWorkers` (e.g. 128) to reduce event queue backlog; raise `alerter.alertRuleEventQueueSize` as well if needed.
+- **Constrained network or CPU**: lower `alerter.alertRuleDeliveryWorkers` (e.g. 16–32) to limit outbound connections and avoid competing with other traffic.
+- **High packet-loss or unreliable networks**: consider a larger `alerter.serverSleep` (e.g. 10s) so backoff starts from a longer initial interval, reducing futile requests during congestion.
+
+### Automatic upgrade flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `alerter.disableAutoUpdate` | `false` | Disables server-pushed automatic upgrades. Set to `true` and the instance no longer performs automatic upgrades; container environments are detected and skipped automatically, and this flag takes precedence |
+| `alerter.updateMirror` | `https://static.flashcat.cloud/monitedge` | Mirror root URL for automatic upgrade artifacts. The engine downloads the artifact and checksum file from `<mirror root>/releases/download/<vX.Y.Z>/`; offline or private-network environments must point this at an internal mirror |
+
+Automatic upgrades take effect on Linux (systemd) deployments only and require the engine to reach the artifact mirror. If these conditions are not met, copy the **upgrade command** in the console and upgrade manually.

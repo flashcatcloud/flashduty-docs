@@ -111,10 +111,13 @@ export const docMap = {
   Github: `${alertBase}/github.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
+  SumoLogic: `${alertBase}/sumo-logic.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
   DbPull: `${alertBase}/db-pull.mdx`,
+  Emqx: `${alertBase}/emqx.mdx`,
+  Rizhiyi: `${alertBase}/rizhiyi.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
@@ -150,9 +153,4 @@ export const docMap = {
   Link: `${integrationBase}/other-integration/link.mdx`
 };
 
-export const optionalMissingKeys = [
-  // These keys are referenced defensively by fc-saas-web but were not present
-  // in the old published knowledge-base package either.
-  'Emqx',
-  'Rizhiyi'
-];
+export const optionalMissingKeys = [];

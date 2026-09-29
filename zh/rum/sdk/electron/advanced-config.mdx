@@ -1,0 +1,257 @@
+---
+title: "Electron SDK 高级配置"
+description: "配置 Electron RUM SDK 的上报地址、批次、用户身份、错误上报和其他进阶选项"
+keywords: ["RUM", "Electron SDK", "高级配置", "代理", "用户身份", "手动上报"]
+---
+
+本文介绍主进程 `@flashcatcloud/electron-sdk` 的可选配置和公开 API。渲染进程使用 Browser SDK，其通用配置见 [Web SDK 高级配置](/zh/rum/sdk/web/advanced-config)。
+
+## 初始化参数
+
+```ts main.ts
+import { app } from 'electron';
+import { init } from '@flashcatcloud/electron-sdk';
+
+const initialized = await init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  env: 'production',
+  version: app.getVersion(),
+});
+
+if (!initialized) {
+  console.error('[Flashduty RUM] SDK initialization failed');
+}
+```
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `applicationId` | `string` | 是 | — | RUM 应用 ID |
+| `clientToken` | `string` | 是 | — | 客户端 Token |
+| `service` | `string` | 是 | — | 服务名称；上传 sourcemap 时需要使用相同的值 |
+| `site` | `string` | 否 | `browser.flashcat.cloud` | 普通 RUM 事件的上报域名，只填写 host，不包含协议和路径 |
+| `proxy` | `string` | 否 | — | 普通 RUM 事件的自定义转发地址 |
+| `env` | `string` | 否 | — | 环境标识。当前主进程 RUM 事件不带该字段；渲染进程需要单独配置 |
+| `version` | `string` | 否 | — | 应用版本；上传 sourcemap 时需要使用相同的值 |
+| `telemetrySampleRate` | `number` | 否 | `20` | SDK 自身遥测采样率，范围为 0–100；设为 `0` 可关闭 |
+| `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | 否 | `MEDIUM` | 普通 RUM 事件的单批大小 |
+| `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | 否 | `NORMAL` | 普通 RUM 事件的上报间隔 |
+| `defaultPrivacyLevel` | `'mask' \| 'allow' \| 'mask-user-input'` | 否 | `mask` | 渲染进程没有单独配置时使用的回放隐私级别 |
+| `allowedWebViewHosts` | `string[]` | 否 | `[]` | 允许通过桥接上报的额外 host；当前窗口自身无需配置 |
+| `correctPrewarmedViewTimings` | `boolean` | 否 | `true` | 校正预创建隐藏窗口的 FCP / LCP |
+| `normalizeStackPaths` | `boolean` | 否 | `true` | 将应用目录中的错误栈路径归一化为稳定的 `app:///` 路径 |
+| `normalizeStackPath` | `(path: string) => string \| undefined` | 否 | — | 自定义单个栈帧的路径映射 |
+
+`init()` 返回 `false` 表示配置校验失败。SDK 会在主进程控制台输出具体原因，并且不会开始采集，但不会阻止应用继续启动。
+
+## 自定义上报地址
+
+默认情况下，普通 RUM 事件由主进程上报到 Flashduty SaaS，无需配置 `site` 或 `proxy`。
+
+| 场景 | 配置方式 |
+|------|----------|
+| Flashduty SaaS | 无需配置 |
+| 私有化数据接收端使用 HTTPS，路径为 `/api/v2/rum` | 在主进程配置 `site` |
+| 需要自定义路径、统一网关或转发服务 | 在主进程配置 `proxy` |
+| 私有化部署并开启会话回放 | 除主进程配置外，还要在渲染进程配置 `proxy` |
+
+### 使用私有化接收域名
+
+如果数据接收端支持 HTTPS，并且接收路径为 `/api/v2/rum`，请将域名填入 `site`。不要包含 `https://` 或路径：
+
+```ts main.ts
+await init({
+  // 其余配置
+  site: 'rum.example.internal',
+});
+```
+
+SDK 会向 `https://rum.example.internal/api/v2/rum` 上报普通 RUM 事件。
+
+### 使用自定义转发地址
+
+以下场景请使用 `proxy`：
+
+- 数据接收端只提供 HTTP
+- 上报路径不是 `/api/v2/rum`
+- 客户端需要通过统一网关访问数据接收端
+
+```ts main.ts
+await init({
+  // 其余配置
+  proxy: 'https://rum-gateway.example.internal/forward',
+});
+```
+
+这里的 `proxy` 是由你提供的 **RUM 转发地址**，不是操作系统或 Electron 的网络代理设置。主进程会在请求中附加目标路径信息；转发服务需要保留请求体和 `DD-API-KEY` 请求头，并将请求发送到 Flashduty 数据接收端。
+
+设置 `proxy` 后，主进程不再使用 `site` 生成上报地址。
+
+### 为会话回放配置私有化地址
+
+普通 RUM 事件通过主进程上报，但会话回放由渲染进程直接上传。因此，主进程的 `site` 或 `proxy` 不会自动应用到回放。
+
+私有化部署开启回放时，请在渲染进程配置 Browser SDK 的 `proxy`：
+
+```ts renderer.ts
+flashcatRum.init({
+  applicationId: '<YOUR_APPLICATION_ID>',
+  clientToken: '<YOUR_CLIENT_TOKEN>',
+  service: 'my-electron-app',
+  proxy: 'https://rum-gateway.example.internal/forward',
+  sessionReplaySampleRate: 100,
+  sessionReplayDirectUpload: true,
+});
+```
+
+同时将该地址加入页面 CSP 的 `connect-src`。
+
+## 上报批次与频率
+
+普通 RUM 事件会先写入应用的 `userData` 目录，再按批次上传。上传成功后，SDK 才会删除对应的批次文件。
+
+| `batchSize` | 单批大小 |
+|-------------|----------|
+| `SMALL` | 16 KiB |
+| `MEDIUM` | 512 KiB |
+| `LARGE` | 4 MiB |
+
+| `uploadFrequency` | 上报间隔 |
+|-------------------|----------|
+| `RARE` | 30 秒 |
+| `NORMAL` | 10 秒 |
+| `FREQUENT` | 5 秒 |
+
+接入调试时，可以使用 `batchSize: 'SMALL'` 和 `uploadFrequency: 'FREQUENT'` 更快看到数据。正常运行时建议保留默认值。
+
+<Note>
+这套落盘与重试机制只覆盖普通 RUM 事件。会话回放由渲染进程直接上传，不使用主进程的磁盘缓冲。
+</Note>
+
+## 采集第三方页面
+
+当前窗口加载的页面始终可以使用桥接，无需配置 `allowedWebViewHosts`。只有当你需要采集 `<webview>` 或 `BrowserView` 中加载的第三方页面时，才添加额外 host：
+
+```ts main.ts
+await init({
+  // 其余配置
+  allowedWebViewHosts: ['partner.example.com'],
+});
+```
+
+匹配规则包含子域名。例如配置 `example.com` 后，`app.example.com` 也可以使用桥接。
+
+## 关联登录用户
+
+用户登录后，在主进程调用 `setUser()`。主进程事件和通过桥接上报的渲染进程事件都会带上相同的用户身份。
+
+```ts main.ts
+import { clearUser, getUser, setUser } from '@flashcatcloud/electron-sdk';
+
+setUser({
+  id: 'user-123',
+  name: 'Alice',
+  email: 'alice@example.com',
+});
+
+console.log(getUser());
+
+// 用户退出登录时
+clearUser();
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `id` | 是 | 用户唯一标识 |
+| `name` | 否 | 用户名称 |
+| `email` | 否 | 用户邮箱 |
+
+开启会话回放时，请在同一套登录和退出流程中同步调用渲染进程的 `flashcatRum.setUser()` 与 `flashcatRum.clearUser()`，因为回放分段不会经过主进程。
+
+## 手动上报错误
+
+主进程中被 `try/catch` 捕获的异常不会作为未处理异常自动上报。你可以调用 `addError()` 记录它：
+
+```ts main.ts
+import { addError } from '@flashcatcloud/electron-sdk';
+
+try {
+  await syncWorkspace();
+} catch (error) {
+  addError(error, {
+    context: {
+      component: 'sync',
+      workspaceId: 'ws-1001',
+    },
+  });
+}
+```
+
+手动上报的错误会标记为已处理错误。`context` 中的属性可用于筛选和定位业务场景。
+
+## 结束当前会话
+
+用户退出登录或需要重新开始会话时，可以调用 `stopSession()`：
+
+```ts main.ts
+import { stopSession } from '@flashcatcloud/electron-sdk';
+
+stopSession();
+```
+
+当前会话会立即结束。下一次有效的界面输入会创建新会话。
+
+## 预创建窗口的性能指标
+
+Electron 应用可能先创建隐藏的 `BrowserWindow`，完成页面加载后再显示。SDK 默认会将这类窗口的 FCP 和 LCP 校正到窗口首次可见的时间，避免把预热等待时间计入页面性能。
+
+如果你希望保留页面原始的 Paint Timing 数值，可以关闭校正：
+
+```ts main.ts
+await init({
+  // 其余配置
+  correctPrewarmedViewTimings: false,
+});
+```
+
+该能力只覆盖 `BrowserWindow`。`WebContentsView` 和 `<webview>` 的指标不会校正。
+
+## 自定义错误栈路径
+
+SDK 默认把应用目录中的错误栈路径改写为 `app:///<相对路径>`，让同一份 sourcemap 可以匹配不同机器上的安装路径。大多数项目无需修改。
+
+如果构建产物的目录结构与应用目录不一致，可以通过 `normalizeStackPath` 自定义映射：
+
+```ts main.ts
+await init({
+  // 其余配置
+  normalizeStackPath: (absolutePath) => {
+    const normalized = absolutePath.replace(/\\/g, '/');
+    const match = /\/public(\/dist\/.+)$/.exec(normalized);
+    return match ? match[1] : undefined;
+  },
+});
+```
+
+返回 `undefined` 时，SDK 会继续使用默认归一化逻辑。上传方法见 [Electron 错误还原](/zh/rum/sdk/electron/error-symbolication)。
+
+## 相关页面
+
+<CardGroup cols={2}>
+<Card title="SDK 接入指南" icon="plug" href="/zh/rum/sdk/electron/sdk-integration">
+完成主进程与渲染进程接入。
+</Card>
+
+<Card title="错误还原" icon="bug" href="/zh/rum/sdk/electron/error-symbolication">
+上传 JavaScript sourcemap 和原生崩溃符号。
+</Card>
+
+<Card title="数据收集" icon="database" href="/zh/rum/sdk/electron/data-collection">
+查看 SDK 采集的数据类型与上报行为。
+</Card>
+
+<Card title="问题排查" icon="circle-question" href="/zh/rum/sdk/electron/faq">
+排查桥接、回放和数据上报问题。
+</Card>
+</CardGroup>

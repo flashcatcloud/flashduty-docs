@@ -1,0 +1,139 @@
+---
+title: "Estimating RUM Ingest Bandwidth and Capacity Planning"
+sidebarTitle: "Bandwidth Estimation"
+description: "Estimate how much bandwidth RUM telemetry needs before you onboard: a three-step method from user scale to bandwidth tiers, measured reference parameters, bandwidth reduction levers, and calibration methods."
+keywords: ["RUM", "bandwidth", "capacity planning", "compression", "ingest traffic", "frontend monitoring"]
+---
+
+Once RUM is deployed, monitoring data from end users is continuously reported to the ingest endpoint. For teams that need to provision bandwidth in advance or plan link capacity for private deployments, this guide provides an estimation method you can plug your own business parameters into, along with reference values measured on real applications.
+
+## The method: three steps
+
+Bandwidth estimation breaks into three steps with very different levels of certainty. Compute them separately rather than applying a single blended number:
+
+| Step | Conversion | Certainty |
+|---|---|---|
+| 1 | Bandwidth → events/second | High. Depends only on event size and compression |
+| 2 | Events/second → concurrent users | Medium. Varies over 10x by application type |
+| 3 | Concurrent users → daily active users | Low. Depends on daily online time and peak factor |
+
+### Baseline parameters (measured reference values)
+
+The following parameters were measured on real web applications and can be used directly as a starting point:
+
+| Parameter | Reference value | Notes |
+|---|---|---|
+| Raw size per event | ~1.9 KB | Includes shared session, view, and device context |
+| Size per ingest request | ~15 KB | One batch holds ~8 events |
+| Batch flush triggers | 16 KiB / 50 events / 30 s | Whichever is reached first |
+| Compression ratio | ~6.8 : 1 | deflate; consistent across replay and regular event data |
+| Event mix | ~72% resource, ~22% long task | Volume is driven mainly by page network requests |
+
+### Step 1: bandwidth → events/second
+
+Each event is 1.9 KB raw, or ~0.28 KB with compression enabled:
+
+| Bandwidth | Without compression | With compression |
+|---|---|---|
+| 10 Mbps | ~660 events/s | ~4,500 events/s |
+| 20 Mbps | ~1,300 | ~9,000 |
+| 50 Mbps | ~3,300 | ~22,500 |
+| 100 Mbps | ~6,600 | ~45,000 |
+
+Formula: `bandwidth (Mbps) × 1000 ÷ 8 ÷ event size (KB) = events/s`
+
+### Step 2: events/second → concurrent users
+
+The event rate per active user varies widely by application type:
+
+```text
+event rate per user ≈ events per page view ÷ average dwell time (seconds)
+```
+
+| Application type | Event rate (events/s/user) | Notes |
+|---|---|---|
+| Long-lived single page (WebSocket) | ~0.1 | Messaging generates no events; see below |
+| Console / admin dashboard | ~0.2 | Measured |
+| Typical web application | ~0.5 | Estimated |
+| Content / e-commerce (frequent navigation) | ~1.3 | Estimated |
+
+Example with compression enabled and a typical web application: 10 Mbps ÷ 0.5 events/s ≈ **9,000 concurrent users**.
+
+<Note>
+The event rate depends on the **network transport**, not on how busy the application feels. The SDK instruments only `XMLHttpRequest` and `fetch`; it does not track WebSocket traffic or keyboard input. High-frequency WebSocket messaging generates **no events at all**, while HTTP short polling generates one resource event per poll (a 3-second poll adds 0.33 events/s per user). Confirm the application's data transport before estimating.
+</Note>
+
+### Step 3: concurrent users → daily active users
+
+```text
+DAU = peak concurrency × 86400 ÷ (daily online seconds per user × peak factor)
+```
+
+- **Daily online seconds per user**: back-office applications can exceed 3,000 seconds; consumer-facing applications are usually far lower
+- **Peak factor**: how concentrated your business hours are — typically 3–5, and 8+ for highly concentrated traffic (exams, flash sales)
+
+There is no universal value for this step; always plug in your own business data.
+
+## Two switches that dominate bandwidth
+
+### Ingest compression (off by default on web)
+
+The browser SDK's `compressIntakeRequests` is off by default. Enabling it cuts bandwidth to roughly 1/6.8 with no data loss:
+
+```js
+flashcatRum.init({
+  // ...
+  compressIntakeRequests: true,
+});
+```
+
+This is the only zero-cost lever available; we recommend always enabling it. Mobile SDKs (Android / iOS / HarmonyOS) compress by default and need no configuration.
+
+### Session Replay (off by default)
+
+Session Replay traffic is on a different scale from regular events: measured at roughly **20–30x** the total volume of regular RUM events, depending on how frequently the page DOM changes. Before enabling replay, turn it on for a small fraction of sessions, measure for a day, and then decide the sample rate — do not extrapolate from a multiplier alone. See [Session Replay](/en/rum/session-replay/overview).
+
+## Mobile vs. web
+
+Mobile parameters differ structurally from web; per-user bandwidth cost is roughly 1/20 of web:
+
+| | Web browser SDK | Android / iOS / HarmonyOS SDK |
+|---|---|---|
+| Compression default | Off (enable manually) | **On by default** |
+| Raw size per event | ~1.9 KB | ~1.2 KB |
+| Resource event sources | All static assets + XHR/fetch | Only API requests made by the app |
+
+For mixed clients (web + app), estimate each platform separately and sum the results — do not use a single blended event rate.
+
+## Bandwidth reduction levers
+
+Ordered by cost-effectiveness:
+
+| Lever | Effect | Trade-off |
+|---|---|---|
+| Enable ingest compression (web) | Down to ~1/6.8 | None |
+| Lower the [session sample rate](/en/rum/best-practices/sampling) | Linear reduction | Harder to reproduce long-tail issues |
+| Disable resource collection (`trackResources: false`) | Down to ~1/3.6 | Lose API and asset performance data |
+| Filter third-party domains | Depends on page composition | Usually lossless |
+| Disable long task collection (`trackLongTasks: false`) | Down to ~1/1.3 | Lose main-thread blocking analysis |
+
+## Private deployment: the two-segment link
+
+Private deployments commonly run a two-segment link: a public-facing ingress node forwarding to an internal data center. When the ingress layer is an nginx `proxy_pass` passthrough (no decompression, no parsing), both segments carry essentially the same bytes — **provision both with the same number**, and client-side compression reduces both segments with a single setting.
+
+Three ingress configuration checks:
+
+1. **Upstream connection reuse**: configure `keepalive` in the `upstream` block, set `proxy_http_version 1.1`, and clear the `Connection` header to avoid per-request TCP/TLS handshakes across data centers
+2. **Request body limit**: `client_max_body_size` defaults to 1 MB; Session Replay segments and source map uploads will exceed it and trigger 413 errors — raise it to 20 MB or more
+3. **Return traffic**: ingest responses are ~0.4 KB per request, which is ~18% of ingress volume once compression is enabled — not negligible on links billed for egress
+
+## Calibrate with real measurements
+
+The parameters above are general references. Before committing to a purchase, calibrate with one of two methods:
+
+- **Canary extrapolation (recommended)**: enable collection for 1% of users for one full day, read the actual ingress traffic, and scale linearly — typically accurate within 20%
+- **Single-request measurement (quick)**: filter the ingest domain in browser developer tools and read the request's `Content-Length` header (note: the Network panel's Size column shows the response size, not the upload), then combine with the request rate
+
+<Note>
+The values in this guide are estimation references for sizing and capacity planning; they are not a service-level commitment. Always defer to your own calibration results.
+</Note>
