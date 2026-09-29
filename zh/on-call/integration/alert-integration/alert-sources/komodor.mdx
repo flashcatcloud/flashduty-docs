@@ -1,0 +1,153 @@
+---
+title: "Komodor 告警集成"
+description: "通过 Komodor 实时健康监控（Realtime Health Monitors）的 Webhook 通知，将 Kubernetes 工作负载、节点、PVC 和 Job 的问题及恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Komodor", "Kubernetes", "Realtime Health Monitors", "Webhook"]
+---
+
+通过 Komodor 实时健康监控（Realtime Health Monitors）的 Webhook 通知渠道，把 Komodor 在 Kubernetes 集群中发现的问题推送到 Flashduty On-call。同一集群、同一命名空间下同一个资源的同一类监控问题对应一条 Flashduty 告警：Komodor 发出 `open` 消息时触发告警，发出 `closed` 消息时告警自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警路由到不同的协作空间时，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+  2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+  3. 选择 **Komodor**，点击 **保存**
+  4. 打开生成的集成卡片，复制 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据 Payload 将告警路由到不同的协作空间时，选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+  2. 选择 **Komodor**，填写集成名称
+  3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+  4. 点击 **保存**，复制生成的 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## 前提条件
+---
+
+- 已在 Kubernetes 集群中安装 Komodor Agent，并能在 Komodor 控制台看到该集群。
+- 当前账号有权限编辑 Komodor 的 **Health Policies**。
+
+## 在 Komodor 中配置
+---
+
+<Steps>
+<Step title="打开监控">
+
+登录 Komodor 控制台，进入 **Organization Settings** → **Health Policies** → **Realtime Monitors**。展开集群和监控类型（例如 **Availability monitor**），点击一条监控（例如 **Default Runtime Availability**）打开 **Edit Monitor**，或点击 **+ Add Monitor** 新建监控。
+
+</Step>
+
+<Step title="添加 Webhook 通知渠道">
+
+1. 在 **Where do you want to receive notifications?** 中选择 **Webhook**
+2. 点击 **Add New Webhook**：
+   - **Webhook URL**：粘贴 Flashduty 集成的完整推送地址（包含 `integration_key` 参数）
+   - **Webhook Name**：填写便于识别的名称，例如 `Flashduty`
+   - **Headers** 留空
+3. 点击 **Test Webhook**（见下一步），再点击 **Add Webhook**
+4. 在 **Select webhooks** 中选择 `Flashduty`，点击 **Save Monitor**
+
+同一个 Webhook 创建后，可以在其他监控中直接选择。需要接入 Flashduty 的每条监控都要选择它。
+
+</Step>
+
+<Step title="确认推送">
+
+**Test Webhook** 会从浏览器发送 `{"type":"Test!"}`，Flashduty 返回成功但不创建告警，只用于确认推送地址可达。
+
+监控下一次发现问题时，在 Flashduty 协作空间的告警列表中确认收到告警；问题解决后确认告警自动恢复。
+
+</Step>
+</Steps>
+
+<Note>
+Deploy 监控的通知只描述一次发布（成功或失败），不是健康问题，也不会发送恢复消息。Flashduty 收到 Deploy 监控的通知时返回成功，不创建告警。发布记录请通过变更集成接入。
+</Note>
+
+## Alert Key
+---
+
+Flashduty 使用 `monitorType`、`cluster`、`namespace` 和 `resourceName` 四个字段共同生成 Alert Key。同一个资源的同一类问题，`open` 和 `closed` 消息的这四个字段相同，因此会合并到同一条告警并由 `closed` 消息恢复。
+
+- 不同资源、不同命名空间、不同集群，或同一资源的不同监控类型（例如 Availability 和 Job），会生成不同的告警。
+- 问题详情（`issueDetails`）、问题链接（`issueURL`）和时间字段的变化不会改变 Alert Key。
+- 节点（Node）问题没有命名空间，`namespace` 为空时同样可以生成 Alert Key。
+
+## 状态和告警等级
+---
+
+Komodor 的 Webhook 通知不带告警等级字段，Flashduty 统一按 Critical 处理。
+
+| Komodor `status` | Flashduty 状态 | Flashduty 告警等级 |
+| :--- | :--- | :--- |
+| `open` | 触发 | Critical |
+| `closed` | 恢复 | Critical |
+
+`status` 为其他值，或缺少 `monitorType`、`cluster`、`resourceName` 时，Flashduty 返回错误，Komodor 会记为推送失败。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `cluster` | 集群名称 |
+| `namespace` | 命名空间（节点问题没有该标签） |
+| `service` | Komodor 服务标识 `serviceName` |
+| `resource` | 资源名称 `resourceName` |
+| `check` | 监控类型，例如 `availability`、`node`、`pvc`、`job` |
+| `status` | `open` 或 `closed` |
+| `issue_details` | 问题详情，例如 `NonZeroExitCode - Exit code: 1`；多条详情以 `; ` 连接 |
+| `issue_url` | 跳转到 Komodor 问题详情的链接 |
+
+告警标题为 `<监控类型> issue on <资源名称> (<集群>/<命名空间>)`，告警描述包含问题详情和 Komodor 链接。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="支持 Komodor Agentic Operation Platform 的 Notification sinks 吗？">
+
+不支持。Notification sinks 推送的是智能体运行和调查事件（例如 `run.finished`、`incident.triaged`），Komodor 没有公开其中事件对应的问题 ID 字段，无法保证触发和恢复合并到同一条告警。请使用本页的 Realtime Health Monitors Webhook 通知。
+
+</Accordion>
+
+<Accordion title="告警没有恢复怎么办？">
+
+- 确认对应监控规则仍然选择了 Flashduty 的 Webhook 通知渠道，修改或删除规则后 Komodor 不会再发送 `closed` 消息
+- 在告警详情中核对 `check`、`cluster`、`namespace`、`resource` 标签，四个值与恢复消息一致才能恢复同一条告警
+- 调整 Availability 监控的范围（scope）可能会移除已有的问题，此时 Komodor 不一定发送 `closed` 消息，请在 Flashduty 中手动关闭告警
+
+</Accordion>
+
+<Accordion title="同一个工作负载为什么出现了多条告警？">
+
+不同监控类型会生成不同的告警。例如一个 CronJob 同时触发 Availability 和 CronJob 监控时，会分别生成两条告警，各自由对应的 `closed` 消息恢复。
+
+</Accordion>
+</AccordionGroup>
+
+更多监控类型和触发条件请参阅 Komodor 帮助中心的 Realtime Health Monitors 和 Webhook 文档。

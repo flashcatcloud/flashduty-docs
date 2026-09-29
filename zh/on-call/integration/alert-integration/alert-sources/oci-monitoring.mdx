@@ -1,0 +1,123 @@
+---
+title: "OCI Monitoring 告警集成"
+description: "通过 OCI Notifications 的 HTTPS 订阅，将 Oracle Cloud Infrastructure Monitoring 告警的触发和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Oracle Cloud", "OCI", "Monitoring", "Alarm", "Notifications", "dedupeKey"]
+---
+
+通过 OCI Notifications 主题的 HTTPS (Custom URL) 订阅，将 Oracle Cloud Infrastructure（OCI）Monitoring 告警（Alarm）同步到 Flashduty On-call。一个 OCI 告警（按指标流拆分消息时，是一个告警里的一条指标流）对应一条 Flashduty 告警；触发、重复通知、恢复和重置都会更新这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **OCI Monitoring**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **OCI Monitoring**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+<Note>
+OCI 的 HTTPS 订阅地址不允许带查询参数，所以本集成的推送地址把集成 key 放在路径里，形如 `https://api.flashcat.cloud/event/push/alert/oci-monitoring/<integration_key>`。请原样粘贴完整地址，不要改成 `?integration_key=` 的写法。
+</Note>
+
+## 在 OCI 中配置
+---
+
+<Steps>
+<Step title="创建主题">
+
+1. 登录 OCI 控制台，打开导航菜单，选择 **Developer Services**，在 **Application Integration** 下选择 **Notifications**
+2. 选择告警所在的 Compartment，点击 **Create topic**
+3. 名称可填写 `Flashduty`，点击 **Create**
+
+</Step>
+
+<Step title="创建 HTTPS 订阅">
+
+1. 打开 `Flashduty` 主题，选择 **Subscriptions**，点击 **Create subscription**
+2. **Protocol** 选择 **HTTPS (Custom URL)**
+3. **URL** 填写 Flashduty 集成的完整推送地址，点击 **Create**
+4. OCI 会向推送地址发送订阅确认请求，Flashduty 自动访问其中的确认链接。几秒后刷新订阅列表，状态从 **Pending** 变为 **Active** 即完成
+
+</Step>
+
+<Step title="把告警通知发到主题">
+
+1. 打开导航菜单，选择 **Observability & Management** → **Monitoring** → **Alarm Definitions**，创建或编辑告警
+2. 在 **Destination** 中，**Destination service** 选择 **Notifications**，**Topic** 选择 `Flashduty`
+3. **Message grouping** 按需选择：
+   - **Split notifications per metric stream**：每条触发的指标流（通常是一个资源）各自对应一条 Flashduty 告警，推荐
+   - **Group notifications across metric streams**：整个告警规则对应一条 Flashduty 告警，全部指标流恢复后才恢复
+4. 可选开启 **Repeat notification**，持续触发期间的重复通知会合并到同一条告警
+5. 保存告警。**Message format** 只影响邮件订阅，无需修改
+
+</Step>
+
+<Step title="验证">
+
+1. 在主题的 **Actions** 菜单中选择 **Publish message**，可以验证推送地址可达。手动发布的消息不是告警消息，Flashduty 会返回成功但不会创建告警
+2. 让告警真实触发（例如临时调低阈值），确认 Flashduty 收到活动告警；再恢复阈值，等待告警回到 OK，确认原告警自动恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 直接使用告警消息中的 `dedupeKey` 作为 Alert Key。OCI 官方将 `dedupeKey` 定义为告警（汇总消息）或告警中某条指标流（拆分消息）的唯一标识，并说明同一告警的消息用它归组。同一告警的 `OK_TO_FIRING`、`REPEAT`、`FIRING_TO_OK` 和 `RESET` 消息携带相同的 `dedupeKey`，所以会更新同一条 Flashduty 告警。
+
+标题、正文、等级、时间和指标值的变化都不会改变 Alert Key。缺少 `dedupeKey` 的告警消息会被拒绝。
+
+## 状态和告警等级
+---
+
+| OCI `type` | Flashduty 状态 |
+| :--- | :--- |
+| `OK_TO_FIRING` | 触发 |
+| `REPEAT` | 触发（更新同一条告警） |
+| `FIRING_TO_OK` | 恢复 |
+| `RESET` | 恢复（触发告警的指标流停止上报，建议检查资源状态） |
+
+| OCI `severity` | Flashduty 等级 |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `ERROR` | Warning |
+| `WARNING` | Warning |
+| `INFO` | Info |
+
+恢复时保留告警原有等级。空值或未知的 `severity` 按 Warning 处理；未知的 `type` 会被拒绝。
+
+## 告警标签
+---
+
+Flashduty 会把以下字段写入告警标签，便于路由和排查：
+
+- `check`（告警标题）、`dedupe_key`、`type`、`severity`、`notification_type`
+- `alarm_id`（告警 OCID）、`alarm_status`、`namespace`、`query`、`alarm_url`、`total_metrics_firing`
+- 拆分消息时，指标流的全部维度，例如 `resourceId`、`resourceDisplayName`、`region`、`availabilityDomain`；其中 `resourceDisplayName` 同时写入 `resource`
+
+告警正文 `body` 和告警摘要 `alarmSummary` 写入告警描述。
+
+## 排查问题
+---
+
+- **订阅一直是 Pending**：确认 URL 是完整推送地址，集成 key 在路径里且没有查询参数；然后删除这个订阅，用正确的地址重新创建。确认链接 3 天内有效，过期后同样需要重新创建订阅
+- **Flashduty 返回 ConfirmationURL 错误**：Flashduty 只访问 Oracle Cloud 域名（如 `oraclecloud.com`）上的 https 确认链接，请确认请求来自 OCI Notifications
+- **收不到告警**：确认告警的 Destination 是这个主题、订阅状态为 Active，以及告警确实进入了 FIRING 状态
+- **告警没有恢复**：汇总消息模式下，要等告警内所有指标流都恢复才会发送 `FIRING_TO_OK`；指标流停止上报时，OCI 在内部重置周期结束后发送 `RESET`，约 13 分钟
+- **一个告警规则只出现一条 Flashduty 告警**：Message grouping 选的是汇总消息，如需按资源分别告警，改为 **Split notifications per metric stream**
+
+更多字段含义请参阅 [Alarm Message Format](https://docs.oracle.com/en-us/iaas/Content/Monitoring/alarm-message-format.htm)、[Message Types](https://docs.oracle.com/en-us/iaas/Content/Monitoring/Concepts/monitoringoverview.htm#MessageTypes) 和 [Creating an HTTPS (Custom URL) Subscription](https://docs.oracle.com/en-us/iaas/Content/Notification/Tasks/create-subscription-https.htm)。
