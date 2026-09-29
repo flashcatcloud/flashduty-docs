@@ -1,0 +1,90 @@
+---
+title: "NS1 Connect alert integration"
+description: "Send IBM NS1 Connect monitoring job down and up events to Flashduty On-call through a webhook notifier."
+keywords: ["alert integration", "NS1", "IBM NS1 Connect", "webhook", "notifier", "monitoring job"]
+---
+
+Use an NS1 Connect webhook notifier to send monitoring job `down` and `up` state changes to Flashduty On-call. Each monitoring job maps to one Flashduty alert. A job going down creates the alert, `notify_repeat` notifications merge into it, and the job coming back up recovers it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **NS1** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure NS1 Connect
+---
+
+<Steps>
+<Step title="Create a webhook notifier">
+
+Your account needs the **Manage notifier lists** permission.
+
+1. Sign in to NS1 Connect and go to **Monitors** → **Notifier Lists**
+2. Create a notifier list, or open an existing one, and click **Add a new notifier**
+3. Select **Webhook** as the **Notifier type**
+4. Paste the complete Flashduty integration Push URL into **Webhook URL**
+5. Click **Create notifier** and save the notifier in the list
+
+</Step>
+
+<Step title="Enable notifications on monitoring jobs">
+
+Open the monitoring job that should alert (new or existing) and select the notifier list in its notification settings.
+
+<Warning>
+Keep **Notify failback** (`notify_failback`) enabled on every monitoring job that sends to Flashduty. When it is off, NS1 sends `down` only and never sends `up`, so the Flashduty alert cannot recover automatically.
+</Warning>
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make the monitored endpoint genuinely unreachable and confirm Flashduty receives a Critical alert. Then restore the endpoint and confirm the same alert recovers. NS1 notifiers have no documented test button, so verify with a real state change.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the monitoring job ID, `job_document.id`, as the Alert Key. NS1's official example of the `down` body carries the full `job_document`, whose `id` is the job ID. The down, repeated, and up notifications of one job share it.
+
+If the job has `job_document.notify_regional` enabled, NS1 notifies per region. The Alert Key is then `job_document.id/region`, each region has its own alert, and one region recovering does not close another region's alert. When it is off, the region is not part of the Alert Key, so a `down` and an `up` observed from different regions belong to the same alert.
+
+Changes to the job name, the `since` timestamp, the region that observed the change, or the check configuration do not change the Alert Key.
+
+<Note>
+NS1's official documentation shows the full `down` body only; its `up` example is truncated after `since`. Flashduty assumes the `up` body carries the same `job_document`. If an `up` body has no `job_document.id`, Flashduty rejects it instead of guessing which alert it belongs to.
+</Note>
+
+## State and severity
+---
+
+NS1 sends no severity.
+
+| NS1 `state` | Flashduty status or severity |
+| :--- | :--- |
+| `down` | Critical. A down monitoring job is an availability failure, so the Warning default is not used |
+| `up` | Recovery, with the original severity Critical |
+| Any other value, or no `state` | Returns 200 and creates no alert |
+
+`state` is case-insensitive.
+
+## Labels
+---
+
+Flashduty keeps the labels `check` (job name), `resource` (`host`, `url`, or `domain` from `config`), `job_id`, `job_type`, `region`, `state`, and `notify_list` for troubleshooting and routing on the alert page.
+
+## Troubleshooting
+---
+
+- **The alert does not recover**: confirm **Notify failback** is enabled on the monitoring job. If you cannot enable it, turn on [auto-close timeout](/en/on-call/channel/create-edit) for the channel with a duration of 1 hour and the timer starting at incident trigger
+- **NS1 reports a webhook failure**: confirm the Push URL is complete and includes `integration_key`
+- **Flashduty returns `job_document.id is required`**: the body has no monitoring job ID; check that the notification was sent by an NS1 monitoring job
+- **Several alerts after enabling regional notifications**: this is expected, each region is an independent alert
+
+For field details, see [NS1 Connect custom webhook notifier](https://www.ibm.com/docs/en/ns1-connect?topic=notifiers-configuring-custom-webhook-notifier).

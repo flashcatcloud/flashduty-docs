@@ -67,6 +67,7 @@ export const docMap = {
   Datadog: `${alertBase}/datadog.mdx`,
   NewRelic: `${alertBase}/new-relic.mdx`,
   SumoLogic: `${alertBase}/sumo-logic.mdx`,
+  Ns1: `${alertBase}/ns1.mdx`,
   Site24x7: `${alertBase}/site24x7.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
   HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
