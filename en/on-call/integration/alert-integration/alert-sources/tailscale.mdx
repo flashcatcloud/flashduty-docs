@@ -1,0 +1,158 @@
+---
+title: "Tailscale alert integration"
+description: "Send Tailscale node key expiry, pending device approval, and subnet router or exit node misconfiguration events to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Tailscale", "tailnet", "node key expiry", "device approval", "webhook"]
+---
+
+Use Tailscale webhooks to send the tailnet events an administrator has to act on to Flashduty On-call: a node key about to expire or already expired, a device or user waiting for approval, a device waiting for a signature under Tailnet Lock, and a subnet router or exit node without IP forwarding enabled. When a device is approved, signed, or deleted, Flashduty recovers the matching alert.
+
+According to the Tailscale documentation, webhooks are available on all plans, including the free Personal plan.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Tailscale** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Tailscale** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Tailscale
+---
+
+<Steps>
+<Step title="Add a webhook endpoint">
+
+You need the Owner, Admin, Network admin, or IT admin role in the tailnet.
+
+1. Sign in to the Tailscale admin console, open **Settings → Webhooks**, and click **Add endpoint**
+2. For **Webhook URL**, enter the full Flashduty push URL
+3. Leave **Destination** set to **None** (the Tailscale format). With Slack, Discord, or another destination format, Flashduty cannot parse the request
+
+</Step>
+
+<Step title="Select events">
+
+Select the following events. The two IP forwarding events make up the **Device Misconfigurations** category, so you can select that category instead; the others are in the **Tailnet Management** category:
+
+| Event | Effect |
+| :--- | :--- |
+| `nodeKeyExpiringInOneDay` | The node key expires in less than one day; opens an alert |
+| `nodeKeyExpired` | The node key has expired; opens a Critical alert under the same Alert Key |
+| `nodeNeedsApproval` | A device is waiting for approval; opens an alert |
+| `nodeApproved` | The device was approved; recovers the approval alert |
+| `nodeNeedsSignature` | With Tailnet Lock enabled, a device is waiting for a signature; opens an alert |
+| `nodeSigned` | The device was signed; recovers the signature alert |
+| `userNeedsApproval` | A user is waiting for approval; opens an alert |
+| `userApproved` | The user was approved; recovers the user approval alert |
+| `exitNodeIPForwardingNotEnabled` | An exit node has IP forwarding disabled; opens an alert |
+| `subnetIPForwardingNotEnabled` | A subnet router has IP forwarding disabled; opens an alert |
+| `nodeDeleted` (optional) | The device was deleted; recovers all of its alerts |
+
+Rejecting a pending device in Tailscale deletes it, so no `nodeApproved` follows. Subscribe to `nodeDeleted` to recover such approval alerts when the device is deleted. Tailscale also sends `nodeDeleted` every time an ephemeral node is removed automatically; when no matching alert is open, Flashduty ignores the recovery.
+
+You can also select the whole **Tailnet Management** category. Its other events (such as `nodeCreated`, `policyUpdate`, and `userRoleUpdated`) are informational: Flashduty returns success and creates no alert.
+
+</Step>
+
+<Step title="Save and test">
+
+1. Click **Add endpoint**. Tailscale shows the webhook secret; Flashduty does not use it, so you can close the dialog
+2. In the webhook list, open the menu to the right of the endpoint and select **Test endpoint** → **Send test event**
+3. Tailscale sends an event whose `type` is `test`. Flashduty returns success and creates no alert
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+Node key expiry and IP forwarding misconfiguration have no recovery event: after you renew the key or enable IP forwarding, Tailscale sends nothing more. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest a timeout of **24 hours**, counted from **Incident trigger**. Closing the incident also closes its alerts.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Each Tailscale delivery is a JSON array that can carry several events. Flashduty handles every event that creates an alert separately:
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `type` | Event type | Alert status and severity, label `event_type` |
+| `tailnet` | Tailnet name | Label `tailnet` |
+| `message` | Event summary | Alert title |
+| `data.nodeID` | Node ID of the device | Alert Key for device events, label `node_id` |
+| `data.user` | User login name | Alert Key for user events, label `user` |
+| `data.deviceName` | Device name | Label `resource` |
+| `data.url` | Link to the item in the admin console | Label `url` |
+| `data.expiration` | Node key expiry time | Label `key_expiry` |
+
+Every alert also has the label `source=tailscale` and a `check` label (`key_expiry`, `approval`, `signature`, `user_approval`, `exit_node_ip_forwarding`, or `subnet_ip_forwarding`). When `message` is empty, the title is `Tailscale <event type>: <device or user>`.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the object (the device's `nodeID` or the user's `user`) and the check (`check`):
+
+- `nodeNeedsApproval` and `nodeApproved` for one device land on the same alert, which recovers when the device is approved
+- `nodeKeyExpiringInOneDay` and `nodeKeyExpired` for one device share an Alert Key. When the key expires, Flashduty opens a new Critical alert and keeps the earlier Warning alert open; `nodeDeleted` closes both
+- Different checks on one device (for example key expiry and pending approval) create separate alerts
+- Tailscale retries a failed delivery hourly for up to 24 hours; retried events merge into the original alert instead of creating duplicates
+
+Renaming a device or the tailnet does not change the Alert Key.
+
+## Status and severity
+---
+
+| Tailscale event | Flashduty status or severity |
+| :--- | :--- |
+| `nodeKeyExpiringInOneDay` | Warning |
+| `nodeKeyExpired` | Critical |
+| `nodeNeedsApproval`, `nodeNeedsAuthorization` (deprecated) | Warning |
+| `nodeNeedsSignature` | Warning |
+| `userNeedsApproval` | Warning |
+| `exitNodeIPForwardingNotEnabled`, `subnetIPForwardingNotEnabled` | Warning |
+| `nodeApproved`, `nodeAuthorized` (deprecated) | Recovers the approval alert |
+| `nodeSigned` | Recovers the signature alert |
+| `userApproved` | Recovers the user approval alert |
+| `nodeDeleted` | Recovers all alerts of the device |
+| `test` and other event types | No alert |
+
+If a device event that creates an alert has no `data.nodeID`, or a user event has no `data.user`, the whole request is rejected.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why did the alert not recover after I renewed the node key?">
+
+Tailscale has no "key renewed" event. Turn on the channel's auto-resolve timeout, or close the alert in Flashduty by hand. For servers that should not expire, you can also [disable key expiry](https://tailscale.com/kb/1028/key-expiry) in Tailscale.
+
+</Accordion>
+
+<Accordion title="Do I need to configure the webhook secret?">
+
+No. Flashduty identifies the integration by the `integration_key` in the push URL and does not verify the `Tailscale-Webhook-Signature` header. Keep the push URL as secret as a key.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: make sure **Destination** is **None** and the push URL is complete (it includes `integration_key`)
+- **The test event succeeds but no alert appears**: the `test` event creates no alert; make sure the endpoint subscribes to the events in the table above
+- **The alert does not recover after the device is approved**: make sure the endpoint subscribes to `nodeApproved`
