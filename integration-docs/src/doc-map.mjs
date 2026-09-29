@@ -118,6 +118,7 @@ export const docMap = {
   Stripe: `${alertBase}/stripe.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
   Hyperdx: `${alertBase}/hyperdx.mdx`,
+  OciMonitoring: `${alertBase}/oci-monitoring.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   SumoLogic: `${alertBase}/sumo-logic.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
