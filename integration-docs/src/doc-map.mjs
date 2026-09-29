@@ -114,6 +114,7 @@ export const docMap = {
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Github: `${alertBase}/github.mdx`,
+  Harness: `${alertBase}/harness.mdx`,
   Komodor: `${alertBase}/komodor.mdx`,
   Openstatus: `${alertBase}/openstatus.mdx`,
   PandoraFms: `${alertBase}/pandora-fms.mdx`,
