@@ -4,10 +4,10 @@ description: "通过 Webhook 将 Papertrail 保存搜索命中的日志同步到
 keywords: ["告警集成", "Papertrail", "SolarWinds", "Saved Search", "Webhook", "日志告警"]
 ---
 
-Papertrail（SolarWinds 旗下的日志聚合服务）用 **Saved Search（保存搜索）** 描述一条持续匹配日志的查询，命中时可以调用 **Webhook** 告警。Papertrail 官方文档没有定义任何"已恢复"状态：每次轮询命中新的日志都是独立事件，不会关联到更早的一次。本集成的转换规则：
+Papertrail（SolarWinds 旗下的日志聚合服务）用 **Saved Search（保存搜索）** 描述一条持续匹配日志的查询，命中时可以调用 **Webhook** 告警。Papertrail 官方文档没有定义任何"已恢复"状态：每次轮询命中新的日志，都只是它单方面发出的一条新推送，本身不携带任何跟上一次推送的关联信息。本集成的转换规则：
 
 - 同一个保存搜索的一次推送，无论命中多少条日志，都只生成一条 Flashduty 告警
-- 同一个保存搜索的下一次推送会生成新的一条告警，不会与上一条合并
+- 同一个保存搜索的下一次推送会合并到同一条告警，视为同一个问题在持续发生
 - 不同的保存搜索各自独立
 
 <div className="hide">
@@ -47,7 +47,7 @@ Papertrail（SolarWinds 旗下的日志聚合服务）用 **Saved Search（保�
 
 1. 在 Alert 配置页选择 **Webhook** 作为通知方式
 2. **URL** 粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
-3. **Frequency** 选择轮询间隔（`minute` / `hour` / `day`）：间隔越短，同一个保存搜索一有新的匹配就越快生成新告警
+3. **Frequency** 选择轮询间隔（`minute` / `hour` / `day`）：间隔越短，同一个保存搜索一有新的匹配就越快合并进已有的告警
 4. 确认未开启 **Send only counts**（仅发送计数）。开启后请求里不再包含具体日志和事件 ID，Flashduty 无法识别，会拒绝请求
 5. 保存
 
@@ -56,7 +56,7 @@ Papertrail（SolarWinds 旗下的日志聚合服务）用 **Saved Search（保�
 </Step>
 <Step title="开启超时自动关闭">
 
-Papertrail 的保存搜索告警没有恢复事件，也没有严重程度：只要保存搜索还在命中新的日志，就会不断生成新的告警。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，计时起点选择 **故障触发**。建议超时时长至少 30 分钟，留出响应人员确认的时间；若 Frequency 选择了 `hour` 或 `day`，请相应调长为所选 Frequency 的 2-3 倍（例如 `1 hour` 时设置 3 小时），避免问题仍在发生、下一次推送还没到达时告警就先自动关闭。
+Papertrail 的保存搜索告警没有恢复事件，也没有严重程度：只要保存搜索还在命中新的日志，同一条告警就会不断被新的推送合并、延续下去。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，计时起点选择 **故障触发**。建议超时时长至少 30 分钟，留出响应人员确认的时间；若 Frequency 选择了 `hour` 或 `day`，请相应调长为所选 Frequency 的 2-3 倍（例如 `1 hour` 时设置 3 小时），避免问题仍在发生、下一次推送还没到达时告警就先自动关闭。故障关闭时，关联的告警一并关闭；问题仍在发生时，下一次推送会重新打开一条新的告警。
 
 </Step>
 <Step title="验证">
@@ -97,12 +97,12 @@ Flashduty 按 Papertrail 官方文档的固定格式解析请求：请求体为 
 
 | 字段 | 说明 | 在 Flashduty 中的用途 |
 | :--- | :--- | :--- |
-| `saved_search.id` | 保存搜索的 ID，在整个生命周期中稳定 | Alert Key 的一部分，标签 `saved_search_id` |
+| `saved_search.id` | 保存搜索的 ID，在整个生命周期中稳定 | Alert Key，标签 `saved_search_id` |
 | `saved_search.name` | 保存搜索名称 | 告警标题，标签 `check` |
 | `saved_search.query` | 搜索条件 | 告警描述，标签 `query` |
 | `saved_search.html_search_url` | 该搜索在 Papertrail 中的链接 | 告警描述，标签 `search_url` |
-| `max_id` | 本次推送命中的最新一条日志的 ID，每次新推送都会更高 | Alert Key 的一部分，标签 `max_id` |
-| `min_id` | 本次推送命中的最早一条日志的 ID | 标签 `min_id` |
+| `max_id` | 本次推送命中的最新一条日志的 ID，每次新推送都会更高 | 标签 `max_id`，反映最近一次推送 |
+| `min_id` | 本次推送命中的最早一条日志的 ID | 标签 `min_id`，反映最近一次推送 |
 | `frequency` | 该告警配置的轮询间隔 | 标签 `frequency` |
 | `events[]` | 本次推送命中的日志，单次最多 25,000 条 / 10 MB | 汇总进告警描述（最多摘录前 5 条），标签 `event_count` 记录总数，`resource`/`source_name`/`program` 取自第一条命中日志 |
 | `counts[]`（"Send only counts" 模式） | 按来源分组的计数，不包含具体日志和 ID | 不支持，收到时 Flashduty 拒绝请求，请在 Papertrail 中关闭该选项 |
@@ -110,7 +110,11 @@ Flashduty 按 Papertrail 官方文档的固定格式解析请求：请求体为 
 ## Alert Key
 ---
 
-Flashduty 使用 `saved_search.id` 与 `max_id` 组合作为 Alert Key。`saved_search.id` 官方文档定义为保存搜索的稳定标识，在同一个保存搜索的每次推送中都不会变化；`max_id` 是本次推送里最新一条日志的 ID，Papertrail 后续每次新的推送都会带来更高的 `max_id`。两者组合后，同一个保存搜索的连续两次推送一定产生不同的 Alert Key，各自开出独立的告警；缺少 `saved_search.id` 或 `max_id` 的推送会被拒绝。
+Flashduty 直接使用 `saved_search.id` 作为 Alert Key。官方文档将其定义为保存搜索的稳定标识，在同一个保存搜索的每次推送中都不会变化，因此同一个保存搜索反复命中新日志时，每次推送都会合并进同一条告警，视为同一个问题在持续发生；不同的保存搜索产生不同的 Alert Key，各自开出独立的告警。
+
+`max_id`/`min_id` 是本次推送命中日志的 ID 范围，每次推送都会不同，因此不参与 Alert Key：如果把它们混进 Alert Key，会导致同一个保存搜索每命中一次新日志就开出一条新的、永远不会恢复的告警。它们只作为标签，反映最近一次推送的范围。
+
+缺少 `saved_search.id` 的推送会被拒绝。
 
 ## 告警等级
 ---
@@ -122,9 +126,9 @@ Papertrail 的保存搜索告警没有严重程度字段，所有命中都以 **
 
 <AccordionGroup>
 
-<Accordion title="为什么两次告警之间隔了很久，中间的日志去哪了？">
+<Accordion title="为什么同一个保存搜索反复命中，却只看到一条告警在延续？">
 
-Papertrail 按 **Frequency** 轮询：如果同一个保存搜索在一个轮询周期内多次命中，会合并进同一次推送、同一条告警的描述里（最多摘录前 5 条，其余在描述中显示"... and N more"）。只有跨越了下一个轮询周期的命中，才会触发新的推送和新的告警。
+Papertrail 按 **Frequency** 轮询：一个轮询周期内的多次命中会合并进同一次推送、同一条告警的描述里（最多摘录前 5 条，其余在描述中显示"... and N more"）；跨越轮询周期的新推送则会合并进这条已经打开的告警，因为它们共用同一个 `saved_search.id`。只有在协作空间的超时自动关闭触发、这条告警先被关闭之后，下一次推送才会重新打开一条新的告警。
 
 </Accordion>
 
