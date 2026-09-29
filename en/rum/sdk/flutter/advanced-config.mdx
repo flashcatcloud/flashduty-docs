@@ -1,7 +1,7 @@
 ---
 title: "Flutter SDK advanced configuration"
-description: "Configure sampling, tracking consent, event filtering, distributed tracing, and symbol file upload for the Flutter RUM SDK"
-keywords: ["RUM", "Flutter SDK", "advanced configuration", "sampling", "tracking consent", "symbol upload"]
+description: "Configure sampling, remote configuration, tracking consent, event filtering, distributed tracing, and symbol file upload for the Flutter RUM SDK"
+keywords: ["RUM", "Flutter SDK", "advanced configuration", "sampling", "remote configuration", "tracking consent", "symbol upload"]
 ---
 
 This page describes the advanced configuration options of the Flutter SDK. All configuration is passed through `DatadogConfiguration` and `DatadogRumConfiguration`.
@@ -15,6 +15,61 @@ DatadogRumConfiguration(
   traceSampleRate: 20.0,      // Trace sampling rate on resources
 );
 ```
+
+## Remote configuration
+
+Starting with `flashcat_flutter_plugin` 0.2.0, the session sample rate can be adjusted online from the console under **Application Management > Remote Configuration**, with no code change or new release. The feature is off by default and has to be enabled at initialization:
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  sessionSamplingRate: 100.0,        // Used when the console delivers no rate
+  remoteConfigurationEnabled: true,
+);
+```
+
+Once enabled, the configuration is fetched by the native Android / iOS SDK underneath the plugin, and behaves exactly as it does there:
+
+- A rate published in the console applies to the **next new session**; a session already under way is not affected.
+- The delivered values are persisted locally, so the first session after a cold start is already drawn under the last delivered rate.
+- A failed, timed-out or unreadable response leaves the values in force untouched; they are never cleared. When remote configuration is disabled in the console, the SDK falls back to the `sessionSamplingRate` passed at initialization.
+- The Flutter SDK reads only the **session sample rate** and **custom configuration keys**; the other settings have no effect. Read the custom keys with `getRemoteConfig()`, which returns `null` when remote configuration is off or no configuration has arrived yet:
+
+```dart
+final custom = await DatadogSdk.instance.rum?.getRemoteConfig();
+// Numbers can arrive as int or double depending on the platform, so read them as num
+final threshold = (custom?['threshold'] as num?)?.toDouble();
+```
+
+To decide sampling by your own business rules, use the `beforeSampling` callback. Each time a new session is about to be drawn it receives the rate that would apply (`sessionSampleRate`) and the console's custom keys (`custom`); return a rate to override it, or `null` to leave it alone. It runs synchronously, so keep it fast; returning a value outside 0–100, throwing, or timing out all keep the native SDK's decision. The callback also runs when remote configuration is off — `sessionSampleRate` is then the local value and `custom` is `null`.
+
+```dart
+DatadogRumConfiguration(
+  applicationId: '<APPLICATION_ID>',
+  remoteConfigurationEnabled: true,
+  beforeSampling: (context) {
+    // For example: collect every session of users listed in the custom key debugUsers,
+    // and keep the delivered rate for everyone else
+    final debugUsers = context.custom?['debugUsers'];
+    if (debugUsers is List && debugUsers.contains(currentUserId)) {
+      return 100;
+    }
+    return null;
+  },
+);
+```
+
+To collect the current user regardless of the sample rate (for example while investigating one user's issue), call `DatadogSdk.instance.rum?.setForcedSession()`. If the current session was sampled out it ends immediately and a collected one starts; every session afterwards is collected for the lifetime of the process. The setting cannot be reverted until the app restarts.
+
+<Note>
+When Flutter attaches to a native SDK that is already initialized (add-to-app), `remoteConfigurationEnabled` and `beforeSampling` must be set by the native side when it initializes RUM — see [iOS SDK Advanced Configuration](/en/rum/sdk/ios/advanced-config#remote-configuration) and [Android SDK Advanced Configuration](/en/rum/sdk/android/advanced-config#remote-configuration-adjust-the-sample-rate-from-the-console). `getRemoteConfig()` and `setForcedSession()` still work from Dart.
+</Note>
+
+<Warning>
+Custom configuration keys are delivered to clients and readable by anyone who holds the Client Token. Never put secrets, access tokens, or personally sensitive information in them.
+</Warning>
+
+For the console side (settings, publishing and when a version takes effect), see [Application Management · Remote Configuration](/en/rum/quickstart/app-management#remote-configuration).
 
 ## Tracking consent
 
