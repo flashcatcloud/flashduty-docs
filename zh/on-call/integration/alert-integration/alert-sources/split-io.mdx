@@ -1,0 +1,150 @@
+---
+title: "Split 告警集成"
+description: "通过 Metric Alert Webhook 将 Split（Harness FME）的指标劣化告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Split", "Harness FME", "功能开关", "指标告警", "Webhook"]
+---
+
+Split 现已并入 Harness，产品名为 Harness Feature Management & Experimentation（FME）。通过 FME 的 **Outgoing Webhook (Metric Alerts)**，把功能开关或实验导致指标劣化的告警同步到 Flashduty On-call：Alert Policy 阈值被突破，或 Guardrail / Key 指标出现统计显著的不利影响。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Split**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Split**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Harness FME 中配置
+---
+
+<Steps>
+<Step title="确认权限">
+
+需要 FME Administrator 权限，以及账号级的连接器编辑权限（`core_connector_edit`）：Metric Alert Webhook 在 Harness 中以连接器的形式保存。
+
+</Step>
+
+<Step title="添加 Metric Alert Webhook">
+
+1. 在 FME 导航菜单中点击 **FME Settings → Integrations**，在分类菜单中选择 **Webhooks**
+2. 在 **Outgoing Webhook (Metric Alerts)** 上点击 **Add**，选择要接入的项目（project）
+3. **Environments** 选择要发送告警的环境，例如生产环境
+4. 选择触发推送的告警类型，可多选：
+   - **All alert policies**
+   - **Metric alert policies**
+   - **Key metric significance**
+   - **Guardrail metric significance**
+5. Webhook URL 填写 Flashduty 集成的完整推送地址
+6. 点击 **Save**
+
+一个 Webhook 只属于一个项目。多个项目需要分别添加，可以使用同一个推送地址。
+
+</Step>
+
+<Step title="测试">
+
+保存前可以点击 **Send Test Message** 检查连通性。测试消息不是劣化告警时，Flashduty 返回成功，不生成告警；若测试消息是一条完整的指标告警样例，Flashduty 会生成一条告警，请手动关闭。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+FME 只在告警触发时推送，告警被忽略（dismiss）或自动解除（auto-resolved）时不会再通知，Flashduty 收不到恢复事件。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 **24 小时**（与 FME 默认的 24 小时监控窗口一致；如果调整过监控窗口，可按窗口长度设置），计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+FME 每次推送一个 `type` 为 `METRIC_ALERT` 的 JSON 对象。Flashduty 使用以下字段：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `source.id` | 功能开关或实验 ID | Alert Key，标签 `source_id` |
+| `source.name` | 功能开关或实验名称 | 告警标题，标签 `source_name` |
+| `source.type` | `FEATURE_FLAG` 或 `EXPERIMENT` | 标签 `source_type` |
+| `source.url` | 功能开关或实验链接 | 标签 `url` |
+| `data.environment.id` / `name` | 环境 | Alert Key，标签 `environment_id`、`env` |
+| `data.metric.id` / `name` / `url` | 指标 | Alert Key，告警标题，标签 `metric_id`、`metric`、`metric_url` |
+| `data.alertType` | `ALERT_POLICY` 或 `SIGNIFICANCE` | 告警等级，标签 `alert_type` |
+| `data.direction` | `DESIRED` 或 `UNDESIRED` | 是否生成告警，标签 `direction` |
+| `data.metricCategory.name` | 指标分类 | 标签 `metric_category` |
+| `data.alertPolicy` | 名称、阈值、阈值类型（显著性告警为空） | 标签 `alert_policy`、`threshold`、`threshold_type` |
+| `data.baselineTreatment` / `comparisonTreatment` | 基线与对比的 treatment | 标签 `baseline_treatment`、`comparison_treatment` |
+| `data.targetingRule` | 触发告警的定向规则 | 标签 `targeting_rule` |
+| `data.baselineValue` / `comparisonValue` / `absoluteImpact` / `relativeImpact` / `pValue` | 指标值、影响和 p 值 | 同名蛇形标签（`baseline_value` 等） |
+
+告警标题为 `<功能开关或实验名称> degraded <指标名称> in <环境名称>`。每条告警还带有标签 `source=split-io`。
+
+## Alert Key
+---
+
+Flashduty 用功能开关或实验 ID、环境 ID 和指标 ID 一起生成 Alert Key：
+
+- 同一个功能开关在同一环境中再次让同一指标劣化（包括不同 treatment、不同定向规则），合并到仍在触发的告警
+- 同一指标同时触发 Alert Policy 告警和显著性告警时，合并到同一条告警
+- 不同功能开关、不同环境或不同指标，各生成一条告警
+- FME 投递失败后 300 毫秒重试一次；重试的推送合并到原告警
+
+修改功能开关、指标、环境或告警策略的名称不会改变 Alert Key。
+
+## 告警等级
+---
+
+| `data.alertType` | Flashduty 告警等级 |
+| :--- | :--- |
+| `ALERT_POLICY` | Critical |
+| `SIGNIFICANCE` | Warning |
+| 其他值或为空 | Warning |
+
+以下推送返回成功，不生成告警：
+
+- `data.direction` 为 `DESIRED`（指标向期望方向变化）。Key 指标显著性告警和阈值为 0 的 Alert Policy 会同时推送改善和劣化
+- `type` 不是 `METRIC_ALERT`
+
+`METRIC_ALERT` 推送缺少 `source.id`、`data.environment.id` 或 `data.metric.id` 时，请求会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="FME 中告警已自动解除，Flashduty 告警为什么没有关闭？">
+
+FME 的 Metric Alert Webhook 只在告警触发时推送，没有恢复事件。请开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭该告警。
+
+</Accordion>
+
+<Accordion title="为什么指标改善的显著性告警没有出现在 Flashduty？">
+
+`direction` 为 `DESIRED` 的推送表示指标向期望方向变化，不需要值班处理，Flashduty 不生成告警。
+
+</Accordion>
+
+<Accordion title="FME 的邮件告警和 Webhook 有什么区别？">
+
+FME 也可以把告警邮件发到任意地址。Webhook 推送结构化字段，Flashduty 能按功能开关、环境和指标合并告警，推荐使用 Webhook。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认推送地址完整（包含 `integration_key`）
+- **FME 中有告警但 Flashduty 没有**：确认 Webhook 选中了该环境和该告警类型；指标改善（`DESIRED`）不生成告警
