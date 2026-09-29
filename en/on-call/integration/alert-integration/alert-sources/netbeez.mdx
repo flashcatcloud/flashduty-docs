@@ -1,0 +1,135 @@
+---
+title: "NetBeez alert integration"
+description: "Send NetBeez network monitoring alert and incident notifications to Flashduty On-call through a webhook."
+keywords: ["alert integration", "NetBeez", "network monitoring", "webhook", "alert_dedup_id", "incident_id"]
+---
+
+Use the NetBeez webhook integration to send network monitoring alerts and incidents to Flashduty On-call. NetBeez sends every alert and every incident as an open notification followed by a cleared notification: the open notification triggers a Flashduty alert, and the cleared notification recovers the same alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **NetBeez** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **NetBeez** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure NetBeez
+---
+
+<Steps>
+<Step title="Enable the webhook integration">
+
+1. Sign in to NetBeez as an administrator (webhooks require BeezKeeper 13.0 or later)
+2. Go to **Settings → Integrations → Webhooks** and enable the integration
+3. Paste the full Flashduty push URL into the webhook URL field and save
+4. Optionally use the test function on that page to check the URL. Flashduty returns success for a request without an event type (`event_type` or `event`) and creates no alert
+
+</Step>
+
+<Step title="Choose the notification types to send">
+
+In the notification settings on the same page, select what to send to the webhook: Agent device alerts, alerts for Agents, Targets, WiFi profiles and scheduled tests, and incidents for Agents, Targets and WiFi profiles. Each type can be sent as single notifications or as aggregate notifications; an aggregate request carries several events, and Flashduty handles them one by one.
+
+<Note>
+Alerts and incidents are separate notifications. If you select both for the same network problem, Flashduty creates two alerts. To respond by incident only, select only the incident notifications.
+</Note>
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a Target or Agent fail (for example, temporarily disable an Agent), confirm that Flashduty receives an active alert, then restore it and confirm the original alert recovers.
+
+</Step>
+</Steps>
+
+## Payload fields
+---
+
+NetBeez POSTs `application/json` with a single `data` field: an object for a single notification, an array for an aggregate notification. Flashduty parses it directly, so no template is needed.
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `alert_dedup_id` | Alert dedup ID; a cleared notification carries the ID of its open notification | Alert Key for alert notifications, label `alert_dedup_id` |
+| `event_type` | `ALERT_OPEN` or `ALERT_CLEARED` | Trigger or recovery |
+| `severity` / `severity_name` | At most 5 when open, 6 when cleared | Alert severity, labels `severity`, `severity_name` |
+| `event` | `INCIDENT_OPEN` or `INCIDENT_CLEARED` | Trigger or recovery for incident notifications |
+| `incident_id`, `incident_ts` | Incident ID and incident start time (millisecond timestamp) | Labels `incident_id`, `incident_ts`; `incident_ts` is part of the Alert Key |
+| `agent_id` / `target_id` / `wifi_profile_id` | ID of the object the incident belongs to | Part of the incident Alert Key, label of the same name |
+| `agent` / `target` / `wifi_profile` | Object name | Alert title, label of the same name, label `check` |
+| `destination` | Host the test was reaching | Labels `destination`, `resource` |
+| `test_type` | Test type, such as `DnsTest` or `HttpTest` | Label `test_type` |
+| `message` | Description | Alert title and description |
+| `url` | Link to the incident in the NetBeez UI | Label `url` |
+
+The alert title is "object name: message". The object name is the first non-empty of `target`, `wifi_profile`, `agent` and `destination`.
+
+## Alert Key
+---
+
+- Alert notifications use `alert_dedup_id`. NetBeez documents that the open and cleared notifications of one alert share it, so grouping by it is enough.
+- Incident notifications use the object type, the object ID and `incident_ts`. `incident_ts` is always the incident start time and is the same in the open and cleared notifications. NetBeez also suggests correlating incidents by `incident_id`, but the cleared example in its documentation carries a different `incident_id` from the open one, so Flashduty does not depend on it and keeps `incident_id` only as a label.
+- Alert and incident Alert Keys never overlap, and changing the object name, message or severity does not change the Alert Key.
+
+If an alert notification has no `alert_dedup_id`, or an incident notification has no object ID or `incident_ts`, Flashduty returns a parameter error because the cleared notification could not be matched to its alert reliably.
+
+## Status and severity
+---
+
+| NetBeez notification | Flashduty status or severity |
+| :--- | :--- |
+| Alert `ALERT_OPEN`, `severity` 1 or 2 | Critical |
+| Alert `ALERT_OPEN`, any other `severity` (including missing) | Warning |
+| Alert `ALERT_CLEARED` | Recovery |
+| Incident `INCIDENT_OPEN` | Warning |
+| Incident `INCIDENT_CLEARED` | Recovery |
+
+NetBeez documents only that open alerts have a `severity` of at most 5 with names such as `alert` and `critical`, and does not publish a full table, so only 1 and 2 map to Critical. To change a severity, rewrite it with a rule under the channel's **Configuration**.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="What happens when an aggregate notification contains both open and cleared events?">
+
+Flashduty processes the events in `alert_ts` order, oldest first, so the open event of an alert is handled before its cleared event and the alert ends up recovered.
+
+</Accordion>
+
+<Accordion title="Does the webhook test create an alert?">
+
+The NetBeez test sends sample data. Flashduty treats only requests that contain `event_type` or `event` as alerts and returns success without creating an alert for anything else. If the sample is recognized as an alert, close it manually in Flashduty.
+
+</Accordion>
+
+<Accordion title="Do NetBeez retries create duplicate alerts?">
+
+No. NetBeez retries on non-2xx responses, the Alert Key of an event does not change, and repeated deliveries merge into the same alert.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **NetBeez fails to deliver**: confirm the webhook URL is the full push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: confirm the body has `data`, alerts carry `alert_dedup_id`, and incidents carry an object ID and `incident_ts`
+- **An alert does not recover**: confirm the matching type is selected in NetBeez so its cleared notification is sent (open and cleared notifications share one notification type)
+
+For the field reference, see the NetBeez documentation [NetBeez Webhook Payloads Reference](https://community.netbeez.net/t/netbeez-webhook-payload-reference/320).
