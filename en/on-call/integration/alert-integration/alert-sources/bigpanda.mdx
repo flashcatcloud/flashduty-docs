@@ -1,0 +1,184 @@
+---
+title: "BigPanda alert integration"
+description: "Send the incidents BigPanda creates by correlating alerts to Flashduty On-call through BigPanda's Notifications Webhook v2 integration."
+keywords: ["alert integration", "BigPanda", "AIOps", "Notifications Webhook v2", "AutoShare", "incident.id"]
+---
+
+BigPanda is an event correlation platform: it ingests alerts from monitoring and log tools and correlates related ones into a single incident, then drives notifications off that incident's state changes. Flashduty receives these incidents through BigPanda's **Notifications Webhook v2** integration. An incident's creation, updates, and closure all carry the same `incident.id`, so Flashduty merges them into one alert and recovers it automatically when the incident closes.
+
+Notifications Webhook v2 can currently only be created and updated through BigPanda's REST API — there is no console form for it. This page gives you a request body you can copy as-is.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+Choose this method when you do not need to route alerts to different channels.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Channel** and open a channel
+  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+  3. Select **BigPanda**, then click **Save**
+  4. Open the generated integration card and copy the **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+### Use a shared integration
+
+Choose this method when you need to route alerts to different channels based on the payload.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Integration Center → Alert Events**
+  2. Select **BigPanda** and enter an integration name
+  3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+  4. Click **Save** and copy the generated **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## Prerequisites
+---
+
+- **Permissions**: calling the Notifications Webhook v2 API needs the **Integrations** permission; creating an AutoShare rule needs the **Notifications** permission (view, add, edit, and delete AutoShare rules).
+- **Authentication**: the Notifications Webhook v2 API currently only accepts credentials from a **User Account** — a Service Account cannot call it.
+- This integration does not parse a fixed BigPanda schema. It parses the JSON template you paste into the request body in step one below — keep the field names exactly as given.
+
+## Configure BigPanda
+---
+
+<Steps>
+<Step title="Create the Notifications Webhook v2 integration">
+
+Call BigPanda's integration creation endpoint. Replace `base_url` with your Flashduty integration's complete push URL (including the `integration_key` parameter), and replace `Authorization` with your User Account access token:
+
+```bash
+curl https://api.bigpanda.io/resources/v2.1/integrations \
+  --request POST \
+  --header 'Authorization: Bearer <User Account access token>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "name": "flashduty",
+    "parent_system_id": "webhook_v2",
+    "workflow_config": {
+      "events": {
+        "default": {
+          "enabled": true,
+          "body": {
+            "incident_id": "{{incident.id}}",
+            "status": "{{incident.status}}",
+            "environment": "{{metadata.environment_name}}",
+            "host": "{{primaryAlert.tags.host}}",
+            "check": "{{primaryAlert.tags.check}}",
+            "description": "{{primaryAlert.description}}",
+            "url": "{{links.console}}"
+          }
+        }
+      },
+      "config": {
+        "base_url": "https://api.flashcat.cloud/event/push/alert/bigpanda?integration_key=<integration key>"
+      }
+    }
+  }'
+```
+
+<Warning>
+Keep the request body's field names (`incident_id`, `status`, `environment`, `host`, `check`, `description`, `url`) and the `{{...}}` variables exactly as shown. The `default` event configuration applies to any trigger you don't configure separately, so an incident's creation, updates, and closure all reuse this one template — you do not need to configure each event on its own.
+</Warning>
+
+</Step>
+
+<Step title="Create an AutoShare rule">
+
+Creating the Webhook v2 integration does not by itself make BigPanda send anything to it. An AutoShare rule decides which incidents get shared to it:
+
+1. In BigPanda, go to **Settings → AutoShare**
+2. Click **Create AutoShare**
+3. In **Environment**, select the environment you want connected to Flashduty
+4. In **Share Via**, select the Webhook v2 integration you created in the previous step
+5. Click **Create AutoShare**
+
+Once the rule is active, that environment's incident creation, status changes, and closure are all shared automatically according to the rule's delay settings — no separate event-type toggle is needed.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Trigger a real alert in that environment (or wait for the next real one) and confirm Flashduty receives an active alert. Then let every correlated alert recover and confirm that once the incident's status becomes `ok`, the Flashduty alert recovers automatically. BigPanda's own documentation does not describe a test-notification feature for this integration, so you cannot verify it with a single click.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the request body's `incident_id` (from BigPanda's template variable `{{incident.id}}`) directly as the Alert Key. BigPanda's documentation defines `incident.id` as the incident's system-generated unique identifier; an incident's creation, updates, and closure all share the same `incident.id`.
+
+Changes to `status`, `environment`, `host`, `check`, `description`, or `url` do not change the Alert Key.
+
+## Status and severity
+---
+
+| BigPanda `incident.status` | Flashduty status | Flashduty severity |
+| :--- | :--- | :--- |
+| `critical` | Triggered | Critical |
+| `warning` | Triggered | Warning |
+| `unknown` | Triggered | Warning |
+| `ok` | Recovered | — |
+
+`incident.status` is the most severe status among the incident's correlated alerts. `unknown` means BigPanda could not determine health from the correlated alerts; the incident is still open, so it is treated as Warning. An empty or unrecognized `status` is rejected.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check`, `resource`, `host` | Template variables `{{primaryAlert.tags.check}}` and `{{primaryAlert.tags.host}}` |
+| `incident_id` | `incident_id` |
+| `status` | `status` |
+| `env` | `environment` (`{{metadata.environment_name}}`) |
+| `url` | `url` (`{{links.console}}`; requires a BigPanda login to open) |
+| `source` | Always `bigpanda` |
+
+The alert title uses `check` first; when the template's `{{primaryAlert.tags.check}}` is empty, it falls back to `description`.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="I created the integration but never received any request.">
+
+Creating a Webhook v2 integration does not make it receive data on its own. You must also create an AutoShare rule that points to it (step two above), and confirm the rule covers the right environment.
+
+</Accordion>
+
+<Accordion title="Flashduty reports an invalid parameter.">
+
+Confirm the request body's `incident_id` and `status` field names match this page's template exactly, and that `status` is one of `critical`, `warning`, `unknown`, `ok`. BigPanda automatically converts template variables to their JSON type, so if you edited the template, keep every field written as `"field name": "{{variable}}"`.
+
+</Accordion>
+
+<Accordion title="The alert does not recover.">
+
+Confirm the AutoShare rule's environment matches the one the alert was raised in. BigPanda only sets `incident.status` to `ok` once every correlated alert in the incident has recovered; if only some of them have, the incident stays at `warning`.
+
+</Accordion>
+
+<Accordion title="Can I reuse one integration across several AutoShare rules?">
+
+Yes. The Webhook v2 integration and its AutoShare rules are separate, and several rules can share one integration. To route different environments to different Flashduty channels, create a separate Flashduty integration and AutoShare rule for each environment.
+
+</Accordion>
+</AccordionGroup>
+
+See BigPanda's own documentation for further field definitions: [Notifications Webhook v2](https://docs.bigpanda.io/en/notifications-webhook-v2.html) and [AutoShare](https://docs.bigpanda.io/en/autoshare--adr-.html).

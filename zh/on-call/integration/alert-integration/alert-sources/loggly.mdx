@@ -1,0 +1,151 @@
+---
+title: "Loggly 告警集成"
+description: "通过 HTTP Endpoints 将 Loggly（SolarWinds 旗下）的日志告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Loggly", "SolarWinds", "HTTP Endpoints", "日志告警", "Webhook"]
+---
+
+Loggly 是 SolarWinds 旗下的日志管理服务，其告警功能（Alerts）在保存的搜索命中数达到阈值时通知您。本集成通过 Loggly 的 **HTTP Endpoints** 通知方式，把每条 Loggly 告警转成一条 Flashduty 告警。
+
+<Note>
+Loggly 的告警功能仅在付费套餐（Standard、Pro）中提供；免费的 Lite 套餐没有告警功能。30 天试用无需信用卡，试用期内可以正常使用告警。
+</Note>
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Loggly**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Loggly**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Loggly 中配置
+---
+
+<Steps>
+<Step title="创建或编辑一条告警">
+
+登录 Loggly，进入 **Alerts**，新建一条告警（基于保存的搜索），或编辑一条已有告警。
+
+</Step>
+
+<Step title="添加 HTTP Endpoint">
+
+在告警的通知方式中选择 **HTTP Endpoints**：
+
+1. 将 Flashduty 集成的完整推送地址粘贴到 URL 输入框，地址中需包含 `integration_key`
+2. 请求方式选择 **POST**（Loggly 同时支持 POST 和 GET，Flashduty 的推送接口只接受 POST）
+
+Loggly 会以固定结构的 JSON 对象推送，字段无法自定义：
+
+```json
+{
+  "alert_name": "IndexOutOfBounds Exception",
+  "edit_alert_link": "https://<您的子域名>.loggly.com/alerts/edit/8188",
+  "source_group": "N/A",
+  "start_time": "Mar 17 11:41:40",
+  "end_time": "Mar 17 11:46:40",
+  "search_link": "https://<您的子域名>.loggly.com/search/?terms=...",
+  "query": "*",
+  "num_hits": 225,
+  "recent_hits": [],
+  "owner_username": "sample",
+  "owner_subdomain": "sample",
+  "owner_email": "you@example.com"
+}
+```
+
+保存后确认该 HTTP Endpoint 已在这条告警的通知列表中启用。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Loggly 的 HTTP Endpoints 通知没有恢复事件：只要告警条件仍然成立，Loggly 就会按检查周期反复推送同一条告警（例如每分钟检查一次，条件持续 30 分钟就会推送 30 次）；条件消失后 Loggly 不再推送，也不会告诉 Flashduty "已恢复"。
+
+请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，超时时长建议参考该保存搜索的检查周期，至少覆盖 2-3 个检查周期（例如检查周期 1 分钟，建议 30 分钟；检查周期 1 小时，建议 3 小时），计时起点选择 **故障触发**。
+
+</Step>
+
+<Step title="验证">
+
+Loggly 的 HTTP Endpoints 没有单独的测试推送按钮。请让保存的搜索在真实环境中命中一次（例如临时降低阈值，或触发一条会被该搜索命中的日志），确认 Flashduty 收到对应告警后，再把阈值改回正常值。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用「Loggly 账号子域名（`owner_subdomain`）+ 告警定义 ID」的组合作为 Alert Key。告警定义 ID 从 `edit_alert_link`（该告警的编辑页面地址）中解析，即 URL 中 `/alerts/edit/` 后面的数字，例如 `.../alerts/edit/8188` 中的 `8188`。
+
+`edit_alert_link` 缺失，或不是 `/alerts/edit/<数字ID>` 形式的地址时，Flashduty 会拒绝该请求。
+
+同一条告警定义在条件持续期间反复推送的多次通知，会合并到同一条 Flashduty 告警里，而不是各自开出新告警；告警名称、命中数、时间范围、查询语句等字段的变化不影响 Alert Key。
+
+## 告警等级
+---
+
+Loggly 的 HTTP Endpoints 通知不携带严重程度字段，所有告警都以 **Warning** 等级触发。日志搜索命中数超过阈值本身不代表故障，如果某条保存搜索确实需要更高优先级，可在 Flashduty 的告警规则中调整。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警名称（`alert_name`） |
+| `resource` / `source_group` | 保存搜索所属的 Source Group，未分组时为 `N/A` |
+| `alert_definition_id` | 从 `edit_alert_link` 解析出的告警定义 ID，即 Alert Key 的一部分 |
+| `edit_alert_link` | 该告警的编辑页面地址 |
+| `owner_username` / `owner_subdomain` | 触发该告警的 Loggly 账号 |
+| `start_time` / `end_time` | 本次检查窗口的起止时间 |
+| `query` | 保存搜索使用的查询语句 |
+| `search_link` | 本次命中结果的搜索页面地址 |
+| `num_hits` | 本次检查窗口内命中的日志条数 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+
+<Accordion title="为什么配置了 HTTP Endpoint，却没有收到任何告警？">
+
+先确认账号是付费套餐（Standard/Pro）或仍在 30 天试用期内 —— 免费 Lite 套餐没有告警功能。再确认这条告警的通知方式里已经勾选/启用了刚创建的 HTTP Endpoint，并且保存搜索确实命中了数据。
+
+</Accordion>
+
+<Accordion title="告警为什么一直不关闭？">
+
+Loggly 的通用 HTTP Endpoints 没有恢复事件，条件消失后 Loggly 只是停止推送，不会主动通知"已恢复"。请开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭该告警。
+
+</Accordion>
+
+<Accordion title="同一条告警短时间内收到很多条推送，正常吗？">
+
+正常。只要保存搜索的条件持续成立，Loggly 就会按检查周期反复推送；Flashduty 会把这些推送合并到同一条告警上，不会重复开出新告警。
+
+</Accordion>
+
+<Accordion title="能否自定义推送内容？">
+
+不能。HTTP Endpoints 的 JSON 结构由 Loggly 固定，不支持修改字段。如果需要转发到 PagerDuty、Slack、OpsGenie 等其他平台，Loggly 另外提供了专用的原生集成，但不经过本集成。
+
+</Accordion>
+
+</AccordionGroup>
+
+更多字段含义请参阅 [Loggly Alert Endpoints](https://documentation.solarwinds.com/en/success_center/loggly/content/admin/alert-endpoints.htm) 和 [Loggly Alerts](https://documentation.solarwinds.com/en/success_center/loggly/content/admin/alerts.htm)。
