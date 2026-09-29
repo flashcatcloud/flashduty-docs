@@ -146,6 +146,16 @@ clean_content() {
     | sed -E 's/<[A-Za-z/][^<>]*>//g; s/ +/ /g'
 }
 
+# The page as a reader of the raw text sees it: frontmatter and import lines
+# dropped, everything else — headings, lists, tables, code — kept line by line.
+# `content` is flattened for search; `body` keeps the structure for consumers
+# that hand a whole page to a reader.
+body_content() {
+  local file=$1
+  awk 'BEGIN{skip=0} NR==1 && /^---$/{skip=1;next} skip && /^---$/{skip=0;next} !skip' "$file" \
+    | { grep -v '^import ' || true; }
+}
+
 # Build a JSON document for a single file
 build_doc_json() {
   local file=$1
@@ -157,17 +167,18 @@ build_doc_json() {
   id=$(file_to_id "$file")
   content=$(clean_content "$file")
 
-  # The content goes through stdin: as a --arg it would hit the kernel's
-  # 128 KiB limit on a single command-line argument for a long page.
-  printf '%s' "$content" | jq -Rs \
+  # Content and body go through stdin (a --arg would hit the kernel's 128 KiB
+  # limit on one command-line argument for a long page), NUL-separated.
+  { printf '%s\0' "$content"; body_content "$file"; } | jq -Rs \
     --arg id "$id" \
     --arg title "$title" \
     --arg locale "$locale" \
     --arg url "$doc_url" \
-    '{id: $id, title: $title, content: ., locale: $locale, url: $url}' 2>/dev/null
+    --arg path "$file" \
+    'split("\u0000") as $p | {id: $id, title: $title, content: $p[0], body: $p[1], locale: $locale, url: $url, source: "public", path: $path}' 2>/dev/null
 }
 
-# Write "id<TAB>url" for every document in the index to $1. Fails unless the
+# Write "id<TAB>url<TAB>source" for every document in the index to $1. Fails unless the
 # pages add up to exactly the total the index reports, so an incomplete
 # listing can never drive deletions.
 list_index_docs() {
@@ -179,7 +190,7 @@ list_index_docs() {
   while :; do
     if ! page=$(curl -sS --fail-with-body --connect-timeout 30 --max-time 60 \
       -H "Authorization: Bearer $MEILI_API_KEY" \
-      "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents?fields=id,url&limit=$LIST_PAGE_SIZE&offset=$offset"); then
+      "$MEILI_ENDPOINT/indexes/$MEILI_INDEX/documents?fields=id,url,source&limit=$LIST_PAGE_SIZE&offset=$offset"); then
       echo "Listing index documents failed: $page" >&2
       return 1
     fi
@@ -193,7 +204,7 @@ list_index_docs() {
       echo "Index changed while listing (total $total -> $page_total)" >&2
       return 1
     fi
-    jq -r '.results[] | [.id, (.url // "")] | @tsv' <<<"$page" >> "$out" || return 1
+    jq -r '.results[] | [.id, (.url // ""), (.source // "")] | @tsv' <<<"$page" >> "$out" || return 1
 
     offset=$((offset + LIST_PAGE_SIZE))
     [[ $offset -lt $total ]] || break
@@ -354,8 +365,17 @@ fi
 echo "Index has $(wc -l < "$work_dir/index_docs" | xargs) documents"
 echo ""
 
-# Index documents with no source file in the current doc set
+# One document per API operation, from the consolidated spec.
+python3 scripts/openapi_docs.py api-reference/openapi.zh.json > "$work_dir/openapi_docs.json"
+jq -r '.[].id' "$work_dir/openapi_docs.json" >> "$work_dir/current_ids"
+LC_ALL=C sort -u -o "$work_dir/current_ids" "$work_dir/current_ids"
+echo "Built $(jq length "$work_dir/openapi_docs.json") API operation documents"
+
+# Index documents this script owns (pages and API operations; documents older
+# than the source field carry none) with nothing behind them in the current
+# set. Documents other uploaders put in the same index are left alone.
 LC_ALL=C sort "$work_dir/index_docs" \
+  | awk -F'\t' '$3 == "" || $3 == "public" || $3 == "openapi"' \
   | LC_ALL=C join -t $'\t' -v 1 - "$work_dir/current_ids" > "$work_dir/stale_docs"
 stale_count=$(wc -l < "$work_dir/stale_docs" | xargs)
 
@@ -365,11 +385,19 @@ echo "--- Uploading documents ---"
 upload_files "$work_dir/files" || result=1
 
 echo ""
+echo "--- Uploading API operation documents ---"
+openapi_total=$(jq length "$work_dir/openapi_docs.json")
+for ((i = 0; i < openapi_total; i += 50)); do
+  batch=$(jq -c ".[$i:$((i + 50))]" "$work_dir/openapi_docs.json")
+  upload_batch "$batch" "$(jq length <<<"$batch")" || result=1
+done
+
+echo ""
 echo "--- Removing documents with no source file ---"
 if [[ $stale_count -eq 0 ]]; then
   echo "None."
 else
-  while IFS=$'\t' read -r id url; do
+  while IFS=$'\t' read -r id url _source; do
     echo "Will delete: $url (id: $id)"
   done < "$work_dir/stale_docs"
   ids_json=$(cut -f1 "$work_dir/stale_docs" | jq -Rn '[inputs]')
