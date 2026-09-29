@@ -116,6 +116,7 @@ export const docMap = {
   Komodor: `${alertBase}/komodor.mdx`,
   PandoraFms: `${alertBase}/pandora-fms.mdx`,
   Openstatus: `${alertBase}/openstatus.mdx`,
+  Opennms: `${alertBase}/opennms.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
   OciMonitoring: `${alertBase}/oci-monitoring.mdx`,
