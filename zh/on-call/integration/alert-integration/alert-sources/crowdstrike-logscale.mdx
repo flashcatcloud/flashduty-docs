@@ -1,0 +1,161 @@
+---
+title: "CrowdStrike Falcon LogScale 告警集成"
+description: "通过 Falcon LogScale（原 Humio）触发器的 Webhook Action，把命中查询的日志告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "CrowdStrike", "Falcon LogScale", "Humio", "Webhook Action", "Trigger"]
+---
+
+Falcon LogScale（原 Humio）用 **Trigger（触发器）** 描述一条持续运行的查询：查询命中时执行关联的 **Action（动作）**。LogScale 的触发器只会“触发”，官方文档没有定义任何“恢复/已解决”状态——同一个触发器进入静默期（Throttle Time）后，问题若仍在发生，静默期结束后会再次触发。通过 Webhook Action，可以把触发器的每一次触发同步到 Flashduty On-call：
+
+- 同一个触发器反复命中会合并为一条告警
+- 不同触发器（包括同名触发器在不同 Repository 下）互不影响，各自是独立的告警
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **CrowdStrike Falcon LogScale**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **CrowdStrike Falcon LogScale**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Falcon LogScale 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook Action">
+
+1. 进入目标 Repository 或 View，点击 **Automation** 标签
+2. 在左侧面板选择 **Actions**，点击 **New action**
+3. 填写名称（例如 `Flashduty`），点击 **Create**
+4. 在弹出的 Action 类型下拉框中选择 **Webhook**
+5. **Method** 选择 `POST`
+6. **URL** 粘贴 Flashduty 集成的完整推送地址
+7. **HTTP Headers** 中添加一行 `Content-Type: application/json`
+8. **Message Body Template** 保持 LogScale 自动填充的默认 JSON 模板不变（见下方“推送内容”），不要删减或重命名字段
+9. 点击 **Create action** 保存
+
+</Step>
+
+<Step title="关联到 Trigger">
+
+1. 在同一个 Repository 或 View 下，进入 **Automation → Triggers**
+2. 新建一个 Filter Alert 或 Aggregate Alert（或编辑已有的），填写查询和触发条件
+3. 在 Actions 属性中加入刚创建的 `Flashduty` Action
+4. 点击 **Save**
+
+一个触发器可以最多关联 10 个 Action；未关联任何 Action 的触发器不会执行。
+
+</Step>
+
+<Step title="测试">
+
+Action 编辑面板上的 **Test action** 按钮会真实发起一次 HTTP 请求，但官方文档没有说明测试时如何填充 `{id}`、`{name}` 等模板变量——如果此时没有真实告警上下文，这些字段可能为空，Flashduty 会因为缺少 `alert.id` 拒绝请求，LogScale 侧显示 **Problem invoking test action**。这不代表配置有问题，只说明还没有一次真实触发；请用第 2 步的查询和条件让它真正命中一次，确认 Flashduty 收到告警。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+LogScale 触发器只会触发，不会发送任何“已恢复”的通知，告警不会自动恢复。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，超时时长建议略长于触发器自身的 Throttle Time（例如 1 小时），计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭；问题仍在发生时，下一次触发会重新打开告警。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Flashduty 按 LogScale 自动生成的默认 Message Body Template 解析请求体，请求体为 `application/json`：
+
+```json
+{
+    "repository": "{repo_name}",
+    "timestamp": {triggered_timestamp},
+    "alert": {
+      "name": "{name}",
+      "description": "{description}",
+      "query": {
+          "queryString": "{query_string}",
+          "end": "{query_time_end}",
+          "start": "{query_time_start}"
+      },
+      "notifierID": "{action_id}",
+      "id": "{id}"
+    },
+    "warnings": "{warnings}",
+    "events": {events},
+    "numberOfEvents": {event_count}
+}
+```
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `repository` | 触发器所在的 Repository 名称 | 标签 `repository` |
+| `alert.name` | 触发器名称 | 告警标题 |
+| `alert.description` | 触发器描述 | 告警描述 |
+| `alert.query.queryString` | 触发器的查询语句 | 告警描述，标签 `query` |
+| `alert.query.start` / `alert.query.end` | 本次查询窗口的起止时间 | 告警描述，标签 `query_start`/`query_end` |
+| `alert.notifierID` | 该 Action 自身的 ID | 标签 `notifier_id` |
+| `alert.id` | **触发器 ID** | Alert Key，标签 `trigger_id` |
+| `warnings` | 查询警告 | 告警描述 |
+| `timestamp` / `events` / `numberOfEvents` | 触发时间、命中的日志事件、事件数 | 不解析——这三个字段在官方默认模板里不加引号，代表数字或数组，其精确类型未经证实，且不是识别告警所必需的字段 |
+
+请不要修改默认模板里这些字段的名称或位置；模板允许添加更多变量，但 Flashduty 只读取上表列出的字段，多余字段会被忽略。
+
+## Alert Key
+---
+
+Flashduty 直接使用 `alert.id`（LogScale 官方文档中定义的 Trigger ID）作为 Alert Key：
+
+- 同一个触发器反复命中，合并为一条告警，告警的标题、描述和标签显示最近一次命中的内容
+- 不同触发器是不同的告警，即使名称相同或在同一个 Repository 下
+- 缺少 `alert.id` 的请求会被拒绝
+
+## 状态和告警等级
+---
+
+LogScale 的默认模板不携带任何告警等级字段，所有告警统一为 Warning。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么告警不会自动恢复？">
+
+LogScale 的触发器是单向的：查询命中就触发关联的 Action，条件不再满足时不会再发送任何通知。请开启协作空间的超时自动关闭，让告警在预期时间内自动关闭。
+
+</Accordion>
+
+<Accordion title="同一个问题持续发生，为什么只有一条告警？">
+
+同一个触发器（相同 `alert.id`）的多次命中会合并到一条告警上，告警的事件数随之增加，不会为每次命中单独打开告警。开启超时自动关闭后，故障在超时后关闭；如果问题还在发生，下一次触发会打开新的告警。
+
+</Accordion>
+
+<Accordion title="需要校验签名吗？">
+
+不需要。Flashduty 通过推送地址中的 `integration_key` 识别集成。LogScale 的 Webhook Action 不提供签名头，请像保管密钥一样保管推送地址。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **点击 Test action 显示 Problem invoking test action**：这通常是因为测试时模板里的 `{id}` 等字段还没有真实值，Flashduty 拒绝了空 `alert.id`；用真实查询命中触发一次即可验证
+- **Flashduty 没有收到告警**：确认 Action 的 URL 完整（包含 `integration_key`），且该 Action 已关联到触发器
+- **告警一直不关闭**：在协作空间中开启超时自动关闭
+
+更多字段含义请参阅 [Action Type: Webhooks](https://library.humio.com/logscale-gdo/automated-actions-webhooks.html) 和 [Message Templates and Variables](https://library.humio.com/logscale-gdo/automated-actions-message-template.html)。

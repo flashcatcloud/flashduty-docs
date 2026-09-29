@@ -1,0 +1,149 @@
+---
+title: "Papertrail alert integration"
+description: "Sync log lines matched by a Papertrail saved search to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Papertrail", "SolarWinds", "saved search", "webhook", "log alert"]
+---
+
+Papertrail (SolarWinds' log aggregation service) uses a **saved search** to describe a query that keeps matching new log lines, and can call a **webhook** whenever it does. Papertrail's own documentation defines no "recovered" state: each polling interval that finds new matches is just another delivery it sends on its own, carrying no link back to the previous one. This integration follows these rules when it turns a webhook delivery into a Flashduty alert:
+
+- One delivery for a saved search, however many log lines it matched, becomes exactly one Flashduty alert
+- The saved search's next delivery merges into that same alert, treated as the same problem still happening
+- Different saved searches are independent of each other
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Papertrail**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Papertrail** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Papertrail
+---
+
+<Steps>
+<Step title="Create a saved search and attach an alert">
+
+1. Sign in to Papertrail, open **Events**, and enter the search terms to match
+2. Click **Save Search**, name it, then choose **Save & Setup an Alert**. You can also open the Dashboard, click the edit icon on an existing saved search, and choose **New Alert**
+
+</Step>
+<Step title="Choose Webhook as the destination">
+
+1. On the alert configuration page, choose **Webhook** as the notification method
+2. Paste the full Flashduty push URL into **URL**. It must include `integration_key`
+3. Choose the polling **Frequency** (`minute` / `hour` / `day`); a shorter interval means a new match merges into the open alert sooner
+4. Make sure **Send only counts** is off. When it is on, the request carries no individual log lines or event IDs, so Flashduty cannot identify it and rejects the request
+5. Save
+
+The push URL needs no extra signature or auth header. Flashduty identifies the integration by the `integration_key` in the URL, so keep the push URL as secret as a key.
+
+</Step>
+<Step title="Turn on the auto-resolve timeout">
+
+A Papertrail saved-search alert has no recovery event and no severity: as long as the saved search keeps matching new log lines, the same alert keeps getting merged with each new delivery and stays open. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit), counted from **Incident trigger**. We suggest a timeout of at least 30 minutes, to leave responders time to confirm the issue; if you chose an `hour` or `day` Frequency, lengthen it to 2-3 times that Frequency (for example, 3 hours for a `1 hour` Frequency), so the alert does not auto-close before the next delivery arrives while the issue is still happening. Closing the incident also closes its alert; if the issue is still happening, the next delivery opens a new alert.
+
+</Step>
+<Step title="Verify">
+
+Papertrail's own documentation mentions no test-delivery button for webhooks. Let the saved search's query genuinely match a new log line (for example by temporarily lowering a threshold or triggering a real event), and confirm the matching alert appears in Flashduty.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Flashduty parses the request in Papertrail's own fixed format: the body is `application/x-www-form-urlencoded` with a single form field `payload`, whose value is a JSON hash:
+
+```json
+{
+  "events": [
+    {
+      "id": 7711561783320576,
+      "source_name": "abc",
+      "hostname": "abc",
+      "program": "CROND",
+      "severity": "Info",
+      "message": "message body"
+    }
+  ],
+  "saved_search": {
+    "id": 42,
+    "name": "Important stuff",
+    "query": "cron OR server1",
+    "html_search_url": "https://papertrailapp.com/searches/42"
+  },
+  "max_id": 7711582041804800,
+  "min_id": 7711561783320576,
+  "frequency": "1 minute"
+}
+```
+
+| Field | Meaning | Use in Flashduty |
+| :--- | :--- | :--- |
+| `saved_search.id` | The saved search's ID, stable across its whole lifecycle | Alert Key, label `saved_search_id` |
+| `saved_search.name` | Saved search name | Alert title, label `check` |
+| `saved_search.query` | Search query | Alert description, label `query` |
+| `saved_search.html_search_url` | Link to this search in Papertrail | Alert description, label `search_url` |
+| `max_id` | ID of the newest log line matched in this delivery; always higher on the next delivery | Label `max_id`, reflects the latest delivery |
+| `min_id` | ID of the earliest log line matched in this delivery | Label `min_id`, reflects the latest delivery |
+| `frequency` | The alert's configured polling interval | Label `frequency` |
+| `events[]` | Matched log lines in this delivery, up to 25,000 / 10 MB per callback | Summarized into the alert description (up to the first 5 quoted), label `event_count` holds the total, `resource`/`source_name`/`program` come from the first matched log line |
+| `counts[]` ("Send only counts" mode) | Per-source counts with no individual log lines or IDs | Not supported. Flashduty rejects the request; turn this setting off in Papertrail |
+
+## Alert Key
+---
+
+Flashduty uses `saved_search.id` alone as the Alert Key. It is the saved search's stable identifier, unchanged across every delivery for that search, so repeated matches for the same saved search keep merging into the same alert, treated as the same problem still happening. Different saved searches produce different Alert Keys and open separate alerts.
+
+`max_id`/`min_id` are the id range matched in this delivery, and they change on every delivery, so they are not part of the Alert Key: mixing them in would open a new, permanently-unrecoverable alert on every single new match. They stay as labels, reflecting the most recent delivery's range.
+
+Deliveries missing `saved_search.id` are rejected.
+
+## Severity
+---
+
+A Papertrail saved-search alert has no severity field, so every match triggers a **Warning** alert. The `severity` on each individual log line (such as `Info` or `Error`) is that line's own syslog level, and one delivery can mix several values; it does not represent the alert's urgency, and only shows up in the log lines quoted in the alert description.
+
+## FAQ
+---
+
+<AccordionGroup>
+
+<Accordion title="Why does the same saved search keep matching, but I only see one alert extending?">
+
+Papertrail polls on the chosen **Frequency**. Matches within one polling interval are combined into one delivery and one alert's description (the first 5 lines are quoted, with "... and N more" for the rest). A delivery from a later polling interval merges into that same open alert, since they share the same `saved_search.id`. Only after the channel's auto-resolve timeout closes that alert does the next delivery open a new one.
+
+</Accordion>
+
+<Accordion title="Why does the alert never close?">
+
+Papertrail has no recovery event. Turn on the channel's auto-resolve timeout, or close the alert manually in Flashduty.
+
+</Accordion>
+
+<Accordion title="What do I do if requests fail after I turn on Send only counts?">
+
+In "Send only counts" mode, the request carries no individual log lines or event IDs, so Flashduty cannot identify it and returns an error. Turn this setting off in Papertrail's alert settings.
+
+</Accordion>
+
+</AccordionGroup>
+
+For field details, see [Papertrail Alerts](https://www.papertrail.com/help/alerts/) and [Papertrail Web hooks](https://www.papertrail.com/help/web-hooks/).
