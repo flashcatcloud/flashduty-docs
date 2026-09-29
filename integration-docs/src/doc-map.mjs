@@ -112,6 +112,7 @@ export const docMap = {
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
   Instatus: `${alertBase}/instatus.mdx`,
+  Statuspal: `${alertBase}/statuspal.mdx`,
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Github: `${alertBase}/github.mdx`,
