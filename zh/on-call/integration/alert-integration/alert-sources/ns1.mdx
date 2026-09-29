@@ -1,0 +1,104 @@
+---
+title: "NS1 Connect 告警集成"
+description: "通过 Webhook 通知器将 IBM NS1 Connect 监控任务的宕机和恢复事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "NS1", "IBM NS1 Connect", "Webhook", "Notifier", "监控任务"]
+---
+
+通过 NS1 Connect 的 Webhook 通知器，将监控任务（Monitoring Job）的 `down` 与 `up` 状态变化同步到 Flashduty On-call。每个监控任务对应一条 Flashduty 告警：任务宕机时创建告警，`notify_repeat` 重复通知会合并进同一条告警，任务恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **NS1**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **NS1**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 NS1 Connect 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 通知器">
+
+需要账号拥有 **Manage notifier lists** 权限。
+
+1. 登录 NS1 Connect，进入 **Monitors** → **Notifier Lists**
+2. 新建通知列表，或打开已有的通知列表，点击 **Add a new notifier**
+3. **Notifier type** 选择 **Webhook**
+4. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
+5. 点击 **Create notifier**，并把通知器保存到通知列表中
+
+</Step>
+
+<Step title="在监控任务中启用通知">
+
+打开需要告警的监控任务（新建或编辑），在通知设置中选择上一步的通知列表。
+
+<Warning>
+请在每个接入 Flashduty 的监控任务上保持开启 **Notify failback**（对应 `notify_failback`）。关闭时，NS1 只发送 `down`，不会发送 `up`，Flashduty 告警无法自动恢复。
+</Warning>
+
+</Step>
+
+<Step title="验证生命周期">
+
+让被监控的端点真实不可达，确认 Flashduty 收到 Critical 告警；再让端点恢复，确认同一条告警变为恢复。NS1 通知器没有文档化的测试按钮，请用真实的状态变化验证。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用监控任务 ID `job_document.id` 作为 Alert Key。NS1 官方示例的 `down` 请求体包含完整的 `job_document`，其中 `id` 是任务 ID；同一任务的宕机、重复通知和恢复共用这个 ID。
+
+如果任务开启了 `job_document.notify_regional`，NS1 会按区域分别通知，此时 Alert Key 为 `job_document.id/region`，各区域各自一条告警，某个区域恢复不会关闭其他区域的告警。未开启时区域不参与 Alert Key，不同区域观察到的 `down`、`up` 属于同一条告警。
+
+任务名称、`since` 时间戳、区域观察结果和检测配置的变化不会改变 Alert Key。
+
+<Note>
+NS1 官方文档只完整展示了 `down` 请求体，`up` 示例在 `since` 之后被省略。Flashduty 按 `up` 请求体携带同样的 `job_document` 处理；如果 `up` 请求体缺少 `job_document.id`，Flashduty 会拒绝该请求，而不会猜测归属。
+</Note>
+
+## 状态和告警等级
+---
+
+NS1 不发送告警等级。
+
+| NS1 `state` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `down` | Critical。监控任务宕机是可用性故障，因此不使用 Warning 默认值 |
+| `up` | 恢复，原等级为 Critical |
+| 其他值或缺少 `state` | 返回 200，不创建告警 |
+
+`state` 不区分大小写。
+
+## 标签
+---
+
+Flashduty 会保留 `check`（任务名称）、`resource`（`config` 中的 `host`、`url` 或 `domain`）、`job_id`、`job_type`、`region`、`state` 和 `notify_list` 标签，便于在告警页排查与路由。
+
+## 排查问题
+---
+
+- **告警没有恢复**：确认监控任务开启了 **Notify failback**；如果无法开启，请在协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 1 小时，计时起点选择 **故障触发**
+- **NS1 报告 Webhook 失败**：确认推送地址完整并包含 `integration_key`
+- **Flashduty 返回 `job_document.id is required`**：请求体缺少监控任务 ID，请检查通知器是否由 NS1 监控任务触发
+- **开启区域通知后出现多条告警**：这是预期行为，每个区域独立成一条告警
+
+更多字段含义请参阅 [NS1 Connect 自定义 Webhook 通知器](https://www.ibm.com/docs/en/ns1-connect?topic=notifiers-configuring-custom-webhook-notifier)。
