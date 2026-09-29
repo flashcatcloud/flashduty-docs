@@ -111,6 +111,7 @@ export const docMap = {
   Tailscale: `${alertBase}/tailscale.mdx`,
   SplitIo: `${alertBase}/split-io.mdx`,
   Firefly: `${alertBase}/firefly.mdx`,
+  Kuvasz: `${alertBase}/kuvasz.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
   Instatus: `${alertBase}/instatus.mdx`,
