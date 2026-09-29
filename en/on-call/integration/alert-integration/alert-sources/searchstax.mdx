@@ -1,0 +1,129 @@
+---
+title: "SearchStax alert integration"
+description: "Send SearchStax Managed Search metric alerts to Flashduty On-call through a webhook. Flashduty alerts close automatically when the SearchStax alert closes."
+keywords: ["alert integration", "SearchStax", "Managed Search", "Solr", "webhook", "search service"]
+---
+
+SearchStax Managed Search lets you define the webhook body: the webhook's **Payload** is a JSON object whose values are SearchStax predefined variables (such as `$ALERT_ID`). This page gives that JSON template and attaches the webhook to both the trigger and the resolve droplists of an alert. When the alert triggers, Flashduty opens an alert. When the SearchStax alert closes, the Flashduty alert closes automatically.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **SearchStax** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **SearchStax** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure SearchStax
+---
+
+Managing webhooks and alerts requires the Account Owner, Admin, or Technical Contact role in SearchStax.
+
+<Steps>
+<Step title="Create a webhook">
+
+In the SearchStax Managed Search dashboard, select **Webhooks** in the left navigation, click **Create Webhook**, and fill in:
+
+| Field | Value |
+| :--- | :--- |
+| **Name** | A name of your choice, such as `Flashduty`. The alert page shows it in its droplists |
+| **URL** | The full push URL, including `?integration_key=...` |
+| **Payload** | The JSON template below |
+
+Payload template:
+
+```json
+{
+  "alert_id": "$ALERT_ID",
+  "alert_status": "$ALERT_STATUS",
+  "alert_title": "$ALERT_TITLE",
+  "alert_type": "$ALERT_TYPE",
+  "alert_metric": "$ALERT_METRIC",
+  "current_value": "$ALERT_CURRENT_VALUE",
+  "threshold_operator": "$ALERT_THRESHOLD_OPERATOR",
+  "threshold_value": "$ALERT_THRESHOLD_VALUE",
+  "date": "$DATE",
+  "deployment_name": "$DEPLOYMENT_NAME",
+  "deployment_uid": "$DEPLOYMENT_UID",
+  "hostname": "$HOSTNAME"
+}
+```
+
+Do not rename the fields. `alert_id` and `alert_status` are required. If the editor offers an option to encode the body as a form, leave it off: Flashduty accepts JSON only. Click **Update** to save.
+
+</Step>
+
+<Step title="Attach the webhook to an alert">
+
+Open the alert you want to sync (or create one). In its webhook droplists, select the webhook from the previous step for both **trigger** and **resolve**. Both must use the same webhook: `$ALERT_STATUS` is `OPEN` when the alert triggers and `CLOSED` when it closes, and Flashduty uses it to tell a trigger from a recovery.
+
+To re-notify while the alert stays open, use the alert's `repeat_every` and `max_alerts` settings. A repeat notification updates the same Flashduty alert.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Push a metric over its threshold (for example, give a test alert a very low threshold) and confirm Flashduty receives the alert. After the metric recovers and the SearchStax alert closes, confirm the original alert closes. SearchStax webhooks have no test button, so verification needs a real alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `alert_id` (`$ALERT_ID`) as the Alert Key. SearchStax describes it as the internal alert number. Trigger and resolve use the same webhook template, so `OPEN` and `CLOSED` messages land on the same Flashduty alert.
+
+A SearchStax alert is a deployment-level rule: a rule whose `host` is `*` watches every node in the cluster, all nodes share one `$ALERT_ID`, and Flashduty keeps a single alert for it. To alert per node, create a separate SearchStax alert for each node.
+
+Changes to the alert title, metric value, or time do not change the Alert Key. Flashduty rejects a request that lacks `alert_id` or `alert_status`, or whose value is still an unrendered `$...` variable.
+
+## Alert lifecycle
+---
+
+Flashduty handles a message by its `alert_status` field (`$ALERT_STATUS`, case-insensitive):
+
+| SearchStax `alert_status` | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `OPEN` | The alert triggered, or a `repeat_every` re-notification | Trigger or update the alert |
+| `CLOSED` | The alert closed | Recover the alert |
+
+Any other value is rejected.
+
+## Severity
+---
+
+SearchStax alerts carry no severity, so every alert defaults to **Warning**. To use another level, append `&severity=Critical` (or `Info`) to the push URL. A recovery keeps the severity of the original alert.
+
+## Alert content
+---
+
+- **Title**: the alert name (`$ALERT_TITLE`); `SearchStax alert <alert_id>` when missing
+- **Description**: `metric current-value operator threshold`, for example `os.SystemCpuLoad 0.01 > 10.0`
+- **Labels**: `check` (alert name), `resource` (node name), `alert_id`, `alert_status`, `alert_type`, `alert_metric`, `current_value`, `threshold_operator`, `threshold_value`, `deployment_name`, `deployment_uid`, `hostname`
+
+Fields with an empty value are not written as labels.
+
+## Troubleshooting
+---
+
+- **Flashduty says the body is not valid JSON**: check that the Payload matches the template and that form encoding is off
+- **No alert arrives**: check that the alert's webhook droplist selects this webhook and that the webhook is not **Paused**. Tick **Ignore SSL Validation** only if the target uses a self-signed certificate
+- **The alert does not recover**: check that the resolve droplist selects the same webhook and that `alert_status` in the template is `$ALERT_STATUS`
+- **Alerts from several nodes overwrite each other**: a rule with `host` set to `*` shares one `$ALERT_ID`; create one alert per node instead
+
+For the meaning of each variable, see the SearchStax docs [Webhooks](https://www.searchstax.com/docs/searchstax-cloud-webhooks/) and [Alerts API](https://www.searchstax.com/docs/searchstax-cloud-alerts-api/).
