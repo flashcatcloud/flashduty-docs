@@ -142,6 +142,7 @@ export const docMap = {
   Mezmo: `${alertBase}/mezmo.mdx`,
   CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
   GhostInspector: `${alertBase}/ghost-inspector.mdx`,
+  LogzIo: `${alertBase}/logz-io.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
