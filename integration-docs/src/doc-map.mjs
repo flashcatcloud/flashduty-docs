@@ -81,6 +81,7 @@ export const docMap = {
   Coralogix: `${alertBase}/coralogix.mdx`,
   Monitive: `${alertBase}/monitive.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,
+  Xitoring: `${alertBase}/xitoring.mdx`,
   Tideways: `${alertBase}/tideways.mdx`,
   Wormly: `${alertBase}/wormly.mdx`,
   Flowtriq: `${alertBase}/flowtriq.mdx`,
