@@ -1,0 +1,134 @@
+---
+title: "HCP Terraform 变更集成"
+description: "通过 HCP Terraform 工作区通知将 Terraform Run 同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "HCP Terraform", "Terraform Cloud", "Run", "Webhook", "基础设施变更"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 HCP Terraform（原 Terraform Cloud）工作区的通知配置（Notification），将 Terraform Run 同步到 Flashduty On-call。每一次 Run 对应一条 Flashduty 变更；Run 从创建、Plan、等待确认、Apply 到完成、出错或取消的每个状态，都会更新同一条变更。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **HCP Terraform**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `organization`、`workspace`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 HCP Terraform 中配置
+---
+
+通知按工作区配置，每个需要接入的工作区配置一次。需要该工作区的管理员权限。
+
+<Steps>
+<Step title="打开通知设置">
+
+进入工作区，选择 **Settings → Notifications**，点击 **Create a notification**。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Destination**：选择 **Webhook**
+2. **Name**：填写便于识别的名称，例如 `Flashduty`
+3. **Webhook URL**：粘贴 Flashduty 集成的完整推送地址
+4. **Token**：留空即可，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+</Step>
+
+<Step title="选择触发事件">
+
+1. 在 **Run Events** 中选择 **All events**
+2. 在 **Workspace Events**（漂移检测、自动销毁等）中选择 **No events**，Flashduty 会忽略这类通知
+3. 点击 **Create a notification**
+
+保存时 HCP Terraform 会发送一次验证请求，Flashduty 返回成功但不会生成变更。之后可以用 **Send a test** 再次验证。
+
+</Step>
+</Steps>
+
+也可以使用 Terraform 的 `tfe` Provider 管理这项配置：`tfe_notification_configuration` 资源设置 `destination_type = "generic"`、`url` 为推送地址、`triggers` 为 `["run:created", "run:planning", "run:needs_attention", "run:applying", "run:completed", "run:errored"]`。
+
+## 一条变更是什么
+---
+
+| HCP Terraform 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Run | `run_id`，例如 `run-FwnENkvDnrpyFC7M` | 同一个 Run 的所有通知更新同一条变更；同一工作区的两次 Run 是两条变更 |
+
+## 状态映射
+---
+
+| 通知触发事件（trigger） | Run 状态（run_status） | Flashduty 变更状态 |
+|---|---|---|
+| run:created | pending | Ready |
+| run:planning | planning | Processing |
+| run:needs_attention | 例如 planned、policy_override（等待人工确认） | Planned |
+| run:applying | applying | Processing |
+| run:completed | applied、planned_and_finished、planned_and_saved | Done |
+| run:completed | discarded（在确认步骤被放弃的 Run） | Canceled |
+| run:errored | errored、policy_soft_failed | Failed |
+| run:errored | canceled、force_canceled | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
+
+`planned_and_finished` 表示只做了 Plan 的 Run（无变更或 Plan-only），同样记为 Done，可以通过 `run_status` 标签区分。
+
+以下推送返回成功但不生成变更：保存配置或 **Send a test** 时的验证请求（trigger 为 `verification`）、健康评估通知（`assessment:drifted`、`assessment:check_failure`、`assessment:failed`）和工作区通知（`workspace:auto_destroy_reminder`、`workspace:auto_destroy_run_results`、`workspace:deleted`）。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<组织>/<工作区>: terraform run <run_id>` |
+| 描述 | Run 的 message（触发原因，例如 VCS 提交信息或手动填写的说明） |
+| 链接 | HCP Terraform 中该 Run 的页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `organization` | HCP Terraform 组织名称 |
+| `workspace` | 工作区名称 |
+| `workspace_id` | 工作区 ID，例如 `ws-XdeUVMWShTesDMME` |
+| `run_id` | Run ID |
+| `run_status` | 最新通知中的 Run 状态 |
+| `actor` | 创建 Run 的用户 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 确认通知配置已启用，且勾选了 **Run Events**。只勾选 **Workspace Events** 时不会产生变更
+- 在通知配置页面查看最近的推送记录和 Flashduty 的响应
+- 通知按工作区配置，确认 Run 所在的工作区配置了该通知
+
+</Accordion>
+
+<Accordion title="重复推送会重复记录吗？">
+
+不会。同一 Run、同一状态、同一时间的事件只记录一次。
+
+</Accordion>
+
+<Accordion title="漂移检测（Drift）会生成变更吗？">
+
+不会。健康评估反映的是资源状态偏离配置，不是一次变更，Flashduty 收到后返回成功并忽略。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported notifications[].trigger` 或 `unsupported notifications[].run_status`：收到了 Flashduty 尚未支持的触发事件或 Run 状态，请联系我们
+- `run_id is missing`：推送内容不完整，请确认推送来自 HCP Terraform 的 Webhook 通知
+
+</Accordion>
+</AccordionGroup>
