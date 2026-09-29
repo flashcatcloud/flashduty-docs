@@ -1,0 +1,208 @@
+---
+title: "Firebase Crashlytics alert integration"
+description: "Send new fatal, regression, and velocity alerts from Firebase Crashlytics to Flashduty On-call through a small Cloud Function."
+keywords: ["alert integration", "Firebase", "Crashlytics", "Cloud Functions", "Eventarc", "crash", "mobile app"]
+---
+
+Firebase Crashlytics has no generic outbound webhook for third parties: crash alerts are delivered only through **Firebase Alerts**, as an Eventarc event to a Cloud Function (2nd gen). This integration provides a Cloud Function that subscribes to Crashlytics alert events and forwards them to Flashduty, covering:
+
+| Firebase event | Trigger condition |
+| :--- | :--- |
+| New fatal issue (`onNewFatalIssuePublished`) | A new fatal crash issue appears |
+| Regression (`onRegressionAlertPublished`) | An issue already marked resolved happens again |
+| Velocity alert (`onVelocityAlertPublished`) | An issue's crash rate in recent sessions crosses a threshold |
+| New non-fatal issue (`onNewNonfatalIssuePublished`) | A new non-fatal issue appears |
+| New ANR issue (`onNewAnrIssuePublished`) | A new Android "Application Not Responding" issue appears |
+
+Firebase also sends a **stability digest** (`onStabilityDigestPublished`), a daily rollup of several trending issues. It is a periodic report, not one actionable issue, so this integration does not turn it into an alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Firebase Crashlytics**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Firebase Crashlytics** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Firebase
+---
+
+Crashlytics alert functions run on Cloud Functions (2nd gen). The Firebase project must be on the **Blaze (pay as you go)** plan to deploy them, even if actual usage stays inside the free tier — a billing account still has to be attached.
+
+<Steps>
+<Step title="Set up the Cloud Functions project">
+
+If the project has no Cloud Functions yet, run this in the project root:
+
+```bash
+firebase init functions
+```
+
+Choose JavaScript or TypeScript, and keep the default `firebase-functions` and `firebase-admin` dependencies.
+
+</Step>
+
+<Step title="Add the forwarding function">
+
+Replace or append `functions/index.js` (or your entry file) with the following, and replace `FLASHDUTY_URL` with the push URL you copied above (keep the `?integration_key=...` part):
+
+```js
+const {
+  onNewFatalIssuePublished,
+  onRegressionAlertPublished,
+  onVelocityAlertPublished,
+  onNewNonfatalIssuePublished,
+  onNewAnrIssuePublished,
+} = require("firebase-functions/v2/alerts/crashlytics");
+
+const FLASHDUTY_URL = "<push URL>";
+
+async function forwardToFlashduty(event) {
+  const issue = event.data.payload.issue;
+  const body = {
+    alert_type: event.alertType,
+    app_id: event.appId,
+    issue_id: issue.id,
+    issue_title: issue.title,
+    issue_subtitle: issue.subtitle,
+    app_version: issue.appVersion,
+    create_time: event.data.createTime,
+  };
+
+  if (event.data.payload.resolveTime) {
+    body.resolve_time = event.data.payload.resolveTime;
+  }
+  if (event.data.payload.crashCount !== undefined) {
+    body.crash_count = event.data.payload.crashCount;
+    body.crash_percentage = event.data.payload.crashPercentage;
+    body.first_version = event.data.payload.firstVersion;
+  }
+
+  await fetch(FLASHDUTY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+exports.flashdutyOnNewFatalIssue = onNewFatalIssuePublished((event) => forwardToFlashduty(event));
+exports.flashdutyOnRegression = onRegressionAlertPublished((event) => forwardToFlashduty(event));
+exports.flashdutyOnVelocity = onVelocityAlertPublished((event) => forwardToFlashduty(event));
+exports.flashdutyOnNewNonfatalIssue = onNewNonfatalIssuePublished((event) => forwardToFlashduty(event));
+exports.flashdutyOnNewAnrIssue = onNewAnrIssuePublished((event) => forwardToFlashduty(event));
+```
+
+The field names and value paths all come from `firebase-functions`'s official type definitions — do not rename them. `event.alertType`, `event.appId`, `event.data.createTime`, and `event.data.payload.issue` are common to every event type; `resolveTime` exists only on a regression event; `crashCount`, `crashPercentage`, and `firstVersion` exist only on a velocity alert. The function relies on the `fetch` built into Node.js 18 and later, so no extra HTTP client library is needed.
+
+To wire up only some of these events, remove the `require` entries and `exports` lines you don't need, and leave the field names of the ones you keep unchanged.
+
+</Step>
+
+<Step title="Scope to one app if needed">
+
+If the Firebase project has several apps (one App ID each for iOS, Android, and Web) and you only want events from one of them, change `onXxxPublished(handler)` to `onXxxPublished(appId, handler)`. Find `appId` under **Project settings → General → your app's App ID**. Without an `appId`, events from every app in the project are forwarded.
+
+</Step>
+
+<Step title="Deploy">
+
+```bash
+firebase deploy --only functions:flashdutyOnNewFatalIssue,functions:flashdutyOnRegression,functions:flashdutyOnVelocity,functions:flashdutyOnNewNonfatalIssue,functions:flashdutyOnNewAnrIssue
+```
+
+The first deploy of a Firebase Alerts-triggered function can take a few minutes while the underlying Eventarc services are enabled; that is expected.
+
+</Step>
+
+<Step title="Verify">
+
+Crashlytics alerts have no test button. Verify in two separate steps:
+
+- **Verify the Flashduty side**: send a curl request to the push URL using the same field shape as the template, and confirm it opens an alert:
+
+  ```bash
+  curl -X POST "<push URL>" \
+    -H "Content-Type: application/json" \
+    -d '{"alert_type":"crashlytics.newFatalIssue","app_id":"test","issue_id":"test-issue","issue_title":"Test issue","app_version":"1.0.0"}'
+  ```
+
+  Close this test alert in Flashduty by hand afterward.
+
+- **Verify the full pipeline**: trigger a real crash in a debug build (for example, force an exception after `Crashlytics.crash()` or `FirebaseCrashlytics.getInstance().log(...)`), wait for the issue to appear in the Crashlytics console (this can take a few minutes), and confirm Flashduty receives the matching alert.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+Crashlytics sends no "resolved" notification for any of these events, so alerts in Flashduty do not recover on their own. In the channel that receives this integration's alerts, turn on the **auto-resolve timeout**, set the window timing start to **Incident trigger**, and set the timeout to **72 hours** — crash issues usually take longer to triage and ship a fix for than a typical infrastructure incident. See [Create and edit channels](/en/on-call/channel/create-edit) for the steps. Close the alert by hand in Flashduty once the fix has shipped.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the event type `alert_type` and Crashlytics' issue ID `issue_id` (the official `Issue.id`). As a result:
+
+- Two deliveries of the same event type for the same issue (for example, two `newFatalIssue` deliveries — Eventarc may retry) merge into the same alert
+- A new fatal issue and a later velocity alert on the same issue are two separate alerts
+- An issue that was previously marked resolved and reoccurs (`regression`) opens a new alert — it does not reuse the earlier `newFatalIssue` alert
+- Changes to the issue title, subtitle, app version, or any timestamp do not change the Alert Key
+
+If a request is missing `issue_id`, Flashduty rejects it.
+
+## Severity
+---
+
+Crashlytics alert events carry no severity. Flashduty sets it by event type:
+
+| Event type (`alert_type`) | Flashduty severity |
+| :--- | :--- |
+| `crashlytics.newFatalIssue` | **Critical** |
+| `crashlytics.regression` | **Critical** |
+| `crashlytics.velocity` | Warning |
+| `crashlytics.newNonfatalIssue` | Warning |
+| `crashlytics.newAnrIssue` | Warning |
+
+To override this with a fixed severity, append `&severity=Critical` (or `Warning`, `Info`) to the push URL.
+
+## Alert content
+---
+
+The alert title is `Firebase Crashlytics <event type>: <issue_title>`, for example `Firebase Crashlytics new fatal issue: java.lang.NullPointerException`. The description includes the issue subtitle (the class and method where the crash happened) and the app version; a regression alert also includes the time the issue was previously marked resolved, and a velocity alert also includes the crash session count, crash percentage, and the version where the issue first appeared.
+
+| Label | Source |
+| :--- | :--- |
+| `alert_type` | Firebase's event type, such as `crashlytics.newFatalIssue` |
+| `app_id` | Firebase app ID |
+| `issue_id` | Crashlytics issue ID |
+| `issue_subtitle` | Issue subtitle (crash location) |
+| `app_version` | App version where the issue occurred |
+| `create_time` | Event creation time |
+| `resolve_time` | Regression alerts only: when the issue was previously marked resolved |
+| `crash_count` / `crash_percentage` / `first_version` | Velocity alerts only: crash session count, crash percentage, and the version where the issue first appeared |
+
+## Troubleshooting
+---
+
+- **Function deployment fails or reports a permission error**: Make sure the Firebase project is on the Blaze plan and the account deploying it has permission to deploy Cloud Functions on that project
+- **A crash happened but no alert arrives**: Crashlytics can take a few minutes to process a crash log and trigger the alert function; check `firebase functions:log` to see whether the function ran and whether `fetch` threw an error
+- **Flashduty returns an invalid parameter error**: This is usually a renamed field in the template, or an `integration_key` in the push URL that does not belong to this integration — compare your function against the template above field by field
+- **Alerts never recover**: None of these events carries a recovery signal. Turn on the channel's auto-resolve timeout, or close the alert by hand once it is fixed
+
+For field details, see Firebase's official [Trigger a function on Crashlytics events](https://firebase.google.com/docs/functions/beta/alerts/crashlytics) and the `firebase-functions` source for [`alerts/crashlytics`](https://github.com/firebase/firebase-functions/blob/master/src/v2/providers/alerts/crashlytics.ts).
