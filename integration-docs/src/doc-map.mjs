@@ -110,6 +110,7 @@ export const docMap = {
   Firefly: `${alertBase}/firefly.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
+  Instatus: `${alertBase}/instatus.mdx`,
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
   Github: `${alertBase}/github.mdx`,
