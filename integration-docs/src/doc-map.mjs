@@ -141,6 +141,7 @@ export const docMap = {
   Mezmo: `${alertBase}/mezmo.mdx`,
   CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
   Bigpanda: `${alertBase}/bigpanda.mdx`,
+  Loggly: `${alertBase}/loggly.mdx`,
   GhostInspector: `${alertBase}/ghost-inspector.mdx`,
   LogzIo: `${alertBase}/logz-io.mdx`,
 
