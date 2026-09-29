@@ -74,6 +74,7 @@ export const docMap = {
   Cronitor: `${alertBase}/cronitor.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
+  Gitguardian: `${alertBase}/gitguardian.mdx`,
   Dash0: `${alertBase}/dash0.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
