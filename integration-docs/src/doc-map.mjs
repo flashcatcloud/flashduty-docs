@@ -93,6 +93,7 @@ export const docMap = {
   SplunkObservability: `${alertBase}/splunk-observability.mdx`,
   PRTG: `${alertBase}/prtg.mdx`,
   Netdata: `${alertBase}/netdata.mdx`,
+  Stackrox: `${alertBase}/stackrox.mdx`,
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   Axiom: `${alertBase}/axiom.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
