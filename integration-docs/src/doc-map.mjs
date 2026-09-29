@@ -78,6 +78,7 @@ export const docMap = {
   Gitguardian: `${alertBase}/gitguardian.mdx`,
   Dash0: `${alertBase}/dash0.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
+  SimpleObservability: `${alertBase}/simple-observability.mdx`,
   Tideways: `${alertBase}/tideways.mdx`,
   Wormly: `${alertBase}/wormly.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
