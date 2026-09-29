@@ -1,0 +1,193 @@
+---
+title: "Pandora FMS 告警集成"
+description: "通过自定义告警命令将 Pandora FMS 模块告警的触发和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Pandora FMS", "Alert command", "告警命令", "Alert recovery", "_id_alert_", "curl"]
+---
+
+通过 Pandora FMS 的自定义告警命令（Alert command），把模块告警（Module alert）的触发和恢复同步到 Flashduty On-call。每条 Pandora FMS 模块告警对应一条 Flashduty 告警：告警触发时产生告警，重复触发合并到同一条告警，模块不再满足告警模板的条件时关闭告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Pandora FMS**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Pandora FMS**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Pandora FMS 中配置
+---
+
+Pandora FMS 的告警动作在 Pandora FMS 服务器上执行命令。下面的配置新建一个用 `curl` 推送的告警命令，再新建一个使用该命令的动作，最后把动作加到模块告警上。
+
+<Note>
+执行告警的 Pandora FMS 服务器需要安装 `curl`，并且能够通过 HTTPS 访问推送地址中的域名。
+</Note>
+
+<Steps>
+<Step title="新建告警命令">
+
+1. 以管理员身份登录 Pandora FMS 控制台，进入 **Management → Alerts → Commands**，点击 **Create**
+2. **Name** 填写 `Flashduty`
+3. **Command** 填写下方命令，保持为一行，不要修改字段名：
+
+```text
+curl -sS -m 10 "_field1_" --data-urlencode "event=_field2_" --data-urlencode "id_alert=_id_alert_" --data-urlencode "alert_name=_alert_name_" --data-urlencode "alert_priority=_alert_priority_" --data-urlencode "alert_times_fired=_alert_times_fired_" --data-urlencode "agent=_agent_" --data-urlencode "id_agent=_id_agent_" --data-urlencode "address=_address_" --data-urlencode "agent_group=_agentgroup_" --data-urlencode "module=_module_" --data-urlencode "id_module=_id_module_" --data-urlencode "module_description=_moduledescription_" --data-urlencode "module_status=_modulestatus_" --data-urlencode "data=_data_" --data-urlencode "timestamp=_timestamp_"
+```
+
+4. 按下表填写字段说明和可选值：
+
+| 字段 | Description | Values |
+| :--- | :--- | :--- |
+| **Field 1** | `Flashduty push URL` | 留空 |
+| **Field 2** | `Event` | `alert_fired,Alert fired;alert_recovered,Alert recovered` |
+
+5. 点击 **Create** 保存
+
+每个宏都写在双引号内，Pandora FMS 替换宏时会为值加上 Shell 引号，`curl --data-urlencode` 再对值做 URL 编码，所以代理名、模块描述中的空格、引号和中文都能原样到达 Flashduty。
+
+</Step>
+
+<Step title="新建告警动作">
+
+1. 进入 **Management → Alerts → Actions**，点击 **Create**
+2. **Name** 填写 `Flashduty`，**Group** 选择需要使用该动作的组（所有组选 **All**），**Command** 选择上一步的 `Flashduty`
+3. 按下表填写字段，**Triggering** 和 **Recovery** 两列都要填：
+
+| 字段 | Triggering | Recovery |
+| :--- | :--- | :--- |
+| **Field 1**（Flashduty push URL） | Flashduty 集成的完整推送地址 | Flashduty 集成的完整推送地址 |
+| **Field 2**（Event） | `Alert fired`（`alert_fired`） | `Alert recovered`（`alert_recovered`） |
+
+4. 点击 **Create** 保存
+
+</Step>
+
+<Step title="确认告警模板开启了恢复">
+
+进入 **Management → Alerts → Templates**，打开要使用的模板，在第 3 步 **Advanced fields** 中确认 **Alert recovery** 为启用。内置的 **Critical condition** 和 **Warning condition** 模板默认已启用。**Alert recovery** 关闭时，模块恢复后 Pandora FMS 不会执行动作，Flashduty 中的告警不会自动关闭。
+
+</Step>
+
+<Step title="把动作加到模块告警">
+
+1. 进入 **Management → Alerts → Module Alerts**，新建一条模块告警，或打开已有的模块告警
+2. 选择 **Agent**、**Module** 和 **Template**，在 **Actions** 中添加 `Flashduty`
+3. 保存
+
+也可以在代理（Agent）的 **Alerts** 标签页为模块添加告警并选择 `Flashduty` 动作。已有模块告警只需添加 `Flashduty` 动作，原有的邮件等动作不受影响。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个已配置告警的模块进入告警条件（例如调低 CPU 模块的 Critical 阈值），确认 Flashduty 收到活动告警；恢复阈值后等待下一次采集，确认原告警关闭。
+
+</Step>
+</Steps>
+
+<Warning>
+动作的 **Field 2** 必须在 **Recovery** 列填写 `alert_recovered`。Recovery 列留空时，Pandora FMS 会改用告警模板中的恢复字段（内置模板的 Field 2 恢复值是一段邮件主题），Flashduty 会以参数错误拒绝这条恢复通知，告警不会关闭。
+</Warning>
+
+## 推送内容
+---
+
+命令以 `application/x-www-form-urlencoded` 表单格式 POST 以下字段：
+
+| 字段 | Pandora FMS 宏 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `event` | `_field2_`，动作中的 `alert_fired` 或 `alert_recovered` | 触发或恢复 |
+| `id_alert` | `_id_alert_`，模块告警 ID | Alert Key，标签 `alert_id` |
+| `alert_name` | `_alert_name_`，告警模板名称 | 告警标题，标签 `check` |
+| `alert_priority` | `_alert_priority_`，模板优先级（数字） | 告警等级，标签 `priority` |
+| `alert_times_fired` | `_alert_times_fired_`，告警触发次数 | 标签 `times_fired` |
+| `agent` | `_agent_`，代理别名 | 告警标题，标签 `resource` |
+| `id_agent` | `_id_agent_`，代理 ID | 标签 `agent_id` |
+| `address` | `_address_`，代理 IP 地址 | 标签 `host` |
+| `agent_group` | `_agentgroup_`，代理所在组 | 标签 `agent_group` |
+| `module` | `_module_`，模块名称 | 告警标题，标签 `module` |
+| `id_module` | `_id_module_`，模块 ID | 标签 `module_id` |
+| `module_description` | `_moduledescription_`，模块描述 | 告警描述 |
+| `module_status` | `_modulestatus_`，模块当前状态 | 告警描述，标签 `module_status` |
+| `data` | `_data_`，触发告警的数据 | 告警描述，标签 `data` |
+| `timestamp` | `_timestamp_`，告警时间 | 告警描述 |
+
+告警标题为 `<模板名称>: <代理> / <模块>`；缺少部分字段时使用其余字段，全部为空时使用 `Pandora FMS alert <id_alert>`。
+
+## Alert Key
+---
+
+Flashduty 使用 `id_alert`（Pandora FMS 宏 `_id_alert_`）作为 Alert Key。Pandora FMS 文档对该宏的说明是 “Alert identifier, useful for correlating the alert in third-party tools”：它是模板分配到某个模块后的模块告警 ID，同一条模块告警的触发、重复触发和恢复携带相同的 ID，因此会落在同一条 Flashduty 告警上。同一个模板分配到两个模块时是两条模块告警，ID 不同，会生成不同的 Flashduty 告警。修改模板名称、优先级、代理别名或数据不会改变 Alert Key。
+
+模块告警 ID 只在一套 Pandora FMS 内唯一。多套 Pandora FMS（包括 Metaconsole 下的多个节点）请分别使用不同的 Flashduty 集成，避免不同实例中 ID 相同的告警合并到同一条告警。
+
+只有模块告警带有 `_id_alert_`。事件告警、日志告警和关联告警没有模块告警 ID，Flashduty 会以参数错误拒绝，请不要把 `Flashduty` 动作加到这类告警上。
+
+## 状态和告警等级
+---
+
+`event` 决定告警触发还是恢复，`alert_priority`（告警模板的 **Priority**）决定告警等级：
+
+| `alert_priority` | Pandora FMS 优先级 | Flashduty 告警等级 |
+| :--- | :--- | :--- |
+| `4` | Critical | Critical |
+| `6` | Major | Critical |
+| `3` | Warning | Warning |
+| `5` | Minor | Warning |
+| `0`、`1`、`2` | Maintenance、Informational、Normal | Info |
+| 其他值或为空 | | Warning |
+
+`event` 为 `alert_recovered` 时关闭告警，告警等级仍取模板优先级。`event` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么要在动作里填写 Event？">
+
+Pandora FMS 在告警触发和恢复时执行同一个动作，没有宏能说明本次执行是触发还是恢复，只有动作字段可以按 **Triggering** 和 **Recovery** 分别取值。因此由 **Field 2** 的 `alert_fired` 和 `alert_recovered` 告诉 Flashduty 本次执行是触发还是恢复。
+
+</Accordion>
+
+<Accordion title="手动强制执行（Force）告警会创建告警吗？">
+
+对尚未触发的模块告警强制执行时，`alert_times_fired` 为 `0`。Flashduty 把这类请求识别为测试，直接返回成功，不会创建告警。对已经触发的告警强制执行时，请求会合并到该告警，不会新建告警。
+
+</Accordion>
+
+<Accordion title="告警重复触发会产生多条告警吗？">
+
+不会。同一条模块告警在恢复前的重复触发携带相同的 `id_alert`，会合并到同一条 Flashduty 告警。重复触发的频率由模板的 **Max number of alerts** 和动作的 **Threshold** 控制。
+
+</Accordion>
+
+<Accordion title="告警在 Pandora FMS 中已恢复，Flashduty 中没有关闭？">
+
+依次确认：告警模板启用了 **Alert recovery**；动作 **Field 2** 的 **Recovery** 列是 `alert_recovered`；模块告警没有处于 Standby 状态（Standby 的告警不执行任何动作）。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Pandora FMS 没有推送**：在 Pandora FMS 服务器上执行 `curl -sS <推送地址>` 确认网络可达；确认动作的 **Group** 覆盖了代理所在组
+- **Flashduty 返回参数错误**：确认命令完整粘贴、保持为一行；确认动作 **Field 2** 两列分别为 `alert_fired` 和 `alert_recovered`；确认动作只加在模块告警上
+- **告警没有恢复**：见上方常见问题 “告警在 Pandora FMS 中已恢复，Flashduty 中没有关闭？”
+
+宏和告警配置说明请参阅 Pandora FMS 官方文档 [Alerts](https://pandorafms.com/manual/!current/en/documentation/pandorafms/management_and_operation/01_alerts)。
