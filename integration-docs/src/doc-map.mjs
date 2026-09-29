@@ -152,6 +152,7 @@ export const docMap = {
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
+  GiteaChange: `${integrationBase}/change-integration/gitea.mdx`,
   GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
   LaunchdarklyChange: `${integrationBase}/change-integration/launchdarkly.mdx`,
   NetlifyChange: `${integrationBase}/change-integration/netlify.mdx`,
