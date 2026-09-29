@@ -111,6 +111,7 @@ export const docMap = {
   Statuspage: `${alertBase}/statuspage.mdx`,
   Argocd: `${alertBase}/argocd.mdx`,
   Fluxcd: `${alertBase}/fluxcd.mdx`,
+  Komodor: `${alertBase}/komodor.mdx`,
   Openstatus: `${alertBase}/openstatus.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
