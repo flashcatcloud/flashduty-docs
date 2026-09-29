@@ -126,6 +126,7 @@ export const docMap = {
   DbPull: `${alertBase}/db-pull.mdx`,
   Emqx: `${alertBase}/emqx.mdx`,
   Rizhiyi: `${alertBase}/rizhiyi.mdx`,
+  SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
