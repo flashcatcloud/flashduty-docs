@@ -1,0 +1,129 @@
+---
+title: "Wormly alert integration"
+description: "Send Wormly host failure, escalation, and recovery notifications to Flashduty On-call through a contact webhook channel."
+keywords: ["alert integration", "Wormly", "Uptime", "webhook", "Alert Group", "hostid"]
+---
+
+Use the webhook channel of a Wormly contact to send host failure and recovery notifications to Flashduty On-call. Each Wormly host maps to one Flashduty alert: the alert triggers when the host fails, repeated notifications sent at each escalation level of the alert group merge into the same alert, and the alert recovers when the host is up again.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Wormly** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Wormly** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Wormly
+---
+
+<Steps>
+<Step title="Create a webhook contact">
+
+1. Sign in to Wormly, go to **Contacts**, and click **Create a new contact**
+2. Choose the **Webhook** channel
+3. Paste the full Flashduty push URL into the URL field
+4. Choose a JSON webhook type (`JSON` or `JSON - multipart/form encoding`; Flashduty parses both). Do not choose XML or Serialized PHP
+5. Save
+
+</Step>
+
+<Step title="Add the contact to an alert group">
+
+In **Alert Groups**, edit the group used by the hosts you want to send, and add the new contact to the relevant escalation levels. One alert group can be used by several hosts.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a monitored host fail (for example, temporarily point the monitor at a closed port) and confirm Flashduty receives an active alert. Then restore the target and confirm the alert recovers.
+
+</Step>
+</Steps>
+
+<Note>
+Wormly requires the receiving endpoint to be on a different server than the one being monitored, and times out after 5 seconds. The Flashduty push URL meets both requirements.
+</Note>
+
+## Payload
+---
+
+Wormly sends one JSON object per notification. Flashduty parses it directly, with no template to configure:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `hostid` | Wormly host ID | Alert Key, label `host_id` |
+| `name` | Host name | Alert title, labels `check` and `host` |
+| `isrecovery` | `0` for a failure, `1` when the host recovered from a prior failure | Trigger or recovery |
+| `downtime` | Seconds the host has been down | Label `downtime_seconds`, added to the description |
+| `alertlevel` | Current escalation level ID | Label `alert_level` |
+| `alertlevel_name` | Current escalation level name | Label `alert_level_name`, added to the description |
+| `failedsensors` | Array of sensors that failed their tests; each has `type`, `sensorid`, and `message` | Labels `sensor_types` and `sensor_ids`; error messages are added to the description |
+
+The alert title is the host name, or `Wormly host <hostid>` when the name is empty. The request can be a JSON body, or a urlencoded or multipart form that carries the JSON in the `wormlyalert` field.
+
+## Alert Key
+---
+
+Flashduty uses `hostid` as the Alert Key. Wormly documents it as the unique ID of the host that triggered the alert. Failure, repeated escalation, and recovery notifications for one host carry the same `hostid`, so they land on the same alert. Different hosts produce different alerts even when they share a name. Changing the host name, escalation level, or sensors does not change the Alert Key.
+
+If `hostid` is missing, Flashduty returns a parameter error because a recovery could not be matched to its alert.
+
+## Status and severity
+---
+
+Wormly notifications carry no severity. `alertlevel` is an escalation step, not a severity, so Flashduty treats every failure as Critical.
+
+| Wormly `isrecovery` | Flashduty status or severity |
+| :--- | :--- |
+| `0` | Critical |
+| `1` | Recovery, previous severity Critical |
+
+Requests whose `isrecovery` is missing or is neither `0` nor `1` are rejected, so a request of unknown state never enters the wrong alert lifecycle.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a continuing failure create multiple Flashduty alerts?">
+
+No. While a host stays down, each notification sent at an escalation level carries the same `hostid` and merges into one alert. When several sensors of one host fail together, Wormly lists them in a single notification and Flashduty still creates one alert.
+
+</Accordion>
+
+<Accordion title="Does the contact's test button create an alert?">
+
+Wormly's documentation does not describe the test notification. Flashduty acknowledges an empty JSON object, which has none of the known fields, and creates no alert. If the test notification carries a sample `hostid`, it creates an alert keyed on that `hostid`, which you can close manually in Flashduty.
+
+</Accordion>
+
+<Accordion title="Can I send Wormly's XML or Serialized PHP format?">
+
+No. Flashduty only parses the JSON format. Choose a JSON webhook type in Wormly.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Wormly reports a failed push**: confirm the URL is the full push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: confirm the webhook type is JSON and that `hostid` and `isrecovery` are present in the request
+- **The alert does not recover**: confirm the recovery notification goes to the same contact. Wormly notifies every recipient that received a failure notice when the host recovers
+
+For field details, see the Wormly documentation [Webhook / HTTP Alert Channel](https://www.wormly.com/help/channels/http-rpc).
