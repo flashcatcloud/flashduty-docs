@@ -139,6 +139,9 @@ export const docMap = {
   SolarwindsOrion: `${alertBase}/solarwinds-orion.mdx`,
   Cfengine: `${alertBase}/cfengine.mdx`,
   Mezmo: `${alertBase}/mezmo.mdx`,
+  CrowdstrikeLogscale: `${alertBase}/crowdstrike-logscale.mdx`,
+  Bigpanda: `${alertBase}/bigpanda.mdx`,
+  GhostInspector: `${alertBase}/ghost-inspector.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
