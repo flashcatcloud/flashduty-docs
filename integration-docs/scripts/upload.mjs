@@ -41,10 +41,16 @@ async function refreshCdnCache(url) {
   console.log(`Refreshed CDN cache: ${url}`);
 }
 
+// ali-oss's timeout (default 60s) runs from socket connect until the response
+// arrives, so it also covers sending the body. The ~1.4 MB en.js/zh.js bundles
+// take 30-52s from a GitHub-hosted runner (~30 KB/s) and cross 60s as more
+// integrations are added; the tarball upload has seen ~9 KB/s.
+const UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
 async function uploadFile(file) {
   const localFilePath = path.join(localDir, file);
   const ossFilePath = path.join(process.env.CDN_DIR, file).replace(/\\/g, '/');
-  const result = await ossClient.put(ossFilePath, localFilePath);
+  const result = await ossClient.put(ossFilePath, localFilePath, { timeout: UPLOAD_TIMEOUT_MS });
   const cdnUrl = buildCdnUrl(result.url, process.env.CDN_ENDPOINT, process.env.CDN_URL);
   console.log(`Uploaded ${file} -> ${cdnUrl}`);
   await refreshCdnCache(cdnUrl);
