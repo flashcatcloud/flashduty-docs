@@ -202,6 +202,7 @@ export const docMap = {
   SemaphoreChange: `${integrationBase}/change-integration/semaphore.mdx`,
   AwxChange: `${integrationBase}/change-integration/awx.mdx`,
   ScalrChange: `${integrationBase}/change-integration/scalr.mdx`,
+  GrowthbookChange: `${integrationBase}/change-integration/growthbook.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
