@@ -82,6 +82,7 @@ export const docMap = {
   StatusCake: `${alertBase}/statuscake.mdx`,
   Netbeez: `${alertBase}/netbeez.mdx`,
   Apimetrics: `${alertBase}/apimetrics.mdx`,
+  Gatus: `${alertBase}/gatus.mdx`,
   Odown: `${alertBase}/odown.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,
   Xitoring: `${alertBase}/xitoring.mdx`,
