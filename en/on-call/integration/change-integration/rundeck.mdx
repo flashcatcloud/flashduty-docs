@@ -1,0 +1,135 @@
+---
+title: "Rundeck change integration"
+description: "Sync every execution of your Rundeck jobs to Flashduty On-call through Rundeck's webhook notification, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Rundeck", "webhook notification", "job execution", "runbook automation"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use the [webhook notification](https://docs.rundeck.com/docs/manual/notifications/webhooks.html) of a Rundeck job to sync its executions to Flashduty On-call. Each execution becomes one Flashduty change; the execution's start and end update that same change.
+
+Rundeck cannot tell whether a job changes production, so add the notification only to **jobs that deploy or modify things**, not to read-only check jobs.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Rundeck** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project` or `job`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Rundeck
+---
+
+<Steps>
+<Step title="Open the job's notification settings">
+
+Open the job to sync, click **Edit**, and switch to the **Notifications** tab.
+
+</Step>
+
+<Step title="Add a webhook notification">
+
+Add a notification of type **Send Webhook** for each of **On Start**, **On Success**, **On Failure**, and **On Retryable Failure**:
+
+1. **URL(s)**: the full Push URL of the Flashduty integration
+2. **Payload Format**: select `JSON`. Rundeck defaults to XML, which Flashduty does not accept
+3. **Method**: select `POST`
+
+All four triggers are needed: On Start makes the change appear when the execution starts; On Success and On Failure give the end status; when the job has **Retry** set, the failed attempt sends only On Retryable Failure and not On Failure, so without it the change stays at Processing.
+
+The notification can also live in the `notification` section of the job definition (YAML or XML) and be applied with `rd jobs load` or a project import.
+
+</Step>
+
+<Step title="Run the job">
+
+Save and run the job once; the change appears in the Flashduty change list. The webhook notification has no test button. When Rundeck fails to reach Flashduty, it logs `Notification failed` in the Rundeck server log only; a delivery that Flashduty rejects is not shown on the job page.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+Each job execution is one change. The change key (change_key) is Rundeck's execution id, for example `4711`.
+
+- The start and end notifications of one execution update the same change
+- Two executions of the same job are two changes
+- When a failed job is retried automatically, each retry is a new execution and therefore a new change
+- An execution id is unique within one Rundeck server. Create a separate integration for each Rundeck server; otherwise equal execution ids from different servers merge into one change
+
+## Status mapping
+---
+
+| Trigger | Execution status (status) | Flashduty change status |
+|---|---|---|
+| On Start | running | Processing |
+| On Success | succeeded | Done |
+| On Failure | failed | Failed |
+| On Failure | timedout (execution timeout) | Failed |
+| On Failure | missed (missed its schedule) | Failed |
+| On Failure | aborted (killed) | Canceled |
+| On Retryable Failure | failed-with-retry | Failed |
+
+Done, Failed, and Canceled are end statuses; Flashduty records the change's end time.
+
+`On Average Duration Exceeded` reports an execution that is still running, not a new stage; Flashduty accepts it and records nothing.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project>: run <job group>/<job name>`, for example `ops: run release/prod/deploy-app`; `<project>: run execution <execution id>` when the job was deleted |
+| Description | The job's description; empty when the job has none |
+| Link | The execution's page in Rundeck |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `project` | Rundeck project name |
+| `job` | Job name |
+| `job_group` | Job group |
+| `job_id` | Job ID |
+| `execution_id` | Execution ID |
+| `execution_type` | Execution type: `user` (manual), `scheduled`, or `user-scheduled` |
+| `actor` | The user who started the execution |
+| `rundeck_state` | Latest execution status |
+
+Job option values may contain secrets and are not recorded.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't I see any change?">
+
+- Check that **Payload Format** is `JSON`
+- Check that On Start, On Success, On Failure, and On Retryable Failure each have a notification
+- Only job executions send notifications; ad hoc commands run from the **Commands** page do not
+- Search the Rundeck server log for `Notification failed` to see why a delivery failed
+
+</Accordion>
+
+<Accordion title="Why does a change stay at Processing?">
+
+The end notification did not arrive. Common causes are a job with retries but no **On Retryable Failure** notification, or a network path from Rundeck to Flashduty that is down. Rundeck tries each notification once and does not resend it.
+
+</Accordion>
+
+<Accordion title="Which deliveries does Flashduty reject?">
+
+Flashduty rejects a delivery in these cases:
+
+- `must use format JSON`: the notification's **Payload Format** is `XML`
+- `execution is missing` or `execution.id is missing`: the body has no execution; check that it comes from a Rundeck webhook notification
+- `unsupported status`: an execution status Flashduty does not support yet, for example a custom job status (`other`); contact us
+
+</Accordion>
+</AccordionGroup>
