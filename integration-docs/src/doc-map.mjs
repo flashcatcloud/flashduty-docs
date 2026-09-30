@@ -110,6 +110,7 @@ export const docMap = {
   Auvik: `${alertBase}/auvik.mdx`,
   Airbrake: `${alertBase}/airbrake.mdx`,
   Redash: `${alertBase}/redash.mdx`,
+  Appsignal: `${alertBase}/appsignal.mdx`,
   Opensearch: `${alertBase}/opensearch.mdx`,
   Logrocket: `${alertBase}/logrocket.mdx`,
   RedgateSqlMonitor: `${alertBase}/redgate-sql-monitor.mdx`,
