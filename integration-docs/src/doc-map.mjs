@@ -75,6 +75,7 @@ export const docMap = {
   Pingdom: `${alertBase}/pingdom.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
+  DattoRmm: `${alertBase}/datto-rmm.mdx`,
   Rbltracker: `${alertBase}/rbltracker.mdx`,
   Uptimeobserver: `${alertBase}/uptimeobserver.mdx`,
   Gitguardian: `${alertBase}/gitguardian.mdx`,
