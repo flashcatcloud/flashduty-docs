@@ -75,6 +75,7 @@ export const docMap = {
   Pingdom: `${alertBase}/pingdom.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
+  Aikido: `${alertBase}/aikido.mdx`,
   DattoRmm: `${alertBase}/datto-rmm.mdx`,
   Rbltracker: `${alertBase}/rbltracker.mdx`,
   Uptimeobserver: `${alertBase}/uptimeobserver.mdx`,
@@ -116,7 +117,11 @@ export const docMap = {
   Checkmk: `${alertBase}/checkmk.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+<<<<<<< HEAD
   Semgrep: `${alertBase}/semgrep.mdx`,
+=======
+  Sonarqube: `${alertBase}/sonarqube.mdx`,
+>>>>>>> origin/feat/alert-batch15
   Level: `${alertBase}/level.mdx`,
   JuniperMist: `${alertBase}/juniper-mist.mdx`,
   Extrahop: `${alertBase}/extrahop.mdx`,
@@ -170,6 +175,7 @@ export const docMap = {
   Openstatus: `${alertBase}/openstatus.mdx`,
   Opennms: `${alertBase}/opennms.mdx`,
   CertSpotter: `${alertBase}/cert-spotter.mdx`,
+  Crowdsec: `${alertBase}/crowdsec.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   Twilio: `${alertBase}/twilio.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
