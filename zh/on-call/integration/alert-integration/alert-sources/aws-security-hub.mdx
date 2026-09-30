@@ -1,0 +1,99 @@
+---
+title: "AWS Security Hub 告警集成"
+description: "通过 EventBridge 规则把 AWS Security Hub 的发现（finding）推送到 Flashduty 的 AWS EventBridge 集成，按发现合并，处置状态变化时自动恢复告警。"
+keywords: ["告警集成", "AWS Security Hub", "Security Hub", "ASFF", "EventBridge", "云安全", "AWS"]
+---
+
+AWS Security Hub 把每条发现作为 **Security Hub Findings - Imported** 事件发到 Amazon EventBridge。Flashduty 的 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge) 能识别这类事件：每条发现生成一条告警，发现被标记为已解决或已归档时自动恢复。因此不需要单独的 Security Hub 集成：在 Flashduty 创建 AWS EventBridge 集成，再在 EventBridge 中建一条规则把 Security Hub 事件转给它。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 AWS EventBridge**，不是 AWS Security Hub。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **AWS EventBridge**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/aws/eventbridge?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **AWS EventBridge**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 AWS 中配置
+---
+
+1. 按 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge) 中的「方式一：API destination」创建 Connection 和 API destination，endpoint 填 Flashduty 推送地址。也可以用「方式二：SNS 主题」
+2. 在 EventBridge 控制台创建规则：**Rule type** 选择 **Rule with an event pattern**
+3. 用模板构建事件模式时，**Event source** 选择 **AWS services**，**AWS service** 选择 **Security Hub**，**Event type** 选择 **Security Hub Findings - Imported**。也可以选择 **Custom patterns (JSON editor)** 粘贴下面的模式
+4. **Target types** 选择 **EventBridge API destination**，并选择上面创建的 API destination
+
+事件模式：
+
+```json
+{
+  "source": ["aws.securityhub"],
+  "detail-type": ["Security Hub Findings - Imported"]
+}
+```
+
+如果只想接收部分发现，在 `detail.findings` 中按发现属性过滤。例如只接收 Amazon Inspector 产生的、严重程度为 `HIGH` 或 `CRITICAL` 的发现：
+
+```json
+{
+  "source": ["aws.securityhub"],
+  "detail-type": ["Security Hub Findings - Imported"],
+  "detail": {
+    "findings": {
+      "ProductArn": ["arn:aws:securityhub:us-east-1::product/aws/inspector"],
+      "Severity": {
+        "Label": ["HIGH", "CRITICAL"]
+      }
+    }
+  }
+}
+```
+
+<Warning>
+不要用 `Workflow.Status`、`RecordState` 或 `Compliance.Status` 过滤，否则「已解决」「已归档」的更新事件到不了 Flashduty，告警无法自动恢复。严重程度和产品（`ProductArn`）在发现的整个生命周期内不变，适合用来过滤。
+</Warning>
+
+Security Hub 的规则在每个启用了 Security Hub 的区域分别创建。自定义动作触发的 **Security Hub Findings - Custom Action** 事件也带有发现，Flashduty 用同样的方式处理，把 `detail-type` 加进规则即可。
+
+## 字段映射
+---
+
+**Security Hub Findings - Imported** 事件的 `detail.findings` 每次只包含一条发现。以下映射来自 Flashduty 对 AWS EventBridge 事件的处理：
+
+| Security Hub 字段 | Flashduty |
+| :--- | :--- |
+| `ProductArn` + `Id` | Alert Key。同一条发现的后续更新合并到同一条告警 |
+| `Workflow.Status`、`RecordState` | `Workflow.Status` 为 `RESOLVED` 或 `SUPPRESSED`，或 `RecordState` 为 `ARCHIVED` 时恢复告警；其他状态触发或更新告警 |
+| `Title` | 标签 `summary`（告警标题固定为 `aws.securityhub::Security Hub Findings - Imported`） |
+| `Severity.Label` | 标签 `severity_label`；告警等级固定为 Warning，可用 [告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 按该标签改写 |
+| `Resources[0].Id`、`Resources[0].Type` | 标签 `resource`、`resource_type` |
+| `ProductName`、`GeneratorId`、`AwsAccountId`、`Compliance.Status`、`Workflow.Status`、`RecordState` | 标签 `product_name`、`generator_id`、`aws_account_id`、`compliance_status`、`workflow_status`、`record_state` |
+| 事件的 `source`、`region`、`account`、`detail-type`、`detail` | 标签 `source`、`region`、`account`、`check`、`detail` |
+
+## 恢复与去重
+---
+
+- 在 Security Hub 中把发现的工作流状态改为 **Resolved** 或 **Suppressed**，或发现被归档，都会产生新的 **Security Hub Findings - Imported** 事件，Flashduty 收到后按相同的 Alert Key 关闭告警。
+- 一个事件里有多条发现时，每条发现单独生成告警。
+- 事件缺少 `Id` 或 `ProductArn` 时，Flashduty 返回 HTTP 400。
+
+## 排查问题
+---
+
+- **API destination 调用失败**：确认 endpoint 是完整推送地址且包含 `integration_key`，`HTTP method` 为 `POST`
+- **告警没有恢复**：检查规则的事件模式是否按 `Workflow.Status`、`RecordState` 过滤，以及目标是否配置了 Input transformer（需要发送完整事件）
+- **没有收到某个区域的发现**：EventBridge 规则只在所在区域生效，需要在每个启用 Security Hub 的区域创建规则

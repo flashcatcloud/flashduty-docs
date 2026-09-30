@@ -1,0 +1,98 @@
+---
+title: "Amazon Inspector 告警集成"
+description: "通过 EventBridge 规则把 Amazon Inspector 的漏洞和网络可达性发现推送到 Flashduty 的 AWS EventBridge 集成，发现关闭或被抑制时自动恢复告警。"
+keywords: ["告警集成", "Amazon Inspector", "Inspector2", "漏洞扫描", "EventBridge", "AWS"]
+---
+
+Amazon Inspector 在发现新漏洞或状态变化时向 Amazon EventBridge 发送 **Inspector2 Finding** 事件。Flashduty 的 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge) 能识别这类事件：每条发现生成一条告警，状态变为 `CLOSED` 或 `SUPPRESSED` 时自动恢复。因此不需要单独的 Inspector 集成：在 Flashduty 创建 AWS EventBridge 集成，再在 EventBridge 中建一条规则把 Inspector 事件转给它。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 AWS EventBridge**，不是 Amazon Inspector。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **AWS EventBridge**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/aws/eventbridge?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **AWS EventBridge**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 AWS 中配置
+---
+
+Inspector 把事件发到启用 Inspector 的每个区域的默认事件总线，规则要在每个区域分别创建。
+
+1. 按 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge) 中的「方式一：API destination」创建 Connection 和 API destination，endpoint 填 Flashduty 推送地址。也可以用「方式二：SNS 主题」
+2. 在 EventBridge 控制台选择 **Rules** → **Create rule**，**Rule type** 选择 **Rule with an event pattern**
+3. 在 **Event pattern** 中选择 **Custom patterns (JSON editor)**，粘贴下面的事件模式
+4. **Target types** 选择 **EventBridge API destination**，并选择上面创建的 API destination
+
+事件模式：
+
+```json
+{
+  "source": ["aws.inspector2"],
+  "detail-type": ["Inspector2 Finding"]
+}
+```
+
+如果只关心高危发现，可以按严重程度过滤：
+
+```json
+{
+  "source": ["aws.inspector2"],
+  "detail-type": ["Inspector2 Finding"],
+  "detail": {
+    "severity": ["HIGH", "CRITICAL"]
+  }
+}
+```
+
+<Warning>
+不要在模式里加 `"status": ["ACTIVE"]`。Inspector 官方文档的通知示例用它来只接收活跃发现，但发现关闭时发出的 `CLOSED` 事件也会被过滤掉，Flashduty 收不到恢复事件，告警无法自动恢复。
+</Warning>
+
+Inspector 的其他事件（`Inspector2 Scan`、`Inspector2 Coverage`、`Inspector2 AutoEnable`）不是发现，不要转发到 Flashduty；上面的 `detail-type` 已经把它们排除在外。
+
+## 字段映射
+---
+
+以下映射来自 Flashduty 对 AWS EventBridge 事件的处理：
+
+| Inspector 字段 | Flashduty |
+| :--- | :--- |
+| `detail.findingArn` | Alert Key。发现更新时 ID 不变，后续事件合并到同一条告警 |
+| `detail.status` | `CLOSED` 或 `SUPPRESSED` 时恢复告警；`ACTIVE` 触发或更新告警 |
+| `detail.title` | 标签 `summary`（告警标题固定为 `aws.inspector2::Inspector2 Finding`） |
+| `detail.severity` | 标签 `inspector_severity`；告警等级固定为 Warning，可用 [告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 按该标签改写 |
+| `detail.type` | 标签 `finding_type`（如 `PACKAGE_VULNERABILITY`、`NETWORK_REACHABILITY`、`CODE_VULNERABILITY`） |
+| `detail.resources[0].id`、`detail.resources[0].type` | 标签 `resource`、`resource_type` |
+| `detail.awsAccountId`、`detail.findingArn`、`detail.status` | 标签 `aws_account_id`、`finding_arn`、`finding_status` |
+| 事件的 `source`、`region`、`account`、`detail-type`、`detail`、`resources` | 标签 `source`、`region`、`account`、`check`、`detail`、`resources` |
+
+## 恢复与去重
+---
+
+- Inspector 在漏洞被修复、发现状态变化时对同一个 `findingArn` 再发一次事件。`status` 为 `CLOSED`（已修复）或 `SUPPRESSED` 时，Flashduty 关闭对应告警。
+- 如果账号是 Inspector 的委派管理员，成员账号的发现也会发到管理员账号，可以用标签 `aws_account_id` 区分来源账号。
+- 事件缺少 `detail.findingArn` 时，Flashduty 返回 HTTP 400。
+- 代码漏洞类发现的 `detail` 里含有文件路径和检测器名称，会随 `detail` 标签一起进入告警。
+
+## 排查问题
+---
+
+- **API destination 调用失败**：确认 endpoint 是完整推送地址且包含 `integration_key`，`HTTP method` 为 `POST`
+- **告警没有恢复**：检查规则的事件模式是否按 `status` 过滤，以及目标是否配置了 Input transformer（需要发送完整事件）
+- **没有收到某个区域的发现**：Inspector 只向所在区域的事件总线发事件，需要在每个启用 Inspector 的区域创建规则

@@ -1,0 +1,111 @@
+---
+title: "AWS Health 告警集成"
+description: "通过 Amazon EventBridge 规则接收 AWS Health 事件，使用 Flashduty 的 AWS EventBridge 集成，事件关闭时自动恢复告警。"
+keywords: ["告警集成", "AWS Health", "AWS Health Dashboard", "EventBridge", "服务健康", "计划变更"]
+---
+
+AWS Health 把影响你账号的服务事件（运行故障、计划变更、账号通知）作为 `source` 为 `aws.health`、`detail-type` 为 `AWS Health Event` 的事件发送到 Amazon EventBridge。Flashduty 的 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge) 对这类事件有专门处理，因此不需要单独的 AWS Health 集成：在 Flashduty 创建 AWS EventBridge 集成，把它的推送地址设为 EventBridge 规则的目标即可。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 AWS EventBridge**，不是 AWS Health。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **AWS EventBridge**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **AWS EventBridge**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 AWS 中配置
+---
+
+AWS Health 事件要通过 EventBridge 规则转发，规则的目标使用指向 Flashduty 推送地址的 API destination（也可以经 SNS 主题转发）。API destination 和 SNS 两种目标的具体步骤见 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge)，AWS Health 只需要在规则里使用下面的事件模式。
+
+1. 在 EventBridge 中创建规则，事件模式填写：
+
+```json
+{
+  "source": ["aws.health"],
+  "detail-type": ["AWS Health Event"]
+}
+```
+
+2. 需要缩小范围时，在 `detail` 中增加过滤条件。例如只接收 Amazon EC2 的 `issue` 类事件：
+
+```json
+{
+  "source": ["aws.health"],
+  "detail-type": ["AWS Health Event"],
+  "detail": {
+    "eventTypeCategory": ["issue"],
+    "service": ["EC2"]
+  }
+}
+```
+
+3. 在规则的目标中选择指向 Flashduty 推送地址的 API destination，保存规则
+4. 创建规则时，可在 EventBridge 控制台的 **Test event pattern** 面板选择 AWS 提供的 AWS Health 示例事件，确认事件模式能匹配
+
+AWS 的说明：规则只接收本账号的事件；公共（PUBLIC）事件在创建规则后最长可能延迟一小时才开始发送。组织视图下的事件转发见 AWS 文档 [Aggregating AWS Health events](https://docs.aws.amazon.com/health/latest/ug/aggregating-health-events.html)。
+
+<Warning>
+不要在事件模式里过滤掉 `statusCode`，例如只匹配 `"statusCode": ["open"]`，否则收不到事件关闭的通知，告警无法自动恢复。
+</Warning>
+
+## 区域和备份规则
+---
+
+- 每个需要接收事件的区域都要创建规则；全局事件（例如 IAM 相关事件）发送到 US East (N. Virginia)，即 `us-east-1`
+- 在标准 AWS 分区中，事件还会同时发送到备份区域 US West (Oregon)。如果在主区域和备份区域都创建了规则，同一事件会到达两次；这两次事件的 `eventArn` 和受影响账号相同，Flashduty 按相同的 Alert Key 合并为一条告警
+- 只想保留主区域的事件时，在备份区域的规则里增加 `"backupEvent": ["false"]` 过滤条件（`detail.backupEvent`）
+
+## 字段映射
+---
+
+| AWS Health 字段 | Flashduty |
+| :--- | :--- |
+| `detail.eventArn` + `detail.affectedAccount`（缺失时用 `account`） | Alert Key，同一事件的后续更新合并到同一条告警 |
+| `detail.statusCode` | `closed` 时恢复告警；`open`、`upcoming` 时触发或更新告警 |
+| `detail-type` 和 `source` | 告警标题固定为 `aws.health::AWS Health Event` |
+| `detail.service`、`detail.eventTypeCode` | 标签 `service`、`event_type_code`，并组成 `summary` 标签（`AWS Health <service> <eventTypeCode>`） |
+| `detail.eventTypeCategory` | 标签 `event_type_category`（`issue`、`accountNotification`、`scheduledChange`、`investigation`） |
+| `detail.eventScopeCode` | 标签 `event_scope_code`（`ACCOUNT_SPECIFIC` 或 `PUBLIC`） |
+| `detail.affectedEntities[].entityValue` | 标签 `affected_entities`，第一个值同时写入 `resource` |
+| `detail.eventArn`、`detail.statusCode`、`detail.affectedAccount` | 标签 `event_arn`、`status_code`、`affected_account` |
+| `region`、`account`、`resources`、`detail` | 标签 `region`、`account`、`resources`、`detail`（`detail` 为事件详情的 JSON） |
+
+## 告警等级
+---
+
+EventBridge 事件没有统一的等级字段，所有 AWS Health 事件都以 Warning 触发。需要区分等级时，在 [告警处理](/zh/on-call/integration/alert-integration/alert-pipelines) 中按 `event_type_category` 标签改写等级，例如把 `issue` 改为 Critical，把 `scheduledChange` 保持为 Warning 或降为 Info。
+
+## 恢复与去重
+---
+
+- AWS Health 在事件结束时发送 `statusCode` 为 `closed` 的更新，Flashduty 按相同 Alert Key 恢复对应告警
+- 计划变更类事件（`scheduledChange`）在开始前就会以 `upcoming` 状态发送，Flashduty 会提前触发告警。只关心正在发生的故障时，在事件模式中限定 `eventTypeCategory` 为 `issue`
+- `detail-type` 为 `AWS Health Abuse Event` 的事件没有专门处理，每条事件按事件 `id` 生成一条独立告警，没有恢复。事件模式中只写 `AWS Health Event` 即可避开
+- `detail.eventArn` 缺失的事件会被拒绝（HTTP 400）
+
+## 排查问题
+---
+
+- **规则没有触发**：检查事件模式；公共事件在创建规则后最长可能延迟一小时；确认已在事件所属区域和 `us-east-1`（全局事件）创建规则
+- **告警没有恢复**：确认事件模式没有过滤掉 `closed` 状态，且目标没有配置 Input transformer（需要发送完整事件）
+- **同一事件出现两条告警**：确认两条事件的 `detail.eventArn` 和受影响账号相同；`detail-type` 被改写后无法按 Health 事件合并
+- **API destination 调用失败**：确认 endpoint 是完整推送地址，`HTTP method` 为 `POST`
+
+更多字段含义请参阅 AWS 文档 [AWS Health events Amazon EventBridge schema](https://docs.aws.amazon.com/health/latest/ug/aws-health-events-eventbridge-schema.html) 和 [Creating EventBridge rules for AWS Region coverage](https://docs.aws.amazon.com/health/latest/ug/choosing-a-region.html)。
