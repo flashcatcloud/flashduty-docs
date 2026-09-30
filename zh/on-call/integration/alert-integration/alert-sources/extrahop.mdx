@@ -1,0 +1,131 @@
+---
+title: "ExtraHop 告警集成"
+description: "通过检测通知规则的自定义 Webhook，将 ExtraHop Reveal(x) 的安全和性能检测同步到 Flashduty On-call。"
+keywords: ["告警集成", "ExtraHop", "Reveal(x)", "RevealX", "NDR", "NPM", "网络检测", "Webhook"]
+---
+
+通过 ExtraHop Reveal(x) 的检测通知规则（Detection Notification Rule）中的 Custom Webhook，将安全检测和性能检测同步到 Flashduty On-call。Flashduty 用检测的 `id` 作为 Alert Key，同一个检测的多次更新合并为同一条告警。
+
+ExtraHop 的文档没有说明检测被关闭或解决时会发送通知，所以 Flashduty 不会自动恢复这些告警。请开启协作空间的超时自动关闭（见下文[检测与恢复](#检测与恢复)），或在处理完成后手动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **ExtraHop**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **ExtraHop**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 ExtraHop 中配置
+---
+
+需要 NDR 或 NPM 模块权限，并拥有完全写入（full write）及以上权限。Webhook 通过 TCP 443（HTTPS）发送，ExtraHop 需要能访问 Flashduty 推送地址。
+
+<Steps>
+<Step title="创建通知规则">
+
+1. 使用 `https://<extrahop 主机名或 IP>` 登录 ExtraHop，点击 **System Settings** 图标，选择 **Notification Rules**，点击 **Create**
+2. NDR 模块选择 **Security Detection**，NPM 模块选择 **Performance Detection**
+3. 填写规则名称，在 **Criteria** 中添加触发通知的条件，例如 **Minimum Risk Score**、**Category**、**Site**
+
+</Step>
+
+<Step title="配置 Custom Webhook">
+
+1. 在 **Target** 中选择 **Custom Webhook**
+2. 在 **Payload URL** 中粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`。认证依靠该参数，**Show Advanced Connection Options** 中的自定义请求头和 Basic、Bearer 认证都可以留空
+3. **Notification Behavior** 选择 **Send for every detection update**，**Payload Options** 选择 **Default payload**。默认 payload 包含 `id`、`title`、`type`、`description`、`url`、`risk_score`、`src`、`dst` 等字段，Flashduty 直接识别
+4. 点击 **Save**
+
+如果选择 **Send once per detection**，ExtraHop 要求使用自定义 payload。请在建议的 JSON 基础上加入检测 ID，Flashduty 才能识别（缺少 `id` 的请求会被拒绝）；`risk_score` 和 `site` 可选，用于告警等级和标签：
+
+```json
+{
+    "id": {{ id }},
+    "title": "{{ title }}",
+    "type": "{{ type }}",
+    "url": "{{ url }}",
+    "description": "{{ description }}",
+    "risk_score": {{ risk_score }},
+    "site": "{{ site }}",
+    "categories_string": "{{ categories_string }}",
+    "victim_primary": {{ victim_primary | safe }},
+    "offender_primary": {{ offender_primary | safe }}
+}
+```
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 点击 **Test Connection**，ExtraHop 会向 Payload URL 发送一条标题为 **Test Notification** 的消息。ExtraHop 文档没有说明该消息的内容，Flashduty 没有为它做专门处理，缺少检测 `id` 的测试消息会返回参数错误，这只说明地址可达，不代表配置有误
+2. 等待一个满足条件的检测产生，确认 Flashduty 收到告警
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `id`（ExtraHop 文档定义为 "The unique identifier for the detection"）作为 Alert Key。同一个检测每次更新推送的 `id` 相同，会合并到同一条告警；标题、描述、风险分和时间变化不会改变 Alert Key。缺少 `id` 的请求会被拒绝。
+
+## 检测与恢复
+---
+
+ExtraHop 的检测通知只有"创建"和"更新"两种情形，文档没有描述检测关闭或解决时的通知。Flashduty 收到的每条通知都是触发状态，不会自动恢复。
+
+请在协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时；也可以在检测处理完成后手动关闭告警。
+
+## 告警等级
+---
+
+告警等级取自 `risk_score`，分段与 ExtraHop 控制台的颜色一致：
+
+| risk_score | Flashduty 等级 |
+| :--- | :--- |
+| 80 及以上（红色） | Critical |
+| 31–79（橙色） | Warning |
+| 1–30（黄色） | Info |
+| 缺失、0 或非数字（性能检测没有风险分） | Warning |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `extrahop` |
+| `detection_id` | `id` |
+| `detection_type` | `type` |
+| `detection_url` | `url` |
+| `risk_score` | `risk_score` |
+| `site` | `site` |
+| `category` | `categories_string` |
+| `src_host` / `src_ip` | `src.hostname` / `src.ipaddr` |
+| `dst_host` / `dst_ip` | `dst.hostname` / `dst.ipaddr` |
+| `offender` / `victim` | `offender_primary`、`victim_primary` 的名称，没有名称时取 IP |
+
+告警标题取自 `title`，为空时依次取 `type` 和 `ExtraHop detection <id>`。描述为检测描述加上检测详情链接。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并且 payload 中有 `id`
+- **告警一直未关闭**：ExtraHop 没有恢复通知，请开启协作空间的超时自动关闭，或手动关闭
+- **同一个检测收到多次通知**：选择 **Send for every detection update** 时，检测每次更新都会推送，这些通知合并到同一条 Flashduty 告警；不需要更新通知时选择 **Send once per detection**
+
+更多字段含义请参阅 [ExtraHop 检测通知规则文档](https://docs.extrahop.com/current/detections-create-notification-rule/)。
