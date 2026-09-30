@@ -84,6 +84,7 @@ export const docMap = {
   Dash0: `${alertBase}/dash0.mdx`,
   ProjectDiscovery: `${alertBase}/projectdiscovery.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
+  Sevone: `${alertBase}/sevone.mdx`,
   HostedGraphite: `${alertBase}/hosted-graphite.mdx`,
   Netbeez: `${alertBase}/netbeez.mdx`,
   Apimetrics: `${alertBase}/apimetrics.mdx`,
