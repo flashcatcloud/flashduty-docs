@@ -193,6 +193,7 @@ export const docMap = {
   ArgoRolloutsChange: `${integrationBase}/change-integration/argo-rollouts.mdx`,
   OctopusDeployChange: `${integrationBase}/change-integration/octopus-deploy.mdx`,
   AwxChange: `${integrationBase}/change-integration/awx.mdx`,
+  CoolifyChange: `${integrationBase}/change-integration/coolify.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
