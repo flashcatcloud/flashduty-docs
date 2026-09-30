@@ -1,0 +1,112 @@
+---
+title: "Canarytokens alert integration"
+description: "Send alerts from Canarytokens (canarytokens.org or self-hosted) to Flashduty On-call through a webhook when a honeytoken is touched."
+keywords: ["alert integration", "Canarytokens", "webhook", "honeytoken", "canary", "intrusion detection", "security"]
+---
+
+Canarytokens, by Thinkst, creates decoys such as web bugs, DNS names, Word, Excel and PDF documents, and AWS keys. Anyone who touches one is somewhere they should not be. With a webhook set on a token, every touch is sent to Flashduty On-call. Each token maps to one Flashduty alert: it is created on the first touch, and later touches of the same token merge into it. Canarytokens never sends a recovery, so turn on auto-close for the channel.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Canarytokens** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Canarytokens** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Canarytokens
+---
+
+<Steps>
+<Step title="Set the webhook URL on the token">
+
+1. Open [canarytokens.org](https://canarytokens.org) (or your self-hosted Canarytokens site) and choose the token type to create
+2. In the notification settings, choose **Webhook** and paste the full Flashduty push URL, which must include `integration_key`
+3. In **Reminder**, describe what the token is and where it lives, for example `Decoy file on the finance share`. It becomes part of the Flashduty alert title, so the responder knows what was touched
+4. Create the token and place it where it should be found
+
+Canarytokens sends the request from its server, so the webhook URL must be reachable from the public internet. URLs that resolve to private or reserved addresses are rejected. A self-hosted Canarytokens sends the same request.
+
+</Step>
+
+<Step title="Turn on auto-close">
+
+Canarytokens alerts are one-shot and are never recovered. In the channel that receives them, turn on [auto-close](/en/on-call/channel/create-edit) with a suggested duration of 24 hours, counted from **Incident trigger**. While the alert is open, further touches of the same token merge into it; a touch after it closes creates a new alert.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. When you save the webhook URL, Canarytokens posts a test request to it. Flashduty creates an Info alert titled `Canarytokens test notification`. It does not recover, so close it by hand after checking
+2. Touch the token (for example, open a web bug token's link in a browser or with `curl`) and confirm that Flashduty receives a Critical alert
+
+</Step>
+</Steps>
+
+## Event types
+---
+
+Canarytokens posts one JSON object per event and never posts a recovery.
+
+| Payload | Effect in Flashduty |
+| :--- | :--- |
+| A token is touched | Triggers a Critical alert; later touches of the same token update it |
+| A token is found exposed publicly (`key_id`, `exposed_time`) | Triggers a Warning alert titled `Canarytoken exposed`; replace the token on private infrastructure |
+| The test request sent when the webhook is saved | Creates a separate Info alert that never recovers |
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from `token`, the token's fixed identifier. A token touched from different source IPs or through different channels keeps one Alert Key, and changes to the memo, source IP or time do not change it. A request without `token` is rejected. An exposure notice uses `token` plus `key_id`, so it never merges into the token's hit alert.
+
+## Status and severity
+---
+
+A honeytoken has no legitimate visitors, so any touch may be an intrusion and hit alerts are always Critical. Exposure notices are Warning and the test request is Info. To grade tokens differently, adjust severity with a channel route or alert processing rule on a label such as `token_type`.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | The token's memo, or its type when there is no memo |
+| `token` | The token identifier |
+| `token_type` | Token type, such as `web`, `dns`, `ms_word`, `aws_keys` |
+| `channel` | The channel that was touched, such as `HTTP`, `DNS`, `SMTP` |
+| `src_ip` | Source IP of the touch |
+| `hit_time` | Time of the touch recorded by Canarytokens (UTC) |
+| `user_agent` / `referer` / `location` / `hostname` | The matching fields of `additional_data`, only when the request carries them |
+| `key_id` / `public_location` | The exposed key ID and where it was found, on exposure notices |
+
+The `manage_url` in the payload carries the auth parameter that controls the token. Flashduty neither reads nor stores it. Use the Canarytokens management page to see the token's details and hit history.
+
+## About signatures
+---
+
+The Canarytokens webhook has no signature and sends no dedicated header, so Flashduty does not verify one. The `integration_key` in the push URL is the only credential; keep it private.
+
+## Troubleshooting
+---
+
+- **Flashduty receives nothing**: make sure the webhook URL is publicly reachable and not a private address. Canarytokens times out after 2 seconds and does not retry
+- **The token's webhook was disabled**: Canarytokens disables a webhook after 5 consecutive errors. Fix the push URL and save the webhook again, and confirm the push URL is complete and includes `integration_key`
+- **Invalid parameter error**: confirm the URL is complete and includes `integration_key`; a body without `token` is also rejected
+- **The alert never closes**: Canarytokens sends no recovery, so turn on auto-close for the channel or close the alert by hand; the Info alert from the test request also needs closing by hand
+- **Slack, Teams, Discord or Google Chat URLs**: these URLs receive Canarytokens' chat-specific message format, not the JSON described here, and cannot be used with Flashduty
+
+For more, see the [Canarytokens source repository](https://github.com/thinkst/canarytokens).

@@ -1,0 +1,112 @@
+---
+title: "Canarytokens 告警集成"
+description: "通过 Webhook 将 Canarytokens（canarytokens.org 或自建）中蜜标被触碰的告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Canarytokens", "Webhook", "蜜标", "Honeytoken", "入侵检测", "安全"]
+---
+
+Canarytokens 是 Thinkst 提供的蜜标服务，可以创建 Web bug、DNS、Word/Excel/PDF 文档、AWS 密钥等诱饵；一旦有人触碰，就说明有人在不该访问的地方活动。为蜜标配置 Webhook 后，每次被触碰都会把告警同步到 Flashduty On-call。每个蜜标对应一条 Flashduty 告警：首次被触碰时创建，之后同一蜜标的再次触碰合并到同一条告警。Canarytokens 不会推送恢复事件，请开启协作空间的超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Canarytokens**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Canarytokens**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Canarytokens 中配置
+---
+
+<Steps>
+<Step title="为蜜标填写 Webhook 地址">
+
+1. 打开 [canarytokens.org](https://canarytokens.org)（或您自建的 Canarytokens 站点），选择要创建的蜜标类型
+2. 在通知设置中选择 **Webhook**，将 Flashduty 集成的完整推送地址粘贴进去，地址中需包含 `integration_key`
+3. 在 **Reminder** 中填写蜜标的用途和位置，例如 `财务共享目录上的诱饵文件`。它会成为 Flashduty 告警标题的一部分，值班人员据此判断哪里被触碰
+4. 创建蜜标并放置到目标位置
+
+Canarytokens 从服务端发起请求，Webhook 地址必须是公网可访问的地址，指向内网或保留地址的 URL 会被拒绝。自建 Canarytokens 使用相同的请求格式。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Canarytokens 的告警是一次性事件，不会推送恢复。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长为 24 小时，计时起点选择 **故障触发**。同一个蜜标在告警未关闭期间再次被触碰，会合并到原有告警；关闭后再次被触碰，会创建新的告警。
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 保存 Webhook 地址时，Canarytokens 会向该地址发送一条测试请求。Flashduty 会创建一条 Info 级别的测试告警，标题为 `Canarytokens test notification`，它不会自动恢复，验证后请手动关闭
+2. 触碰蜜标（例如用浏览器或 `curl` 打开 Web bug 蜜标的链接），确认 Flashduty 收到 Critical 告警
+
+</Step>
+</Steps>
+
+## 事件类型
+---
+
+Canarytokens 每次推送一个 JSON 对象，不推送恢复。
+
+| 推送内容 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| 蜜标被触碰 | 触发 Critical 告警；同一蜜标的再次触碰更新该告警 |
+| 蜜标被发现公开暴露（`key_id`、`exposed_time`） | 触发 Warning 告警，标题为 `Canarytoken exposed`，需要在私有环境中替换该蜜标 |
+| 保存 Webhook 时的测试请求 | 创建一条独立的 Info 告警，不会恢复 |
+
+## Alert Key
+---
+
+Flashduty 使用 `token`（蜜标的固定编号）计算 Alert Key。同一蜜标无论从哪个来源 IP、通过哪个通道被触碰，都使用相同的 Alert Key；备注、来源 IP、时间的变化不会改变它，缺少 `token` 的请求会被拒绝。蜜标暴露通知使用 `token` 加 `key_id`，不会合并到该蜜标的触碰告警。
+
+## 状态和告警等级
+---
+
+蜜标没有合法的访问者，任何一次触碰都可能是入侵迹象，因此触碰告警固定为 Critical。暴露通知为 Warning，测试请求为 Info。如需区分不同蜜标的严重程度，可在协作空间中按标签（例如 `token_type`）配置路由或告警处理规则调整等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 蜜标备注（`memo`），无备注时为蜜标类型 |
+| `token` | 蜜标编号 |
+| `token_type` | 蜜标类型，如 `web`、`dns`、`ms_word`、`aws_keys` |
+| `channel` | 触碰通道，如 `HTTP`、`DNS`、`SMTP` |
+| `src_ip` | 触碰的来源 IP |
+| `hit_time` | Canarytokens 记录的触碰时间（UTC） |
+| `user_agent` / `referer` / `location` / `hostname` | `additional_data` 中对应的字段，仅当推送里带有时才有 |
+| `key_id` / `public_location` | 暴露通知中被暴露的密钥编号和公开位置 |
+
+推送中的 `manage_url` 包含蜜标管理权限的认证参数，Flashduty 不读取、不保存。请到 Canarytokens 的管理页面查看蜜标详情和触碰历史。
+
+## 关于签名
+---
+
+Canarytokens 的 Webhook 没有签名机制，请求也没有专用的请求头，Flashduty 不做签名校验。推送地址中的 `integration_key` 是唯一的凭证，请妥善保管。
+
+## 排查问题
+---
+
+- **Flashduty 没有收到推送**：确认 Webhook 地址是公网可访问的 HTTPS 或 HTTP 地址，不是内网地址。Canarytokens 请求超时时间为 2 秒，不会重试
+- **蜜标的 Webhook 被停用**：Canarytokens 在 Webhook 连续 5 次返回错误后会停用它，需要修正推送地址后重新保存 Webhook；请确认推送地址完整且包含 `integration_key`
+- **返回参数错误**：确认 URL 完整且包含 `integration_key`；推送内容缺少 `token` 时同样会被拒绝
+- **告警没有关闭**：Canarytokens 没有恢复事件，请开启协作空间的超时自动关闭，或手动关闭；测试请求产生的 Info 告警同样需要手动关闭
+- **Slack、Teams、Discord、Google Chat 地址**：这些地址会收到 Canarytokens 专用的消息格式，不是本页描述的 JSON，不能用于 Flashduty
+
+更多信息请参阅 [Canarytokens 源码仓库](https://github.com/thinkst/canarytokens)。
