@@ -85,6 +85,7 @@ export const docMap = {
   Gatus: `${alertBase}/gatus.mdx`,
   Odown: `${alertBase}/odown.mdx`,
   Updown: `${alertBase}/updown.mdx`,
+  Hyperping: `${alertBase}/hyperping.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,
   Xitoring: `${alertBase}/xitoring.mdx`,
   Monitive: `${alertBase}/monitive.mdx`,
