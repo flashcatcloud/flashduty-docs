@@ -163,6 +163,7 @@ export const docMap = {
   ThinkstCanary: `${alertBase}/thinkst-canary.mdx`,
   Falco: `${alertBase}/falco.mdx`,
   Blumira: `${alertBase}/blumira.mdx`,
+  Snyk: `${alertBase}/snyk.mdx`,
   Cloudamqp: `${alertBase}/cloudamqp.mdx`,
   Canarytokens: `${alertBase}/canarytokens.mdx`,
   Intersight: `${alertBase}/intersight.mdx`,
