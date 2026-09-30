@@ -117,6 +117,7 @@ export const docMap = {
   Checkmk: `${alertBase}/checkmk.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Sonarqube: `${alertBase}/sonarqube.mdx`,
   Level: `${alertBase}/level.mdx`,
   JuniperMist: `${alertBase}/juniper-mist.mdx`,
   Extrahop: `${alertBase}/extrahop.mdx`,
