@@ -1,0 +1,139 @@
+---
+title: "Vercel change integration"
+description: "Sync deployments, promotions and rollbacks from a Vercel team webhook to Flashduty On-call as change events correlated with alerts and incidents."
+keywords: ["change integration", "Vercel", "Deployment", "deployment events", "Instant Rollback", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires the On-call Standard plan or above. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Vercel team webhook to sync deployments and production rollbacks (Instant Rollback) to Flashduty On-call. Each deployment becomes one Flashduty change; every state of the deployment, from created and built to succeeded, promoted, failed or canceled, updates that same change.
+
+<Note>Vercel team webhooks are available to Pro and Enterprise teams only; Hobby accounts cannot configure them.</Note>
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Vercel** and enter an integration name
+3. To assign changes to specific channels, configure rules in the integration's **Routing** based on labels such as `project` or `environment`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Vercel
+---
+
+<Steps>
+<Step title="Open webhook settings">
+
+In the Vercel dashboard, switch to the target team and go to **Settings → Webhooks**. You need permission to manage the team's webhooks.
+
+</Step>
+
+<Step title="Select events">
+
+Under **Deployment Events**, select:
+
+- **Deployment Created**
+- **Deployment Succeeded**
+- **Deployment Promoted**
+- **Deployment Rollback**
+- **Deployment Error**
+- **Deployment Cancelled**
+
+Project, Feature Flag and Firewall events are not deployment changes; if selected, Flashduty returns success without recording a change.
+
+</Step>
+
+<Step title="Choose projects and enter the push URL">
+
+1. Choose the projects to send: **All Team Projects** or specific projects
+2. **Endpoint URL**: paste the full Flashduty push URL
+3. Click **Create Webhook**
+
+Vercel then shows a secret. Flashduty does not need it; requests are authenticated by the `integration_key` in the push URL.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| Vercel object | Change key (change_key) | Notes |
+|---|---|---|
+| Deployment | `deployment:<deployment.id>` | Every event of one deployment (an ID starting with `dpl_`) updates the same change; two deployments of the same project and commit are two changes |
+| Rollback | `rollback:<fromDeploymentId>:<toDeploymentId>` | An Instant Rollback is a separate change and does not modify the records of the replaced or restored deployment |
+
+## Status mapping
+---
+
+| Vercel event | Flashduty change status |
+|---|---|
+| `deployment.created` | Ready |
+| `deployment.ready` (built, checks running) | Processing |
+| `deployment.succeeded` | Done |
+| `deployment.promoted` (now serving production traffic) | Done |
+| `deployment.error` | Failed |
+| `deployment.canceled` | Canceled |
+| `deployment.rollback` | Done |
+
+Done, Failed and Canceled are end states; Flashduty records the change's end time.
+
+These deliveries return success without recording a change: event types that do not start with `deployment.` (Project, Feature Flag, Firewall and others); deployment events about checks or integration actions; `deployment.cleanup` (the deployment is permanently deleted after its retention period, which does not change its earlier result).
+
+## Change content
+---
+
+| Field | Deployment | Rollback |
+|---|---|---|
+| Title | `<project>: deploy <branch> (<short SHA>) to <environment>`, or the deployment URL when there is no Git metadata | `<project ID>: roll back production to <restored deployment ID>` |
+| Description | First line of the Git commit message | Empty |
+| Link | The deployment's page in the Vercel dashboard | Empty (Vercel rollback events carry no link) |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Deployment | Rollback |
+|---|---|---|
+| `project` | Project name | — |
+| `project_id` | Project ID (starts with `prj_`) | Same |
+| `environment` | `production`, a custom environment such as `staging`, or `preview` when no target is set | `production` |
+| `ref` | Git branch | — |
+| `sha` | Full commit SHA | — |
+| `actor` | Git username of the commit author | — |
+| `deployment_id` | Deployment ID | — |
+| `from_deployment_id` / `to_deployment_id` | — | IDs of the replaced / restored deployment |
+| `state` | Latest Vercel event, for example `succeeded` | `rollback` |
+
+`ref`, `sha` and `actor` come from the deployment metadata of a connected GitHub, GitLab or Bitbucket repository; deployments made directly from the CLI do not have them.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why does a production deployment reach Done twice?">
+
+After a production deployment builds successfully, Vercel sends `deployment.succeeded`, then `deployment.promoted` once production traffic has switched to it. Both map to Done and update the same change.
+
+</Accordion>
+
+<Accordion title="Do Vercel retries create duplicate records?">
+
+No. Flashduty uses the time carried by the Vercel event, so the same event at the same time is recorded once. When a delivery fails, Vercel retries it for up to 24 hours.
+
+</Accordion>
+
+<Accordion title="What happens if I roll back between the same two deployments twice?">
+
+Rolling back from the same deployment to the same deployment produces the same change key, so the second rollback updates the first rollback's change (its last time becomes the second rollback's time) instead of creating a new one. Vercel rollback events carry only the two deployment IDs, not a rollback ID of their own.
+
+</Accordion>
+
+<Accordion title="The push returns an InvalidParameter error">
+
+- `unsupported type`: Flashduty received a deployment event it does not support yet (for example `deployment.blocked` subscribed through the API). Select only the six events listed above, or contact us
+- `payload.deployment.id is missing`: the payload is incomplete; make sure the request comes from a native Vercel webhook
+
+</Accordion>
+</AccordionGroup>
