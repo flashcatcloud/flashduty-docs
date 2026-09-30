@@ -1,0 +1,161 @@
+---
+title: "CrowdStrike Falcon LogScale alert integration"
+description: "Send Trigger hits from Falcon LogScale (formerly Humio) to Flashduty On-call through the Trigger's Webhook Action."
+keywords: ["alert integration", "CrowdStrike", "Falcon LogScale", "Humio", "Webhook Action", "Trigger"]
+---
+
+Falcon LogScale (formerly Humio) describes an always-running query as a **Trigger**: when the query matches, LogScale runs the **Action** attached to it. Triggers only fire — the official docs define no "recovered" or "resolved" state. Once a trigger fires it goes silent for its Throttle Time; if the problem is still occurring when the throttle period ends, it fires again. Use a Webhook Action to send every firing of a trigger to Flashduty On-call:
+
+- Repeated firings of the same trigger merge into one alert
+- Different triggers (including two triggers with the same name in different repositories) are separate alerts
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **CrowdStrike Falcon LogScale** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **CrowdStrike Falcon LogScale** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Falcon LogScale
+---
+
+<Steps>
+<Step title="Create a Webhook Action">
+
+1. Open the target repository or view and click the **Automation** tab
+2. In the left panel, select **Actions**, then click **New action**
+3. Enter a name (for example `Flashduty`) and click **Create**
+4. In the action type dropdown, select **Webhook**
+5. Set **Method** to `POST`
+6. Paste the Flashduty integration's full push URL as the **URL**
+7. Under **HTTP Headers**, add `Content-Type: application/json`
+8. Leave the **Message Body Template** as the default JSON template LogScale fills in automatically (see Payload below) — do not remove or rename any field
+9. Click **Create action** to save
+
+</Step>
+
+<Step title="Attach it to a Trigger">
+
+1. In the same repository or view, go to **Automation → Triggers**
+2. Create a new Filter Alert or Aggregate Alert (or edit an existing one) with your query and trigger condition
+3. Add the `Flashduty` action you just created to its list of actions
+4. Click **Save**
+
+A trigger can have up to 10 actions attached; a trigger with no action attached never runs.
+
+</Step>
+
+<Step title="Test">
+
+The **Test action** button on the action's edit panel sends a real HTTP request, but the docs don't say how it fills in template variables such as `{id}` and `{name}` when there is no real trigger context — they may come through empty. Flashduty then rejects the request because `alert.id` is missing, and LogScale shows **Problem invoking test action**. That doesn't mean the configuration is wrong, only that no real firing has happened yet. Use the query and condition from step 2 to make it actually fire once, and confirm the alert appears in Flashduty.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+LogScale triggers only fire; they never send anything that means "resolved", so these alerts never recover on their own. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest a timeout longer than the trigger's own Throttle Time — for example **1 hour** as a starting point — counted from **Incident trigger**. Closing the incident also closes its alerts; if the problem is still occurring, the next firing opens the alert again.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Flashduty parses the request body against LogScale's own default Message Body Template, sent as `application/json`:
+
+```json
+{
+    "repository": "{repo_name}",
+    "timestamp": {triggered_timestamp},
+    "alert": {
+      "name": "{name}",
+      "description": "{description}",
+      "query": {
+          "queryString": "{query_string}",
+          "end": "{query_time_end}",
+          "start": "{query_time_start}"
+      },
+      "notifierID": "{action_id}",
+      "id": "{id}"
+    },
+    "warnings": "{warnings}",
+    "events": {events},
+    "numberOfEvents": {event_count}
+}
+```
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `repository` | Repository the trigger belongs to | Label `repository` |
+| `alert.name` | Trigger name | Alert title |
+| `alert.description` | Trigger description | Alert description |
+| `alert.query.queryString` | The trigger's query | Alert description, label `query` |
+| `alert.query.start` / `alert.query.end` | Start and end of this query window | Alert description, labels `query_start`/`query_end` |
+| `alert.notifierID` | ID of this Action itself | Label `notifier_id` |
+| `alert.id` | **Trigger ID** | Alert Key, label `trigger_id` |
+| `warnings` | Query warnings | Alert description |
+| `timestamp` / `events` / `numberOfEvents` | Fire time, matched log events, event count | Not parsed — these three render unquoted in the vendor's own default template (numeric/array position), so their exact type isn't confirmed, and none of them is needed to identify the alert |
+
+Don't rename or move the fields above in the default template. The template can carry more variables, but Flashduty only reads the fields in this table and ignores the rest.
+
+## Alert Key
+---
+
+Flashduty uses `alert.id` (what the LogScale docs define as the Trigger ID) as the Alert Key directly:
+
+- Repeated firings of the same trigger merge into one alert; the alert's title, description, and labels show the latest firing
+- Different triggers are different alerts, even with the same name or in the same repository
+- A request without `alert.id` is rejected
+
+## Status and severity
+---
+
+LogScale's default template carries no severity field, so every alert opens as Warning.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't these alerts recover on their own?">
+
+LogScale triggers are one-way: a matching query fires the attached action, and nothing is sent when the condition stops matching. Turn on the channel's auto-resolve timeout so alerts close automatically after the time you expect the underlying problem to take.
+
+</Accordion>
+
+<Accordion title="The same problem keeps firing. Why is there only one alert?">
+
+Repeated firings of one trigger (the same `alert.id`) merge into one alert, whose event count grows instead of a new alert opening every time. With the auto-resolve timeout on, the incident closes after the timeout; if the problem is still occurring, the next firing opens a new alert.
+
+</Accordion>
+
+<Accordion title="Do I need to verify a signature?">
+
+No. Flashduty identifies the integration by the `integration_key` in the push URL. LogScale's Webhook Action sends no signature header, so keep the push URL as secret as a key.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **"Problem invoking test action" when clicking Test action**: usually means `{id}` and other template variables had no real value at test time, so Flashduty rejected the empty `alert.id`. Trigger a real match with your query to verify instead
+- **No alert in Flashduty**: check that the action's URL is complete (including `integration_key`) and that the action is attached to a trigger
+- **Alerts never close**: turn on the auto-resolve timeout in the channel
+
+For more on template variables, see [Action Type: Webhooks](https://library.humio.com/logscale-gdo/automated-actions-webhooks.html) and [Message Templates and Variables](https://library.humio.com/logscale-gdo/automated-actions-message-template.html).
