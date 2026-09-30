@@ -124,6 +124,7 @@ export const docMap = {
   Auvik: `${alertBase}/auvik.mdx`,
   Domotz: `${alertBase}/domotz.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Jumpcloud: `${alertBase}/jumpcloud.mdx`,
   Zenoss: `${alertBase}/zenoss.mdx`,
   Semgrep: `${alertBase}/semgrep.mdx`,
   Sonarqube: `${alertBase}/sonarqube.mdx`,
