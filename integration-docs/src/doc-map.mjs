@@ -75,6 +75,7 @@ export const docMap = {
   Pingdom: `${alertBase}/pingdom.mdx`,
   JuniperMist: `${alertBase}/juniper-mist.mdx`,
   Imperva: `${alertBase}/imperva.mdx`,
+  Wazuh: `${alertBase}/wazuh.mdx`,
   Extrahop: `${alertBase}/extrahop.mdx`,
   Fastnetmon: `${alertBase}/fastnetmon.mdx`,
   TacticalRmm: `${alertBase}/tactical-rmm.mdx`,
