@@ -89,6 +89,7 @@ export const docMap = {
   Rbltracker: `${alertBase}/rbltracker.mdx`,
   Gitguardian: `${alertBase}/gitguardian.mdx`,
   Dash0: `${alertBase}/dash0.mdx`,
+  ProjectDiscovery: `${alertBase}/projectdiscovery.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
   Monitive: `${alertBase}/monitive.mdx`,
