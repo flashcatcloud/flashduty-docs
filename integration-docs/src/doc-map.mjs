@@ -109,6 +109,7 @@ export const docMap = {
   Honeybadger: `${alertBase}/honeybadger.mdx`,
   Ohdear: `${alertBase}/ohdear.mdx`,
   Appsignal: `${alertBase}/appsignal.mdx`,
+  Dbmarlin: `${alertBase}/dbmarlin.mdx`,
   Redash: `${alertBase}/redash.mdx`,
   Airbrake: `${alertBase}/airbrake.mdx`,
   Opensearch: `${alertBase}/opensearch.mdx`,
