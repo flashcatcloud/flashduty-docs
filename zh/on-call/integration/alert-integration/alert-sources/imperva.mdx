@@ -1,0 +1,121 @@
+---
+title: "Imperva 告警集成"
+description: "通过 Imperva 的 Webhook Connection 将 DDoS 攻击开始与结束、BGP 连接中断与恢复、连接性能劣化等事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Imperva", "Thales", "DDoS", "BGP", "Webhook", "网络防护"]
+---
+
+Imperva（Thales）云端应用与网络安全控制台提供 Webhook Connection：把通知策略的投递渠道设为一个 Webhook，Imperva 就会向该地址 POST 固定格式的 JSON。接入 Flashduty On-call 后，网站 DDoS、IP 段 DDoS、单 IP DDoS 的开始与结束，以及 BGP 连接中断与恢复，都会按同一个对象合并为一条告警并自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Imperva**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Imperva**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Imperva 中配置
+---
+
+<Steps>
+<Step title="新增 Webhook Connection">
+
+1. 登录 `my.imperva.com`，在顶部菜单选择 **Account** → **Account Management**
+2. 在侧边栏选择 **Webhook Connections**，点击 **Add Webhook**
+3. 填写 **Name**，在 **URL** 中粘贴 Flashduty 的完整推送地址（包含 `integration_key`）
+4. **Secret Token** 可留空。Imperva 会把它放在自定义请求头里随每次请求发送，Flashduty 不校验该请求头
+5. 点击 **Test Webhook** 发送测试请求，确认地址可达，然后保存
+
+配置 Webhook 需要 **Manage notification settings** 权限，只查看需要 **View notification settings**。
+
+</Step>
+
+<Step title="在通知策略中选择该 Webhook">
+
+新增或编辑通知策略，在 **Recipients** 的 **Channel** 中选择刚创建的 Webhook Connection。建议为下面"事件与恢复"表中的通知子类型（Website DDoS、Website Group DDoS、Individual IP Protection、Network Protection、Network Connectivity）各建一条策略。
+
+</Step>
+
+<Step title="验证">
+
+在 Webhook Connection 上点击 **Test Webhook**。Flashduty 会创建一条 Info 级别的测试告警，标题形如 `Hello World Test - <Webhook 名称>`。测试没有对应的恢复通知，验证后请手动关闭。
+
+</Step>
+</Steps>
+
+Imperva 的 Webhook 载荷是固定格式，不能自定义模板。Imperva 可能重复投递同一事件，Flashduty 按同一 Alert Key 合并，不会产生重复告警。
+
+## 事件与恢复
+---
+
+| 通知子类型 | 开始事件 | 结束事件 | Flashduty 等级 |
+| :--- | :--- | :--- | :--- |
+| Website DDoS | `WebsiteDdosStart` | `WebsiteDdosStop` | Warning |
+| Website Group DDoS | `WebsiteProtectNetworkTrafficDdosStart` | `WebsiteProtectNetworkTrafficDdosStop` | Warning |
+| Individual IP Protection | `SingleIpDdosStart` | `SingleIpDdosStop` | Warning |
+| Network Protection | `IpRangeDdosStart` | `IpRangeDdosStop` | Warning |
+| Network Connectivity | `BgpDown` | `BgpUp` | Critical |
+| Network Connectivity | `PerformanceDegraded` | `PerformanceRestored` | Warning |
+| Network Protection | `MonitoringAttackStartCritical` | 无 | Critical |
+| Network Protection | `TrafficStartDivert` | 无 | Warning |
+
+- Imperva 的载荷没有严重程度字段，等级由事件类型决定。DDoS 开始事件表示攻击已被 Imperva 拦截或正在切换清洗，记为 Warning；BGP 连接中断和需要人工确认的攻击告警记为 Critical
+- 结束事件（`...Stop`、`BgpUp`、`PerformanceRestored`）会把同一对象的告警恢复
+- `MonitoringAttackStartCritical` 和 `TrafficStartDivert` 没有对应的结束通知，每次事件产生一条独立告警。请在协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时
+- 账号、站点、账单、订阅、策略变更、IP 段状态变化等其他通知类型不会产生告警，Flashduty 收到后直接返回成功
+
+## Alert Key
+---
+
+Alert Key 由事件类别、Imperva 账号 ID 和对象标识计算，开始事件和结束事件使用相同的字段：
+
+| 事件类别 | 对象标识 |
+| :--- | :--- |
+| 网站 DDoS | `extended_parameters.site_name` |
+| 网站组网络层 DDoS | `extended_parameters.ip_range` + `extended_parameters.slice_name` |
+| IP 段 DDoS、单 IP DDoS | `extended_parameters.range` |
+| BGP 连接、连接性能 | `extended_parameters.connection_name` |
+| 一次性事件 | 网络前缀或 IP 段 + `event_metadata.event_date` |
+
+标题、事件时间、载荷中的账号名和 Webhook ID 不参与计算。缺少事件类型（`event_type`）或缺少所属类别的对象标识时，请求会被拒绝并返回错误，错误信息指出缺失的字段。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` / `event_type` | `event_metadata.event_type` |
+| `resource` | 站点、IP 段、连接名或网络前缀 |
+| `account_id` / `asset_id` | 账号 ID、Imperva 资产 ID |
+| `main_category` / `sub_type` | 通知类型与子类型 |
+| `site_name` / `range` / `ip_range` / `slice_name` / `network_prefix` | 攻击对象 |
+| `connection_name` / `connection_type` / `pop_name` / `affected_networks` | BGP 与连接性能事件 |
+| `attack_duration` / `event_duration` / `max_blocked_bps` / `max_blocked_pps` / `request_rate` | 攻击规模与时长 |
+| `dashboard_link` / `analytics_link` / `attack_report_link` | Imperva 控制台链接 |
+
+告警标题取自 `event_title`，描述取自 `event_details.event_body`。
+
+## 排查问题
+---
+
+- **Test Webhook 报失败**：Imperva 要求接收端返回 200 或 201。确认推送地址完整、`integration_key` 有效，且集成类型为 Imperva
+- **没有收到告警**：确认通知策略的 Recipients 选择了这个 Webhook Connection，且事件类型在上表中。表外的事件类型不会产生告警
+- **告警一直未恢复**：确认恢复事件对应的通知子类型也已加入通知策略；`MonitoringAttackStartCritical` 与 `TrafficStartDivert` 不会自动恢复
+- **收到返回 400**：请求缺少 `event_type`，或缺少对象标识字段，返回信息会指出字段名
+
+更多信息请参阅 [Imperva Webhook Connections 文档](https://docs-cybersec.thalesgroup.com/bundle/cloud-application-security/page/webhooks.htm)。
