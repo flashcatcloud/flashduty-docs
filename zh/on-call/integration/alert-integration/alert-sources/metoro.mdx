@@ -1,0 +1,108 @@
+---
+title: "Metoro 告警集成"
+description: "通过 Metoro 的 Webhook 目的地，将告警的触发和恢复事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Metoro", "Kubernetes", "Webhook", "可观测性"]
+---
+
+通过 Metoro 的 Webhook 集成，把告警触发和恢复推送到 Flashduty On-call。同一次触发实例（fire instance）的触发和恢复会更新同一条 Flashduty 告警。
+
+Metoro 的 Webhook 请求体由您在 **Body Template** 里书写，Metoro 会把 `$alert_name` 这类变量替换为实际值。本页给出的模板就是 Flashduty 解析的格式，请照抄。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Metoro**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Metoro**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Metoro 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook">
+
+在 Metoro 的 Integrations 页面选择 **Add Webhook**，填写：
+
+- **Name**：例如 `Flashduty`
+- **URL**：Flashduty 的完整推送地址，形如 `https://api.flashcat.cloud/event/push/alert/metoro?integration_key=<your-integration-key>`
+- **HTTP Method**：`POST`
+- **Headers**：Metoro 对 POST 默认加上 `Content-Type: application/json`，无需额外添加
+- **Body Template**：粘贴下面的模板
+
+```json
+{
+  "alert_name": "$alert_name",
+  "alert_uuid": "$alert_uuid",
+  "alert_fire_uuid": "$alert_fire_uuid",
+  "state": "$alert_state",
+  "description": "$alert_description",
+  "attributes": "$attributes",
+  "metric_name": "$metric_name",
+  "value": "$breaching_datapoint_value",
+  "deep_link": "$deep_link"
+}
+```
+
+<Warning>
+必须保留 `alert_fire_uuid` 和 `state` 两个字段，且不要删掉变量两侧的引号。缺少 `alert_fire_uuid` 或 `state` 不是 `firing` / `resolved` 时，Flashduty 会拒绝请求，因为无法可靠关联后续恢复。
+</Warning>
+
+</Step>
+
+<Step title="把 Webhook 设为告警目的地并开启恢复通知">
+
+在告警的目的地（Alert Destinations）中添加上一步的 Webhook，勾选 **Notify when alarm recovers**。界面会展开两个 Webhook 选择器，触发和恢复都选择同一个 Webhook 即可。不勾选时 Metoro 只发送 `firing`，Flashduty 中的告警不会自动恢复。
+
+</Step>
+
+<Step title="验证生命周期">
+
+Metoro 没有独立的测试按钮。让一条以该 Webhook 为目的地的告警真实触发，确认 Flashduty 收到活动告警；条件恢复后，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用 `alert_fire_uuid`（Metoro 的 `$alert_fire_uuid`，即某一次触发实例的 UUID）作为 Alert Key。Metoro 官方的 Rootly 集成指南用同一个字段配对触发和恢复通知（identifier 为 `$.metoro_alert_fire_uuid`，状态字段为 `resolved`），并说明带 group by 的告警里，每个分组值有各自的 `$alert_fire_uuid`，而 `$alert_uuid` 对所有分组相同。
+
+- 带 group by 的告警，每个分组值对应一条独立的 Flashduty 告警，互不影响恢复
+- 同一条告警定义再次触发会生成新的 `alert_fire_uuid`，对应一条新的 Flashduty 告警
+- `description`、`value` 等字段的变化不会改变 Alert Key
+
+## 状态和告警等级
+---
+
+| Metoro `$alert_state` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `firing` | Warning |
+| `resolved` | 恢复，原等级为 Warning |
+
+Metoro 告警没有等级字段，统一按 Warning 处理。空值或其他状态值会被拒绝。如需区分等级，可在 Flashduty 协作空间里用规则调整。
+
+## 排查问题
+---
+
+- **Metoro 提示 Webhook 发送失败（400）**：确认 Body Template 是有效 JSON，且 `alert_fire_uuid`、`state` 非空。变量在 JSON 请求下会自动转义，不要自己再加转义
+- **返回 404 或 401**：确认推送地址完整并包含 `integration_key`
+- **告警没有恢复**：确认目的地勾选了 **Notify when alarm recovers** 且恢复 Webhook 选的是同一个模板；`state` 必须是 `resolved`
+- **`attributes` 为空**：该字段只在告警使用 group by 时有值
+
+更多变量请参阅 [Metoro Webhook 文档](https://metoro.io/docs/integrations/webhooks)。
