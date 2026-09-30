@@ -34,6 +34,7 @@ export const docMap = {
   Dynatrace: `${alertBase}/dynatrace.mdx`,
   HuaweiyunLTS: `${alertBase}/huawei-lts.mdx`,
   GoogleCM: `${alertBase}/google-cloud-monitoring.mdx`,
+  GoogleScc: `${alertBase}/google-scc.mdx`,
   Splunk: `${alertBase}/splunk.mdx`,
   AppDynamics: `${alertBase}/appdynamics.mdx`,
   SolarWinds: `${alertBase}/solarwinds.mdx`,
