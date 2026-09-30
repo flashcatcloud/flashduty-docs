@@ -1,0 +1,127 @@
+---
+title: "Veracode SCA 告警集成"
+description: "通过项目 Webhook 将 Veracode SCA（基于 Agent 的扫描）发现的漏洞问题同步到 Flashduty On-call，问题解决后自动恢复。"
+keywords: ["告警集成", "Veracode", "SCA", "软件成分分析", "漏洞", "Webhook"]
+---
+
+通过 Veracode SCA（基于 Agent 的扫描）的项目 Webhook，将开源组件的漏洞问题同步到 Flashduty On-call。每个漏洞问题（issue）对应一条告警：
+
+- **发现新漏洞**：项目库中出现新漏洞时，Veracode 发送 `VULN_ISSUES_DISCOVERED_AFTER_SCAN`，Flashduty 为其中每个问题触发一条告警。
+- **漏洞更新或解决**：Veracode 发送 `VULN_ISSUES_CHANGED_AFTER_SCAN`，问题状态为 `RESOLVED` 时，对应告警恢复。
+- **扫描成功**：`SCAN_SUCCESS` 只是扫描摘要，Flashduty 收到后直接返回成功，不创建告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Veracode SCA**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Veracode SCA**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Veracode 中配置
+---
+
+Webhook 按项目（project）配置。需要 Security Lead、Workspace Administrator 或 Workspace Editor 角色。
+
+<Steps>
+<Step title="创建 Webhook">
+
+1. 登录 Veracode SCA，打开要监控的项目
+2. 进入 **Settings** → **Notifications** → **Actions** → **Create**
+3. 在 Payload URL 中粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
+
+Veracode 要求 Payload URL 可从公网访问并接受 HTTP HEAD 请求。Flashduty 的推送地址接受 HEAD 请求。
+
+</Step>
+
+<Step title="选择触发事件">
+
+勾选以下事件：
+
+- **Vulnerability issues discovered in project library after a scan**：新漏洞出现
+- **Vulnerability issues changed in project library after a scan**：已有漏洞被更新，包括状态变为已解决
+
+**Scan** 事件（扫描成功）不会创建告警，无需勾选。
+
+</Step>
+
+<Step title="验证">
+
+Veracode 文档没有描述 Webhook 的测试推送按钮，请在有新漏洞披露或漏洞被解决时，确认 Flashduty 中出现或恢复对应告警。
+
+</Step>
+</Steps>
+
+## 事件和恢复
+---
+
+| Veracode 事件 | `issues[].status` | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| `VULN_ISSUES_DISCOVERED_AFTER_SCAN` | `NEW` | 每个问题触发一条告警 |
+| `VULN_ISSUES_CHANGED_AFTER_SCAN` | `RESOLVED`、`FIXED`、`IGNORED` | 恢复对应问题的告警 |
+| `VULN_ISSUES_CHANGED_AFTER_SCAN` | 其他状态（例如评分变化） | 更新对应问题的告警 |
+| `SCAN_SUCCESS` | | 忽略 |
+| 其他事件 | | 拒绝，返回参数错误 |
+
+一次推送可能包含多个问题，Flashduty 按问题编号排序后逐个处理，每次推送最多处理 200 个问题，超出部分忽略。
+
+## Alert Key
+---
+
+Alert Key 由项目编号（`project.id`）和问题编号（`issues[].id`）共同计算。Veracode 文档示例中，同一个问题在发现和变更事件里的编号相同，所以恢复会落到同一条告警上。漏洞标题、评分和项目名称变化不会改变 Alert Key。缺少 `project.id`、`issues[].id` 或 `issues[].status` 的推送会被拒绝，并在错误信息中指出字段名。
+
+## 告警等级
+---
+
+Veracode 的 payload 不直接携带等级，Flashduty 按漏洞的 CVSS 评分映射，优先使用 CVSS v3 评分，没有时使用 CVSS v2 评分：
+
+| CVSS 评分 | Flashduty 等级 |
+| :--- | :--- |
+| 7.0 及以上 | Critical |
+| 4.0 至 6.9 | Warning |
+| 低于 4.0 | Info |
+| 无评分 | Warning |
+
+恢复时状态变为已恢复，等级保持为最后一次的等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `veracode_sca` |
+| `check` | 漏洞标题（`vuln.title`） |
+| `resource` / `project` | 项目名称 |
+| `project_id` | 项目编号 |
+| `workspace` | 工作区名称 |
+| `issue_id` / `issue_status` / `issue_url` | 问题编号、状态和链接 |
+| `vuln_id` / `vuln_stage` | 漏洞编号和阶段 |
+| `cvss_score` / `cvss3_score` | CVSS v2 和 v3 评分 |
+| `has_exploits` | 是否存在已知利用 |
+| `trigger_event` | 触发本次推送的 Veracode 事件 |
+
+Flashduty 不保存推送中的组织信息和用户信息。
+
+## 排查问题
+---
+
+- **Veracode 保存 Webhook 失败**：确认推送地址可从公网访问，并包含 `integration_key`
+- **Flashduty 返回参数错误**：错误信息会指出缺少的字段，或不支持的事件名称
+- **告警一直不恢复**：只有项目 Webhook 勾选了 **changed** 事件，且问题状态变为 `RESOLVED`、`FIXED` 或 `IGNORED` 时才会恢复。漏洞从依赖中移除后是否发送该事件，以 Veracode 实际推送为准
+
+更多字段含义请参阅 [Veracode SCA 项目监控](https://docs.veracode.com/r/Monitor_SCA_projects)。
