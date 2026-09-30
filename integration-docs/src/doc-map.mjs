@@ -171,6 +171,7 @@ export const docMap = {
   Cloudamqp: `${alertBase}/cloudamqp.mdx`,
   Canarytokens: `${alertBase}/canarytokens.mdx`,
   Intersight: `${alertBase}/intersight.mdx`,
+  Upguard: `${alertBase}/upguard.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
   Instatus: `${alertBase}/instatus.mdx`,
