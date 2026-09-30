@@ -1,0 +1,133 @@
+---
+title: "Google Cloud Personalized Service Health Alert Integration"
+description: "Receive Personalized Service Health events through a Cloud Monitoring log-based alerting policy and a webhook notification channel using the Flashduty Google Cloud Monitoring integration, with an auto-resolve timeout to close alerts."
+keywords: ["alert integration", "Google Cloud", "Personalized Service Health", "Service Health", "Cloud Monitoring", "log-based alert", "webhook"]
+---
+
+Personalized Service Health writes the Google Cloud events that affect your projects (event creations and updates) to Cloud Logging and integrates with Cloud Monitoring log-based alerting policies. A log-based alerting policy can send its notifications through a webhook notification channel. The Flashduty [Google Cloud Monitoring integration](/en/on-call/integration/alert-integration/alert-sources/google-cloud-monitoring) accepts this webhook, so no separate Personalized Service Health integration is needed: create a Google Cloud Monitoring integration in Flashduty, paste its push URL into a webhook notification channel, and use the channel in a Service Health alerting policy.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Google Cloud Monitoring integration type** in both, not Personalized Service Health.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Google Cloud Monitoring** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/google-cm?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Google Cloud Monitoring** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Google Cloud
+---
+
+### Step 1: Prepare
+
+1. Enable the Service Health API in the project you want to receive events for, and make sure billing is enabled for it
+2. The account that configures alerts needs these IAM roles on the project: Logs Configuration Writer (`roles/logging.configWriter`), Monitoring AlertPolicy Editor (`roles/monitoring.alertPolicyEditor`), Monitoring NotificationChannel Viewer (`roles/monitoring.notificationChannelViewer`) and Personalized Service Health Viewer (`roles/servicehealth.viewer`)
+
+### Step 2: Create a webhook notification channel
+
+1. In the Google Cloud console, go to **Monitoring** → **Alerting** and click **Edit notification channels**
+2. In the **Webhook** section, click **Add New**, enter the push URL copied above as the `Endpoint URL`, and enter `Flashduty` as the `Display Name`
+3. Click **Test Connection**, then click **Save**
+
+Per Google, webhooks only support public endpoints, which the Flashduty push URL is.
+
+### Step 3: Create a Service Health alerting policy
+
+Use either method.
+
+**Method 1: In the Service Health dashboard**
+
+1. Open the Service Health dashboard and click **Create Alert Policy** at the upper right
+2. Choose an alerting policy template, select the webhook channel from Step 2 as the notification channel, and click **Create Policies**
+3. To change the condition, choose **Customize alert policy** in the template's menu
+
+**Method 2: With gcloud**
+
+```bash
+gcloud config set project PROJECT_ID
+gcloud monitoring policies create --policy-from-file="policy.json"
+```
+
+Example `policy.json`. `NOTIFICATION_CHANNEL` is the resource name of the channel from Step 2, in the form `projects/PROJECT_ID/notificationChannels/885798905074` (list them with `gcloud beta monitoring channels list`):
+
+```json
+{
+  "displayName": "Google Cloud incident",
+  "combiner": "OR",
+  "conditions": [ {
+    "displayName": "Log match condition",
+    "conditionMatchedLog": {
+      "filter": "labels.\"servicehealth.googleapis.com/new_event\"=true AND jsonPayload.detailedCategory = \"CONFIRMED_INCIDENT\" AND jsonPayload.@type = \"type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog\""
+    } } ],
+  "notificationChannels": [ "NOTIFICATION_CHANNEL" ],
+  "enabled": true,
+  "severity": "WARNING",
+  "alertStrategy": { "notificationRateLimit": { "period": "300s" }, "autoClose": "1800s" }
+}
+```
+
+`filter` is the log filter. Common conditions from the Google documentation:
+
+| Scenario | Condition |
+| :--- | :--- |
+| New incidents for one product | `labels."servicehealth.googleapis.com/new_event"=true AND jsonPayload.detailedCategory = "CONFIRMED_INCIDENT" AND jsonPayload.impactedProductIds =~ "<product ID>" AND jsonPayload.@type = "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog"` |
+| New incidents for one region | `labels."servicehealth.googleapis.com/new_event"=true AND jsonPayload.detailedCategory = "CONFIRMED_INCIDENT" AND jsonPayload.impactedLocations =~ "us-central1" AND jsonPayload.@type = "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog"` |
+| Any update to a confirmed incident | `jsonPayload.detailedCategory = "CONFIRMED_INCIDENT" AND jsonPayload.@type = "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog"` |
+
+Product IDs and location names are listed in the Google documentation [Google Cloud products and locations](https://cloud.google.com/service-health/docs/supported-products-locations). Set the **Policy severity level** (API field `severity`) in the alerting policy; Flashduty uses it for the alert severity.
+
+### Step 4: Test
+
+Following the Google documentation, write a test log entry to Cloud Logging, wait a few minutes, and confirm the alert in **Monitoring** → **Incidents** and in Flashduty. Wait at least 5 minutes before testing again.
+
+```bash
+gcloud logging write --payload-type=json LOG_NAME '{ "category": "INCIDENT", "relevance": "IMPACTED", "@type": "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog", "description": "This is a test log entry"}'
+```
+
+Use the Service Health log name for `LOG_NAME`; the Google documentation uses the format `projects/PROJECT_ID/logs/servicehealth.googleapis.com%2Factivity`.
+
+## Enable the auto-resolve timeout
+---
+
+For log-based alerting policies, Cloud Monitoring only sends a notification when an incident opens, not when it closes (the API documents the notification prompt of log-based policies as always `OPENED`), so Flashduty receives no recovery notification. Enable the [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel that receives these alerts, choose **Incident trigger** as the window timing start, and start with 24 hours, adjusted to the usual duration of the events you care about.
+
+The `autoClose` setting in the alerting policy only decides when the incident closes in Cloud Monitoring (7 days by default for log-based alerts); it does not notify Flashduty.
+
+## Field mapping
+---
+
+| Cloud Monitoring field | Flashduty |
+| :--- | :--- |
+| `incident.incident_id` | Alert Key |
+| `incident.state` | `closed` recovers the alert; any other value triggers or updates it |
+| `incident.policy_name`, `incident.condition_name` | Alert title in the form `<policy name> / <condition name>`, for example `Google Cloud incident / Log match condition` |
+| `incident.summary` | Alert description |
+| `incident.severity` | `Critical` → Critical; `Error`, `Warning` → Warning; anything else (including `No severity`) → Info |
+| `incident.url` | Label `url`, which links to the Cloud Monitoring incident page |
+| `incident.scoping_project_id`, `resource_name`, and so on | Labels `scoping_project_id`, `resource_name`, and so on |
+| `incident.documentation.content` | Label `content` |
+| `incident.policy_user_labels` | Each key becomes a label |
+
+## Troubleshooting
+---
+
+- **No alert arrives**: confirm in **Monitoring** → **Incidents** that the incident opened; check whether the log filter matches, and note that notifications are rate limited (the Google documentation gives 20 alerts per policy per day per project as an example)
+- **The alert does not recover**: log-based alerts send no closure notification, so enable the channel's auto-resolve timeout
+- **Test Connection fails**: confirm the `Endpoint URL` is the full push URL, including `integration_key`
+- **Several updates of one event produce several alerts**: each Cloud Monitoring incident (`incident_id`) maps to one Flashduty alert; using the `new_event` condition notifies only for new events and reduces the number of alerts
+
+For more details, see the Google documentation [Configure alerts through Cloud Logging](https://cloud.google.com/service-health/docs/configure-alerts-cloud-logging), [Example alerting policies and conditions](https://cloud.google.com/service-health/docs/example-alerting-policies) and [Create and manage notification channels](https://cloud.google.com/monitoring/support/notification-options).
