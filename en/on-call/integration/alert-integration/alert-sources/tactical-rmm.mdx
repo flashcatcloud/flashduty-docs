@@ -1,0 +1,142 @@
+---
+title: "Tactical RMM alert integration"
+description: "Send Tactical RMM agent-overdue, check, and task failure alerts to Flashduty On-call through a webhook (URL Action) in an alert template."
+keywords: ["alert integration", "Tactical RMM", "webhook", "RMM", "MSP", "remote monitoring and management"]
+---
+
+Use a webhook action in a Tactical RMM (self-hosted, open-source RMM) alert template to send agent-overdue, check, and task failure alerts to Flashduty On-call. Each Tactical RMM alert maps to one Flashduty alert: it is created on failure and recovers when Tactical RMM resolves it.
+
+Tactical RMM has no fixed webhook payload; you write the request body yourself. This page gives the JSON template to paste, and Flashduty parses the fields of that template.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Tactical RMM** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Tactical RMM** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Tactical RMM
+---
+
+Create two webhooks, one for failure and one for recovery, then attach both to an alert template. Both webhooks use the Flashduty push URL, and the request bodies differ only in `status`.
+
+<Steps>
+<Step title="Create the failure webhook">
+
+1. Sign in to the Tactical RMM console, go to **URL Actions** under **Settings**, and create a new webhook action (the menu location depends on your version)
+2. Set **URL Pattern** to the full Flashduty push URL, including `integration_key`, and set the request method to **POST**
+3. Set **Request Headers** to:
+
+```json
+{ "Content-Type": "application/json" }
+```
+
+4. Set **Request Body** to:
+
+```json
+{
+  "status": "firing",
+  "alert_id": "{{alert.id}}",
+  "alert_type": "{{alert.alert_type}}",
+  "severity": "{{alert.severity}}",
+  "message": "{{alert.message}}",
+  "hostname": "{{agent.hostname}}",
+  "agent_id": "{{agent.agent_id}}",
+  "client": "{{agent.site.client.name}}",
+  "site": "{{agent.site.name}}"
+}
+```
+
+</Step>
+
+<Step title="Create the recovery webhook">
+
+Create a second webhook with the same URL, method, and headers. Use the same request body, and change only the first line to `"status": "resolved"`.
+
+</Step>
+
+<Step title="Attach them to an alert template">
+
+1. Go to **Settings** → **Alert Templates** and create or edit the template used for on-call alerts
+2. In the action settings, set the type of **Failure action** to Rest and select the failure webhook. Set the type of **Resolved action** to Rest and select the recovery webhook
+3. Enable the alerts you need in the template's agent, check, and task settings, and apply the template to the clients, sites, or policies you want
+
+Tactical RMM runs webhooks for Error alerts (such as an overdue agent) and Warning alerts by default. Info alerts are not sent unless you turn on Info notifications in the global alert settings.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. On the webhook edit page, click **Test** without selecting a test target (agent, site, or client). Flashduty creates an Info alert titled `Tactical RMM test notification`. It does not recover on its own, so close it manually after verifying. The Tactical RMM documentation says `{{alert.XXX}}` variables are not available in test mode. If you select a target, the variables may be replaced with other values, and Flashduty rejects the request because `alert_type` is invalid
+2. Trigger a real alert (for example, stop a test agent) and confirm Flashduty receives an active alert
+3. After the alert recovers, confirm the matching Flashduty alert recovers
+
+</Step>
+</Steps>
+
+## Event types
+---
+
+| Request body | Effect in Flashduty |
+| :--- | :--- |
+| `status` is `firing` | Triggers an alert |
+| `status` is `resolved` | Recovers the alert |
+| Test button (`alert_id` and `alert_type` are still the unrendered `{{alert.id}}` and `{{alert.alert_type}}`) | Creates a separate Info alert that does not recover |
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from `alert_id` (`{{alert.id}}`, the number of the alert record in Tactical RMM). The failure and recovery webhooks render from the same record, so the number is the same. If the same subject fails again after recovery, Tactical RMM creates a new alert record, so it is a new alert in Flashduty. Changes to severity, message, or hostname do not change the Alert Key, and requests without `alert_id` are rejected.
+
+Use one Flashduty integration per Tactical RMM instance. Alert numbers from different instances can collide.
+
+## Status and severity
+---
+
+| Tactical RMM `severity` | Flashduty severity |
+| :--- | :--- |
+| `error` | Critical |
+| `warning` | Warning |
+| `info` | Info |
+| Anything else or empty | Warning |
+
+When `status` is `resolved` the alert recovers and keeps its last severity.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` / `alert_type` | Alert type (`availability`, `check`, `task`, `custom`) |
+| `resource` / `host` | Agent hostname (`hostname`) |
+| `alert_id` | Tactical RMM alert number |
+| `severity` | Original Tactical RMM severity |
+| `agent_id` | Agent ID |
+| `client` / `site` | Client and site the agent belongs to |
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: the message names the field. Common causes are a request body without `alert_id`, or an `alert_type` other than `availability`, `check`, `task`, or `custom` (for example, when a test target was selected on the Test button)
+- **The alert does not recover**: confirm the recovery webhook exists, is set as the **Resolved action** of the alert template, and sends `"status": "resolved"`. The action result is visible in the alert details in Tactical RMM
+- **Flashduty receives nothing**: confirm the alert template is applied to the agent and the alert severity is not filtered out by the Info and Warning notification switches
+- **The request body is not valid JSON**: if `{{alert.message}}` contains double quotes, the JSON that Tactical RMM renders is invalid and Flashduty rejects it. Remove the `message` line from the template and Flashduty builds the title from the alert type and hostname
+- **The test alert stays open**: the Test button does not send a recovery, so close it manually
+
+For more variables, see the Tactical RMM [alerting](https://docs.tacticalrmm.com/functions/alerting/) and [webhook](https://docs.tacticalrmm.com/functions/webhooks/) documentation.

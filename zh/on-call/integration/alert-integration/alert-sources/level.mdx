@@ -1,0 +1,107 @@
+---
+title: "Level 告警集成"
+description: "通过 Webhook 将 Level 设备告警的触发和解决同步到 Flashduty On-call。"
+keywords: ["告警集成", "Level", "level.io", "RMM", "Webhook", "设备告警"]
+---
+
+通过 Level（level.io）的 Webhook，将设备告警同步到 Flashduty On-call。Level 每个告警对象在触发时推送 `alert_active`，在被解决时推送 `alert_resolved`；Flashduty 用告警的 `id` 关联两者，触发时创建告警，解决时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Level**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Level**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Level 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook">
+
+1. 登录 Level，进入 **Settings → Webhooks**
+2. 新建 Webhook，将 Flashduty 集成的完整推送地址粘贴到 URL，地址中需包含 `integration_key`
+3. 勾选事件 `alert_active` 和 `alert_resolved`。只勾选 `alert_active` 时，告警不会自动恢复
+4. Secret 可以留空。Level 在设置了 Secret 时会在请求头 `X-Level-Signature` 中附带 HMAC-SHA256 签名，Flashduty 不校验该签名，认证依靠推送地址中的 `integration_key`
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 保存 Webhook
+2. 在 Level 中触发一个设备告警，确认 Flashduty 收到活动告警
+3. 告警在 Level 中被解决后，确认 Flashduty 中对应告警恢复
+4. 在 Level 的 Webhook 页面可以查看每次投递的状态码和响应，并用 **Re-run request** 重新发送
+
+Level 文档没有说明 Webhook 是否提供测试按钮，以及测试请求的内容。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用告警数据中的 `data.id`（Level 的告警 ID）作为 Alert Key，同一个告警的 `alert_active` 和 `alert_resolved` 使用同一个 Alert Key。告警名称、描述、等级、设备主机名等字段变化不会改变 Alert Key。Level 的 `event_id` 是事件的唯一标识，重试和手动重新发送时保持不变，Flashduty 不把它作为 Alert Key。缺少 `data.id` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+| 事件类型 | 状态 |
+| :--- | :--- |
+| `alert_active` | 触发 |
+| `alert_resolved` | 恢复 |
+
+`device_created`、`device_updated`、`device_deleted`、`group_created`、`group_updated`、`group_deleted` 事件不是告警，Flashduty 收到后直接返回成功，不创建告警。
+
+告警等级取自 `data.severity`：
+
+| Level 等级 | Flashduty 等级 |
+| :--- | :--- |
+| `information` | Info |
+| `warning` | Warning |
+| `critical` | Critical |
+| `emergency` | Critical |
+| 缺失或其他值 | Warning |
+
+恢复事件保留告警原有的等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `level` |
+| `event_type` | 事件类型 |
+| `alert_id` | `data.id` |
+| `device_id` | `data.device_id` |
+| `host` | `data.device_hostname` |
+| `check` | `data.name` |
+| `level_severity` | `data.severity` 原值 |
+| `started_at` / `resolved_at` | 告警开始和解决时间 |
+
+告警标题为 `主机名: 告警名称`，描述取自 `data.description` 和 `data.payload`。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并且请求体是 Level 的 Webhook 格式
+- **告警没有恢复**：确认 Webhook 勾选了 `alert_resolved`
+- **重复收到同一事件**：Level 会自动重试失败的投递，同一个告警的重复投递会合并到同一条 Flashduty 告警
+
+更多字段含义请参阅 [Level Webhooks 开发指南](https://docs.level.io/en/articles/16650292-webhooks-developer-guide)。

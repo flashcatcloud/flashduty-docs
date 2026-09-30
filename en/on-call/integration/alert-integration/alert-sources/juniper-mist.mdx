@@ -1,0 +1,142 @@
+---
+title: "Juniper Mist alert integration"
+description: "Send Juniper Mist alarm triggers and recoveries to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Juniper Mist", "Mist", "Marvis", "wireless network", "webhook", "alarms"]
+---
+
+Use webhooks in Juniper Mist to send alarms from the `alarms` topic to Flashduty On-call. Paired Mist alarms (for example `device_down` and `device_reconnected`) are correlated by device, so the recovery type recovers the matching alert. A Marvis alarm recovers when its `status` changes from `open` to `resolved` on the same alarm `id`. Every other alarm is deduplicated by alarm `id` and does not recover automatically.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Juniper Mist**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Juniper Mist** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Juniper Mist
+---
+
+<Steps>
+<Step title="Create a webhook">
+
+Create an organization (Org) or site webhook in Mist, either on the Webhooks configuration page of the Mist portal or through the API. For an organization webhook:
+
+```bash
+curl -X POST "https://api.mist.com/api/v1/orgs/<org_id>/webhooks" \
+  -H "Authorization: Token <api_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Flashduty",
+    "type": "http-post",
+    "url": "<Flashduty push URL, including integration_key>",
+    "topics": ["alarms"],
+    "enabled": true,
+    "verify_cert": true
+  }'
+```
+
+Notes:
+
+1. Set `type` to `http-post` and `url` to the full Flashduty push URL, including `integration_key`
+2. Select only the `alarms` topic. Other topics (such as `device-updowns` or `audits`) are not alarms; Flashduty acknowledges them and creates no alert
+3. The secret can be left empty. When a secret is set, Mist adds signatures in the `X-Mist-Signature-v2` (HMAC-SHA256) and `X-Mist-Signature` (HMAC-SHA1) headers; Flashduty does not verify them and authenticates with the `integration_key` in the push URL
+4. The API host depends on your Mist cloud region (for example `api.eu.mist.com`)
+
+</Step>
+
+<Step title="Choose the alarm types to send">
+
+The webhook only sends alarm types that are enabled. Enable the types you need in the Alerts configuration in Mist. `GET https://api.mist.com/api/v1/const/alarm_defs` lists every alarm type with its default enablement, severity, and an example payload.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. After saving the webhook, call **Ping Org Webhook** (`POST /api/v1/orgs/<org_id>/webhooks/<webhook_id>/ping`) or **Ping Site Webhook** to send a test request. Flashduty creates a separate Info alert titled `Juniper Mist test notification`; no recovery follows, so close it by hand
+2. Trigger a real alarm (for example, disconnect an AP) and confirm Flashduty receives the alert
+3. After the device reconnects, confirm the matching alert recovers
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+One delivery can carry several alarm events (the `events` array). Flashduty handles each event on its own.
+
+**Paired alarms**: Mist reports a fault and its recovery as two alarm types, for example `device_down` and `device_reconnected`, and their alarm `id` values differ. Flashduty uses the type correspondence in `alarm_defs` and builds the Alert Key from `org_id`, `site_id`, the type pair (for example AP connection), and the device, so the fault and recovery types share one Alert Key. The device comes from `aps`, `switches`, `gateways`, `mxedge_ids`, or `cellular_edges`, and from `hostnames` when none of them is present. An event that names several devices produces one Flashduty alert per device, so a recovery for some of them recovers only those alerts.
+
+DHCP, DNS, and ARP types (`infra_dhcp_failure` / `infra_dhcp_success` and so on) carry no device field and use `vlans` and `servers`. LACP members, tunnels, and Mist Edge power and fan types also add the port (`port_ids`), tunnel name (`tunnel_names`), or component (`component`).
+
+**Other alarms**: the alarm `id` is the Alert Key. When Mist re-sends an alarm within its aggregation window, it sends `update: true` with the same `id`, and Flashduty merges it into the same alert. When the `status` of a Marvis alarm becomes `resolved`, the alert with that `id` recovers.
+
+Changes to severity, count, hostnames, or names do not change the Alert Key. An event without `type`, an unpaired event without `id`, or a paired event without any device information is rejected.
+
+The paired types are: AP, switch, and WAN Edge offline and reconnect (`device_down`, `switch_down`, `gateway_down`); VPN peers and paths; BGP and OSPF neighbors; critical ports and virtual chassis ports; tunnels; chassis alarms (`sw_alarm_chassis_*` and `gw_alarm_chassis_*` with their `_clear` types); cellular edge connect and disconnect; Mist Edge connection, power, fan, and CPU, memory, and disk usage; tunnel terminator tunnels; WAN Edge flow and FIB thresholds; switch DDoS protocol violations; and DHCP, DNS, and ARP.
+
+Several critical-port alarms on the same switch or gateway share one Alert Key, and so do the two nodes of an HA cluster.
+
+## Status and severity
+---
+
+| Event | Status |
+| :--- | :--- |
+| Fault type of a pair (for example `device_down`) | Trigger |
+| Recovery type of a pair (for example `device_reconnected`, `*_clear`, `*_up`) | Recovery |
+| Unpaired alarm whose `status` is not `resolved` or is missing | Trigger |
+| Unpaired alarm whose `status` is `resolved` | Recovery |
+
+Severity comes from `severity`:
+
+| Mist severity | Flashduty severity |
+| :--- | :--- |
+| `critical` | Critical |
+| `warn` | Warning |
+| `info` | Info |
+| `normal` | Info |
+| Missing or other value | Warning |
+
+A recovery event keeps its own severity.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `source` | Always `juniper_mist` |
+| `alarm_type` | `type` |
+| `group` / `category` | Alarm group and category |
+| `org_id` / `org_name` | Organization |
+| `site_id` / `site_name` | Site |
+| `alarm_id` | `id` |
+| `device` | Device of a paired type |
+| `host` | `hostnames`, comma-separated |
+| `mist_severity` / `mist_status` | Raw `severity` and `status` |
+
+The alert title is `type: device or hostname`, for example `device down: d420b02000fa`. The description comes from `reasons`, `text`, `suggestion`, and `count`.
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: confirm the URL is complete and includes `integration_key`, and that the body is a Mist `alarms` topic payload
+- **An alert does not recover**: confirm the matching recovery type is enabled in Mist too (for example, if AP offline is enabled, also enable AP reconnected). Check each type's default enablement in `alarm_defs`
+- **The webhook arrives but no alert appears**: deliveries whose `topic` is not `alarms` (such as `device-updowns`) are ignored
+- **The test request created an alert**: the ping creates a separate Info alert; close it by hand
+
+For field details, see the [Juniper Mist webhook documentation](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/webhook-topics.html).
