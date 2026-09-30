@@ -1,0 +1,127 @@
+---
+title: "Veracode SCA alert integration"
+description: "Send vulnerability issues found by Veracode SCA (agent-based scanning) to Flashduty On-call through a project webhook, and recover them when the issue is resolved."
+keywords: ["alert integration", "Veracode", "SCA", "software composition analysis", "vulnerability", "webhook"]
+---
+
+Use the Veracode SCA (agent-based scanning) project webhook to send open-source vulnerability issues to Flashduty On-call. Each vulnerability issue becomes one alert:
+
+- **New vulnerabilities**: when a new vulnerability affects a project library, Veracode sends `VULN_ISSUES_DISCOVERED_AFTER_SCAN` and Flashduty triggers one alert for each issue in it.
+- **Updated or resolved vulnerabilities**: Veracode sends `VULN_ISSUES_CHANGED_AFTER_SCAN`; when the issue status is `RESOLVED`, the matching alert recovers.
+- **Scan success**: `SCAN_SUCCESS` is only a scan summary. Flashduty acknowledges it and creates nothing.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the integration push URL in either of the following ways.
+
+### Dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integration** and click **Add an integration**
+3. Select **Veracode SCA** and click **Save**
+4. Open the integration card and copy the **push URL**
+
+### Shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert events**
+2. Select **Veracode SCA** and enter a name
+3. Set the default route and pick a channel; you can add more rules under **Routes** later
+4. Click **Save** and copy the **push URL**
+
+</div>
+
+## In Veracode
+---
+
+Webhooks are configured per project. You need the Security Lead, Workspace Administrator, or Workspace Editor role.
+
+<Steps>
+<Step title="Create the webhook">
+
+1. Sign in to Veracode SCA and open the project to monitor
+2. Go to **Settings** → **Notifications** → **Actions** → **Create**
+3. Paste the full Flashduty push URL, including `integration_key`, as the Payload URL
+
+Veracode requires the Payload URL to be reachable from the internet and to accept HTTP HEAD requests. The Flashduty push URL accepts HEAD requests.
+
+</Step>
+
+<Step title="Select the trigger events">
+
+Select:
+
+- **Vulnerability issues discovered in project library after a scan**: a new vulnerability appears
+- **Vulnerability issues changed in project library after a scan**: an existing vulnerability is updated, including when its status becomes resolved
+
+The **Scan** event (scan success) creates no alert; you do not need to select it.
+
+</Step>
+
+<Step title="Verify">
+
+The Veracode documentation does not describe a test button for webhooks. When a new vulnerability is disclosed or one is resolved, confirm that the matching alert appears or recovers in Flashduty.
+
+</Step>
+</Steps>
+
+## Events and recovery
+---
+
+| Veracode event | `issues[].status` | Effect in Flashduty |
+| :--- | :--- | :--- |
+| `VULN_ISSUES_DISCOVERED_AFTER_SCAN` | `NEW` | One alert is triggered per issue |
+| `VULN_ISSUES_CHANGED_AFTER_SCAN` | `RESOLVED`, `FIXED`, `IGNORED` | The issue's alert recovers |
+| `VULN_ISSUES_CHANGED_AFTER_SCAN` | Any other status (for example a score change) | The issue's alert is updated |
+| `SCAN_SUCCESS` | | Ignored |
+| Any other event | | Rejected with an invalid-parameter error |
+
+One delivery can carry several issues. Flashduty processes them in issue id order, at most 200 issues per delivery; the rest are ignored.
+
+## Alert Key
+---
+
+The Alert Key is computed from the project id (`project.id`) and the issue id (`issues[].id`). In the Veracode documentation examples, the same issue has the same id in the discovered and changed events, so the recovery lands on the same alert. Changes to the vulnerability title, score, or project name do not change the Alert Key. A delivery without `project.id`, `issues[].id`, or `issues[].status` is rejected, and the error names the missing field.
+
+## Severity
+---
+
+The Veracode payload carries no severity, so Flashduty maps the vulnerability's CVSS score, using the CVSS v3 score and falling back to the CVSS v2 score:
+
+| CVSS score | Flashduty severity |
+| :--- | :--- |
+| 7.0 and above | Critical |
+| 4.0 to 6.9 | Warning |
+| Below 4.0 | Info |
+| No score | Warning |
+
+On recovery the status becomes Ok and the severity stays at the last severity.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `source` | Always `veracode_sca` |
+| `check` | Vulnerability title (`vuln.title`) |
+| `resource` / `project` | Project name |
+| `project_id` | Project id |
+| `workspace` | Workspace name |
+| `issue_id` / `issue_status` / `issue_url` | Issue id, status, and link |
+| `vuln_id` / `vuln_stage` | Vulnerability id and stage |
+| `cvss_score` / `cvss3_score` | CVSS v2 and v3 scores |
+| `has_exploits` | Whether known exploits exist |
+| `trigger_event` | The Veracode event that triggered the delivery |
+
+Flashduty does not keep the organization and user information in the payload.
+
+## Troubleshooting
+---
+
+- **Veracode fails to save the webhook**: confirm the push URL is reachable from the internet and includes `integration_key`
+- **Flashduty returns an invalid-parameter error**: the message names the missing field or the unsupported event
+- **An alert never recovers**: it recovers only when the project webhook has the **changed** event selected and the issue status becomes `RESOLVED`, `FIXED`, or `IGNORED`. Whether Veracode sends that event when a vulnerable library is removed from dependencies depends on what Veracode actually sends
+
+For field details, see [Veracode SCA project monitoring](https://docs.veracode.com/r/Monitor_SCA_projects).
