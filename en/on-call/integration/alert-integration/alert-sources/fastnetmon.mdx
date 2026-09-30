@@ -1,0 +1,140 @@
+---
+title: "FastNetMon alert integration"
+description: "Send FastNetMon Advanced DDoS ban and unban notifications to Flashduty On-call through a web callback."
+keywords: ["alert integration", "FastNetMon", "DDoS", "web callback", "ban", "unban", "BGP blackhole", "Flow Spec"]
+---
+
+Use the FastNetMon Advanced web callback to send DDoS ban (`ban`, `partial_block`) and unban (`unban`, `partial_unblock`) notifications to Flashduty On-call. Each attacked host IP (or host group) maps to one alert: the alert triggers when FastNetMon bans and recovers when FastNetMon unbans.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of two ways.
+
+### Dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **FastNetMon** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **FastNetMon** and enter an integration name
+3. Configure the default route and choose a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In FastNetMon
+---
+
+<Steps>
+<Step title="Enable the web callback">
+
+On the FastNetMon Advanced server, set the callback URL with `fcli` and commit (use the full Flashduty push URL, including `integration_key`):
+
+```bash
+sudo fcli set main web_callback_enabled enable
+sudo fcli set main web_callback_url 'https://api.flashcat.cloud/event/push/alert/fastnetmon?integration_key=YOUR_KEY'
+sudo fcli commit
+```
+
+FastNetMon sends a `POST` with `Content-Type: application/json`. Flashduty parses the document directly, so no template is needed.
+
+</Step>
+
+<Step title="(Optional) Keep sending attack status">
+
+FastNetMon 2.0.375 and later can repeat the ban notification at a fixed interval while the ban is active:
+
+```bash
+sudo fcli set main web_callback_attack_status_updates true
+sudo fcli set main ban_status_delay 20
+sudo fcli commit
+```
+
+Repeated notifications carry the same host IP, so they merge into the same alert and refresh its traffic data.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Trigger an attack detection (for example, send test traffic above the ban threshold of a host group) and confirm an active alert appears in Flashduty. After the attack ends and FastNetMon unbans, confirm the alert recovers.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `action` | `ban`, `partial_block`, `unban` or `partial_unblock` | Trigger or recovery, label `action` |
+| `alert_scope` | `host` (one host) or `hostgroup`; treated as `host` when omitted | Label `alert_scope` |
+| `ip` | Attacked host IP (`host` scope) | Alert Key, alert title, labels `ip` and `resource` |
+| `hostgroup_name` | Host group name (`hostgroup` scope) | Alert Key, alert title, labels `hostgroup_name` and `resource` |
+| `attack_details.attack_severity` | Attack severity | Alert severity, label `attack_severity` |
+| `attack_details.attack_uuid` | Attack UUID | Label `attack_uuid` |
+| `attack_details.host_network`, `host_group` | Network and host group | Labels `host_network` and `host_group` |
+| `attack_details.total_incoming_pps`, `total_incoming_traffic_bits` and related | Incoming and outgoing packet rate and traffic | Alert description |
+
+Packet samples (`packet_dump`) and Flow Spec rules in ban notifications are not stored on the alert.
+
+## Alert Key
+---
+
+The Alert Key identifies the attacked object: `ip` for host scope, `hostgroup_name` for host group scope. The ban, status updates and unban for one IP land on the same alert; different IPs or host groups are different alerts. Changes to severity, traffic data or `attack_uuid` do not change the Alert Key.
+
+`attack_uuid` is not used: in FastNetMon's official samples only the blackhole ban and unban share a UUID, while the Flow Spec and host group samples carry different UUIDs on ban and unban, so a UUID key could not be guaranteed to close the alert.
+
+If a blackhole ban and a Flow Spec partial block are active on the same IP, they share one alert, and whichever unban arrives first closes it.
+
+A request without `ip` (or without `hostgroup_name` in host group scope) is rejected with a parameter error, because the unban could not be matched to its alert reliably. A request with any other `action` or `alert_scope` is rejected too.
+
+## Status and severity
+---
+
+| FastNetMon `attack_severity` | Flashduty severity |
+| :--- | :--- |
+| `high` | Critical |
+| `middle`, `medium` | Warning |
+| `low` | Info |
+| empty or other | Warning |
+
+The official samples only show `middle`; the other values follow common naming. On unban the alert recovers and keeps the severity of the last attack notification.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does FastNetMon have a test button?">
+
+The official documentation does not describe a test notification, and Flashduty has no special handling for one. Posting a sample JSON with `curl` creates a real alert; send the matching `unban` notification to close it.
+
+</Accordion>
+
+<Accordion title="Does the alert stay open if an unban notification is lost?">
+
+Yes. FastNetMon does not guarantee a resend of the unban. Enable [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel, with a duration longer than your longest ban.
+
+</Accordion>
+
+<Accordion title="Does the Community edition work?">
+
+This integration targets the JSON format that FastNetMon Advanced uses for web callbacks and notify scripts. Check FastNetMon's documentation for whether the Community edition sends the same format.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **No alerts arrive**: on the FastNetMon server, confirm `web_callback_enabled` is on, `fcli commit` was run, and the server can reach the Flashduty push URL
+- **Flashduty returns a parameter error**: confirm the request is a FastNetMon JSON notification and that `ip` (host scope) or `hostgroup_name` (host group scope) is not empty
+- **The alert does not recover**: confirm the unban notification was sent and carries the same `ip`; enable auto-close after timeout if needed
+
+For field details, see the FastNetMon documentation: [Web Callbacks](https://fastnetmon.com/docs-fnm-advanced/fastnetmon-advanced-web-callbacks/) and [JSON formats](https://fastnetmon.com/docs-fnm-advanced/fastnetmon-json-formats/).
