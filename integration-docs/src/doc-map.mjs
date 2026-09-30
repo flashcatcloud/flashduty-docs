@@ -80,6 +80,7 @@ export const docMap = {
   Gitguardian: `${alertBase}/gitguardian.mdx`,
   Dash0: `${alertBase}/dash0.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
+  HostedGraphite: `${alertBase}/hosted-graphite.mdx`,
   Netbeez: `${alertBase}/netbeez.mdx`,
   Apimetrics: `${alertBase}/apimetrics.mdx`,
   Gatus: `${alertBase}/gatus.mdx`,
