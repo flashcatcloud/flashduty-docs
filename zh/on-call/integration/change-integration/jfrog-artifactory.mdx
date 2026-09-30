@@ -1,0 +1,137 @@
+---
+title: "JFrog Artifactory 变更集成"
+description: "通过 JFrog Artifactory Webhook 将制品的上传、删除、移动和复制同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "JFrog", "Artifactory", "制品", "Webhook", "变更事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 JFrog Artifactory 的预定义（Predefined）Webhook，将制品（Artifact）的上传、删除、移动和复制同步到 Flashduty On-call。每上传一个制品生成一条变更，之后删除同一个制品会把这条变更更新为已取消；每次移动或复制生成一条独立的变更。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **JFrog Artifactory**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `repo`、`path`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 JFrog Artifactory 中配置
+---
+
+<Steps>
+<Step title="新建 Webhook">
+
+1. 登录 JFrog Platform，选择 **All Projects** 或某个项目
+2. 进入 **Platform → Integrations → Webhooks**，点击 **New Webhook**
+3. 保持 **Predefined** 开关选中（不要使用 Custom）
+
+需要管理员或项目管理员权限。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Name**：例如 `flashduty-changes`
+2. **URL**：粘贴 Flashduty 集成的完整推送地址
+3. **Secret token**：留空即可，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+</Step>
+
+<Step title="选择事件和仓库">
+
+1. 在事件列表中选择 **Artifacts** 下的 **Artifact was deployed**、**Artifact was deleted**、**Artifact was moved** 和 **Artifact was copied**
+2. 选择要监听的仓库：可选择全部本地仓库，也可以指定仓库或用包含/排除规则按路径筛选
+3. 点击 **Test** 检查连通性，再点击 **Create**
+
+**Test** 发送的是 JFrog 的示例数据（校验和为 `sample_checksum`），Flashduty 返回成功但不会生成变更。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+JFrog 的推送内容里没有变更 ID，Flashduty 用制品所在位置加内容校验和标识一个制品：
+
+| Artifactory 事件 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| deployed、deleted | `artifact:<仓库>/<路径>@<sha256>` | 上传和之后删除同一份内容更新同一条变更；同一路径上传了新内容（校验和不同）是一条新变更 |
+| moved | `moved:<仓库>/<路径>@<sha256> -> <目标>` | 一次移动一条变更 |
+| copied | `copied:<仓库>/<路径>@<sha256> -> <目标>` | 一次复制一条变更 |
+
+对 moved 和 copied，`<仓库>/<路径>` 是制品原来的位置，`<目标>` 是推送中的 `target_repo_path`。
+
+## 状态映射
+---
+
+| Artifactory 事件（event_type） | Flashduty 变更状态 |
+|---|---|
+| deployed | Done |
+| moved | Done |
+| copied | Done |
+| deleted | Canceled |
+
+Artifactory 的制品事件都在操作完成后推送，因此每条变更收到第一个事件时就已结束。
+
+以下推送返回成功但不生成变更：制品以外的事件域（Artifact Properties、Docker、Builds、Release Bundles 等）、`cached`（远程仓库缓存了一个下载的制品，不是变更）、**Test** 按钮发送的示例数据。
+
+## 变更内容
+---
+
+| 字段 | deployed、deleted | moved、copied |
+|---|---|---|
+| 标题 | `<仓库>/<路径> (<sha256 前 12 位>)` | `move <仓库>/<路径> (<sha256 前 12 位>) to <目标>`，复制时为 `copy ...` |
+| 描述 | 空 | 空 |
+| 链接 | JFrog Platform 中该制品的页面 | JFrog Platform 中目标位置的页面 |
+
+链接由推送中的 `jpd_origin` 生成；推送中没有该字段时变更没有链接。
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `repo` | 仓库名（Repository Key）；moved、copied 时为原仓库 |
+| `path` | 制品在仓库中的路径 |
+| `name` | 文件名 |
+| `sha256` | 制品内容的 SHA-256 校验和 |
+| `source_repo_path` | 仅 moved、copied：原位置 |
+| `target_repo_path` | 仅 moved、copied：目标位置 |
+| `actor` | 执行操作的用户或访问令牌主体 |
+| `event_type` | Artifactory 事件：`deployed`、`deleted`、`moved` 或 `copied` |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 确认 Webhook 是 **Predefined** 类型，并勾选了 **Artifacts** 下的事件
+- 确认上传的仓库在 Webhook 选择的仓库范围内
+- 在 Webhook 的 **Troubleshooting** 页查看推送记录和 Flashduty 的响应（JFrog Cloud 需要实例开启该功能）
+
+</Accordion>
+
+<Accordion title="重复上传同一个文件会怎样？">
+
+把内容完全相同的文件再次上传到同一路径，会在原来那条变更上追加一个事件，不会生成新变更。内容不同则生成新变更。
+
+</Accordion>
+
+<Accordion title="Artifactory 重试推送会重复记录吗？">
+
+会追加一个事件，但不会生成新变更。JFrog 的推送内容不带事件时间，Flashduty 以收到推送的时间记录每个事件，因此无法识别重试。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported event_type`：收到了 Flashduty 尚未支持的制品事件，请联系我们
+- `data.repo_key is missing`、`data.path is missing`、`data.sha256 is missing` 或 `data.target_repo_path is missing`：推送内容不完整，请确认使用的是 Predefined Webhook，而不是自定义了推送内容的 Custom Webhook
+
+</Accordion>
+</AccordionGroup>
