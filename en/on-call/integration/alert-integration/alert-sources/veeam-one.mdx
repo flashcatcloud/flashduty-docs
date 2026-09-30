@@ -1,0 +1,110 @@
+---
+title: "Veeam ONE alert integration"
+description: "Veeam ONE sends alarm notifications by email; use a Flashduty email integration with rules to trigger and close Veeam ONE alerts."
+keywords: ["alert integration", "Veeam ONE", "Veeam", "email", "backup monitoring"]
+---
+
+Veeam ONE sends alarm notifications only by email (plus SNMP, syslog and scripts); it has no webhook. The Flashduty [email integration](/en/on-call/integration/alert-integration/alert-sources/email) receives these emails and uses rules on the email title to decide whether each one triggers or resolves an alert, so no separate Veeam ONE integration is needed: create an email integration in Flashduty, add its email address as a Veeam ONE notification recipient, and configure the push rules below.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the integration email address in either of the two ways below. **In both cases choose the Email integration type**, not Veeam ONE.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Email** and click **Save**
+4. Open the new integration card, copy the **email address**, then configure the push rules below
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert events**
+2. Select **Email**, enter an integration name and copy the **email address**
+3. Configure the push rules below
+4. Set a default route, select a channel and click **Save**
+
+</div>
+
+## Configure push rules in Flashduty
+---
+
+Veeam ONE emails carry no alarm ID. An alarm is identified by its alarm name plus the object, and the rules extract these two parts from the email title as the Alert Key. Trigger and resolve emails yield the same key, so a resolve email closes the matching alert.
+
+1. Set **Push mode** to **Trigger or close alert based on rules**
+2. Add the four rules below in this order. Each rule's condition is **Email title** **Match** the given regex, and the Alert Key is extracted from the **Email title**
+3. Under **Default rules**, choose: if none of the above rules match, **discard email**
+
+Rule 1: close the alert
+
+```
+Condition: Email title  Match  / Reset/[Rr]esolved for /
+Regex: /^(.+) Reset/[Rr]esolved for (.+)$/
+```
+
+Rule 2: close the alert
+
+```
+Condition: Email title  Match  /has been changed to Reset/[Rr]esolved/
+Regex: /Alarm . (.+) for (.+?) has been changed to /
+```
+
+Rule 3: trigger an alert
+
+```
+Condition: Email title  Match  / (Error|Warning) for /
+Regex: /^(.+) (?:Error|Warning) for (.+)$/
+```
+
+Rule 4: trigger an alert
+
+```
+Condition: Email title  Match  /has been changed to (Error|Warning)/
+Regex: /Alarm . (.+) for (.+?) has been changed to /
+```
+
+The close rules come before the trigger rules. Rules 1 and 3 match subject template A, rules 2 and 4 match template B; see [Email title format](#email-title-format). With both sets in place you don't need to change the rules when Veeam ONE is upgraded or the template changes.
+
+The default rule discards unmatched mail so that summary emails (see [Limitations](#limitations)) don't create alerts that can never close on their own. If you changed the subject template and don't want to lose any email, set the default rule to **create new alert** instead; alerts created that way from the email title do not resolve automatically.
+
+## Configure Veeam ONE
+---
+
+The paths below are for Veeam ONE v13, all in the Veeam ONE Client.
+
+1. **SMTP**: go to **Settings** → **Server Settings** → **SMTP Settings** (called **Mail Server Settings** in older versions), enter your mail server and send a test email
+2. **Recipients**: add the Flashduty email integration address to the **Default email notification group**, or to the recipients of the **Send email notification** alarm action. Set the notification level to **Any state**, otherwise resolve emails are not sent
+3. **Notification policy**: in **Notification Policy**, keep objects on the default **Mission Critical** policy. It sends one email per alarm when the alarm is raised and on every status change. The **Other** policy sends periodic summary emails, which the rules cannot process one alarm at a time
+4. **Resolve notifications**: under **Notification Policy** → **Miscellaneous**, keep **Send notification when alarm metrics are back to normal** selected, otherwise no email is sent when an alarm resolves
+5. **Email format**: HTML or Plain Text both work; the rules read only the email title
+
+## Email title format
+---
+
+The title of a Mission Critical email comes from **Email subject template** under **Notification Policy** → **Mission Critical** → **Edit template**. The default has two forms depending on the version:
+
+| Form | Template | Example |
+| :--- | :--- | :--- |
+| A | `%ALARM_NAME% %STATUS% for %OBJECT_TYPE% "%OBJECT%"` | `VM CPU usage Error for Virtual Machine "VM1"` |
+| B | `[Veeam ONE Client] Alarm — %ALARM_NAME% for %OBJECT% has been changed to %STATUS% (previous status: %OLD_STATUS%)` | `[Veeam ONE Client] Alarm — VM CPU usage for VM1 has been changed to Error (previous status: Reset/resolved)` |
+
+Values of `%STATUS%`:
+
+| Veeam ONE status | Handled by the rules as |
+| :--- | :--- |
+| `Error`, `Warning` | Trigger an alert; emails with the same alarm name and object merge into one alert |
+| `Reset/resolved` | Close the matching alert |
+| `Information`, `Acknowledged` | Match no rule and are discarded by the default rule |
+
+If you change the subject template, update the regexes in the rules to match. You can also set the subject explicitly to template A in **Edit template**; then only rules 1 and 3 are needed.
+
+## Limitations
+---
+
+- **Manual resolve**: resolving an alarm manually in Veeam ONE sends a summary email (title `Alarm resolve notification`) that can list several alarms. The rules cannot close them one by one, so the email is discarded by the default rule. Close these alerts manually in Flashduty, or turn on the [auto-resolve timeout](/en/on-call/channel/create-edit) in the channel that receives this integration; 24 hours is a reasonable start.
+- **Acknowledge and summary emails**: acknowledgements (`Alarm acknowledgement notification`) and the Other policy's summaries (`Alarm summary notification`) are also summary emails and are discarded by the default rule.
+- **Type and severity**: in Flashduty these alerts show the Email integration type, and their severity is always Warning. You can adjust it with [alert pipelines](/en/on-call/integration/alert-integration/alert-pipelines) based on `Error` in the title.
+- **Merging**: alarms with the same alarm name and object merge into one Flashduty alert.
