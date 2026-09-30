@@ -96,6 +96,7 @@ export const docMap = {
   Wormly: `${alertBase}/wormly.mdx`,
   Obkio: `${alertBase}/obkio.mdx`,
   Flowtriq: `${alertBase}/flowtriq.mdx`,
+  TacticalRmm: `${alertBase}/tactical-rmm.mdx`,
   Bgpalerter: `${alertBase}/bgpalerter.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,
