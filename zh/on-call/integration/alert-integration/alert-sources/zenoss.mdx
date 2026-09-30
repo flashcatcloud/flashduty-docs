@@ -1,0 +1,122 @@
+---
+title: "Zenoss 告警集成"
+description: "通过 Webhook 目的地将 Zenoss Cloud（Virtana Service Observability）的事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Zenoss", "Virtana", "Service Observability", "Webhook", "基础设施监控"]
+---
+
+通过 Zenoss Cloud（现为 Virtana Service Observability）的 Webhook 目的地，将事件同步到 Flashduty On-call。每个 Zenoss 事件对应一条 Flashduty 告警：事件被触发器命中时触发，状态变为 Closed 时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Zenoss**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Zenoss**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Zenoss 中配置
+---
+
+Zenoss 通过 **目的地（Destination）**、**触发器（Trigger）** 和 **规则（Rule）** 三部分发送通知。创建规则需要 Manager 角色。
+
+<Steps>
+<Step title="添加 Webhook 目的地">
+
+1. 进入 **ADMIN > Actions**，打开 **DESTINATIONS** 标签，点击 **ADD DESTINATION**
+2. 目的地类型选择 **Webhook**，填写 **Destination name**
+3. 将 Flashduty 集成的完整推送地址粘贴到 **URL**，地址中需包含 `integration_key`
+4. **Headers** 留空，**Custom Payload** 保持关闭：Flashduty 解析 Zenoss 的默认消息，自定义 JSON 会导致无法识别事件
+5. 点击 **SAVE**
+
+</Step>
+
+<Step title="添加事件触发器">
+
+1. 打开 **TRIGGERS** 标签，点击 **ADD TRIGGER**，**Type** 保持 **Events**
+2. 在 **Trigger criteria** 中设置需要值班处理的事件，例如严重程度为 critical 或 error。建议增加 `Entity: Production State equal to Production`，避免非生产设备产生告警
+3. **Match multiple events** 保持关闭，开启后 Zenoss 会把多个事件合并成一条通知，Flashduty 无法按单个事件处理
+
+</Step>
+
+<Step title="添加规则并开启更新通知">
+
+1. 打开 **RULES** 标签，点击 **ADD RULE**，填写 **Rule name**
+2. 在 **Triggers** 选择上一步的触发器，在 **Destinations** 选择第一步的目的地
+3. 开启 **Send updates**：事件关闭或严重程度变化时 Zenoss 会再发一条通知，Flashduty 靠它恢复和更新告警。不开启则告警不会自动恢复
+4. 点击 **SAVE**
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 让 Zenoss 产生一条命中触发器的事件，确认 Flashduty 收到活动告警
+2. 关闭该事件（或等它自动关闭），确认原告警恢复
+
+目的地页面的 **TEST** 按钮会发送一条测试消息。Zenoss 文档没有给出测试消息的内容，Flashduty 无法把它和真实事件区分开，它可能创建一条告警，验证后请手动关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用事件的 ID（消息中 `context.Context.Event.id`）生成 Alert Key。Zenoss 用事件名称加维度（dimensions）确定一个事件，同一个事件的重复通知、更新和关闭使用同一个 Alert Key。严重程度、摘要、状态和时间变化不会改变 Alert Key。
+
+消息最外层的 `id` 是通知 ID，每次发送都不同，不参与计算。缺少事件 ID 的消息会被拒绝。
+
+## 状态和告警等级
+---
+
+| Zenoss 状态（`status`） | Flashduty 状态 |
+| :--- | :--- |
+| 1 Open | 触发或更新 |
+| 3 Closed | 恢复，等级保留最近一次的值 |
+| 2 Suppressed | 忽略，直接返回成功 |
+
+| Zenoss 严重程度（`severity`） | Flashduty 等级 |
+| :--- | :--- |
+| 5 Critical | Critical |
+| 4 Error、3 Warning | Warning |
+| 2 Info、1 Debug | Info |
+| 0 或无法识别 | Warning |
+
+消息里没有事件内容的通知（例如非事件类触发器）不会创建告警，Flashduty 收到后直接返回成功。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 事件名称（`name`），为空时取摘要 |
+| `event_id` | 事件 ID |
+| `tenant` | Zenoss 租户名称 |
+| `rule` / `trigger` | 发送本次通知的规则和触发器名称 |
+| `zenoss_status` / `zenoss_severity` | 事件状态和严重程度的原始值 |
+| `source` / `source_type` 等 | 事件维度（`dimensions`），每个标量维度对应一个标签，名称中的 `-` 转为 `_` |
+
+事件摘要（`summary`）作为告警描述。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并且目的地没有开启 Custom Payload
+- **告警没有恢复**：确认规则已开启 **Send updates**，并且触发器没有把 Closed 事件排除在外
+- **Flashduty 里没有收到事件**：确认规则已启用且触发器命中；Suppressed 状态的事件不会创建告警
+- **同一个事件重复通知**：Zenoss 规则的 **Repeat notification** 会按间隔重发，这些通知合并到同一条告警
+
+更多字段含义请参阅 [Zenoss Webhook 消息示例](https://docs.zenoss.io/actions/reference/webhook.html)。
