@@ -1,0 +1,142 @@
+---
+title: "Juniper Mist 告警集成"
+description: "通过 Webhook 将 Juniper Mist 的告警（alarms）触发和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Juniper Mist", "Mist", "Marvis", "无线网络", "Webhook", "alarms"]
+---
+
+通过 Juniper Mist 的 Webhook，将 `alarms` 主题下的告警同步到 Flashduty On-call。Mist 的成对告警（如 `device_down` 和 `device_reconnected`）会按设备关联，恢复类型到达时自动恢复对应告警；Marvis 告警在同一个告警 `id` 上从 `open` 变为 `resolved` 时恢复；其余告警按告警 `id` 去重，不会自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Juniper Mist**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Juniper Mist**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Juniper Mist 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+在 Mist 中创建组织（Org）级或站点（Site）级 Webhook，可以在 Mist 门户的 Webhooks 配置页创建，也可以调用 API。以组织级为例：
+
+```bash
+curl -X POST "https://api.mist.com/api/v1/orgs/<org_id>/webhooks" \
+  -H "Authorization: Token <api_token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Flashduty",
+    "type": "http-post",
+    "url": "<Flashduty 推送地址，包含 integration_key>",
+    "topics": ["alarms"],
+    "enabled": true,
+    "verify_cert": true
+  }'
+```
+
+要点：
+
+1. `type` 选 `http-post`，`url` 填完整的 Flashduty 推送地址，地址中需包含 `integration_key`
+2. `topics` 只选 `alarms`。其他主题（如 `device-updowns`、`audits`）不是告警，Flashduty 收到后直接返回成功，不创建告警
+3. `secret` 可以留空。设置 Secret 后 Mist 会在请求头 `X-Mist-Signature-v2`（HMAC-SHA256）和 `X-Mist-Signature`（HMAC-SHA1）中附带签名，Flashduty 不校验签名，认证依靠推送地址中的 `integration_key`
+4. 区域不同，API 域名也不同（如 `api.eu.mist.com`），按您的 Mist 云环境填写
+
+</Step>
+
+<Step title="选择要推送的告警类型">
+
+Webhook 只推送已启用的告警类型。在 Mist 的告警（Alerts）配置中启用需要的类型。完整的告警类型、默认是否启用、严重程度和示例载荷，可以通过 `GET https://api.mist.com/api/v1/const/alarm_defs` 查看。
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 保存 Webhook 后，调用 Mist 的 **Ping Org Webhook**（`POST /api/v1/orgs/<org_id>/webhooks/<webhook_id>/ping`）或 **Ping Site Webhook** 发送测试请求。Flashduty 收到后会新建一条 Info 级别的测试告警，标题为 `Juniper Mist test notification`，它不会有恢复事件，请手动关闭
+2. 触发一个真实告警（例如让 AP 断开连接），确认 Flashduty 收到告警
+3. 设备重新连接后，确认对应告警恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+一次推送可以包含多个告警事件（`events` 数组），Flashduty 为每个事件分别处理。
+
+**成对告警**：Mist 用两个不同类型的告警表示故障和恢复，例如 `device_down` 和 `device_reconnected`，它们的告警 `id` 不同。Flashduty 根据 `alarm_defs` 中的类型对应关系，用 `org_id`、`site_id`、类型对（如 AP 连接状态）和设备生成 Alert Key，故障和恢复类型使用同一个 Alert Key。设备取自 `aps`、`switches`、`gateways`、`mxedge_ids`、`cellular_edges`，缺少这些字段时取 `hostnames`。一个事件里有多台设备时，每台设备对应一条 Flashduty 告警，因此只有部分设备恢复时，只会恢复这部分设备的告警。
+
+DHCP、DNS、ARP 类（`infra_dhcp_failure` / `infra_dhcp_success` 等）没有设备字段，使用 `vlans` 和 `servers`。LACP 成员、隧道、Mist Edge 电源和风扇等类型还会加入端口（`port_ids`）、隧道名（`tunnel_names`）或组件（`component`）。
+
+**其他告警**：使用告警 `id` 作为 Alert Key。Mist 对同一个告警在聚合窗口内再次推送时，会带上 `update: true` 和相同的 `id`，Flashduty 将其合并到同一条告警。Marvis 告警的 `status` 变为 `resolved` 时，同一个 `id` 的告警恢复。
+
+告警等级、计数、主机名、名称等字段变化不会改变 Alert Key。缺少 `type` 的事件、缺少 `id` 的非成对事件、缺少设备信息的成对事件会被拒绝。
+
+成对类型包括：AP、交换机、WAN Edge 的离线与重连（`device_down`、`switch_down`、`gateway_down`），VPN 对端和路径，BGP、OSPF 邻居，关键端口和虚拟机箱端口，隧道，机箱告警（`sw_alarm_chassis_*` 和 `gw_alarm_chassis_*` 与对应的 `_clear`），蜂窝边缘设备的连接与断开，Mist Edge 的连接、电源、风扇和 CPU、内存、磁盘用量，Tunnel Terminator 隧道，WAN Edge 流表和 FIB 阈值，交换机 DDoS 协议违规，以及 DHCP、DNS、ARP。
+
+同一台交换机或网关上，多个端口的关键端口告警共用同一个 Alert Key；HA 集群的两个节点也共用同一个 Alert Key。
+
+## 状态和告警等级
+---
+
+| 事件 | 状态 |
+| :--- | :--- |
+| 成对类型的故障类型（如 `device_down`） | 触发 |
+| 成对类型的恢复类型（如 `device_reconnected`、`*_clear`、`*_up`） | 恢复 |
+| 非成对告警，`status` 不是 `resolved` 或没有 `status` | 触发 |
+| 非成对告警，`status` 为 `resolved` | 恢复 |
+
+告警等级取自 `severity`：
+
+| Mist 等级 | Flashduty 等级 |
+| :--- | :--- |
+| `critical` | Critical |
+| `warn` | Warning |
+| `info` | Info |
+| `normal` | Info |
+| 缺失或其他值 | Warning |
+
+恢复事件保留其自身的等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `juniper_mist` |
+| `alarm_type` | `type` |
+| `group` / `category` | 告警分组和类别 |
+| `org_id` / `org_name` | 组织 |
+| `site_id` / `site_name` | 站点 |
+| `alarm_id` | `id` |
+| `device` | 成对类型中的设备 |
+| `host` | `hostnames`，逗号分隔 |
+| `mist_severity` / `mist_status` | `severity` 和 `status` 原值 |
+
+告警标题为 `类型: 设备或主机名`，例如 `device down: d420b02000fa`。描述取自 `reasons`、`text`、`suggestion` 和 `count`。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并且请求体是 Mist 的 `alarms` 主题格式
+- **告警没有恢复**：确认对应的恢复类型也已在 Mist 中启用（例如启用了 AP offline，也要启用 AP reconnected）。恢复类型的默认启用状态可以在 `alarm_defs` 中查看
+- **收到了 Webhook 但没有告警**：`topic` 不是 `alarms` 的推送（如 `device-updowns`）会被忽略
+- **测试请求创建了告警**：Ping 测试会创建一条独立的 Info 告警，请手动关闭
+
+更多字段含义请参阅 [Juniper Mist Webhook 文档](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/webhook-topics.html)。

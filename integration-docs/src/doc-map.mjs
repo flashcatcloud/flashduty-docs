@@ -73,6 +73,7 @@ export const docMap = {
   HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
   Cronitor: `${alertBase}/cronitor.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
+  JuniperMist: `${alertBase}/juniper-mist.mdx`,
   Imperva: `${alertBase}/imperva.mdx`,
   Extrahop: `${alertBase}/extrahop.mdx`,
   Fastnetmon: `${alertBase}/fastnetmon.mdx`,
