@@ -81,6 +81,7 @@ export const docMap = {
   StatusCake: `${alertBase}/statuscake.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
   Monitive: `${alertBase}/monitive.mdx`,
+  HostedGraphite: `${alertBase}/hosted-graphite.mdx`,
   Netbeez: `${alertBase}/netbeez.mdx`,
   Apimetrics: `${alertBase}/apimetrics.mdx`,
   Gatus: `${alertBase}/gatus.mdx`,
