@@ -1,0 +1,198 @@
+---
+title: "Flux CD change integration"
+description: "Sync every revision that Kustomizations and HelmReleases apply to Flashduty On-call through the Flux notification-controller generic Provider, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Flux CD", "Flux", "GitOps", "Kustomization", "HelmRelease", "notification-controller", "Provider", "Alert", "deployment events"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Flux's kustomize-controller and helm-controller emit events when they apply a new revision, and the notification-controller `generic` Provider can push those events out as JSON. This integration receives them: each Git or OCI revision that a Kustomization applies, and each chart version that a HelmRelease installs or upgrades, becomes one Flashduty change.
+
+- **Kustomization**: recorded as Processing when the revision starts to apply, updated to Done when the reconciliation succeeds, and to Failed when it fails
+- **HelmRelease**: helm-controller only sends an event when an action ends, so the change is recorded directly as Done or Failed
+
+Events of other kinds (GitRepository, HelmChart, ImageUpdateAutomation, and so on) and events without a revision (for example an invalid Kustomization spec or a missing source) are not changes and are not recorded. A Flux Provider can also push the same events as alerts. See [Flux CD alert integration](/en/on-call/integration/alert-integration/alert-sources/fluxcd); you can use both integrations at the same time.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Flux CD** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `namespace`, `name`, or `cluster`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Flux
+---
+
+The steps below need Kubernetes permission to create Providers, Alerts, and Secrets in the `flux-system` namespace (or the namespace where you keep notification config). The notification-controller must be able to reach the domain of the push URL.
+
+<Steps>
+<Step title="Create a Secret that holds the push URL">
+
+The push URL contains the `integration_key`, so do not write it into the Provider. Store it under the `address` key of a Secret:
+
+```bash
+kubectl -n flux-system create secret generic flashduty-change \
+  --from-literal=address='<push URL>'
+```
+
+</Step>
+
+<Step title="Create the Provider and Alert">
+
+Save the following as `flashduty-change.yaml` and run `kubectl apply -f flashduty-change.yaml`:
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: flashduty-change
+  namespace: flux-system
+spec:
+  type: generic
+  secretRef:
+    name: flashduty-change
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: flashduty-change
+  namespace: flux-system
+spec:
+  providerRef:
+    name: flashduty-change
+  eventSeverity: info
+  eventSources:
+    - kind: Kustomization
+      name: '*'
+      namespace: flux-system
+    - kind: HelmRelease
+      name: '*'
+      namespace: flux-system
+  eventMetadata:
+    cluster: prod-eu
+```
+
+- `eventSeverity` must be `info`. Flux's `info` level includes `error` events; with `error` you would miss the start and success events, and changes could never finish
+- List `eventSources` for the scope you need: `name: '*'` matches every object of that kind in the namespace, and objects in other namespaces need their own entry with `namespace`
+- The keys and values in `eventMetadata` are written to the change as labels. Use them for `cluster`, `env`, and other information the Flux event does not carry, to tell clusters apart and to match in routes. Use the same values in every Alert of one cluster
+- The Provider type can also be `generic-hmac`, which adds an `X-Signature` header; Flashduty does not verify that header
+
+</Step>
+
+<Step title="Verify the change record">
+
+Flux has no way to send a test message. Change the source of a Kustomization that the Alert selects (for example, commit a change to its Git repository) and confirm the change appears in the Flashduty change list: once the Kustomization has applied the new revision, the change is updated to Done. Use these commands to check that the Provider and Alert are ready and to see why a push failed:
+
+```bash
+kubectl -n flux-system get provider,alert
+kubectl -n flux-system describe alert flashduty-change
+```
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+One change is one revision applied by one Flux object. Its change key (change_key) is `<object UID>/<revision>`:
+
+- **Object UID**: the `metadata.uid` of the Kustomization or HelmRelease. Kubernetes gives every object a unique UID, so same-named objects in different clusters and objects recreated after deletion are different objects
+- **Revision**: for a Kustomization, the revision of its source (GitRepository, OCIRepository, or Bucket), such as `main@sha1:731f7ead...`; for a HelmRelease, the chart version, such as `6.5.4`
+
+The start, success, and failure of one revision update the same change; two revisions of the same object are two changes. A HelmRelease uninstall (`UninstallSucceeded`, `UninstallFailed`) is a separate change whose key has an `uninstall:` prefix.
+
+Flux events carry no operation ID, so in two cases an existing change is updated instead of a new one being created:
+
+- The same revision is applied again: you edit the Kustomization or HelmRelease but the revision stays the same, you roll back to a revision that was used before, or you retry after a failure
+- A HelmRelease changes only its values and keeps the chart version: the upgrade event belongs to the same change as the previous install or upgrade
+
+Flashduty rejects an event without `involvedObject.uid`.
+
+## Status mapping
+---
+
+**Kustomization**
+
+| Event | Flashduty change status |
+|---|---|
+| `severity` is `info` and `reason` is `Progressing` (resources applied, resources pruned, health check passed) | Processing |
+| `severity` is `info` and `reason` is `ReconciliationSucceeded` | Done |
+| `severity` is `error`, any `reason` (`BuildFailed`, `HealthCheckFailed`, `PruneFailed`, `ReconciliationFailed`, and so on) | Failed |
+
+**HelmRelease**
+
+| `reason` | Flashduty change status |
+|---|---|
+| `InstallSucceeded`, `UpgradeSucceeded`, `TestSucceeded`, `RollbackSucceeded`, `UninstallSucceeded` | Done |
+| `InstallFailed`, `UpgradeFailed`, `TestFailed`, `RollbackFailed`, `UninstallFailed` | Failed |
+
+Done and Failed are end states, and Flashduty records the change's end time. These events return success but are not recorded: `severity` `trace`; the Kustomization reasons `DependencyNotReady` and `HealthCheckCanceled`; the HelmRelease reasons `PendingRelease` (a stuck release unlocked), `DriftCorrected`, `DriftCorrectionFailed` (drift repair), and `HealthCheckCanceled`; and every event without a revision. Any other `reason` or `severity` is rejected.
+
+## Change content
+---
+
+- **Title**: `<namespace>/<object name>: apply <revision> (<kind>)`, for example `apps/webapp: apply main@sha1:731f7ea (Kustomization)`; a HelmRelease uninstall reads `uninstall`. Git commit IDs are shortened to 7 characters in the title
+- **Link**: Flux events carry no web address, so changes have no link
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `kind` | `Kustomization` or `HelmRelease` |
+| `name` | Object name |
+| `namespace` | Namespace of the object |
+| `object_id` | The object's `metadata.uid` |
+| `revision` | Revision |
+| `origin_revision` | Original revision of the source (when Flux provides it) |
+| `app_version` | Application version of the chart (HelmRelease) |
+| `oci_digest` | OCI digest of the chart (HelmRelease, OCI repositories) |
+| `reason` | `reason` of the latest event |
+| `message` | Message of the latest event, truncated at 1024 bytes |
+| Others | Keys and values from the Alert's `eventMetadata`, such as `cluster` |
+
+Every event of one revision should carry the same routing labels: use the same `eventMetadata` in all Alerts, or later events may land in another channel and start a second change there.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't I see any changes?">
+
+- Run `kubectl -n flux-system describe alert flashduty-change`. A failed push shows a `NotificationDispatchFailed` event with the reason
+- Confirm the Alert's `eventSources` include the namespace of the object and that `eventSeverity` is `info`
+- When the resources a Kustomization applies have not changed, it only sends `ReconciliationSucceeded` and no `Progressing`
+- The notification-controller rate limits events with identical content (5 minutes by default), so `rate limiting duplicate events` in its log is normal
+
+</Accordion>
+
+<Accordion title="Why is there an event every reconcile interval?">
+
+kustomize-controller sends `ReconciliationSucceeded` after every successful reconciliation, so a revision that is already Done keeps gaining events with each interval while its status stays the same. For the same reason, right after you set this up, the revision each Kustomization currently uses is recorded as a Done change, even though nothing was applied at that moment.
+
+</Accordion>
+
+<Accordion title="Why do HelmRelease changes have no Processing state?">
+
+helm-controller only sends an event when an install, upgrade, test, rollback, or uninstall ends. It sends nothing while the action runs, so the change is recorded directly as Done or Failed.
+
+</Accordion>
+
+<Accordion title="A push returned 400 with 'is not supported' in the message?">
+
+The response names the unsupported field: `severity "..." is not supported, want info or error`, `reason "..." is not supported for a Kustomization` or `for a HelmRelease`, `involvedObject.uid is required`, or `timestamp "..." is not an RFC 3339 time`. This happens when a Flux release adds a new `reason`; contact us to add the mapping. That event is not recorded, and later known events of the same change are still recorded.
+
+</Accordion>
+
+<Accordion title="Does a duplicate delivery of the same event create duplicate records?">
+
+No. An event with the same change, time, and status is recorded only once.
+
+</Accordion>
+</AccordionGroup>
+
+For the related Flux configuration, see [Providers](https://fluxcd.io/flux/components/notification/providers/), [Alerts](https://fluxcd.io/flux/components/notification/alerts/), and [Events](https://fluxcd.io/flux/components/notification/events/) in the Flux docs.
