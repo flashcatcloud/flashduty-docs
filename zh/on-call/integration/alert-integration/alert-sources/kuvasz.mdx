@@ -1,0 +1,117 @@
+---
+title: "Kuvasz 告警集成"
+description: "通过 Kuvasz 的 Webhook 集成将网站、端口、DNS、容器和 SSL 证书监控告警同步到 Flashduty On-call，监控恢复时自动关闭告警。"
+keywords: ["告警集成", "Kuvasz", "Webhook", "网站监控", "SSL 证书监控", "开源监控"]
+---
+
+Kuvasz 是开源、可自建的可用性与 SSL 证书监控服务。它的 **Webhook** 集成在监控状态变化时，向配置的地址发送一条 JSON（默认请求体，无需自定义模板）。每个监控对应一条 Flashduty 告警：监控宕机时打开，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Kuvasz**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Kuvasz**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Kuvasz 中配置
+---
+
+Kuvasz 的集成只能通过 YAML 配置文件设置，修改后需要重启 Kuvasz 容器才会生效。
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+在 Kuvasz 的配置文件中增加一个 `webhook` 集成，`url` 填入完整的推送地址（包含 `?integration_key=...`），**不要**设置 `payload-template`，使用 Kuvasz 的默认请求体：
+
+```yaml
+integrations:
+  webhook:
+    - name: flashduty
+      url: https://api.flashcat.cloud/event/push/alert/kuvasz?integration_key=YOUR_INTEGRATION_KEY
+      http-method: POST
+      global: true
+```
+
+`global: true` 表示所有监控默认使用该集成；如果只想让部分监控使用，去掉 `global`，并在对应监控的配置中引用集成 ID `webhook:flashduty`。集成 ID 由类型和名称组成。
+
+如果配置了 `excluded-events`，不要排除 `*_UP` 和 `SSL_VALID` 事件，否则告警无法恢复。
+
+</Step>
+
+<Step title="重启并发送测试事件">
+
+重启 Kuvasz，在 Web 界面的集成页面点击测试按钮（或调用 `POST /api/v2/integrations/{integrationId}/test`）。Kuvasz 会为每种监控事件发送一条示例消息，监控名称均为 `Test monitor`。Flashduty 识别这些示例，返回 `200`，不生成告警。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个监控失败（例如新建一个 HTTP 监控，指向一个返回 500 的地址），确认 Flashduty 收到 Critical 告警；改回正确地址，Kuvasz 检测到恢复后，确认原告警关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `monitorId`（监控编号）加监控类型作为 Alert Key。Kuvasz 的每个监控有固定的编号，同一个监控的宕机（`*_DOWN`）和恢复（`*_UP`）消息带有相同的 `monitorId`，因此落在同一条 Flashduty 告警上。
+
+- 不同类型的监控编号相互独立（HTTP 监控 12 和 TCP 监控 12 是两个监控），所以 Alert Key 同时包含监控类型（HTTP、Push、ICMP、TCP、DNS、Docker）
+- SSL 证书事件使用独立的 Alert Key，不会被同一个 HTTP 监控的恢复消息关闭
+- 监控改名不会改变 Alert Key
+
+请求缺少 `monitorId` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Flashduty 按 `type` 字段处理消息：
+
+| Kuvasz `type` | 含义 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `HTTP_DOWN`、`PUSH_DOWN`、`ICMP_DOWN`、`TCP_DOWN`、`DNS_DOWN`、`DOCKER_DOWN` | 监控宕机 | 触发告警（Critical） |
+| `HTTP_UP`、`PUSH_UP`、`ICMP_UP`、`TCP_UP`、`DNS_UP`、`DOCKER_UP` | 监控恢复 | 恢复告警 |
+| `SSL_INVALID` | 证书无效 | 触发告警（Critical） |
+| `SSL_WILL_EXPIRE` | 证书即将过期 | 触发告警（Warning） |
+| `SSL_VALID` | 证书恢复有效 | 恢复告警 |
+| `DNS_RECORDS_CHANGED` | DNS 解析记录发生变化 | 触发告警（Warning），无恢复消息 |
+| `MAINTENANCE_START`、`MAINTENANCE_END` | 维护窗口开始、结束 | 忽略，返回 `200` |
+
+其他类型同样被忽略。`DNS_RECORDS_CHANGED` 没有对应的恢复消息，建议在协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)，超时计时起点选 **故障触发**，超时时长建议 24 小时。
+
+## 告警等级
+---
+
+Kuvasz 的消息没有等级字段。宕机类事件和 `SSL_INVALID` 表示服务不可用，固定为 **Critical**；`SSL_WILL_EXPIRE` 和 `DNS_RECORDS_CHANGED` 固定为 **Warning**。恢复事件保留原告警的等级。
+
+## 告警内容
+---
+
+- **标题**：监控名称
+- **描述**：Kuvasz 生成的事件说明（`eventDetails`）
+- **标签**：`check`（监控名称）、`monitor_id`、`monitor_type`（监控类型）、`monitor_name`、`monitor_urn`、`monitor_detail`（监控详情页的相对路径）、`event_type`（Kuvasz 的 `type`）、`source`（固定为 `kuvasz`）
+
+## 排查问题
+---
+
+- **测试事件没有产生告警**：这是预期行为，测试事件只用于验证连通性
+- **提示 `integration_key` 无效或返回 4xx**：确认 `url` 是完整的推送地址，并且集成没有被停用
+- **告警没有恢复**：确认没有用 `excluded-events` 排除 `*_UP` 或 `SSL_VALID`，且没有设置自定义 `payload-template`（自定义模板会改变字段，Flashduty 无法识别）
+
+配置项的完整说明请参阅 Kuvasz 文档 [Integrations](https://kuvasz-uptime.dev/management/integrations/)。
