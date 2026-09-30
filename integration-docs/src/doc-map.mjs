@@ -159,6 +159,7 @@ export const docMap = {
   Fortimonitor: `${alertBase}/fortimonitor.mdx`,
   Uptrends: `${alertBase}/uptrends.mdx`,
   Searchstax: `${alertBase}/searchstax.mdx`,
+  Logpoint: `${alertBase}/logpoint.mdx`,
   Hetrixtools: `${alertBase}/hetrixtools.mdx`,
   Mackerel: `${alertBase}/mackerel.mdx`,
   Thousandeyes: `${alertBase}/thousandeyes.mdx`,
