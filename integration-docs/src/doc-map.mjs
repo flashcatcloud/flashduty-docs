@@ -175,6 +175,7 @@ export const docMap = {
   Blumira: `${alertBase}/blumira.mdx`,
   Snyk: `${alertBase}/snyk.mdx`,
   Cloudamqp: `${alertBase}/cloudamqp.mdx`,
+  Bitdefender: `${alertBase}/bitdefender.mdx`,
   Canarytokens: `${alertBase}/canarytokens.mdx`,
   Intersight: `${alertBase}/intersight.mdx`,
   Insightidr: `${alertBase}/insightidr.mdx`,
