@@ -203,6 +203,7 @@ export const docMap = {
   FirebaseCrashlytics: `${alertBase}/firebase-crashlytics.mdx`,
   EcloudCM: `${alertBase}/ecloud-cm.mdx`,
   SumoLogic: `${alertBase}/sumo-logic.mdx`,
+  Fortisiem: `${alertBase}/fortisiem.mdx`,
   AliyunPrometheus: `${alertBase}/aliyun-prometheus.mdx`,
   AliyunDataWorksOp: `${alertBase}/aliyun-dataworks-op.mdx`,
   HttpPull: `${alertBase}/http-pull.mdx`,
