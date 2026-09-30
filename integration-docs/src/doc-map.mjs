@@ -170,6 +170,7 @@ export const docMap = {
   Openstatus: `${alertBase}/openstatus.mdx`,
   Opennms: `${alertBase}/opennms.mdx`,
   CertSpotter: `${alertBase}/cert-spotter.mdx`,
+  Crowdsec: `${alertBase}/crowdsec.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   Twilio: `${alertBase}/twilio.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
