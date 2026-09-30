@@ -117,11 +117,8 @@ export const docMap = {
   Checkmk: `${alertBase}/checkmk.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
-<<<<<<< HEAD
   Semgrep: `${alertBase}/semgrep.mdx`,
-=======
   Sonarqube: `${alertBase}/sonarqube.mdx`,
->>>>>>> origin/feat/alert-batch15
   Level: `${alertBase}/level.mdx`,
   JuniperMist: `${alertBase}/juniper-mist.mdx`,
   Extrahop: `${alertBase}/extrahop.mdx`,
