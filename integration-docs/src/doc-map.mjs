@@ -70,6 +70,7 @@ export const docMap = {
   Ns1: `${alertBase}/ns1.mdx`,
   Site24x7: `${alertBase}/site24x7.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
+  VeracodeSca: `${alertBase}/veracode-sca.mdx`,
   HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
   Cronitor: `${alertBase}/cronitor.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
