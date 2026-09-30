@@ -173,6 +173,7 @@ export const docMap = {
   PandoraFms: `${alertBase}/pandora-fms.mdx`,
   Opennms: `${alertBase}/opennms.mdx`,
   CertSpotter: `${alertBase}/cert-spotter.mdx`,
+  Crowdsec: `${alertBase}/crowdsec.mdx`,
   Stripe: `${alertBase}/stripe.mdx`,
   Twilio: `${alertBase}/twilio.mdx`,
   DeadMansSnitch: `${alertBase}/dead-mans-snitch.mdx`,
