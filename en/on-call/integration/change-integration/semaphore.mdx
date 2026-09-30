@@ -1,0 +1,147 @@
+---
+title: "Semaphore change integration"
+description: "Sync Semaphore pipeline results to Flashduty On-call through a Semaphore webhook notification, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Semaphore", "pipeline", "CI/CD", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Semaphore webhook notification to sync pipeline results to Flashduty On-call. Each pipeline becomes one Flashduty change, recorded once when the pipeline ends.
+
+Semaphore sends a notification only when a pipeline is done (state `done`) and has no start event, so a change has no Processing state and is recorded directly with its end state: Done, Failed, or Canceled.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Semaphore** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project`, `ref`, or `pipeline`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Semaphore
+---
+
+<Steps>
+<Step title="Create a notification">
+
+In the Semaphore console, open **Notifications**, create a notification, and add a rule:
+
+1. **Name**: a recognizable name, for example `Flashduty`
+2. **Filters** (optional): filter by Projects, Branches, Tags, Pipelines (YAML files), and Results. Empty means no restriction. Valid Results are `passed`, `failed`, `stopped`, and `canceled`; leave it empty so all four are sent
+3. **Webhook endpoint**: paste the full Push URL of the Flashduty integration
+4. **Secret**: leave empty. Flashduty authenticates with the `integration_key` in the Push URL and does not verify `X-Semaphore-Signature-256`
+
+You can also create it with the Semaphore CLI:
+
+```bash
+sem create notification flashduty \
+  --projects "<project name>" \
+  --webhook-endpoint "<Flashduty Push URL>"
+```
+
+</Step>
+
+<Step title="Adjust timeout and retries (recommended)">
+
+Semaphore's default response timeout is 500 milliseconds with no retries. If Flashduty answers slower than that, the delivery counts as failed and is not sent again. Run `sem edit notification flashduty` and add to the webhook configuration:
+
+```yaml
+timeout: 3000
+retries: 2
+```
+
+`retries` applies only to timeouts and resends the same body, so Flashduty does not record a duplicate.
+
+</Step>
+
+<Step title="Run a pipeline">
+
+Semaphore has no test delivery. Run a pipeline in a project the notification covers; when it ends, the change appears in the Flashduty change list.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| Semaphore object | Change key (`change_key`) | Notes |
+|---|---|---|
+| Pipeline | `pipeline.id` | Every pipeline of every run has its own ID and becomes one Flashduty change. Two runs on the same branch are two changes; a pipeline started by a promotion inside a workflow is its own change too |
+
+## Status mapping
+---
+
+| Semaphore `pipeline.result` | Flashduty change status |
+|---|---|
+| `passed` | Done |
+| `failed` | Failed |
+| `stopped` | Canceled |
+| `canceled` | Canceled |
+
+These deliveries return success but record no change:
+
+- Deliveries whose `pipeline.state` is not `done`
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project>: <pipeline name> on <branch or tag> (<short SHA>)`, for example `notifications: Build and test on webhook_impl (2d9f5fc)`. Pull request runs use the source branch and the latest commit of the pull request |
+| Description | The commit message |
+| Link | The pipeline's page in Semaphore, `https://<organization>.semaphoreci.com/workflows/<workflow ID>?pipeline_id=<pipeline ID>`, the same address Semaphore's own Slack notification uses. A self-hosted Semaphore has a different domain, so this link may not open |
+| Change time | The pipeline's end time (`pipeline.done_at`) |
+
+Labels for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `project` | Project name |
+| `project_id` | Project ID |
+| `organization` | Organization name |
+| `repo` | Repository, for example `<org>/<repo>` |
+| `pipeline` | Pipeline name |
+| `pipeline_id` | Pipeline ID |
+| `workflow_id` | Workflow ID |
+| `ref` | Branch, tag, or the source branch of a pull request |
+| `sha` | Full commit SHA; the latest commit of the pull request for pull request runs |
+| `pull_request` | Pull request number, only for pull request runs |
+| `actor` | Username that triggered the commit |
+| `semaphore_result` | The raw Semaphore pipeline result |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why is there no running state for a pipeline?">
+
+Semaphore webhook notifications are sent only when a pipeline ends; there is no start event. The change appears with its final status when the pipeline ends.
+
+</Accordion>
+
+<Accordion title="Does a Semaphore retry record a duplicate?">
+
+No. A retry carries the same body, and Flashduty de-duplicates on the pipeline's end time, so it is recorded once.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `pipeline.id is missing`: the body is incomplete; make sure it comes from a Semaphore webhook notification
+- `unknown pipeline.result`: a pipeline result value we have not mapped; contact us to add it
+- `invalid pipeline.done_at`: the time field in the body is malformed
+
+</Accordion>
+
+<Accordion title="No change appears?">
+
+- Notifications are sent for rules created by users who can access the project; make sure the user who created the notification is at least a member of the project
+- Check that the rule's filters do not exclude the project, branch, or result
+- Semaphore's default 500 ms timeout may be too short to wait for the response; see the timeout and retries step above
+
+</Accordion>
+</AccordionGroup>
