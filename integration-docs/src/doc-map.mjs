@@ -110,6 +110,7 @@ export const docMap = {
   Checkmk: `${alertBase}/checkmk.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
   Ohdear: `${alertBase}/ohdear.mdx`,
+  Dbmarlin: `${alertBase}/dbmarlin.mdx`,
   Airbrake: `${alertBase}/airbrake.mdx`,
   Redash: `${alertBase}/redash.mdx`,
   Appsignal: `${alertBase}/appsignal.mdx`,
