@@ -1,0 +1,103 @@
+---
+title: "Twingate 告警集成"
+description: "通过通知 Webhook 将 Twingate 连接器离线、事件同步和集成错误、密钥到期等通知同步到 Flashduty On-call，可恢复的通知会自动关闭告警。"
+keywords: ["告警集成", "Twingate", "零信任", "Connector", "Webhook"]
+---
+
+Twingate 管理控制台的通知支持发送到 Webhook。本集成接收这些 JSON 通知：连接器离线、事件同步错误、身份提供商和设备集成错误、服务账号密钥和设备集成令牌到期、访问请求。其中连接器状态、事件同步和集成错误三类有对应的恢复通知，恢复时自动关闭告警；其余通知不会恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Twingate**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Twingate**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Twingate 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook">
+
+以管理员登录 Twingate 管理控制台，进入 **Settings** 的通知设置，新建 Webhook：填写 Webhook 名称，URL 填写 Flashduty 的完整推送地址，并勾选要发送到该 Webhook 的通知。
+
+建议勾选：Connectors offline / online、Events sync errors / resolved / requires attention、Integration errors / resolved、Identity provider integration error、Google Workspace sync error、Device integration API token expiration、Service Account keys expiration。访问请求（Access Requests）按需勾选。
+
+</Step>
+
+<Step title="测试">
+
+点击通知旁边的 **Test Payload**，Twingate 会向该地址发送一条示例通知。示例通知与真实通知格式相同，Twingate 没有为测试单独标记，所以 Flashduty 会把它当作真实通知生成告警。例如 Connectors offline 的示例会打开一条告警，再对 Connectors online 点击 **Test Payload** 即可关闭；其他类型的示例请手动关闭。
+
+</Step>
+</Steps>
+
+<Note>Twingate 通知 Webhook 没有签名头，也不需要配置密钥。推送地址中的 `integration_key` 相当于凭证，请勿公开。</Note>
+
+## Alert Key
+---
+
+Twingate 的通知没有独立的告警编号，Flashduty 按通知类型分组计算 Alert Key（同时包含租户 `tenant`）：
+
+| 通知类型 `type` | Alert Key 组成 | 生命周期 |
+| :--- | :--- | :--- |
+| `CONNECTOR_STATUS_OFFLINE` / `CONNECTOR_STATUS_ONLINE` | 租户 + 连接器状态 | 离线触发，上线恢复 |
+| `EVENTS_SYNC_ERRORS`、`EVENTS_SYNC_REQUIRES_ATTENTION` / `EVENTS_SYNC_ERROR_RESOLVED` | 租户 + 事件同步 | 错误触发，恢复通知关闭 |
+| `INTEGRATION_ERRORS`、`IDENTITY_PROVIDER_INTEGRATION_ERROR` / `INTEGRATION_ERROR_RESOLVED` | 租户 + `integration` | 错误触发，恢复通知关闭 |
+| `DEVICE_INTEGRATION_API_TOKEN_EXPIRATION` | 租户 + `integration` | 单次通知 |
+| `ACCESS_REQUEST` | 租户 + `request_id` | 单次通知 |
+| `GOOGLE_WORKSPACE_SYNC_ERROR`、`SERVICE_ACCOUNT_KEYS_EXPIRATION` 及以后新增的类型 | 租户 + 通知类型 | 单次通知 |
+
+Twingate 文档中的连接器通知只有 `message` 和 `table` 字段，示例中 `table` 为空，没有连接器编号，因此同一租户的连接器离线通知合并为一条告警，任一 `CONNECTOR_STATUS_ONLINE` 通知都会关闭它。事件同步的错误通知不带 `sync_type`，所以同步类型也不参与 Alert Key。
+
+消息、时间、`days_remaining`、`table` 的变化不会改变 Alert Key。`tenant`、`type` 缺失，或 `integration`、`request_id` 在需要它们的类型中缺失时，Flashduty 会拒绝该请求。
+
+以下通知不产生告警，Flashduty 返回成功：`CLIENT_UPDATE_RECOMMENDED`、`CLIENT_UPDATE_REQUIRED`、`CONNECTOR_UPGRADE_AVAILABLE`。
+
+## 告警等级
+---
+
+Twingate 通知没有等级字段，Flashduty 按通知类型设置：
+
+| 通知类型 | Flashduty 等级 |
+| :--- | :--- |
+| `CONNECTOR_STATUS_OFFLINE` | Critical |
+| `ACCESS_REQUEST` | Info |
+| 其他类型（含未识别的新类型） | Warning |
+
+恢复通知沿用对应触发通知的等级。
+
+## 告警内容
+---
+
+- **标题**：通知的 `message`；没有时为 `Twingate <type>`
+- **描述**：访问请求的申请理由 `reason`，以及 `table` 中每一行的键值（最多 20 行；名称里含 key、token、secret 的字段不写入）
+- **标签**：`tenant`、`type`、`check`（通知分组）、`integration`、`sync_type`、`platform`、`days_remaining`、`request_id`、`user_name`、`resource_name`、`approval_mode`、`request_type`
+
+## 不会恢复的通知
+---
+
+密钥和令牌到期、Google Workspace 同步错误、访问请求都是单次通知，Twingate 不会发送恢复通知。请在协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时；同一对象重复通知会合并到同一条告警。
+
+## 排查问题
+---
+
+- **Twingate 提示 Webhook 报错**：Twingate 要求接收端接受 POST 和 JSON。确认填写的是完整推送地址且包含 `integration_key`
+- **连接器上线后告警没有关闭**：确认勾选了 Connectors online 通知；Flashduty 按租户合并连接器通知，而不是按单个连接器
+- **收到的告警类型与预期不符**：查看告警标签中的 `type`，它就是 Twingate 通知的 `type` 字段
