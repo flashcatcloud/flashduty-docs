@@ -1,0 +1,127 @@
+---
+title: "Tideways alert integration"
+description: "Send Tideways response time, error rate, missing data, exception, and slow SQL notifications to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Tideways", "PHP", "APM", "webhook"]
+---
+
+Use the organization-level Webhook integration in Tideways to send performance and error notifications from your PHP applications to Flashduty On-call. Response time and error rate incidents have a full lifecycle: an alert triggers when the incident opens, updates while it continues, and recovers when it closes. Transaction failure rate and missing data notifications are sent once when they occur and never recover. Exception and slow SQL notifications are sent when an error group is new, reopened, or reappears; Tideways sends nothing when the group is resolved, so those alerts do not recover automatically.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Tideways** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Tideways** and enter an integration name
+3. Configure the default route and choose a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Tideways
+---
+
+You need admin permission on the organization. The Tideways webhook only accepts HTTPS URLs and sends no signature or custom headers. Flashduty identifies the integration by the `integration_key` in the push URL, so keep the URL private.
+
+<Steps>
+<Step title="Add a webhook integration">
+
+1. Open the organization's **Integrations** settings, click **Add New Integration**, and select **Webhook**
+2. Enter a name and paste the full Flashduty push URL, including `integration_key`, as the URL
+3. Under the trigger options, tick **and when the alert is fixed**. It is off by default; without it Tideways sends no `closed` notification and incident alerts never recover in Flashduty
+4. Save
+
+</Step>
+
+<Step title="Attach it to project notifications">
+
+Open the application's **Project Settings → Notifications**. For each notification rule that should page someone, click **Edit**, tick the new webhook integration, and save (use **Create Notification Rule** to add a rule type that is not listed yet). The table shows how Flashduty handles each type.
+
+| Tideways notification rule | `type` | Effect in Flashduty |
+| :--- | :--- | :--- |
+| Service Response Time | `response_time` | Trigger, update, recover |
+| Service Failure Rate | `error_rate` | Trigger, update, recover |
+| Transaction Response Times | `transaction-response-time` | Trigger, update, recover |
+| Transaction Failure Rates | `transaction-failure-rate` | Trigger (no recovery) |
+| Heartbeat Monitoring | `missing-data` | Trigger (no recovery) |
+| New Error/Exception | `exception` | Trigger (no recovery) |
+| New Slow SQL Query | `slow-sql` | Trigger (no recovery) |
+| Weekly Performance Report, New Release, release comparison | `weekly_report`, `release`, `compare_release` | Acknowledged only, no alert |
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Push the application's response time above its threshold and confirm Flashduty receives an active alert. An incident opens once the value has exceeded the threshold over the rule's check period (5 to 60 minutes). After the metric falls back and Tideways closes the incident, confirm the same alert recovers.
+
+The **Preview** button on the integration page sends one `response_time` notification with status `opened` and a placeholder incident ID. Flashduty creates a Warning alert for it, and no `closed` notification follows, so close it manually after testing.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+For response time, failure rate, and transaction response time incidents, the Alert Key is computed from the incident ID (`notification.incident_id`) together with the notification type, organization, and application. The Tideways documentation states that `status` is `opened`, `ongoing`, or `closed` depending on the incident phase; `incidient_id` is a misspelled legacy copy of `incident_id` with the same value, and Flashduty reads it when `incident_id` is missing. Incident notifications missing both are rejected, and so is an unknown `status`.
+
+Other types use their own object:
+
+- New exceptions and slow SQL: the error group ID (`notification.error_group.id`). A group that appears again merges into the same alert
+- Transaction failure rate and missing data: the organization, application, environment (`environment`), service (`service`), and transaction (`transaction`). The same check firing again merges into the same alert
+
+Changes to the value, time, threshold, or occurrence count never change the Alert Key. An error group notification with status `resolved`, `not_error`, or `ignored` recovers the alert of that group. The exception rule only notifies for new, reappeared, reopened, and unacknowledged errors, so in practice a resolved group produces no notification; a reopened group merges into its existing alert.
+
+## Status and severity
+---
+
+Tideways notifications carry no severity, so Flashduty sets it by type:
+
+| Notification | Flashduty severity | Reason |
+| :--- | :--- | :--- |
+| Response time, failure rate, transaction response time, transaction failure rate | Warning | A threshold is crossed but the service still responds |
+| Missing data (`missing-data`) | Critical | A service or transaction sends no data at all |
+| New exception | Warning | |
+| New slow SQL | Info | |
+
+When `status` is `closed`, or an error group is `resolved`, `not_error`, or `ignored`, the alert recovers, and the recovery event keeps the last severity.
+
+## When alerts do not recover
+---
+
+Transaction failure rate and missing data notifications are sent once, and Tideways sends no matching recovery, so these alerts do not recover automatically. Exception and slow SQL alerts also stay active after the error group is resolved or ignored in Tideways, because Tideways sends no notification for that.
+
+Turn on [auto-close](/en/on-call/channel/create-edit) for the channel, with the timer starting from **Incident triggered** and a suggested duration of 24 hours. Missing data and new exceptions are normally handled within a working day. If the channel only receives response time and failure rate notifications, you can leave it off.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `organization` / `application` | Tideways organization and application identifiers |
+| `check` | Notification type (`type`) |
+| `incident_id` / `status` | Incident ID and phase, incident notifications only |
+| `value` / `threshold` | Current value and threshold |
+| `env` / `service` / `transaction` | Environment, service, and transaction |
+| `since_hours` | Hours without data for missing data |
+| `error_group_id` / `exception_type` / `source_location` / `occurrences` | Error group ID, exception type, source location, and total occurrences; exceptions and slow SQL only |
+
+## Troubleshooting
+---
+
+- **Tideways shows a delivery failure**: confirm the URL uses HTTPS and includes `integration_key`. Tideways does not retry, and a response with status 400 or higher is only recorded in the integration's error log
+- **Flashduty returns an invalid-parameter error**: the message names the missing field (for example `notification.incident_id`) or the unsupported `type`
+- **An alert did not recover**: response time, failure rate, and transaction response time incidents recover on `closed`, and turn on auto-close for exceptions, slow SQL, transaction failure rate, and missing data. If incident alerts stay active after Tideways closes the incident, check that **and when the alert is fixed** is ticked on the webhook integration
+- **A weekly report or release notification created no alert**: these are not incidents, so Flashduty only acknowledges them
+
+For field details, see the [Tideways webhook documentation](https://support.tideways.com/documentation/reference/integrations/webhook.html).
