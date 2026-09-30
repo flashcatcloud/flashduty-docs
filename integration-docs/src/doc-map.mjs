@@ -76,6 +76,7 @@ export const docMap = {
   JuniperMist: `${alertBase}/juniper-mist.mdx`,
   Imperva: `${alertBase}/imperva.mdx`,
   Wazuh: `${alertBase}/wazuh.mdx`,
+  Auth0: `${alertBase}/auth0.mdx`,
   Twingate: `${alertBase}/twingate.mdx`,
   Extrahop: `${alertBase}/extrahop.mdx`,
   Fastnetmon: `${alertBase}/fastnetmon.mdx`,
