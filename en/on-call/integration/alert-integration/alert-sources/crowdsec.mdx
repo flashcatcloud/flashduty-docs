@@ -1,0 +1,163 @@
+---
+title: "CrowdSec alert integration"
+description: "Sync attack sources detected by the CrowdSec Security Engine to Flashduty On-call through its HTTP notification plugin."
+keywords: ["alert integration", "CrowdSec", "Security Engine", "intrusion prevention", "IPS", "HTTP notification plugin", "webhook"]
+---
+
+The CrowdSec Security Engine is an open-source, self-hosted intrusion detection and prevention engine. It recognizes brute force, scanning and similar behavior through scenarios, and can hand each detection to a notification plugin. This integration uses the built-in HTTP notification plugin and turns each CrowdSec alert into one Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **CrowdSec**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **CrowdSec** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure CrowdSec
+---
+
+Do the following on the machine that runs the CrowdSec Local API (LAPI). The HTTP notification plugin ships with CrowdSec, so nothing extra needs to be installed.
+
+<Steps>
+<Step title="Configure the HTTP notification plugin">
+
+Edit `/etc/crowdsec/notifications/http.yaml` (the same path inside the container for Docker deployments). Keep the default `format` and fill in `url` and `method`:
+
+```yaml
+type: http
+name: http_default          # must match the name referenced in profiles.yaml
+log_level: info
+
+# Optional: batch the alerts of 30 seconds into one request; group_threshold also works
+group_wait: 30s
+
+format: |
+  {{.|toJson}}
+
+url: https://api.flashcat.cloud/event/push/alert/crowdsec?integration_key=<your_integration_key>
+method: POST
+```
+
+`format` must stay `{{.|toJson}}`: Flashduty parses exactly the default JSON structure of the CrowdSec alert list. Replace `url` with the full Flashduty push URL. Flashduty identifies the integration by the `integration_key` in the URL, so keep this file as secret as a key.
+
+</Step>
+
+<Step title="Enable the notification in a profile">
+
+Edit `/etc/crowdsec/profiles.yaml` and add `notifications` to the profile that should notify:
+
+```yaml
+name: default_ip_remediation
+filters:
+ - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+ - type: ban
+   duration: 4h
+notifications:
+ - http_default
+on_success: break
+```
+
+Only alerts that match the profile filters are pushed. After saving, reload CrowdSec with `sudo systemctl reload crowdsec` (restart the container for Docker deployments).
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+A CrowdSec alert is a one-shot event: after the ban expires, CrowdSec sends nothing more. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest a timeout equal to the ban duration (4 hours in the example above), counted from **Incident trigger**. Closing the incident also closes its alerts.
+
+</Step>
+
+<Step title="Verify">
+
+Run this on the CrowdSec machine:
+
+```bash
+sudo cscli notifications test http_default
+```
+
+An Info alert titled `test alert` appears in Flashduty. It does not recover on its own, so close it by hand or let the auto-resolve timeout close it. `cscli notifications list` shows whether the plugin is loaded.
+
+</Step>
+</Steps>
+
+## What is pushed
+---
+
+Each request carries a JSON array with one CrowdSec alert per element; with `group_wait` or `group_threshold` a request holds several. Flashduty creates one alert per array element. The event details (`events`) and the raw logs in `meta` are not sent to Flashduty.
+
+## Alert Key
+---
+
+Flashduty uses the `uuid` that CrowdSec generates for each alert as the Alert Key. A retried request carries the same `uuid` and merges into the same alert; when the same source IP triggers again later, the new alert has a new `uuid` and creates a new Flashduty alert.
+
+For older releases that send no `uuid`, Flashduty derives the Alert Key from the scenario, source scope, source value and `start_at`. The request is rejected when those fields are missing.
+
+## Severity
+---
+
+CrowdSec provides no severity, so every alert triggers at **Warning**, including alerts in simulation mode (`simulated`). The test alert from `cscli notifications test` is **Info** and uses its own Alert Key, so it never merges with a real alert.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` / `scenario` | The scenario that fired, such as `crowdsecurity/ssh-bf` |
+| `resource` / `source_value` | Value of the attack source, usually an IP |
+| `source_scope` | Source type, such as `Ip` or `Range` |
+| `source_range` | Network range of the source |
+| `as_name` / `as_number` | Autonomous system of the source |
+| `country` | Country code of the source |
+| `events_count` | Number of events that triggered the scenario |
+| `start_at` / `stop_at` | Start and end time of the scenario |
+| `scenario_version` | Scenario version |
+| `machine_id` | Machine that reported the alert |
+| `decision_type` / `decision_duration` / `decision_origin` | Type, duration and origin of the remediation |
+| `simulated` / `remediation` | Whether the alert is simulated, whether it produced a remediation |
+| `uuid` | CrowdSec alert ID, the Alert Key |
+
+The alert title is `<scenario> from <source value>` and the description is the CrowdSec `message`.
+
+## FAQ
+---
+
+<AccordionGroup>
+
+<Accordion title="No alert appears in Flashduty after a push?">
+
+Run `cscli notifications test http_default` first to confirm the test alert arrives. If it does not, check that `url` contains `integration_key` and look for http plugin errors in the CrowdSec log (`/var/log/crowdsec.log`). If the test alert arrives but real ones do not, the profile filters usually do not match, or `http_default` is not listed in the profile.
+
+</Accordion>
+
+<Accordion title="Do I need to configure a signature or an auth header?">
+
+No. Flashduty identifies the integration by `integration_key` only and does not check extra request headers.
+
+</Accordion>
+
+<Accordion title="Why does an alert never close?">
+
+CrowdSec sends no recovery event. Turn on the auto-resolve timeout of the channel, or close the alert in Flashduty by hand.
+
+</Accordion>
+
+</AccordionGroup>
+
+For more options see the [CrowdSec HTTP notification plugin](https://docs.crowdsec.net/docs/notification_plugins/http).
