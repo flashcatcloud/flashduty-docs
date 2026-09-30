@@ -1,0 +1,146 @@
+---
+title: "BGPalerter 告警集成"
+description: "通过 reportHTTP 报告模块将 BGPalerter 检测到的 BGP 劫持、前缀可见性下降、RPKI 无效等事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "BGPalerter", "BGP", "BGP 劫持", "RPKI", "前缀监控", "Webhook"]
+---
+
+BGPalerter 是 NTT 开源的 BGP 监控工具，可检测前缀被劫持、新增子前缀、可见性下降、AS 路径异常和 RPKI 无效等事件。通过 BGPalerter 的 `reportHTTP` 报告模块，可以把这些事件同步到 Flashduty On-call。
+
+BGPalerter 只在事件发生时推送一次，不会推送恢复通知。因此每条告警都需要手动关闭，或者开启协作空间的超时自动关闭（见下文[事件与恢复](#事件与恢复)）。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **BGPalerter**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **BGPalerter**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 BGPalerter 中配置
+---
+
+BGPalerter 没有固定的 Webhook 格式，请求体由 `config.yml` 中 `reportHTTP` 的模板决定。Flashduty 只解析下面这份模板生成的 JSON，请原样使用。
+
+<Steps>
+<Step title="编辑 config.yml">
+
+在 `config.yml` 的 `reports` 下增加 `reportHTTP`（取消注释示例块即可），把 `hooks.default` 换成 Flashduty 集成的完整推送地址（地址中需包含 `integration_key`）：
+
+```yaml
+reports:
+  - file: reportHTTP
+    channels:
+      - hijack
+      - newprefix
+      - visibility
+      - path
+      - misconfiguration
+      - rpki
+      - roa
+    params:
+      method: post
+      isTemplateJSON: true
+      showPaths: 0
+      headers:
+      templates:
+        default: '{"summary": "${summary}", "channel": "${channel}", "type": "${type}", "prefix": "${prefix}", "asn": "${asn}", "description": "${description}", "neworigin": "${neworigin}", "newprefix": "${newprefix}", "peers": "${peers}", "earliest": "${earliest}", "latest": "${latest}", "bgplay": "${bgplay}", "rpkiLink": "${rpkiLink}", "paths": "${paths}"}'
+      hooks:
+        default: https://api.flashcat.cloud/event/push/alert/bgpalerter?integration_key=YOUR_INTEGRATION_KEY
+```
+
+说明：
+
+- `isTemplateJSON: true` 会让 BGPalerter 以 `Content-Type: application/json` 发送 JSON
+- `channels` 只保留您需要的类型即可，例如只关心劫持和可见性时保留 `hijack` 和 `visibility`
+- 模板里的 `${...}` 是 BGPalerter 的[报告上下文标签](https://github.com/nttgin/BGPalerter/blob/main/docs/context.md)。某类事件没有的标签会被渲染成文本 `undefined`，Flashduty 会把它当作空值忽略
+- `prefixes.yml` 中各前缀的 `description` 会写入模板，请不要在其中使用英文双引号，否则 BGPalerter 生成的 JSON 无法解析
+- 使用[用户组](https://github.com/nttgin/BGPalerter/blob/main/docs/usergroups.md)时，在 `hooks` 下为每个用户组填写各自的推送地址
+
+</Step>
+
+<Step title="重启 BGPalerter">
+
+重启 BGPalerter 使配置生效。启动日志出现 `sending report to: ...` 表示已经向该地址推送。
+
+</Step>
+
+<Step title="验证">
+
+BGPalerter 没有独立的"发送测试通知"按钮。执行 `bgpalerter -t`（Docker 中在启动命令末尾追加 `-t`）会用模拟的 BGP 更新在 `hijack` 通道上触发告警，这些告警与真实劫持告警没有区别，会在 Flashduty 中创建普通的 Critical 告警，验证后请手动关闭，并去掉 `-t` 再用于生产。
+
+</Step>
+</Steps>
+
+## 事件与恢复
+---
+
+`channels` 中每个通道对应一类事件：
+
+| `channel` | 含义 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `hijack` | 被监控前缀由其他 AS 发布 | Critical |
+| `visibility` | 被监控前缀的可见性下降（撤销或失联） | Critical |
+| `newprefix` | 被监控 AS 发布了未配置的新前缀 | Warning |
+| `path` | 匹配到用户定义的 AS 路径规则 | Warning |
+| `misconfiguration` | 疑似配置错误（如本 AS 发布了不属于自己的前缀） | Warning |
+| `rpki` | 被监控前缀的发布在 RPKI 校验下无效 | Warning |
+| `roa` | ROA 变化或即将过期 | Warning |
+| `software-update` | BGPalerter 有新版本 | Info |
+| 其他值 | | Warning |
+
+BGPalerter 不推送恢复通知，Flashduty 不会自动恢复这些告警。请在协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时；劫持类事件通常需要人工确认，也可以在处理完成后手动关闭。
+
+## Alert Key
+---
+
+Flashduty 用事件涉及的路由信息计算 Alert Key：通道（`channel`）、被监控前缀（`prefix`）、被监控 AS（`asn`）、新的来源 AS（`neworigin`）和实际发布的前缀（`newprefix`）。BGPalerter 自身对劫持事件也以"来源 AS + 前缀"为分组依据。
+
+- 同一个劫持者对同一前缀反复触发的告警会合并到同一条 Flashduty 告警
+- 不同的劫持者或不同的更具体前缀会产生各自独立的告警
+- `path` 通道的事件不带前缀和 AS，改用事件摘要（`summary`）计算，摘要相同的事件合并
+- 摘要、对端数量、时间等会变化的内容不参与计算
+
+`channel` 缺失，或前缀、AS、摘要都缺失的请求会被拒绝并返回错误。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `channel` / `type` | 通道和产生告警的监控模块名（如 `monitorHijack`） |
+| `check` | 监控模块名，没有时为通道名 |
+| `prefix` / `resource` | 被监控前缀 |
+| `asn` | 被监控 AS |
+| `neworigin` / `newprefix` | 新的来源 AS 和实际发布的前缀（劫持、新前缀、RPKI） |
+| `peers` | 看到该事件的对端数量 |
+| `prefix_description` | `prefixes.yml` 中该前缀的描述 |
+| `earliest` / `latest` | 事件的最早和最近时间（UTC） |
+| `bgplay` / `rpki_link` | BGPlay 和 RPKI 校验页面链接 |
+| `paths` | AS 路径（`showPaths` 大于 0 时） |
+
+告警标题取自 BGPalerter 的事件摘要，描述为前缀描述。
+
+## 排查问题
+---
+
+- **Flashduty 没有收到告警**：确认 `hooks.default` 是完整的 HTTPS 推送地址并包含 `integration_key`；BGPalerter 推送失败只会写入自己的日志，不会重试
+- **BGPalerter 日志报 JSON 解析错误**：检查 `prefixes.yml` 中的前缀描述是否含有英文双引号或换行
+- **告警一直未关闭**：BGPalerter 没有恢复通知，请开启协作空间的超时自动关闭，或手动关闭
+- **收到返回 400**：请求缺少 `channel`，通常是模板被改动，请恢复上面的模板
+
+更多配置项请参阅 [BGPalerter 文档](https://github.com/nttgin/BGPalerter/blob/main/docs/report-http.md)。
