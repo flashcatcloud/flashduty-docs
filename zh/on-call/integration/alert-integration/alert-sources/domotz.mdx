@@ -1,0 +1,114 @@
+---
+title: "Domotz 告警集成"
+description: "通过 Shared Alert 的 Webhook 联系渠道，将 Domotz 的设备与采集器状态、TCP 服务、延迟等事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Domotz", "Webhook", "网络监控", "MSP"]
+---
+
+通过 Domotz 的 Webhook 联系渠道和 Shared Alert，将采集器（Collector）和设备的事件同步到 Flashduty On-call。设备上线/下线、采集器上线/下线、TCP 服务状态、往返延迟（RTD）和网速测试这几类事件带有恢复状态，Flashduty 用同一个 Alert Key 关联：异常时创建告警，恢复时自动关闭。其他事件（心跳丢失、SNMP 变化、IP 或配置变化、安全问题、WAN/LAN 变化）每次单独成为一条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Domotz**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Domotz**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Domotz 中配置
+---
+
+需要在 Domotz 门户中有创建联系渠道和 Shared Alert 的权限。
+
+<Steps>
+<Step title="创建 Webhook 联系渠道">
+
+1. 在 Domotz 门户左侧菜单进入 **Alerts**，选择 **Contact Channels & Ticketing Systems**
+2. 新建一个 Webhook 渠道，填写名称，并将 Flashduty 集成的完整推送地址粘贴为 Webhook 地址，地址中需包含 `integration_key`
+3. 保存渠道
+
+</Step>
+
+<Step title="创建 Shared Alert 并选择事件">
+
+1. 在 **Alerts** 中新建 Shared Alert，通知渠道选择上一步的 Webhook 渠道
+2. 勾选需要推送的事件。Flashduty 支持：Device Goes Up/Down、Heartbeat Lost、IP Change、Configuration Change、Configuration Misalignment、SNMP、TCP、RTD，以及采集器上线/下线、网速测试、安全问题、WAN/LAN 变化
+3. 保存
+
+</Step>
+
+<Step title="应用到设备或采集器">
+
+将 Shared Alert 应用到需要监控的设备，或直接应用到采集器（对该采集器下所有设备生效）。也可以通过 Domotz Public API 的 alert-profile 绑定接口完成。
+
+</Step>
+</Steps>
+
+<Warning>
+Domotz 没有文档化的测试通知按钮，请通过真实事件验证：例如让一台设备断网，在 Flashduty 中应出现一条活动告警；设备恢复后该告警自动恢复。
+</Warning>
+
+<Warning>
+心跳丢失、SNMP、IP 变化、配置变化、安全问题和 WAN/LAN 变化这几类事件没有恢复通知，请在 Flashduty 集成或协作空间中开启 **超时自动关闭**，建议设置为 24 小时。
+</Warning>
+
+## Alert Key
+---
+
+Flashduty 用事件名称、`agent_id`（采集器 ID）和 `device_id`（设备 ID）组合出 Alert Key，TCP 服务再加上端口，字段之间以不可见分隔符连接后取 MD5。这些标识来自 Domotz Public API 定义中各 Webhook 事件的结构。设备名称、状态值、时间等变化不会改变 Alert Key。
+
+- 有恢复状态的事件（`agent_status`、`device_status`、`device_tcp`、`device_rtd`、`agent_speed_test`）的异常和恢复通知使用同一个 Alert Key
+- 无恢复状态的事件在 Alert Key 中加入事件时间戳，每次通知单独成为一条告警
+- 缺少 `agent_id`，或设备事件缺少 `device_id` 的通知会被拒绝
+
+## 状态和告警等级
+---
+
+| Domotz 事件 | 异常时的等级 | 恢复条件 |
+| :--- | :--- | :--- |
+| `agent_status` | Critical | `value` 为 `UP` |
+| `device_status` | Critical | `value` 为 `UP` |
+| `device_tcp` | Critical | 对应端口的 `status` 为 `UP` |
+| `device_rtd` | Warning | `status` 为 `RTD_ISSUE_RESOLVED` |
+| `agent_speed_test` | Warning | `status` 为 `SPEED_TEST_ISSUE_RESOLVED` |
+| `device_heartbeat_lost`、`device_snmp`、`device_configuration_misalignment`、`agent_security_issue` | Warning | 无恢复 |
+| `device_ip_change`、`device_configuration_change`、`agent_wan_change`、`agent_lan_change` | Info | 无恢复 |
+
+一次 `device_tcp` 通知可以包含多个端口，Flashduty 按端口升序为每个端口生成一条事件，最多处理 50 个。设备发现、功能发现、MIB 发现，以及 `monitoring_profile_state_changed`（Domotz 未文档化其恢复状态值）会被接收但不创建告警。状态值不在上表中时返回参数错误。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 事件名称 `name` |
+| `resource` | 设备名称；采集器级事件为采集器名称 |
+| `agent_id` / `agent_name` | 采集器 ID 和名称 |
+| `device_id` / `device_name` | 设备 ID 和名称 |
+| `value` | 状态值（`UP`、`DOWN` 或延迟状态） |
+| `port` | TCP 服务端口 |
+| `trigger_name` | SNMP 触发器名称 |
+
+## 排查问题
+---
+
+- **没有收到告警**：确认 Shared Alert 已勾选对应事件，并已应用到设备或采集器，通知渠道选择了这个 Webhook 渠道
+- **告警没有恢复**：只有上表中有恢复条件的事件会自动恢复；其他事件请依赖超时自动关闭
+- **Flashduty 返回参数错误**：通知缺少 `agent_id` / `device_id`，或状态值不受支持
+- **Webhook 渠道收不到任何请求**：确认推送地址完整且使用 HTTPS
+
+更多字段含义请参阅 [Domotz Public API](https://portal.domotz.com/developers/) 和 [Shared Alerts, Webhooks and Ticketing Systems](https://help.domotz.com/admin-global-features/shared-alerts-webhooks-ticketing-systems/)。

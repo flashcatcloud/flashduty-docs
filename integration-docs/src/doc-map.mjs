@@ -120,6 +120,7 @@ export const docMap = {
   Axiom: `${alertBase}/axiom.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
+  Domotz: `${alertBase}/domotz.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
   Zenoss: `${alertBase}/zenoss.mdx`,
   Semgrep: `${alertBase}/semgrep.mdx`,
