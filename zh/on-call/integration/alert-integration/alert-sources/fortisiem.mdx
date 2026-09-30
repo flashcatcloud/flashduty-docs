@@ -1,0 +1,108 @@
+---
+title: "FortiSIEM 告警集成"
+description: "通过 Incident HTTP Notification 将 FortiSIEM 事件（Incident）的触发、更新和清除同步到 Flashduty On-call。"
+keywords: ["告警集成", "FortiSIEM", "Fortinet", "SIEM", "Incident HTTP Notification", "incidentId"]
+---
+
+FortiSIEM 的 Incident HTTP Notification 会在规则触发事件（Incident）时，以 HTTP(S) POST 发送一份 XML 文档。Flashduty 直接解析这份文档：每个 FortiSIEM Incident 对应一条 Flashduty 告警，`New`、`Update` 和 `Clear` 通知会持续更新并最终恢复这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **FortiSIEM**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **FortiSIEM**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 FortiSIEM 中配置
+---
+
+<Steps>
+<Step title="填写 Incident HTTP Notification">
+
+1. 以管理员身份登录 FortiSIEM，进入 **ADMIN → Settings → Analytics → Incident Notification**
+2. 在 **Incident HTTP Notification** 区域，将 Flashduty 集成的完整推送地址（含 `integration_key` 参数）填入 **HTTP(S) Server URL**
+3. 表单要求 **User Name** 和 **Password** 时填写任意占位值即可，Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验这两个值
+4. 点击 **Save**
+
+</Step>
+
+<Step title="了解发送范围">
+
+Incident HTTP Notification 是 FortiSIEM 的全局通知通道，按官方文档，规则触发事件时即发送。如只想同步部分事件，请在 Flashduty 侧通过 **路由** 或 **告警处理规则** 按 `rule_type`、`severity`、`organization` 等标签筛选。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一条规则真正触发事件，确认 Flashduty 收到活动告警；再在 FortiSIEM 中清除该事件（或等待其自动清除），确认 Flashduty 上的原告警恢复。表单上的 **Test** 按钮在官方文档中只用于检查连接，未公开其请求内容；如果它向推送地址发送了请求，该请求可能被当作一条普通事件处理或返回参数错误，请以控制台中的实际结果为准。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 直接使用 `incident` 元素的 `incidentId` 属性作为 Alert Key。FortiSIEM 官方文档将其定义为 "Unique ID of the incident in FortiSIEM"，同一个 Incident 的 `New`、`Update`、`Clear` 通知使用同一个 `incidentId`。规则名称、等级、重复次数、发生时间和事件明细的变化都不会改变 Alert Key。
+
+缺少 `incidentId` 时 Flashduty 会拒绝请求（HTTP 400），因为无法可靠关联后续更新和恢复。
+
+## 状态和告警等级
+---
+
+`status` 属性：
+
+| FortiSIEM `status` | Flashduty 状态 |
+| :--- | :--- |
+| `New` | 触发 |
+| `Update` | 更新（沿用等级） |
+| `Clear` | 恢复，等级保留为最后一次的等级 |
+| 空值或其他值 | 按触发处理 |
+
+`severity` 属性接受 `HIGH`、`MEDIUM`、`LOW`，也接受对应的 0-10 数值：
+
+| FortiSIEM 等级 | Flashduty 等级 |
+| :--- | :--- |
+| `HIGH`（9-10） | Critical |
+| `MEDIUM`（5-8） | Warning |
+| `LOW`（0-4） | Info |
+| 空值或无法识别 | Warning |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 规则名称（`name`） |
+| `incident_id` / `rule_type` / `organization` / `severity` / `repeat_count` / `status` / `display_time` | `incident` 元素的属性和 `displayTime` |
+| `affected_biz_srvc` | 受影响业务服务（`affectedBizSrvc`） |
+| `source_*` / `target_*` / `detail_*` | `incidentSource`、`incidentTarget`、`incidentDetails` 中的条目，标签名为前缀加属性名（如 `source_srcIpAddr`、`target_hostName`） |
+| `host` | `target_hostName`，没有时取 `target_hostIpAddr` |
+
+包含用户姓名和邮箱的 `deviceDetails` 不会写入标签。
+
+## 排查问题
+---
+
+- **FortiSIEM 侧推送失败**：确认 **HTTP(S) Server URL** 以 `https://` 开头、包含完整的 `integration_key`，且 FortiSIEM 所在网络可以访问 `api.flashcat.cloud`
+- **Flashduty 返回参数错误**：确认发送的是 FortiSIEM 的 Incident XML（根元素为 `incident`），且带有 `incidentId` 属性
+- **告警没有恢复**：确认该事件已在 FortiSIEM 中被清除，并检查 Flashduty 收到的通知里 `status` 是否为 `Clear`
+- **收到的事件过多**：Incident HTTP Notification 对所有规则生效，请用 Flashduty 的路由或告警处理规则筛选
+- **测试成功但真实告警没收到**：检查是否有规则真正触发了事件，以及 FortiSIEM 是否启用了 Incident HTTP Notification
+
+字段含义请参阅 FortiSIEM 文档中的 [Incident Notification](https://docs.fortinet.com/document/fortisiem/7.4.0/user-guide/142816/incident-notification) 和 [Notification via HTTPS](https://docs.fortinet.com/document/fortisiem/6.7.0/integration-api-guide/920026/notification-via-https)。
