@@ -73,6 +73,7 @@ export const docMap = {
   HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
   Cronitor: `${alertBase}/cronitor.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
+  DattoRmm: `${alertBase}/datto-rmm.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
   Uptimeobserver: `${alertBase}/uptimeobserver.mdx`,
   Rbltracker: `${alertBase}/rbltracker.mdx`,
