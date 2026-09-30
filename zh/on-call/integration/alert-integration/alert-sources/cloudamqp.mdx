@@ -1,0 +1,106 @@
+---
+title: "CloudAMQP 告警集成"
+description: "通过 Webhook 收件人将 CloudAMQP 实例的告警（队列积压、消费者数、CPU、内存、磁盘、连接数等）同步到 Flashduty On-call。"
+keywords: ["告警集成", "CloudAMQP", "Webhook", "RabbitMQ", "LavinMQ", "消息队列"]
+---
+
+通过 CloudAMQP 告警（Alarms）的 Webhook 收件人，将实例的告警同步到 Flashduty On-call。每个告警对象（例如某个虚拟主机下的某个队列）对应一条 Flashduty 告警：告警触发时创建，告警持续期间的提醒推送合并到同一条告警，告警恢复时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **CloudAMQP**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **CloudAMQP**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 CloudAMQP 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 收件人">
+
+1. 登录 CloudAMQP 控制台，打开需要接入的实例
+2. 进入 **Alarms**，在收件人（Recipients）中添加一个类型为 **Webhook** 的收件人
+3. 将 Flashduty 集成的完整推送地址粘贴到 URL，地址中需包含 `integration_key`
+
+</Step>
+
+<Step title="为告警指定收件人">
+
+CloudAMQP 的告警只会发给已指定的收件人。在 **Alarms** 中新建或编辑需要值班处理的告警（如队列、消费者、CPU、内存、磁盘、连接数、服务器不可达），把上一步的 Webhook 收件人加入其 **Recipients**。部分告警类型只在专用（dedicated）实例上提供，以控制台可选项为准。
+
+如需持续提醒，可在告警上设置 **Reminder interval**（最小 30 秒）。每次提醒都会推送一条同一告警的事件，Flashduty 将其合并到同一条告警中。
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 在收件人上点击 **Test** 按钮，Flashduty 会创建一条 Info 级别的测试告警，标题为 `CloudAMQP test notification`，它不会自动恢复，验证后请手动关闭。收件人上的 **Resolve** 测试按钮同样只会创建一条独立的 Info 测试告警
+2. 让一个告警真实触发（例如给某个队列设置较低的消息数阈值并发布消息），确认 Flashduty 收到活动告警
+3. 告警恢复后，确认 Flashduty 中对应的告警恢复
+
+</Step>
+</Steps>
+
+## 事件类型
+---
+
+CloudAMQP 每次推送一个告警对象，请求体为 JSON。
+
+| 推送内容 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| `resolved` 为 `false` | 触发告警；同一告警的提醒推送更新该告警 |
+| `resolved` 为 `true` | 恢复告警 |
+| 收件人 Test 按钮（`dedup_key` 为 `test::recipient test`） | 创建一条独立的 Info 告警，不会恢复 |
+
+CloudAMQP 在 Webhook 返回非 2xx 时会重试，重复的推送使用同一个 Alert Key，会合并到同一条告警。
+
+## Alert Key
+---
+
+Flashduty 使用 `dedup_key` 计算 Alert Key。`dedup_key` 由告警类型和对象组成，例如队列告警为 `queue::<vhost>/<queue>`，同一个对象的触发、提醒和恢复推送使用相同的值。阈值、时间阈值、当前值、主题等字段变化不会改变 Alert Key，缺少 `dedup_key` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+CloudAMQP 的推送不携带等级，所有告警类型在 Flashduty 中都是 Warning，`resolved` 为 `true` 时恢复。如需区分严重程度，可在 Flashduty 的协作空间中按标签（例如 `alarm_type`）配置路由或告警处理规则调整等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `alarm_type` / `check` | 告警类型（`type`），如 `queue`、`consumer`、`cpu`、`memory`、`disk`、`connection`、`netsplit` |
+| `service` | 实例名称（`appname`） |
+| `host` | 实例主机名（`hostname`） |
+| `resource` | 告警对象（`subject`），如 `<vhost>/<queue>` |
+| `vhost` / `queue` | 虚拟主机和队列 |
+| `dedup_key` | 告警去重键 |
+| `threshold` / `time_until_fire` | 告警配置的值阈值和时间阈值（秒） |
+| `data_*` | 推送中 `data` 对象的字段，如 `data_value`、`data_name`、`data_type` |
+
+## 排查问题
+---
+
+- **Flashduty 没有收到推送**：确认 Webhook 收件人已加入对应告警的 Recipients，并检查告警列表中收件人的状态列是否报错
+- **返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **告警没有恢复**：确认恢复推送已到达。告警持续 30 天后 CloudAMQP 会重置该告警，之后可能重新触发；也可以在协作空间中开启告警自动关闭作为兜底
+- **测试告警没有关闭**：Test 按钮的推送不会恢复，需手动关闭
+
+更多字段含义请参阅 [CloudAMQP 告警文档](https://www.cloudamqp.com/docs/cloudamqp_alarms.html)。

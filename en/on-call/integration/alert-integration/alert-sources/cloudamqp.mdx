@@ -1,0 +1,106 @@
+---
+title: "CloudAMQP alert integration"
+description: "Send CloudAMQP instance alarms (queue depth, consumers, CPU, memory, disk, connections, and more) to Flashduty On-call through a webhook recipient."
+keywords: ["alert integration", "CloudAMQP", "webhook", "RabbitMQ", "LavinMQ", "message queue"]
+---
+
+Use a webhook recipient of CloudAMQP alarms to send instance alarms to Flashduty On-call. Each alarm subject (for example, one queue in one vhost) maps to one Flashduty alert: it is created when the alarm fires, reminders while the alarm stays active merge into the same alert, and the alert recovers when the alarm resolves.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **CloudAMQP** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **CloudAMQP** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In CloudAMQP
+---
+
+<Steps>
+<Step title="Add a webhook recipient">
+
+1. Sign in to the CloudAMQP console and open the instance you want to connect
+2. Go to **Alarms** and add a recipient of type **Webhook**
+3. Paste the full Flashduty push URL as the URL. The URL must include `integration_key`
+
+</Step>
+
+<Step title="Assign the recipient to alarms">
+
+CloudAMQP sends an alarm only to the recipients assigned to it. In **Alarms**, create or edit each alarm you want on-call to handle (queue, consumer, CPU, memory, disk, connection, server unreachable) and add the webhook recipient to its **Recipients**. Some alarm types are only available on dedicated instances; what the console offers is authoritative.
+
+To get repeated reminders, set a **Reminder interval** on the alarm (minimum 30 seconds). Each reminder pushes another event for the same alarm, and Flashduty merges it into the same alert.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. Click the **Test** button on the recipient. Flashduty creates an Info alert titled `CloudAMQP test notification`. It does not recover automatically, so close it by hand. The recipient's **Resolve** test button likewise only creates a separate Info test alert
+2. Fire a real alarm (for example, set a low message threshold on a queue and publish messages) and confirm Flashduty receives an active alert
+3. After the alarm resolves, confirm the alert recovers in Flashduty
+
+</Step>
+</Steps>
+
+## Event types
+---
+
+CloudAMQP pushes one alarm subject per request, as JSON.
+
+| Push | Effect in Flashduty |
+| :--- | :--- |
+| `resolved` is `false` | Triggers the alert; reminder pushes for the same alarm update it |
+| `resolved` is `true` | Recovers the alert |
+| Recipient Test button (`dedup_key` is `test::recipient test`) | Creates a separate Info alert that never recovers |
+
+CloudAMQP retries when the webhook returns a non-2xx status. Duplicate pushes carry the same Alert Key and merge into one alert.
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from `dedup_key`. It combines the alarm type and its subject (for a queue alarm, `queue::<vhost>/<queue>`), and the trigger, reminder, and resolve pushes of one subject carry the same value. Changes to the threshold, time threshold, current value, or subject text do not change the Alert Key. A request without `dedup_key` is rejected.
+
+## Status and severity
+---
+
+CloudAMQP pushes carry no severity, so every alarm type is Warning in Flashduty, and `resolved: true` recovers the alert. To distinguish severity, use a label such as `alarm_type` in the channel's routing or alert processing rules.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `alarm_type` / `check` | Alarm type (`type`), such as `queue`, `consumer`, `cpu`, `memory`, `disk`, `connection`, `netsplit` |
+| `service` | Instance name (`appname`) |
+| `host` | Instance hostname (`hostname`) |
+| `resource` | Alarm subject (`subject`), such as `<vhost>/<queue>` |
+| `vhost` / `queue` | Virtual host and queue |
+| `dedup_key` | The alarm's dedup key |
+| `threshold` / `time_until_fire` | The alarm's value threshold and time threshold (seconds) |
+| `data_*` | Fields of the `data` object, such as `data_value`, `data_name`, `data_type` |
+
+## Troubleshooting
+---
+
+- **Flashduty receives nothing**: confirm the webhook recipient is added to the alarm's Recipients, and check the recipient's status column in the alarms list for errors
+- **Invalid parameter error**: confirm the URL is complete and includes `integration_key`
+- **Alert does not recover**: confirm the resolve push was delivered. CloudAMQP resets an alarm that has been active for 30 days, after which it may fire again; you can also enable auto-close on the channel as a fallback
+- **Test alert stays open**: the Test button push never recovers; close it by hand
+
+For field details, see the [CloudAMQP alarms documentation](https://www.cloudamqp.com/docs/cloudamqp_alarms.html).
