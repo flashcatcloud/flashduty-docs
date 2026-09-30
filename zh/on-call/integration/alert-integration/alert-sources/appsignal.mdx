@@ -1,0 +1,132 @@
+---
+title: "AppSignal 告警集成"
+description: "通过 Webhook 通知器将 AppSignal 的异常事件、性能事件和异常检测告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "AppSignal", "Webhook", "APM", "异常检测", "错误监控"]
+---
+
+通过 AppSignal 的 Webhook 通知器，将异常事件（Exception）、性能事件（Performance）和异常检测告警（Anomaly detection alert）同步到 Flashduty On-call。三类事件的处理方式不同：
+
+- **异常检测告警**：告警打开时触发，被解决（resolved）时恢复。
+- **异常事件和性能事件**：AppSignal 只在事件创建、重新打开或再次发生时发送，没有恢复通知，因此告警不会自动恢复。请在协作空间中开启超时自动关闭，见下文 [异常和性能事件不会恢复](#异常和性能事件不会恢复)。
+- **部署标记（Deploy marker）**：不是告警，Flashduty 收到后直接返回成功，不创建告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **AppSignal**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **AppSignal**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 AppSignal 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 通知器">
+
+1. 登录 AppSignal，进入组织的 **Notifications** 页面（管理通知器需要组织管理员权限）
+2. 点击 **Add new notifier**，在列表中选择 **Webhook**
+3. 将 Flashduty 集成的完整推送地址粘贴到 URL，地址中需包含 `integration_key`
+4. 在配置表单中勾选要推送的 payload 类型：异常事件、性能事件、异常检测告警。部署标记不会创建告警，无需勾选
+
+AppSignal 会在每个请求中附带 `X-Appsignal-Signature` 请求头，Flashduty 不校验该签名，通过推送地址中的 `integration_key` 认证。
+
+</Step>
+
+<Step title="选择通知器的触发范围">
+
+Webhook 通知器创建后，还需要在以下位置选中它，AppSignal 才会向它发送通知：
+
+- **异常检测告警**：在对应的触发器（Trigger）上选择该通知器。AppSignal 只把告警发送给触发器上选中的通知器
+- **异常和性能事件**：在应用的通知设置中选择该通知器，并按需调整通知频率（Every Occurrence、First in Deploy、First After Close 等）
+
+</Step>
+
+<Step title="验证">
+
+1. 在 AppSignal 中让一个触发器进入告警状态，或在应用中触发一个新的异常，确认 Flashduty 收到活动告警
+2. 异常检测告警解决后，确认 Flashduty 中对应的告警恢复
+
+AppSignal 文档没有描述 Webhook 通知器的测试推送按钮，请用真实事件验证。
+
+</Step>
+</Steps>
+
+## 事件和恢复
+---
+
+| AppSignal payload | 触发条件 | 在 Flashduty 中的效果 |
+| :--- | :--- | :--- |
+| 异常检测告警，`state` 为 `open` | 触发器的阈值条件成立并度过预热期 | 触发告警 |
+| 异常检测告警，`state` 为 `resolved`、`closed` 或 `ended`，或带有 `resolved_at`、`closed_at` | 告警被解决 | 恢复告警 |
+| 异常事件（`exception`） | 新异常出现、已关闭的异常再次发生，或按通知频率再次发生 | 触发或更新该事件的告警 |
+| 性能事件（`performance`） | 新的慢请求事件出现或再次发生 | 触发或更新该事件的告警 |
+| 部署标记（`marker`） | 有新的部署 | 忽略 |
+
+AppSignal 只在异常检测告警打开和解决这两次状态变化时通知 Webhook，预热（warming up）和冷却（cooldown）阶段不会推送。
+
+## Alert Key
+---
+
+Flashduty 按事件的对象生成 Alert Key，同一对象的多次推送使用同一个 Alert Key：
+
+| 对象 | 使用的字段 |
+| :--- | :--- |
+| 异常检测告警 | `alert_id` |
+| 异常事件、性能事件 | `site`、`environment` 和 `number`（事件编号） |
+
+异常事件和性能事件共用同一套事件编号，Alert Key 由对象类型和上表字段共同计算。触发器名称、当前值、时间、异常消息、版本号等字段变化不会改变 Alert Key。缺少对应字段的推送会被拒绝，并在错误信息中指出字段名。
+
+## 告警等级
+---
+
+AppSignal 的 payload 不携带等级，所有告警在 Flashduty 中都是 Warning，恢复时状态变为已恢复。如需区分等级，可在集成的路由或告警处理规则中按标签设置。
+
+## 异常和性能事件不会恢复
+---
+
+异常事件和性能事件没有恢复通知。在接收该集成的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时，并按团队处理异常的时效调整。同一事件再次发生时会更新同一条告警；告警被关闭后再次发生，会创建新的告警。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `appsignal` |
+| `resource` / `env` | 应用名称（`site`）和环境 |
+| `check` | 告警标题：触发器名称、异常类与消息，或慢请求的动作 |
+| `alert_id` / `state` | 异常检测告警的 ID 和状态 |
+| `metric_name` | 触发器监控的指标名称 |
+| `tags` | 告警作用范围的标签，逗号分隔 |
+| `last_value` / `threshold` | 当前值和阈值，如 `12 %`、`> 5 %` |
+| `incident_number` | 事件编号 |
+| `error_class` | 异常类名 |
+| `namespace` / `action` / `path` / `host` | 事件所在的命名空间、动作、请求路径和主机 |
+| `duration_ms` | 性能事件的耗时，毫秒 |
+| `revision` | 部署版本 |
+| `url` | AppSignal 中对应告警或事件页面的链接 |
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **没有收到任何推送**：确认 Webhook 通知器已在触发器（告警）或应用通知设置（事件）中选中，并且勾选了对应的 payload 类型
+- **异常事件没有再次推送**：AppSignal 按事件的通知频率发送，设置为 Never Notify 的事件不会推送，也不会重新打开
+- **告警一直不恢复**：异常和性能事件没有恢复通知，见上文超时自动关闭；异常检测告警需要 AppSignal 端已解决
+
+更多字段含义请参阅 [AppSignal Webhooks](https://docs.appsignal.com/application/integrations/webhooks) 和 [异常检测](https://docs.appsignal.com/anomaly-detection)。
