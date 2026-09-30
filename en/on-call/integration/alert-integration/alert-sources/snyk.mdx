@@ -1,0 +1,125 @@
+---
+title: "Snyk alert integration"
+description: "Send Snyk open source and container issues, new and removed, to Flashduty On-call through a Snyk webhook."
+keywords: ["alert integration", "Snyk", "webhook", "vulnerability", "security alerts", "SCA"]
+---
+
+Use a Snyk webhook to send vulnerabilities found in project scans to Flashduty On-call. Snyk sends one `project_snapshot/v0` event every time it retests a project: each issue in `newIssues` opens a Flashduty alert, and each issue in `removedIssues` recovers its alert.
+
+Snyk webhooks currently cover Open Source and Container scans. The Webhooks API is in beta and is available only in the Snyk US-01, US-02, EU-01, and AU-01 regions.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. Open the Flashduty console, choose **Channels**, and open a channel
+2. Choose **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Choose **Snyk** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. Open the Flashduty console and choose **Integration Center → Alert events**
+2. Choose **Snyk** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Snyk
+---
+
+Snyk webhooks can only be created through the API; the Snyk web console has no entry for them.
+
+<Steps>
+<Step title="Prepare Snyk credentials">
+
+You need your Snyk organization ID and an API token. A webhook belongs to an organization, so the token must have access to that organization.
+
+</Step>
+
+<Step title="Create the webhook">
+
+Call the [Create a webhook](https://docs.snyk.io/developer-tools/snyk-api/reference/webhooks-v1) API. Set `url` to the full Flashduty push URL (Snyk accepts HTTPS URLs only) and `secret` to a random string only you know:
+
+```bash
+curl -X POST "https://api.snyk.io/v1/org/<ORG_ID>/webhooks" \
+  -H "Authorization: token <SNYK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "<Flashduty push URL>", "secret": "<random string>"}'
+```
+
+The response `id` is the webhook ID, which you need for testing and deleting the webhook.
+
+</Step>
+
+<Step title="Send a test">
+
+Snyk sends a `ping/v0` event right after the webhook is created. You can send it again with the ping API:
+
+```bash
+curl -X POST "https://api.snyk.io/v1/org/<ORG_ID>/webhooks/<WEBHOOK_ID>/ping" \
+  -H "Authorization: token <SNYK_TOKEN>"
+```
+
+The test event opens a separate Info alert in Flashduty titled `Snyk test notification`. It is not linked to any real issue and no recovery follows, so close it by hand once you have seen it arrive.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Wait for (or trigger) a project retest and confirm that a new issue opens an alert in Flashduty. Fix the issue, for example by upgrading the dependency, retest, and confirm that the alert recovers.
+
+</Step>
+</Steps>
+
+## About the signature
+---
+
+Snyk signs each request in the `X-Hub-Signature` header (`sha256=<hex HMAC digest>`, keyed with the `secret` you set when creating the webhook). Flashduty does not verify it, so `secret` can be any random string. The `integration_key` in the push URL is the only credential; keep it private.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the **project ID (`project.id`) plus the issue ID (`id`)**: one alert per issue per project. Issues in `newIssues` and `removedIssues` share the same shape and `id`, so an issue appearing and disappearing land on the same alert.
+
+Changes to the project name, branch, or severity do not change the Alert Key. An issue that repeats for several dependency paths of one project produces a single alert. The same issue in two projects is two alerts.
+
+## Status and severity
+---
+
+| Source | Flashduty behavior |
+| :--- | :--- |
+| `newIssues` in `project_snapshot/v0` | One alert per issue |
+| `removedIssues` in `project_snapshot/v0` | Recovers the matching alert and keeps its severity |
+| `project_snapshot/v0` with both lists empty | Success response, no alert |
+| `ping/v0` | A separate Info alert, close it by hand |
+| Other event types | Success response, no alert |
+
+| Snyk `issueData.severity` | Flashduty severity |
+| :--- | :--- |
+| `critical`, `high` | Critical |
+| `medium` | Warning |
+| `low` | Info |
+| Empty or other | Warning |
+
+Flashduty acts only on issues listed in `newIssues` and `removedIssues`. The Snyk docs do not say whether ignoring an issue lists it in `removedIssues`. Turn on [auto-close on timeout](/en/on-call/channel/create-edit) for the channel as a safety net so alerts do not stay open indefinitely.
+
+One request processes at most the first 100 issues of `newIssues` and of `removedIssues` (sorted by issue ID); issues beyond that create no alert.
+
+Alert labels include the project ID and name, project type, branch, organization, issue ID, package name and versions, CVE, CWE, CVSS score, and the fixed-in version. The importing user's name and email are not written to the alert.
+
+## Troubleshooting
+---
+
+- **The create call returns an error**: check that `url` is HTTPS, the token has access to the organization, and the organization is in a region where Snyk webhooks are available
+- **No alerts arrive**: Snyk sends an event only when a project is retested and it is not sent when a project is first imported. Make sure the project's scan type is Open Source or Container
+- **An alert does not recover**: only issues listed in `removedIssues` recover their alerts
+- **A test alert appeared**: it comes from the `ping/v0` event. Close it by hand
+
+For more information, see the Snyk docs [Webhook events and payloads](https://docs.snyk.io/developer-tools/snyk-api/using-specific-snyk-apis/webhooks-apis/webhooks) and [About webhooks](https://docs.snyk.io/developer-tools/snyk-api/using-specific-snyk-apis/webhooks-apis/about-webhooks).
