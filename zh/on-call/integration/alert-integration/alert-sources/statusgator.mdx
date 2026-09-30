@@ -1,0 +1,132 @@
+---
+title: "StatusGator 告警集成"
+description: "通过 Webhook 集成将 StatusGator 监控的第三方服务状态变化和早期预警同步到 Flashduty On-call。"
+keywords: ["告警集成", "StatusGator", "状态页监控", "Webhook", "StatusChange", "EarlyWarningSignal"]
+---
+
+通过 StatusGator 的 Webhook 集成（webhook version 3.0），把监控（Monitor）的状态变化同步到 Flashduty On-call。StatusGator 会发送两类通知：`StatusChange`（监控状态变化）和 `EarlyWarningSignal`（早期预警，服务尚未确认故障）。每个 StatusGator 监控对应一条告警：监控变为 down、warn 或 maintenance 时触发，变回 up 时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **StatusGator**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **StatusGator**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 StatusGator 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 登录 StatusGator，在页面顶部进入 **Integrations**
+2. 选择 **Webhooks**，点击 **Add**
+3. 将 Flashduty 集成的完整推送地址粘贴为 Webhook URL，点击 **Save**
+
+新建的 Webhook 集成默认使用 3.0 版本。2025 年 6 月之前创建的 Webhook 集成可能仍在使用已弃用的 2.0 版本，其请求体格式不同，Flashduty 不解析，请删除后重新添加。
+
+</Step>
+
+<Step title="发送测试通知并验证">
+
+保存后在集成页面发送测试通知，确认 Flashduty 收到请求。真实的状态变化取决于被监控服务自身的故障，无法按需触发。Webhook 的每次投递（请求体、响应码、错误）都记录在集成设置的 **Logs** 标签页。
+
+</Step>
+</Steps>
+
+Webhook 集成在 Business 和 Education 的所有套餐（包括 Free）中可用。StatusGator 连续 5 次收不到 200 响应会停用该 Webhook，请到 **Integrations** 页面修正地址后重新启用。
+
+## 推送内容
+---
+
+StatusGator 以 JSON 格式 POST 事件，请求体固定，不可自定义，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `type` | `StatusChange` 或 `EarlyWarningSignal` | 决定处理方式，标签 `event_type` |
+| `monitor.id` | 监控 ID | Alert Key，标签 `monitor_id` |
+| `monitor.display_name` | 监控名称（缺失时使用 `service.name`） | 告警标题，标签 `monitor_name` |
+| `monitor.type` / `monitor.url` / `monitor.host` | 监控类型（`ServiceMonitor`、`WebsiteMonitor`、`PingMonitor`）、网站地址、Ping 主机 | 标签 `monitor_type`、`monitor_url`、`monitor_host` |
+| `service.id` / `service.name` / `service.slug` / `service.status_page_url` | 被监控服务及其官方状态页 | 标签 `service_id`、`service_name`、`service_slug`、`status_page_url` |
+| `board.id` / `board.name` | 监控所属的看板 | 标签 `board_id`、`board_name` |
+| `status` / `previous_status` | 变化后和变化前的状态 | 决定告警等级或恢复，标签 `status`、`previous_status` |
+| `message` / `details` | 服务方给出的故障摘要和详细描述 | 摘要写入标题，两者写入描述 |
+| `component_status_changes[]` | 组件级状态变化（分组、名称、前后状态） | 按名称排序写入描述 |
+| `summary` | 早期预警的摘要（仅 `EarlyWarningSignal`） | 写入描述 |
+
+告警标题为 `<监控名称>: <message>`；`message` 为空时为 `<监控名称> is <status>`。
+
+## Alert Key
+---
+
+`StatusChange` 使用 `monitor.id` 作为 Alert Key。StatusGator 的请求体没有事件或故障 ID，监控是唯一稳定的业务对象：同一个监控的 down、warn、up 通知落在同一条告警上，不同监控生成不同的告警。修改消息、组件、名称或时间不会改变 Alert Key。
+
+`EarlyWarningSignal` 使用由固定前缀和 `monitor.id` 计算的独立 Alert Key，不会与该监控的状态告警合并；同一个监控重复的早期预警会合并为一条告警。
+
+请求中缺少 `monitor.id` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+| StatusGator `status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `down` | Critical |
+| `warn` | Warning |
+| `maintenance` | Info |
+| `up` | 恢复，原等级取自 `previous_status` 对应的等级；`previous_status` 缺失或不是 down、warn、maintenance 时为 Warning |
+| `EarlyWarningSignal` | Warning |
+
+`type` 或 `status` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 早期预警不会自动恢复
+---
+
+`EarlyWarningSignal` 是单次通知，StatusGator 不会发送对应的恢复事件，Flashduty 也不会在服务恢复时关闭它。请开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)，建议设置为 **1 小时**。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="测试通知会创建告警吗？">
+
+StatusGator 官方文档没有说明测试通知的内容，Flashduty 不对它做特殊处理。如果测试通知带有 `type` 和 `monitor.id`，会被当作一次普通通知创建告警，请手动关闭；缺少这些字段时 Flashduty 返回参数错误，StatusGator 会显示投递失败，这不影响真实通知。
+
+</Accordion>
+
+<Accordion title="监控恢复后告警没有关闭怎么办？">
+
+确认恢复时仍使用同一个 Webhook 集成，并在 StatusGator 的 **Logs** 标签页中检查 `status` 为 `up` 的投递是否返回 200。恢复通知与故障通知的 `monitor.id` 必须相同。
+
+</Accordion>
+
+<Accordion title="StatusGator 会重试失败的投递吗？">
+
+会。非连接类失败最多重试 20 次，历时约 24 天，间隔从几秒增长到超过一天，之后丢弃。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **StatusGator 显示投递失败或停用了 Webhook**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求是 3.0 版本的 JSON 通知，且 `type`、`monitor.id`、`status` 符合上文要求
+- **收到的告警重复或无法恢复**：检查是否同时保留了旧的 2.0 版本 Webhook
+
+字段说明请参阅 StatusGator 官方文档 [Webhook version 3.0](https://support.statusgator.com/support/solutions/articles/47001278989-webhook-version-3-0)。
