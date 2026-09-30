@@ -134,6 +134,7 @@ export const docMap = {
   Firefly: `${alertBase}/firefly.mdx`,
   Hackerone: `${alertBase}/hackerone.mdx`,
   Kuvasz: `${alertBase}/kuvasz.mdx`,
+  Falco: `${alertBase}/falco.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
   Instatus: `${alertBase}/instatus.mdx`,
