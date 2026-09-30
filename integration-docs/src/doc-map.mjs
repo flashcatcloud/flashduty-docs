@@ -84,6 +84,7 @@ export const docMap = {
   Netbeez: `${alertBase}/netbeez.mdx`,
   Apimetrics: `${alertBase}/apimetrics.mdx`,
   Gatus: `${alertBase}/gatus.mdx`,
+  Hyperping: `${alertBase}/hyperping.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,
   Xitoring: `${alertBase}/xitoring.mdx`,
   Odown: `${alertBase}/odown.mdx`,
