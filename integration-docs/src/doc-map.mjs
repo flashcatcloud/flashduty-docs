@@ -81,6 +81,7 @@ export const docMap = {
   Uptimeobserver: `${alertBase}/uptimeobserver.mdx`,
   Gitguardian: `${alertBase}/gitguardian.mdx`,
   Dash0: `${alertBase}/dash0.mdx`,
+  ProjectDiscovery: `${alertBase}/projectdiscovery.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
   HostedGraphite: `${alertBase}/hosted-graphite.mdx`,
   Netbeez: `${alertBase}/netbeez.mdx`,
