@@ -203,6 +203,7 @@ export const docMap = {
   AwxChange: `${integrationBase}/change-integration/awx.mdx`,
   ScalrChange: `${integrationBase}/change-integration/scalr.mdx`,
   GrowthbookChange: `${integrationBase}/change-integration/growthbook.mdx`,
+  FluxcdChange: `${integrationBase}/change-integration/fluxcd.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
