@@ -1,10 +1,12 @@
 ---
 title: "Domotz alert integration"
-description: "Send Domotz device and collector status, TCP service, latency, and other events to Flashduty On-call through a Shared Alert webhook contact channel."
+description: "Send Domotz Alert Rule notifications for device and collector status, TCP services, latency, and more to Flashduty On-call through a webhook contact channel."
 keywords: ["alert integration", "Domotz", "webhook", "network monitoring", "MSP"]
 ---
 
-Use a Domotz webhook contact channel and a Shared Alert to send collector and device events to Flashduty On-call. Device up/down, collector up/down, TCP service status, round-trip delay (RTD), and speed test events carry a recovery state, so Flashduty links them with one Alert Key: the problem creates an alert and the recovery closes it. Other events (heartbeat lost, SNMP change, IP or configuration change, security issue, WAN/LAN change) each become a separate alert.
+Use a Domotz webhook contact channel and an Alert Rule to send collector and device alerts to Flashduty On-call. Every Alert Rule notification carries a Problem or Resolved state and an `alert_id`, so Flashduty links them with one Alert Key: the problem creates an alert and the recovery closes it.
+
+Alert profiles bound through the Domotz Public API deliver named events instead (device up/down, TCP service, RTD, heartbeat lost, SNMP, and so on); those are covered under [Events from Public API alert profiles](#events-from-public-api-alert-profiles).
 
 <div className="hide">
 
@@ -32,51 +34,68 @@ You can obtain an integration push URL in either of the following ways.
 ## Configure in Domotz
 ---
 
-You need permission in the Domotz portal to create contact channels and Shared Alerts.
+You need permission in the Domotz portal to create contact channels and Alert Rules.
 
 <Steps>
 <Step title="Create a webhook contact channel">
 
-1. In the Domotz portal sidebar, open **Alerts** and select **Contact Channels & Ticketing Systems**
-2. Create a webhook channel, enter a name, and paste the full Flashduty push URL as the webhook address. The URL must include `integration_key`
-3. Save the channel
+1. In the Domotz portal sidebar, open **Alerts** and select the **Contact Channels & Ticketing Systems** tab
+2. Scroll to the **Webhooks** section and click **Add Webhook**
+3. Enter a **Name**, paste the full Flashduty push URL into **Add webhook address**, and click **Add**. The URL must include `integration_key`
 
 </Step>
 
-<Step title="Create a Shared Alert and choose events">
+<Step title="Create an Alert Rule that uses the channel">
 
-1. Under **Alerts**, create a Shared Alert and select the webhook channel from the previous step as its notification channel
-2. Select the events to send. Flashduty supports Device Goes Up/Down, Heartbeat Lost, IP Change, Configuration Change, Configuration Misalignment, SNMP, TCP, RTD, plus collector up/down, speed test, security issue, and WAN/LAN change
-3. Save
+1. Open the **Alert Rules** tab and click **Add Alert Rule**
+2. Enter an **Alert Name**, then choose the **Entity** (Collector or Device) and the **Datapoint** to watch, for example Connectivity → Device Status
+3. Choose the **Condition** and the **Severity** (Critical, High, Warning, Info, or No Severity)
+4. Under **Notification Channels**, click **Add Channels**, tick the webhook from the previous step, and click **Set 1 Channels**
+5. Click **Save**
 
 </Step>
 
-<Step title="Apply it to devices or a collector">
+<Step title="Apply the rule">
 
-Apply the Shared Alert to the devices to monitor, or to a collector to cover every device behind it. You can also bind it with the alert-profile binding endpoints of the Domotz Public API.
+A new rule is not applied to anything yet (**Applied To** shows `-`). Open a device, choose **Alerts**, expand the datapoint, and tick the rule. **Applied To** then shows the number of linked devices.
 
 </Step>
 </Steps>
 
-<Warning>
-Domotz documents no test notification button, so verify with a real event: for example, disconnect a device, and an active alert should appear in Flashduty; when the device returns, the alert recovers.
-</Warning>
+<Note>
+In the **Alert Rules** list, **Send Test** next to a rule opens the **Send Test Notification** dialog. Tick the webhook and click **Send Test Alert**. Flashduty opens one separate Info alert titled `Domotz test notification` for each test. It never recovers, so close it manually.
+</Note>
 
 <Warning>
-Heartbeat lost, SNMP, IP change, configuration change, security issue, and WAN/LAN change events have no recovery notification. Turn on [auto-close](/en/on-call/channel/create-edit) in the channel that receives them, with a suggested duration of 24 hours.
+Heartbeat lost, SNMP, IP change, configuration change, security issue, and WAN/LAN change events from Public API alert profiles have no recovery notification. Turn on [auto-close](/en/on-call/channel/create-edit) in the channel that receives them, with a suggested duration of 24 hours.
 </Warning>
 
 ## Alert Key
 ---
 
-Flashduty builds the Alert Key from the event name, `agent_id` (collector ID), and `device_id` (device ID), plus the port for TCP services. The fields are joined with a non-printing separator and hashed with MD5. These identifiers come from the webhook event schemas in the Domotz Public API definition. Changes to device name, state value, or time do not change the Alert Key.
+For an Alert Rule notification (`monitoring_profile_state_changed`), Flashduty builds the Alert Key from the event name and `alert_id`. The Problem and the Resolved notification of one occurrence carry the same `alert_id`, so the alert closes when the state becomes Resolved. The next occurrence gets a new `alert_id` and opens a new alert. A notification without `alert_id`, or with a state other than Problem or Resolved, is rejected.
+
+## State and severity
+---
+
+| Alert Rule severity | Flashduty severity |
+| :--- | :--- |
+| Critical, High | Critical |
+| Warning | Warning |
+| Info, No Severity | Info |
+
+`data.state.current` decides the state: `Problem` triggers the alert and `Resolved` recovers it.
+
+## Events from Public API alert profiles
+---
+
+Alert profiles bound through the alert-profile endpoints of the Domotz Public API deliver the events below. Flashduty builds the Alert Key from the event name, `agent_id` (collector ID), and `device_id` (device ID), plus the port for TCP services. The fields are joined with a non-printing separator and hashed with MD5. These identifiers come from the webhook event schemas in the Domotz Public API definition. Changes to device name, state value, or time do not change the Alert Key.
 
 - Events with a recovery state (`agent_status`, `device_status`, `device_tcp`, `device_rtd`, `agent_speed_test`) use the same Alert Key for the problem and the recovery
 - Events without a recovery state add the event timestamp to the Alert Key, so each notification is a separate alert
 - A notification without `agent_id`, or a device event without `device_id`, is rejected
 
-## State and severity
----
+### State and severity by event
 
 | Domotz event | Severity when failing | Recovers when |
 | :--- | :--- | :--- |
@@ -88,27 +107,29 @@ Flashduty builds the Alert Key from the event name, `agent_id` (collector ID), a
 | `device_heartbeat_lost`, `device_snmp`, `device_configuration_misalignment`, `agent_security_issue` | Warning | no recovery |
 | `device_ip_change`, `device_configuration_change`, `agent_wan_change`, `agent_lan_change` | Info | no recovery |
 
-One `device_tcp` notification can list several ports. Flashduty creates one event per port, in ascending port order, and processes at most 50. Device discovery, feature discovery, MIB discovery, and `monitoring_profile_state_changed` (Domotz does not document its recovery state values) are accepted but create no alert. A state value outside the table returns a parameter error.
+One `device_tcp` notification can list several ports. Flashduty creates one event per port, in ascending port order, and processes at most 50. Device discovery, feature discovery, and MIB discovery are accepted but create no alert. A state value outside the table returns a parameter error.
 
 ## Labels
 ---
 
 | Label | Source |
 | :--- | :--- |
-| `check` | Event name `name` |
+| `check` | Event name `name`; for an Alert Rule, the datapoint (`metric`, for example `device_status`) |
+| `rule` | Alert Rule name |
+| `alert_id` | Alert Rule notification ID |
 | `resource` | Device name; collector name for collector-level events |
 | `agent_id` / `agent_name` | Collector ID and name |
 | `device_id` / `device_name` | Device ID and name |
-| `value` | State value (`UP`, `DOWN`, or the latency state) |
+| `value` | State value (`UP`, `DOWN`, or the latency state); for an Alert Rule, `data.value.current` |
 | `port` | TCP service port |
 | `trigger_name` | SNMP trigger name |
 
 ## Troubleshooting
 ---
 
-- **No alerts arrive**: confirm the Shared Alert has the events selected, is applied to the devices or collector, and uses this webhook channel
+- **No alerts arrive**: confirm the Alert Rule is applied to a device or collector (**Applied To** is not `-`) and lists this webhook channel under **Notification Channels**
 - **An alert does not recover**: only the events with a recovery condition in the table recover on their own; rely on auto-close for the rest
-- **Flashduty returns a parameter error**: the notification lacks `agent_id` or `device_id`, or carries an unsupported state value
+- **Flashduty returns a parameter error**: an Alert Rule notification lacks `alert_id` or has an unsupported state, or an event from a Public API alert profile lacks `agent_id` / `device_id`
 - **The webhook channel sends nothing**: confirm the push URL is complete and uses HTTPS
 
 For field details, see the [Domotz Public API](https://portal.domotz.com/developers/) and [Shared Alerts, Webhooks and Ticketing Systems](https://help.domotz.com/admin-global-features/shared-alerts-webhooks-ticketing-systems/).
