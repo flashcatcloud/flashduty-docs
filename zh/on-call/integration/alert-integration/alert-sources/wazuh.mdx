@@ -1,0 +1,130 @@
+---
+title: "Wazuh 告警集成"
+description: "通过 Wazuh 管理节点内置的 Shuffle 集成，将 Wazuh 告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Wazuh", "SIEM", "XDR", "安全告警", "Shuffle", "integratord"]
+---
+
+Wazuh 管理节点的 Integrator 模块（integratord）内置 `shuffle` 集成：它把每条 Wazuh 告警以 JSON 格式 POST 到配置的 `hook_url`，不需要认证请求头。将 `hook_url` 设置为 Flashduty 的推送地址，即可把 Wazuh 告警同步到 Flashduty On-call，每条 Wazuh 告警对应一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Wazuh**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Wazuh**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Wazuh 中配置
+---
+
+Integrator 模块只在 Wazuh 管理节点（manager）上运行，配置文件为 `/var/ossec/etc/ossec.conf`，需要管理节点的 root 权限。
+
+<Steps>
+<Step title="添加 shuffle 集成">
+
+在 `ossec.conf` 的 `<ossec_config>` 中加入以下配置，将 `hook_url` 替换为 Flashduty 推送地址：
+
+```xml
+<integration>
+  <name>shuffle</name>
+  <hook_url>https://api.flashcat.cloud/event/push/alert/wazuh?integration_key=YOUR_INTEGRATION_KEY</hook_url>
+  <level>7</level>
+  <alert_format>json</alert_format>
+</integration>
+```
+
+- `<alert_format>json</alert_format>` 必须配置，Flashduty 只解析 JSON 格式的告警
+- `<level>` 只转发规则等级大于等于该值的告警。建议按 SOC 的处理能力设置，例如 `7` 或 `10`；也可以用 `<rule_id>`（规则 ID，逗号分隔）、`<group>`（规则组）和 `<event_location>`（日志来源）进一步过滤
+- 不要配置 `<api_key>`，Flashduty 通过地址中的 `integration_key` 认证
+- 不要用 `<options>` 覆盖 `id` 字段，Flashduty 用它区分每条告警
+
+</Step>
+
+<Step title="重启管理节点">
+
+```bash
+systemctl restart wazuh-manager
+```
+
+Docker 部署时重启 manager 容器。
+
+</Step>
+
+<Step title="触发并验证">
+
+1. 在被监控主机上触发一条不低于 `<level>` 的告警，例如对 SSH 服务连续输入错误密码（规则 5763，等级 10）
+2. 在 Flashduty 中确认收到告警
+3. 没有收到时查看管理节点的 `/var/ossec/logs/integrations.log` 和 `/var/ossec/logs/ossec.log`
+
+Wazuh 没有“发送测试通知”功能。shuffle 脚本会跳过 5710、86001-86003、87900-87904、87924、87928、87929、87932、80710 这几条规则的告警（它们由 Docker 和 SSH 探测触发，用于避免 Shuffle 自身的循环告警），验证时不要选这些规则。
+
+</Step>
+</Steps>
+
+## 事件与恢复
+---
+
+Wazuh 每生成一条告警只推送一次，不会推送更新或恢复通知。每条 Wazuh 告警都有唯一的告警 ID，Flashduty 用它作为 Alert Key，因此同一条告警重复投递会合并，不同的告警各自产生一条 Flashduty 告警，不会自动恢复。
+
+请在协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时；也可以处理完成后手动关闭。同一规则在同一主机上反复触发时，可以在协作空间中配置降噪规则，把它们合并成一个故障。
+
+## Alert Key
+---
+
+Alert Key 由 Wazuh 告警的 `id` 字段计算（形如 `1790000101.123456`）。缺少 `id` 的请求会被拒绝并返回参数错误，包括 Slack 集成格式的请求：Flashduty 只支持 `shuffle` 集成。
+
+## 告警等级
+---
+
+按 `all_fields.rule.level`（Wazuh 规则等级 0-15）映射：
+
+| Wazuh 规则等级 | Flashduty 等级 |
+| :--- | :--- |
+| 12-15 | Critical |
+| 7-11 | Warning |
+| 0-6 | Info |
+
+`all_fields.rule.level` 缺失时，按 shuffle 脚本的 `severity` 字段映射：`3`（规则等级 8 及以上）为 Warning，`1` 和 `2` 为 Info；两者都缺失时为 Warning。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 规则描述，同标题 |
+| `alert_id` | 告警 ID |
+| `rule_id` / `rule_level` / `rule_groups` | 规则 ID、等级、规则组（逗号分隔） |
+| `wazuh_severity` | shuffle 脚本的 `severity`（1-3） |
+| `agent_id` / `agent_name` / `agent_ip` | 触发告警的 Agent |
+| `host` | Agent 名称 |
+| `manager` | Wazuh 管理节点名称 |
+| `decoder` | 解码器名称 |
+| `location` | 日志来源，例如 `/var/log/auth.log` |
+| `src_ip` / `src_user` | 解码出的来源 IP 和用户（存在时） |
+
+Flashduty 不读取也不保存原始日志（`text` 和 `full_log`）。但 shuffle 脚本会把整条告警发到 `hook_url`，其中可能包含用户名、IP、文件路径和命令行，请通过 `<level>`、`<rule_id>`、`<group>` 过滤，避免转发认证类原始日志。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认使用的是 `shuffle` 集成且 `<alert_format>` 为 `json`，并检查 `hook_url` 中的 `integration_key`
+- **没有收到告警**：确认已重启 manager，告警等级不低于 `<level>`，规则不在上述跳过列表中，并查看 `integrations.log`
+- **收到的告警太多**：提高 `<level>`，或用 `<rule_id>` / `<group>` 过滤
+- **告警一直未关闭**：Wazuh 没有恢复通知，请开启协作空间的超时自动关闭
+
+更多配置项请参阅 [Wazuh 官方文档：与外部 API 集成](https://documentation.wazuh.com/current/user-manual/manager/integration-with-external-apis.html)。

@@ -1,0 +1,143 @@
+---
+title: "ProjectDiscovery Cloud alert integration"
+description: "Send new vulnerabilities found by rescans, and failed scans and asset discoveries, from ProjectDiscovery Cloud webhook alerting to Flashduty On-call."
+keywords: ["alert integration", "ProjectDiscovery", "Nuclei", "vulnerability scanning", "asset discovery", "webhook", "scan_id"]
+---
+
+Use the webhook in ProjectDiscovery Cloud (Scans → Configurations → Alerting) to send two kinds of notifications to Flashduty On-call: new vulnerabilities found by a rescan (`new_vuln`), and failed scans or asset discoveries (`failed_stopped`). Scan start and finish notifications (`running`, `finished`) and new-asset notifications (`new_asset`) are accepted and dropped without creating an alert.
+
+ProjectDiscovery sends no "fixed" or "resolved" notification, so these alerts do not recover on their own. Turn on [auto-close](/en/on-call/channel/create-edit) in the channel that receives them (see below).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **ProjectDiscovery** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **ProjectDiscovery** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In ProjectDiscovery Cloud
+---
+
+<Steps>
+<Step title="Add a webhook alerting configuration">
+
+1. Sign in to [ProjectDiscovery Cloud](https://cloud.projectdiscovery.io) and go to **Scans → Configurations → Alerting**
+2. Select **Webhook** and enter a **Config Name** (for example `Flashduty`)
+3. Paste the full Flashduty push URL into **Webhook URL** (it must be an HTTPS URL)
+4. Authentication is optional. Flashduty authenticates with the `integration_key` in the push URL, so leave it empty
+
+</Step>
+
+<Step title="Choose the events">
+
+Select **New Vulnerability** and the failure events under **Scan / Asset Finished / Failed**. You can leave the other events off; if you turn them on, Flashduty still returns success and ignores them. To filter by severity, set a severity filter; the counts and vulnerability lists in the notification then only include matching findings.
+
+</Step>
+
+<Step title="Save and attach to scans">
+
+Save the alerting configuration and enable it on the scans or asset discovery jobs you want to be notified about.
+
+</Step>
+</Steps>
+
+<Note>
+The ProjectDiscovery documentation does not describe a webhook test button. If the UI offers a test delivery and its body has the same shape as a real notification, it is handled by the normal rules and may open an alert that you close manually.
+</Note>
+
+## Payload
+---
+
+ProjectDiscovery POSTs notifications as `application/json`, and Flashduty parses them directly with no template. Scan notifications carry `scan_name` and `scan_id`; asset discovery notifications carry `enumeration_name` and `enumeration_id`.
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `type` | `running`, `finished`, `failed_stopped`, `new_vuln`, `new_asset` | Label `event_type`; only `new_vuln` and `failed_stopped` create alerts |
+| `scan_id` / `enumeration_id` | Execution ID | Alert Key and label of the same name |
+| `scan_name` / `enumeration_name` | Scan or asset discovery name | Alert title and label of the same name |
+| `message` | Status text | First line of the description |
+| `finished.rescan_new_vulnerabilities` | Number of new vulnerabilities | Label `new_vulnerabilities` |
+| `finished.total_matches` | Total matches | Label `total_matches` |
+| `finished.rescan_vulns_list` | New vulnerabilities (at most 15) | Listed in the description with name, severity and count |
+| `failed_stopped.progress` | Completion percentage | Label `progress` |
+| `failed_stopped.failure_reason` | Failure reason | Label `failure_reason` and the description |
+
+Alert title: `<name>: new vulnerabilities` for new vulnerabilities, `<name> failed` for failures.
+
+## Alert Key
+---
+
+Flashduty uses `scan_id` (`enumeration_id` for asset discovery) as the Alert Key. ProjectDiscovery documents it as the unique identifier of the execution. Notifications with the same ID merge into one alert, and different scans or discoveries create different alerts. Changing the name, counts or time does not change the Alert Key.
+
+If a new-vulnerability or failure notification has no matching ID, Flashduty returns a parameter error naming the missing field.
+
+## Status and severity
+---
+
+| ProjectDiscovery event | Flashduty severity |
+| :--- | :--- |
+| `new_vuln`, highest in the list is `critical` | Critical |
+| `new_vuln`, highest is `high` or `medium` | Warning |
+| `new_vuln`, highest is `low` or `info` | Info |
+| `new_vuln`, nothing to rank | Warning |
+| `failed_stopped` | Warning |
+
+For `new_vuln`, the highest severity in `rescan_vulns_list` decides; when the list is empty, the highest bucket of `severity_breakdown` with a count above 0 is used. A failed scan is a coverage gap rather than an outage, so it is a Warning.
+
+## Auto-close
+---
+
+ProjectDiscovery sends no recovery notification, so these alerts stay active. Turn on [auto-close](/en/on-call/channel/create-edit) in the channel that receives them, with a suggested duration of 24 hours; adjust it to your scan frequency.
+
+## About signatures
+---
+
+The ProjectDiscovery webhook supports an optional custom authentication header. Flashduty does not verify it and relies on the `integration_key` in the push URL, so keep the push URL secret.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why does a finished scan not create an alert?">
+
+`finished`, `running` and `new_asset` only report job state or asset changes, not problems to act on. Flashduty returns success and drops them. Only new vulnerabilities and failures create alerts.
+
+</Accordion>
+
+<Accordion title="Are vulnerabilities from the first scan reported?">
+
+ProjectDiscovery sends `new_vuln` only for rescans, so the results of a first scan are not sent through this notification.
+
+</Accordion>
+
+<Accordion title="The vulnerability list is incomplete">
+
+`rescan_vulns_list` holds at most 15 entries per notification. View the full list in the ProjectDiscovery console or API.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **ProjectDiscovery reports a failed delivery**: check that the Webhook URL is the full HTTPS push URL including `integration_key`
+- **Flashduty returns a parameter error**: check that the body is a ProjectDiscovery JSON notification and that `new_vuln` and `failed_stopped` carry `scan_id` or `enumeration_id`
+- **An alert does not close**: this is expected; turn on auto-close
+
+For field details, see the ProjectDiscovery documentation: [Integrations](https://docs.projectdiscovery.io/cloud/integrations).
