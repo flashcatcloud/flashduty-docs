@@ -104,6 +104,7 @@ export const docMap = {
   Bgpalerter: `${alertBase}/bgpalerter.mdx`,
   Imperva: `${alertBase}/imperva.mdx`,
   Wazuh: `${alertBase}/wazuh.mdx`,
+  Auth0: `${alertBase}/auth0.mdx`,
   Twingate: `${alertBase}/twingate.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,

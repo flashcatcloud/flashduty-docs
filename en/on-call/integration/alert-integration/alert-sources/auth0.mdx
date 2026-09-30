@@ -1,0 +1,119 @@
+---
+title: "Auth0 alert integration"
+description: "Send attack protection, leaked password and failed login tenant logs to Flashduty On-call through an Auth0 custom webhook log stream."
+keywords: ["alert integration", "Auth0", "log stream", "identity", "security alerts", "leaked password"]
+---
+
+Auth0 log streams deliver tenant logs in near real time to a custom webhook. Set the webhook's Payload URL to your Flashduty push URL to send security-relevant tenant logs to Flashduty On-call: leaked password logins (`pwd_leak`), attack protection blocks (`limit_wc`, `limit_mu`, and others), failed logins and signups (`f`, `fu`, `fp`, `fs`, and others), MFA failures, and API rate limits. Successful logins, successful management operations, and other non-security logs do not create alerts.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Auth0** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Auth0** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Auth0
+---
+
+<Steps>
+<Step title="Create the log stream">
+
+1. Log in to the Auth0 Dashboard and go to **Monitoring** → **Streams**
+2. Click **Create Log Stream**, select **Custom Webhook**, and enter a name
+3. Fill in the following settings:
+
+| Setting | Value |
+| :--- | :--- |
+| Payload URL | The Flashduty push URL |
+| Content Type | `application/json` |
+| Content Format | JSON Lines, JSON Array, or JSON Object; all three are supported |
+| Authorization Token | Leave empty. Flashduty authenticates with the `integration_key` in the URL |
+
+4. Under **Filter by Event Category**, select only the error and warning categories to reduce volume. Leaving it unfiltered also works, because Flashduty ignores success logs
+5. Click **Save**
+
+The Payload URL must be an HTTPS address with a certificate from a trusted authority. Auth0 does not support self-signed certificates.
+
+</Step>
+
+<Step title="Trigger and verify">
+
+1. Open the stream's **Health** tab in **Streams** and confirm the status is **Active**
+2. Log in to a test application with a wrong password to produce an `fp` (wrong password) log
+3. Confirm the alert arrives in Flashduty. If it does not, check the log stream delivery errors under **Monitoring** → **Logs** in Auth0
+
+Auth0 log streams have no "send test notification" button.
+
+</Step>
+</Steps>
+
+## Events and recovery
+---
+
+Auth0 sends each tenant log once and never sends an update or a recovery. Each log has a unique `log_id`, which Flashduty uses as the Alert Key. A retried delivery of the same log does not create a duplicate alert, and different logs each create their own Flashduty alert. Alerts do not recover automatically.
+
+Turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) (24 hours suggested), or close alerts by hand after handling them. When the same source IP triggers many logs, configure a noise-reduction rule on the channel to merge them into one incident.
+
+## Alert Key
+---
+
+The Alert Key is computed from the log's `log_id`. An alertable log without `log_id` is rejected with an invalid-parameter error.
+
+## Severity
+---
+
+Severity follows the log type code (`type`); logs with any other type code are ignored:
+
+| Log type code | Flashduty severity |
+| :--- | :--- |
+| `pwd_leak`, `reset_pwd_leak` (leaked password login or reset) | Critical |
+| `limit_wc`, `limit_mu`, `limit_sul`, `limit_delegation`, `limit_phone`, `api_limit`, `api_limit_warning` | Warning |
+| Failure types starting with `f` (`f`, `fu`, `fp`, `fs`, `ferrt`, and others) and types ending in `_failed` or `_failure` (`gd_auth_failed` and others) | Warning |
+| `w`, `wn`, `wum`, `gd_otp_rate_limit_exceed`, `rich_consents_access_error` | Warning |
+| Success types (`s`, `ss`, `seacft`, `sapi`, and others) and all other types | Ignored, no alert |
+
+For the full list of type codes, see [Auth0 log event type codes](https://auth0.com/docs/deploy-monitor/logs/log-event-type-codes).
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` / `type` | Log type code |
+| `log_id` | Log ID |
+| `tenant` | Tenant name |
+| `client_id` / `client_name` | Application ID and name |
+| `connection` | Connection name |
+| `src_ip` | IP address of the request |
+| `user_id` | User ID |
+| `transaction_id` | Authentication transaction ID, when present |
+| `date` | Log time |
+
+The alert description comes from the log's `description` and `details.error.message`. Flashduty does not read the user's email, the User-Agent, or other fields.
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: confirm Content Type is `application/json` and check the `integration_key` in the Payload URL
+- **No alert arrives**: confirm the log type is in the table above, the Health tab shows Active, and the stream's event category filter does not exclude that type
+- **Too many alerts**: narrow the categories under **Filter by Event Category** and configure a noise-reduction rule on the channel
+- **Alerts never close**: Auth0 sends no recovery, so turn on the channel's auto-resolve timeout
+
+For more settings, see the [Auth0 documentation on custom webhook log streams](https://auth0.com/docs/customize/log-streams/custom-log-streams).
