@@ -1,0 +1,198 @@
+---
+title: "Flux CD 变更集成"
+description: "通过 Flux notification-controller 的 generic Provider，将 Kustomization 和 HelmRelease 应用的每个版本同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Flux CD", "Flux", "GitOps", "Kustomization", "HelmRelease", "notification-controller", "Provider", "Alert", "部署事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Flux 的 kustomize-controller 和 helm-controller 在应用一个新版本时会产生事件，notification-controller 的 `generic` Provider 可以把这些事件以 JSON 推送出去。本集成接收这些事件：Kustomization 每应用一个 Git/OCI 版本，或 HelmRelease 每安装、升级一个 Chart 版本，对应一条 Flashduty 变更。
+
+- **Kustomization**：开始应用版本时记录为 Processing，调和成功后更新为 Done，失败时更新为 Failed
+- **HelmRelease**：helm-controller 只在动作结束时发送事件，所以直接记录为 Done 或 Failed
+
+GitRepository、HelmChart、ImageUpdateAutomation 等其他类型的事件，以及没有版本号的事件（例如 Kustomization 配置无效、找不到源），不属于变更，不会记录。Flux 的 Provider 还可以把同样的事件作为告警推送，请参阅 [Flux CD 告警集成](/zh/on-call/integration/alert-integration/alert-sources/fluxcd)，两个集成可以同时使用。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Flux CD**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `namespace`、`name`、`cluster`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Flux 中配置
+---
+
+以下操作需要能在 Flux 的 `flux-system` 命名空间（或你放置通知配置的命名空间）创建 Provider、Alert 和 Secret 的 Kubernetes 权限。notification-controller 需要能访问推送地址所在的域名。
+
+<Steps>
+<Step title="创建保存推送地址的 Secret">
+
+推送地址包含 `integration_key`，不要直接写进 Provider。把它存入 Secret 的 `address` 键：
+
+```bash
+kubectl -n flux-system create secret generic flashduty-change \
+  --from-literal=address='<推送地址>'
+```
+
+</Step>
+
+<Step title="创建 Provider 和 Alert">
+
+把下面的内容保存为 `flashduty-change.yaml` 并执行 `kubectl apply -f flashduty-change.yaml`：
+
+```yaml
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Provider
+metadata:
+  name: flashduty-change
+  namespace: flux-system
+spec:
+  type: generic
+  secretRef:
+    name: flashduty-change
+---
+apiVersion: notification.toolkit.fluxcd.io/v1beta3
+kind: Alert
+metadata:
+  name: flashduty-change
+  namespace: flux-system
+spec:
+  providerRef:
+    name: flashduty-change
+  eventSeverity: info
+  eventSources:
+    - kind: Kustomization
+      name: '*'
+      namespace: flux-system
+    - kind: HelmRelease
+      name: '*'
+      namespace: flux-system
+  eventMetadata:
+    cluster: prod-eu
+```
+
+- `eventSeverity` 必须是 `info`。Flux 的 `info` 级别同时包含 `error` 事件；设为 `error` 会收不到开始和成功事件，变更无法结束
+- `eventSources` 按需要的范围填写：`name: '*'` 匹配该命名空间内所有同类型对象，其他命名空间的对象需要各写一项并指定 `namespace`
+- `eventMetadata` 中的键值会作为标签写入变更，适合放 `cluster`、`env` 等 Flux 事件本身没有的信息，用于区分多个集群并在路由中匹配。同一集群的所有 Alert 请使用相同的取值
+- Provider 类型也可以是 `generic-hmac`，它会额外发送 `X-Signature` 请求头，Flashduty 不校验该请求头
+
+</Step>
+
+<Step title="验证变更记录">
+
+Flux 没有发送测试消息的功能。修改一个已被 Alert 选中的 Kustomization 的源（例如向 Git 仓库提交一次改动），确认 Flashduty 的变更列表中出现对应变更：Kustomization 应用新版本后变更更新为 Done。可以用下面的命令检查 Provider 和 Alert 是否就绪，以及推送失败的原因：
+
+```bash
+kubectl -n flux-system get provider,alert
+kubectl -n flux-system describe alert flashduty-change
+```
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+一条变更对应一个 Flux 对象应用的一个版本，变更标识（change_key）为 `<对象 UID>/<版本>`：
+
+- **对象 UID**：Kustomization 或 HelmRelease 的 `metadata.uid`。Kubernetes 为每个对象分配的 UID 唯一，不同集群中同名的对象、删除后重建的对象都是不同的对象
+- **版本**：Kustomization 是它所用源（GitRepository、OCIRepository、Bucket）的版本，例如 `main@sha1:731f7ead...`；HelmRelease 是 Chart 版本，例如 `6.5.4`
+
+同一个版本的开始、成功、失败更新同一条变更；同一个对象的两个版本是两条变更。HelmRelease 的卸载（`UninstallSucceeded`、`UninstallFailed`）是独立的一条变更，标识带 `uninstall:` 前缀。
+
+Flux 的事件没有操作编号，所以有两种情况会更新已有的变更，而不是新建：
+
+- 同一个版本再次应用，例如修改了 Kustomization 或 HelmRelease 的配置但版本不变、回滚到之前用过的版本、失败后重试
+- HelmRelease 只修改 values、Chart 版本不变时，升级事件与上一次安装或升级属于同一条变更
+
+事件缺少 `involvedObject.uid` 时，Flashduty 会拒绝该请求。
+
+## 状态映射
+---
+
+**Kustomization**
+
+| 事件 | Flashduty 变更状态 |
+|---|---|
+| `severity` 为 `info`，`reason` 为 `Progressing`（应用了资源、清理了资源、健康检查通过） | Processing |
+| `severity` 为 `info`，`reason` 为 `ReconciliationSucceeded` | Done |
+| `severity` 为 `error`，任意 `reason`（`BuildFailed`、`HealthCheckFailed`、`PruneFailed`、`ReconciliationFailed` 等） | Failed |
+
+**HelmRelease**
+
+| `reason` | Flashduty 变更状态 |
+|---|---|
+| `InstallSucceeded`、`UpgradeSucceeded`、`TestSucceeded`、`RollbackSucceeded`、`UninstallSucceeded` | Done |
+| `InstallFailed`、`UpgradeFailed`、`TestFailed`、`RollbackFailed`、`UninstallFailed` | Failed |
+
+Done 和 Failed 是结束状态，Flashduty 会记录变更结束时间。以下事件返回成功但不记录：`severity` 为 `trace`；Kustomization 的 `DependencyNotReady`、`HealthCheckCanceled`；HelmRelease 的 `PendingRelease`（解锁卡住的发布）、`DriftCorrected`、`DriftCorrectionFailed`（修复漂移）、`HealthCheckCanceled`；以及所有没有版本号的事件。其他未列出的 `reason` 或 `severity` 会被拒绝。
+
+## 变更内容
+---
+
+- **标题**：`<命名空间>/<对象名称>: apply <版本> (<类型>)`，例如 `apps/webapp: apply main@sha1:731f7ea (Kustomization)`；HelmRelease 卸载为 `uninstall`。Git 提交 ID 在标题中缩短为 7 位
+- **链接**：Flux 事件不带网页地址，变更没有链接
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `kind` | `Kustomization` 或 `HelmRelease` |
+| `name` | 对象名称 |
+| `namespace` | 对象所在的命名空间 |
+| `object_id` | 对象的 `metadata.uid` |
+| `revision` | 版本 |
+| `origin_revision` | 源的原始版本（Flux 提供时） |
+| `app_version` | Chart 的应用版本（HelmRelease） |
+| `oci_digest` | Chart 的 OCI 摘要（HelmRelease，OCI 仓库） |
+| `reason` | 最新一次事件的 `reason` |
+| `message` | 最新一次事件的说明，超过 1024 字节时截断 |
+| 其他 | Alert 的 `eventMetadata` 中的键值，例如 `cluster` |
+
+同一个版本的所有事件都应带有相同的路由标签：所有 Alert 请使用相同的 `eventMetadata`，否则后续事件可能进入另一个协作空间，形成另一条变更。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 执行 `kubectl -n flux-system describe alert flashduty-change`，推送失败时会有 `NotificationDispatchFailed` 事件，说明失败原因
+- 确认 Alert 的 `eventSources` 包含该对象所在的命名空间，且 `eventSeverity` 为 `info`
+- Kustomization 应用的资源没有变化时，只会发送 `ReconciliationSucceeded`，不会有 `Progressing`
+- notification-controller 对内容相同的事件做限流（默认 5 分钟），日志中出现 `rate limiting duplicate events` 属于正常现象
+
+</Accordion>
+
+<Accordion title="为什么每个调和周期都有事件？">
+
+kustomize-controller 在每次调和成功后都会发送 `ReconciliationSucceeded`，所以已经是 Done 的版本会随调和周期不断追加事件，变更的状态不变。同样，接入后 Kustomization 当前使用的版本会记录为一条 Done 的变更，即使当时没有应用任何资源。
+
+</Accordion>
+
+<Accordion title="为什么 HelmRelease 的变更没有 Processing？">
+
+helm-controller 只在安装、升级、测试、回滚、卸载结束时发送事件，执行过程中没有事件，所以变更直接记录为 Done 或 Failed。
+
+</Accordion>
+
+<Accordion title="推送返回 400，日志中出现 is not supported？">
+
+响应内容会指出不支持的字段：`severity "..." is not supported, want info or error`、`reason "..." is not supported for a Kustomization` 或 `for a HelmRelease`、`involvedObject.uid is required`、`timestamp "..." is not an RFC 3339 time`。Flux 版本新增了 `reason` 时会出现这种情况，请联系我们补充映射；这个事件不会记录，同一个变更之后的已知事件仍会记录。
+
+</Accordion>
+
+<Accordion title="重复发送同一个事件会重复记录吗？">
+
+不会。同一变更、同一时间、同一状态的事件只记录一次。
+
+</Accordion>
+</AccordionGroup>
+
+相关配置请参阅 Flux 文档 [Providers](https://fluxcd.io/flux/components/notification/providers/)、[Alerts](https://fluxcd.io/flux/components/notification/alerts/) 和 [Events](https://fluxcd.io/flux/components/notification/events/)。
