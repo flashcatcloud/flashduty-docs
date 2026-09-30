@@ -6,9 +6,9 @@ keywords: ["变更集成", "Gitea", "Gitea Actions", "工作流", "Release", "We
 
 <Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
 
-通过 Gitea 仓库或组织的 Webhook，将 Gitea Actions 的工作流运行（Workflow Run）和 Release 发布同步到 Flashduty On-call。每一次工作流运行、每一个 Release 对应一条 Flashduty 变更；工作流运行从排队、执行到成功、失败或取消的每个状态，都会更新同一条变更。
+通过 Gitea 仓库或组织的 Webhook，将 Gitea Actions 的工作流运行（Workflow Run）和 Release 发布同步到 Flashduty On-call。每一次工作流运行、每一个 Release 对应一条 Flashduty 变更；工作流运行从执行到成功、失败或取消的每个状态，都会更新同一条变更。
 
-Gitea 的 Webhook 只能按分支过滤，不能按工作流过滤：接入后仓库中每个工作流的运行都会成为变更，包括只做构建或测试的工作流。请用分支过滤缩小范围，并用 `workflow` 标签在 Flashduty 中路由或筛选出部署类工作流。
+Gitea 的 Webhook 不能按工作流或分支过滤工作流运行（**分支过滤** 只对推送和分支事件生效）：接入后仓库中每个工作流的运行都会成为变更，包括只做构建或测试的工作流。请用 `workflow`、`ref` 标签在 Flashduty 中路由或筛选出部署类运行。
 
 本页适用于 Gitea。Forgejo 的 Actions 事件名称和内容与 Gitea 不同，暂不支持，可使用[自定义变更事件](/zh/on-call/integration/change-integration/custom-event)接入。
 
@@ -50,7 +50,7 @@ Gitea 的 Webhook 只能按分支过滤，不能按工作流过滤：接入后�
 
 1. 在 **触发条件** 中选择 **自定义事件…**
 2. 勾选 **Workflow Run** 和 **Release**，取消其他事件；不要勾选 **Workflow Jobs**，它不会生成变更
-3. 如只想同步部署分支上的运行，在 **分支过滤** 中填写分支规则，例如 `main`
+3. **分支过滤** 留空，它对工作流运行不生效
 4. 保持 **激活** 勾选，点击 **添加 Webhook**
 
 </Step>
@@ -63,7 +63,7 @@ Gitea 的 **测试推送事件（Test Push Event）** 发送的是模拟的 `pus
 
 | Gitea 对象 | 变更标识（change_key） | 说明 |
 |---|---|---|
-| 工作流运行 | `run:<workflow_run.id>` | 同一次运行的排队、执行、结束事件更新同一条变更；同一工作流在同一分支上的两次运行是两条变更。重新运行（rerun）沿用同一个运行 ID，会更新原来的变更，变更从结束状态回到 Processing，`run_attempt` 标签记录第几次尝试 |
+| 工作流运行 | `run:<workflow_run.id>` | 同一次运行的执行、结束事件更新同一条变更；同一工作流在同一分支上的两次运行是两条变更。重新运行（rerun）沿用同一个运行 ID，会更新原来的变更，变更从结束状态回到 Processing，`run_attempt` 标签记录第几次尝试 |
 | Release | `release:<release.id>` | 发布、删除同一个 Release 更新同一条变更 |
 
 ## 状态映射
@@ -72,7 +72,6 @@ Gitea 的 **测试推送事件（Test Push Event）** 发送的是模拟的 `pus
 | Gitea 事件 | Gitea 状态 | Flashduty 变更状态 |
 |---|---|---|
 | workflow_run，`requested` | `waiting`（等待维护者批准运行） | Planned |
-| workflow_run，`requested` | `queued`、`pending`、`requested` | Ready |
 | workflow_run，`in_progress` | 运行中（包括正在取消） | Processing |
 | workflow_run，`completed` | `success` | Done |
 | workflow_run，`completed` | `failure` | Failed |
@@ -83,7 +82,7 @@ Gitea 的 **测试推送事件（Test Push Event）** 发送的是模拟的 `pus
 
 Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
 
-以下推送返回成功但不生成变更：Gitea 的其他事件类型（包括 `workflow_job` 和测试推送事件产生的 `push`）、Release 的 `updated` 动作、草稿状态的 Release。
+以下推送返回成功但不生成变更：Gitea 的其他事件类型（包括 `workflow_job` 和测试推送事件产生的 `push`）、Release 的 `updated` 动作、草稿状态的 Release，以及排队中的运行（状态为 `queued`、`pending` 或 `requested` 的 `requested` 事件；变更从运行开始时才产生）。
 
 ## 变更内容
 ---
@@ -117,7 +116,6 @@ Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时�
 <Accordion title="为什么没有收到工作流变更？">
 
 - 确认 Webhook 勾选了 **Workflow Run**，且所用的 Gitea 版本提供该事件
-- 检查 **分支过滤** 是否把该分支排除在外
 - 在 Webhook 页面的推送记录中查看请求和 Flashduty 的响应
 
 </Accordion>
@@ -130,7 +128,7 @@ Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时�
 
 <Accordion title="为什么所有工作流都变成了变更？">
 
-Gitea 不能按工作流筛选 Webhook 事件。建议用分支过滤缩小范围，并在集成的 **路由** 中按 `workflow` 标签把部署类工作流分派到对应协作空间。
+Gitea 不能按工作流筛选 Webhook 事件。**分支过滤** 对工作流运行同样不生效。请在集成的 **路由** 中按 `workflow` 或 `ref` 标签把部署类工作流分派到对应协作空间。
 
 </Accordion>
 
