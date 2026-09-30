@@ -192,6 +192,8 @@ export const docMap = {
   AzureDevopsChange: `${integrationBase}/change-integration/azure-devops.mdx`,
   ArgoRolloutsChange: `${integrationBase}/change-integration/argo-rollouts.mdx`,
   OctopusDeployChange: `${integrationBase}/change-integration/octopus-deploy.mdx`,
+  CoolifyChange: `${integrationBase}/change-integration/coolify.mdx`,
+  ScalrChange: `${integrationBase}/change-integration/scalr.mdx`,
   SemaphoreChange: `${integrationBase}/change-integration/semaphore.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',

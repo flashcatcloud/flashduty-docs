@@ -1,0 +1,124 @@
+---
+title: "Scalr change integration"
+description: "Sync Terraform and OpenTofu runs to Flashduty On-call through Scalr webhooks, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Scalr", "Terraform", "OpenTofu", "Run", "Webhook", "infrastructure changes"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use Scalr webhooks to sync Terraform and OpenTofu runs to Flashduty On-call. Each run becomes one Flashduty change: the change is created when a run waits for a person to confirm it, and the same change is updated when the run applies, errors, is canceled, or is discarded.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Scalr** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `environment` or `workspace`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Scalr
+---
+
+A webhook is created at account scope and then assigned to environments; once assigned, runs of every workspace in that environment trigger it.
+
+<Steps>
+<Step title="Create the webhook">
+
+At account scope, go to **Integrations → Webhooks** and create a webhook (the Scalr API and the Terraform provider's `scalr_webhook` resource also work):
+
+1. **URL**: paste the full push URL of the Flashduty integration
+2. **Events**: select **Run complete**, **Run errored**, and **Run needs attention**
+3. **Key**: enter any string. Scalr uses it to sign requests; Flashduty authenticates with the `integration_key` in the push URL and does not verify the signature
+
+</Step>
+
+<Step title="Assign it to environments">
+
+In the webhook's Environments, select the environments you want to connect.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| Scalr object | Change identifier (change_key) | Notes |
+|---|---|---|
+| Run | `run.id`, for example `run-v0oe5ki1pnaptv123` | Every delivery of one run updates the same change; two runs of the same workspace are two changes |
+
+Scalr sends a delivery at only three moments: a run needs a person's confirmation, a run finishes successfully, and a run errors or is canceled. A change therefore has no Ready or Processing state; its first state is Planned (waiting for confirmation) or an end state. A run that applies automatically produces one record, when it ends.
+
+## Status mapping
+---
+
+| Delivery event (event-name) | Run status (run.status) | Flashduty change status |
+|---|---|---|
+| run:needs_attention | any, for example planned or policy_override (waiting for confirmation or a policy override) | Planned |
+| run:completed | applied | Done |
+| run:errored | errored | Failed |
+| run:errored | canceled, discarded | Canceled |
+
+End events are mapped by run status: `applied` is Done, `errored` is Failed, and `canceled` and `discarded` (a run abandoned at the confirmation step) are Canceled. Done, Failed, and Canceled are end states, and Flashduty records the change's end time.
+
+These deliveries return success and create no change: an end event whose run status is `planned_and_finished` (a plan-only or no-change run, nothing was applied), and any event outside the `run:` family.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<environment>/<workspace>: run <run.id>` |
+| Description | The run's message (why it was triggered) |
+| Link | The run's page in Scalr |
+
+Labels for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `environment` | Environment name |
+| `environment_id` | Environment ID, for example `env-u0b83rvjmsjk123` |
+| `workspace` | Workspace name |
+| `workspace_id` | Workspace ID, for example `ws-v0oapbepcjdj9d123` |
+| `run_id` | Run ID |
+| `run_status` | Run status in the latest delivery |
+| `source` | What triggered the run, for example `dashboard-workspace` |
+| `actor_id` | ID of the user who created the run |
+
+Run variables (`variables`) and user emails are not recorded.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't I see any changes?">
+
+- Confirm the webhook is enabled and assigned to the environment the run belongs to
+- Confirm Run complete, Run errored, and Run needs attention are all selected
+- Open the webhook's **Deliveries** tab to see each delivery and Flashduty's response; you can also resend from there
+- A plan-only run (a dry run, nothing applied) that succeeds creates no change
+
+</Accordion>
+
+<Accordion title="Does a failed dry run (plan) create a change?">
+
+Yes. Scalr's payload does not tell a dry run from an apply run, so a run that errors during the plan is delivered as `run:errored` and Flashduty records a Failed change. The `source` label can help tell them apart, for example runs triggered by a VCS pull request.
+
+</Accordion>
+
+<Accordion title="Are repeated deliveries recorded twice?">
+
+No. An event with the same run, status, and time is recorded once, so resending from **Deliveries** adds nothing.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `unsupported event-name` or `unsupported run.status`: the delivery carries an event or run status Flashduty does not support yet; contact us
+- `run.id is missing` or `event-name is missing`: the payload is incomplete; confirm it comes from a Scalr webhook
+
+</Accordion>
+</AccordionGroup>
