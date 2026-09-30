@@ -1,0 +1,119 @@
+---
+title: "Fail2ban alert integration"
+description: "Add a custom Fail2ban action that uses curl to push ban and unban events to Flashduty's standard alert event integration; unbanning closes the alert automatically."
+keywords: ["alert integration", "Fail2ban", "intrusion prevention", "IP ban", "curl", "standard alert event"]
+---
+
+Fail2ban has no built-in webhook notification, but an action is just a shell command that runs when an IP is banned or unbanned (the stock `abuseipdb` action calls an external API with `curl`). So no dedicated Fail2ban integration is needed: add an action file to Fail2ban that POSTs the ban event to Flashduty's [standard alert event](/en/on-call/integration/alert-integration/alert-sources/standard-alert) integration with `curl`, and send a recovery event on unban to close the alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the two ways below. **In both cases choose Standard Alert Event as the integration type**, not Fail2ban.
+
+### Dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Standard Alert Event** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration_key>`
+
+### Shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Standard Alert Event** and enter an integration name
+3. Configure the default route and choose a channel; you can add more rules under **Routes** after creating it
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Fail2ban
+---
+
+Run these steps on the host where Fail2ban runs, as root.
+
+<Steps>
+<Step title="Create the action file">
+
+Create `/etc/fail2ban/action.d/flashduty.conf`:
+
+```ini
+[Definition]
+
+# Do not notify again for bans restored from the database after a restart
+norestored = 1
+
+actionban = curl -sS -X POST -H 'Content-Type: application/json' -d '{"event_status":"Warning","title_rule":"Fail2ban <name>: banned <ip>","alert_key":"fail2ban-<name>-<ip>","description":"<failures> failed attempts, banned for <bantime> seconds","labels":{"jail":"<name>","ip":"<ip>","failures":"<failures>","bantime":"<bantime>"}}' '<flashduty_url>'
+
+actionunban = curl -sS -X POST -H 'Content-Type: application/json' -d '{"event_status":"Ok","title_rule":"Fail2ban <name>: unbanned <ip>","alert_key":"fail2ban-<name>-<ip>"}' '<flashduty_url>'
+
+[Init]
+
+flashduty_url =
+```
+
+`<name>`, `<ip>`, `<failures>` and `<bantime>` are tags Fail2ban substitutes when it runs the action (see Action Tags in `jail.conf(5)`): `<name>` is the jail name, `<ip>` the banned IP, `<failures>` the number of failures that caused the ban, and `<bantime>` the ban duration in seconds. `flashduty_url` is a custom parameter in `[Init]` that you pass from the jail.
+
+<Warning>
+Do not put `<matches>` into the JSON. It contains raw log lines, which can hold user names and other sensitive data, and quotes that break the JSON.
+</Warning>
+
+</Step>
+
+<Step title="Enable it in a jail">
+
+Edit `/etc/fail2ban/jail.local` and add the `flashduty` action to each jail you want notifications for, passing the Flashduty push URL as `flashduty_url`. `action` can span several lines; keep the default ban action on the first line:
+
+```ini
+[sshd]
+enabled = true
+action  = %(action_)s
+          flashduty[flashduty_url="https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY"]
+```
+
+To notify for every jail, put these two `action` lines in the `[DEFAULT]` section.
+
+</Step>
+
+<Step title="Reload and verify">
+
+```bash
+fail2ban-client reload
+fail2ban-client set sshd banip 192.0.2.10
+fail2ban-client set sshd unbanip 192.0.2.10
+```
+
+`banip` bans an IP manually and `unbanip` unbans it. After the first command an alert titled `Fail2ban sshd: banned 192.0.2.10` should appear in Flashduty, and the second command should close it. If nothing arrives, run the same `curl` command by hand on the host against the push URL; the response carries an error code. Fail2ban's own errors are in `/var/log/fail2ban.log`.
+
+</Step>
+</Steps>
+
+## Field mapping
+---
+
+| Fail2ban | Flashduty |
+| :--- | :--- |
+| `alert_key` (`fail2ban-<jail>-<ip>`) | Alert Key. A ban and its unban for the same IP in the same jail belong to one alert |
+| `event_status: Warning` | A ban triggers a Warning alert; change it to `Critical` for a higher severity |
+| `event_status: Ok` | Unban closes the alert |
+| `title_rule` | Alert title |
+| `description` | Alert description |
+| `labels` | Labels `jail`, `ip`, `failures`, `bantime` |
+
+## Recovery and deduplication
+---
+
+- Fail2ban runs `actionunban` when the ban time expires, and Flashduty closes the alert with the same `alert_key`.
+- With a permanent ban (`bantime = -1`) the IP is never unbanned, so the alert does not close by itself. Enable [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel that receives this integration, or close the alert manually once handled.
+- A repeat ban of the same IP in the same jail updates the same alert instead of creating a duplicate.
+- `norestored = 1` stops Fail2ban from notifying for bans restored from its database after a restart, which would otherwise produce a burst of duplicate alerts.
+
+## Troubleshooting
+---
+
+- **Flashduty receives nothing**: confirm `fail2ban-client reload` was run; call the push URL with `curl` from the same host to check the response and that api.flashcat.cloud is reachable
+- **`InvalidParameter` is returned**: the push URL is missing `integration_key`, or the JSON was broken by quoting; make sure there are no stray line breaks in `[Definition]`
+- **The alert does not recover**: confirm `actionunban` exists and its `alert_key` matches the ban; permanent bans need auto-resolve timeout
+- **Too many notifications**: enable `flashduty` only on jails that need a human response (for example `recidive` or jails with a high `maxretry`); ordinary mistyped-password bans do not need to notify

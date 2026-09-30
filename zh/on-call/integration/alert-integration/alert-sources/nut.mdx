@@ -1,0 +1,138 @@
+---
+title: "NUT (Network UPS Tools) 告警集成"
+description: "通过 upsmon 的 NOTIFYCMD 脚本把 UPS 断电、低电量、通信中断等事件推送到 Flashduty 的标准告警事件集成，恢复事件自动关闭告警。"
+keywords: ["告警集成", "NUT", "Network UPS Tools", "upsmon", "UPS", "断电告警", "标准告警事件"]
+---
+
+NUT（Network UPS Tools）的 `upsmon` 在 UPS 状态变化时可以执行 `NOTIFYCMD` 指定的脚本，环境变量 `NOTIFYTYPE` 是事件类型（`ONBATT`、`ONLINE`、`COMMBAD` 等），`UPSNAME` 是 UPS 名称，通知文本作为脚本的最后一个参数。NUT 没有原生的 Webhook，用一个几行的脚本把这些事件以 [标准告警事件](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 格式推送给 Flashduty 即可：`ONBATT` 触发告警，`ONLINE` 恢复告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 标准告警事件**，不是 NUT。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **标准告警事件**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **标准告警事件**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 NUT 中配置
+---
+
+### 步骤 1：创建通知脚本
+
+在运行 `upsmon` 的主机上创建脚本，例如 `/usr/local/bin/nut-flashduty.sh`，把 `URL` 换成上一步复制的推送地址，并设置为可执行（`chmod +x`）。该主机需要安装 `curl`。
+
+```sh
+#!/bin/sh
+# NUT NOTIFYCMD: forward UPS events to a Flashduty Standard Alert Event integration.
+URL='https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY'
+
+UPS="${UPSNAME:-unknown}"
+MSG="$*"
+
+case "$NOTIFYTYPE" in
+  ONBATT)   KEY=power;   STATUS=Warning; TEXT="on battery" ;;
+  LOWBATT)  KEY=power;   STATUS=Critical; TEXT="on battery, low battery" ;;
+  ONLINE)   KEY=power;   STATUS=Ok;       TEXT="back on line power" ;;
+  NOCOMM|COMMBAD) KEY=comm; STATUS=Critical; TEXT="communication lost" ;;
+  COMMOK)   KEY=comm;    STATUS=Ok;       TEXT="communication restored" ;;
+  REPLBATT) KEY=battery; STATUS=Warning;  TEXT="battery needs replacement" ;;
+  ALARM)    KEY=alarm;   STATUS=Warning;  TEXT="alarm active" ;;
+  NOTALARM) KEY=alarm;   STATUS=Ok;       TEXT="alarm cleared" ;;
+  OVER)     KEY=overload; STATUS=Warning; TEXT="overloaded" ;;
+  NOTOVER)  KEY=overload; STATUS=Ok;      TEXT="no longer overloaded" ;;
+  BYPASS)   KEY=bypass;  STATUS=Warning;  TEXT="on bypass" ;;
+  NOTBYPASS) KEY=bypass; STATUS=Ok;       TEXT="no longer on bypass" ;;
+  *) exit 0 ;;
+esac
+
+esc() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+JSON=$(printf '{"title_rule":"UPS %s: %s","event_status":"%s","alert_key":"nut:%s:%s","description":"%s","labels":{"resource":"%s","check":"%s","notify_type":"%s"}}' \
+  "$(esc "$UPS")" "$TEXT" "$STATUS" "$(esc "$UPS")" "$KEY" "$(esc "$MSG")" "$(esc "$UPS")" "$KEY" "$NOTIFYTYPE")
+
+curl -fsS -m 10 -X POST -H 'Content-Type: application/json' -d "$JSON" "$URL" >/dev/null
+```
+
+脚本只处理下表中的事件类型，其余类型直接忽略。
+
+| `NOTIFYTYPE` | 含义（NUT 文档） | 告警等级 | Alert Key |
+| :--- | :--- | :--- | :--- |
+| `ONBATT` | UPS 使用电池供电 | Warning | `nut:<UPS 名称>:power` |
+| `LOWBATT` | 使用电池供电且电量低 | Critical | `nut:<UPS 名称>:power` |
+| `ONLINE` | UPS 恢复市电 | 恢复 | `nut:<UPS 名称>:power` |
+| `COMMBAD`、`NOCOMM` | 与 UPS 通信中断、UPS 不可用 | Critical | `nut:<UPS 名称>:comm` |
+| `COMMOK` | 与 UPS 的通信恢复 | 恢复 | `nut:<UPS 名称>:comm` |
+| `REPLBATT` | UPS 电池需要更换 | Warning | `nut:<UPS 名称>:battery` |
+| `ALARM`、`NOTALARM` | UPS 有活动告警、告警解除 | Warning、恢复 | `nut:<UPS 名称>:alarm` |
+| `OVER`、`NOTOVER` | UPS 过载、过载解除 | Warning、恢复 | `nut:<UPS 名称>:overload` |
+| `BYPASS`、`NOTBYPASS` | UPS 进入旁路、退出旁路 | Warning、恢复 | `nut:<UPS 名称>:bypass` |
+
+### 步骤 2：在 upsmon.conf 中启用脚本
+
+编辑 `upsmon.conf`，指定通知脚本，并为要推送的事件类型加上 `EXEC` 标志（`NOTIFYCMD` 只对设置了 `EXEC` 的事件执行）：
+
+```
+NOTIFYCMD /usr/local/bin/nut-flashduty.sh
+
+NOTIFYFLAG ONBATT     SYSLOG+WALL+EXEC
+NOTIFYFLAG LOWBATT    SYSLOG+WALL+EXEC
+NOTIFYFLAG ONLINE     SYSLOG+WALL+EXEC
+NOTIFYFLAG COMMBAD    SYSLOG+WALL+EXEC
+NOTIFYFLAG NOCOMM     SYSLOG+WALL+EXEC
+NOTIFYFLAG COMMOK     SYSLOG+WALL+EXEC
+NOTIFYFLAG REPLBATT   SYSLOG+WALL+EXEC
+```
+
+`NOTIFYCMD` 的第一个值按脚本的完整路径解析，路径含空格时需要加引号（NUT 2.8.5 及更早版本的解析方式不同，详见 NUT 文档 upsmon.conf）。`ALARM`、`OVER`、`BYPASS` 等类型需要推送时，按同样的写法为它们和对应的恢复类型（`NOTALARM`、`NOTOVER`、`NOTBYPASS`）添加 `NOTIFYFLAG`。修改后让 `upsmon` 重新读取配置：
+
+```bash
+upsmon -c reload
+```
+
+<Note>
+NUT 的 `upsmon` 在后台运行 `NOTIFYCMD`，同时发生多个事件时脚本会并行执行多个实例，上面的脚本每次调用只发送一次请求，可以并行运行。关机相关的事件类型（`FSD`、`SHUTDOWN` 等）不在脚本的处理范围内，脚本收到后直接退出。
+</Note>
+
+### 步骤 3：验证
+
+在主机上手动运行脚本，先触发再恢复：
+
+```bash
+NOTIFYTYPE=ONBATT UPSNAME=ups@localhost /usr/local/bin/nut-flashduty.sh "UPS ups@localhost is on battery"
+NOTIFYTYPE=ONLINE UPSNAME=ups@localhost /usr/local/bin/nut-flashduty.sh "UPS ups@localhost is back online"
+```
+
+在 Flashduty 中应先看到告警 `UPS ups@localhost: on battery`，随后被恢复。
+
+## 恢复与去重
+---
+
+- `ONBATT`、`LOWBATT`、`ONLINE` 共用 Alert Key `nut:<UPS 名称>:power`：`ONBATT` 触发告警，随后的 `LOWBATT` 把它升级为 Critical，`ONLINE` 恢复它
+- `COMMBAD`、`NOCOMM` 与 `COMMOK` 共用 `comm`；`ALARM` 与 `NOTALARM`、`OVER` 与 `NOTOVER`、`BYPASS` 与 `NOTBYPASS` 也各自成对
+- `REPLBATT` 没有对应的恢复事件，更换电池后请在 Flashduty 手动关闭告警，或在协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 7 天
+- 多台 UPS 的告警互不影响：Alert Key 中带有 `UPSNAME`
+
+## 排查问题
+---
+
+- **没有收到告警**：确认 `upsmon.conf` 中对应事件类型的 `NOTIFYFLAG` 含有 `EXEC`，且已执行 `upsmon -c reload`
+- **脚本手动运行成功，但 upsmon 触发时没有告警**：`NOTIFYCMD` 必须是脚本的完整路径，且 `upsmon` 的运行用户能执行它；失败原因由 `curl -fsS` 打印到 stderr，`upsmon` 不一定记录，排查时手动运行脚本查看
+- **告警没有恢复**：确认 `ONLINE` 等恢复类型也设置了 `EXEC`
+- **Flashduty 返回参数错误**：确认 `URL` 是完整的推送地址，包含 `integration_key`
+
+更多说明请参阅 NUT 文档 [upsmon.conf](https://networkupstools.org/docs/man/upsmon.conf.html) 和 [upsmon](https://networkupstools.org/docs/man/upsmon.html)。

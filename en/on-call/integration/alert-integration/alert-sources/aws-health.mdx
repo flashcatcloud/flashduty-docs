@@ -1,0 +1,111 @@
+---
+title: "AWS Health Alert Integration"
+description: "Receive AWS Health events through an Amazon EventBridge rule using the Flashduty AWS EventBridge integration; alerts recover automatically when the event closes."
+keywords: ["alert integration", "AWS Health", "AWS Health Dashboard", "EventBridge", "service health", "scheduled change"]
+---
+
+AWS Health sends the service events that affect your account (operational issues, scheduled changes, account notifications) to Amazon EventBridge as events with `source` set to `aws.health` and `detail-type` set to `AWS Health Event`. The Flashduty [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge) handles these events explicitly, so no separate AWS Health integration is needed: create an AWS EventBridge integration in Flashduty and use its push URL as the target of an EventBridge rule.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the AWS EventBridge integration type** in both, not AWS Health.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **AWS EventBridge** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **AWS EventBridge** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in AWS
+---
+
+AWS Health events are forwarded by an EventBridge rule whose target is an API destination that points to the Flashduty push URL (an SNS topic target also works). The steps for both target types are in the [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge); for AWS Health you only need the event pattern below.
+
+1. Create a rule in EventBridge with this event pattern:
+
+```json
+{
+  "source": ["aws.health"],
+  "detail-type": ["AWS Health Event"]
+}
+```
+
+2. To narrow the scope, add filters under `detail`. For example, only `issue` events for Amazon EC2:
+
+```json
+{
+  "source": ["aws.health"],
+  "detail-type": ["AWS Health Event"],
+  "detail": {
+    "eventTypeCategory": ["issue"],
+    "service": ["EC2"]
+  }
+}
+```
+
+3. Choose the API destination that points to the Flashduty push URL as the rule target and save the rule
+4. While creating the rule, you can pick the AWS Health sample events in the **Test event pattern** panel of the EventBridge console to confirm the pattern matches
+
+Per AWS: rules only receive events for your own account, and public (PUBLIC) events can take up to an hour to start arriving after you create a rule. For events aggregated through AWS Organizations, see the AWS guide [Aggregating AWS Health events](https://docs.aws.amazon.com/health/latest/ug/aggregating-health-events.html).
+
+<Warning>
+Do not filter out `statusCode` in the event pattern, for example by matching only `"statusCode": ["open"]`. Otherwise the notification that the event closed never arrives and the alert cannot recover.
+</Warning>
+
+## Regions and backup rules
+---
+
+- Create a rule in every Region you want to receive events from. Global events (for example IAM-related events) are delivered to US East (N. Virginia), `us-east-1`
+- In the standard AWS partition, events are also sent to the backup Region US West (Oregon). If you create rules in both the primary and the backup Region, the same event arrives twice; both copies have the same `eventArn` and affected account, so Flashduty merges them into one alert through the same Alert Key
+- To keep only the primary Region's events, add the filter `"backupEvent": ["false"]` (`detail.backupEvent`) to the backup Region rule
+
+## Field mapping
+---
+
+| AWS Health field | Flashduty |
+| :--- | :--- |
+| `detail.eventArn` + `detail.affectedAccount` (`account` if missing) | Alert Key; later updates of the same event merge into one alert |
+| `detail.statusCode` | `closed` recovers the alert; `open` and `upcoming` trigger or update it |
+| `detail-type` and `source` | The alert title is always `aws.health::AWS Health Event` |
+| `detail.service`, `detail.eventTypeCode` | Labels `service` and `event_type_code`, combined into the `summary` label (`AWS Health <service> <eventTypeCode>`) |
+| `detail.eventTypeCategory` | Label `event_type_category` (`issue`, `accountNotification`, `scheduledChange`, `investigation`) |
+| `detail.eventScopeCode` | Label `event_scope_code` (`ACCOUNT_SPECIFIC` or `PUBLIC`) |
+| `detail.affectedEntities[].entityValue` | Label `affected_entities`; the first value is also written to `resource` |
+| `detail.eventArn`, `detail.statusCode`, `detail.affectedAccount` | Labels `event_arn`, `status_code`, `affected_account` |
+| `region`, `account`, `resources`, `detail` | Labels `region`, `account`, `resources`, `detail` (`detail` holds the event detail as JSON) |
+
+## Severity
+---
+
+EventBridge events carry no common severity field, so every AWS Health event triggers as Warning. To differentiate, rewrite the severity by the `event_type_category` label in [Alert processing](/en/on-call/integration/alert-integration/alert-pipelines), for example `issue` to Critical and `scheduledChange` kept at Warning or lowered to Info.
+
+## Recovery and deduplication
+---
+
+- AWS Health sends an update with `statusCode` set to `closed` when the event ends, and Flashduty recovers the alert with the same Alert Key
+- Scheduled changes (`scheduledChange`) are sent with status `upcoming` before they start, so Flashduty triggers alerts ahead of time. If you only care about ongoing incidents, restrict `eventTypeCategory` to `issue` in the event pattern
+- Events with `detail-type` set to `AWS Health Abuse Event` have no dedicated handling: each event becomes its own alert keyed by the event `id`, with no recovery. Matching only `AWS Health Event` in the pattern avoids them
+- Events without `detail.eventArn` are rejected (HTTP 400)
+
+## Troubleshooting
+---
+
+- **The rule does not fire**: check the event pattern; public events can take up to an hour after the rule is created; make sure rules exist in the event's Region and in `us-east-1` for global events
+- **The alert does not recover**: confirm the event pattern does not filter out the `closed` status and that the target has no Input transformer (the full event must be sent)
+- **Two alerts for one event**: confirm both events have the same `detail.eventArn` and affected account; if `detail-type` was rewritten the event cannot be merged as a Health event
+- **The API destination call fails**: confirm the endpoint is the full push URL and `HTTP method` is `POST`
+
+For field details, see the AWS documentation [AWS Health events Amazon EventBridge schema](https://docs.aws.amazon.com/health/latest/ug/aws-health-events-eventbridge-schema.html) and [Creating EventBridge rules for AWS Region coverage](https://docs.aws.amazon.com/health/latest/ug/choosing-a-region.html).
