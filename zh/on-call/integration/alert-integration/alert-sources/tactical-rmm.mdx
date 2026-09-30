@@ -1,0 +1,142 @@
+---
+title: "Tactical RMM 告警集成"
+description: "通过 Tactical RMM 告警模板的 Webhook（URL Action）将代理离线、检查和任务失败告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Tactical RMM", "Webhook", "RMM", "MSP", "远程监控管理"]
+---
+
+通过 Tactical RMM（自托管的开源 RMM）告警模板中的 Webhook 动作，将代理离线（Agent overdue）、检查（Check）和任务（Task）失败告警同步到 Flashduty On-call。每条 Tactical RMM 告警对应一条 Flashduty 告警：失败时创建，Tactical RMM 判定恢复时自动恢复。
+
+Tactical RMM 没有固定的 Webhook 报文格式，请求体由您在 Webhook 中编写。本页给出需要粘贴的 JSON 模板，Flashduty 按该模板的字段解析。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Tactical RMM**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Tactical RMM**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Tactical RMM 中配置
+---
+
+需要创建两个 Webhook（失败一个、恢复一个），再把它们绑定到告警模板。两个 Webhook 的 URL 都是 Flashduty 推送地址，请求体只有 `status` 不同。
+
+<Steps>
+<Step title="创建“失败”Webhook">
+
+1. 登录 Tactical RMM 控制台，进入 **Settings** 中的 **URL Actions**，新建一个 Webhook 类型的动作（菜单位置以您的版本为准）
+2. **URL Pattern** 填写 Flashduty 的完整推送地址（含 `integration_key`），请求方法选择 **POST**
+3. **Request Headers** 填写：
+
+```json
+{ "Content-Type": "application/json" }
+```
+
+4. **Request Body** 填写：
+
+```json
+{
+  "status": "firing",
+  "alert_id": "{{alert.id}}",
+  "alert_type": "{{alert.alert_type}}",
+  "severity": "{{alert.severity}}",
+  "message": "{{alert.message}}",
+  "hostname": "{{agent.hostname}}",
+  "agent_id": "{{agent.agent_id}}",
+  "client": "{{agent.site.client.name}}",
+  "site": "{{agent.site.name}}"
+}
+```
+
+</Step>
+
+<Step title="创建“恢复”Webhook">
+
+再新建一个 Webhook，URL、请求方法和请求头与上一步相同，请求体与上一步完全一致，只把第一行改为 `"status": "resolved"`。
+
+</Step>
+
+<Step title="绑定到告警模板">
+
+1. 进入 **Settings** → **Alert Templates**，新建或编辑需要值班处理的告警模板
+2. 在动作设置中，把 **Failure action** 的类型选为 Rest，选择“失败”Webhook；把 **Resolved action** 的类型选为 Rest，选择“恢复”Webhook
+3. 在模板的代理、检查、任务设置中开启需要的告警，并把模板应用到对应的客户、站点或策略
+
+Tactical RMM 默认只对 Error 级别（如代理离线）和 Warning 级别的告警执行 Webhook，Info 级别的告警默认不发送。需要 Info 时，在全局设置的告警通知选项中开启。
+
+</Step>
+
+<Step title="保存并验证">
+
+1. 在 Webhook 编辑页点击 **Test**，且不要选择测试对象（代理、站点或客户）。Flashduty 会创建一条 Info 级别的测试告警，标题为 `Tactical RMM test notification`，它不会自动恢复，验证后请手动关闭。Tactical RMM 的文档说明测试模式下 `{{alert.XXX}}` 变量不可用；选择了测试对象时变量可能被替换成其他值，Flashduty 会因 `alert_type` 无效返回参数错误
+2. 让一个告警真实触发（例如停止一台测试代理），确认 Flashduty 收到活动告警
+3. 告警恢复后，确认 Flashduty 中对应的告警恢复
+
+</Step>
+</Steps>
+
+## 事件类型
+---
+
+| 请求体 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| `status` 为 `firing` | 触发告警 |
+| `status` 为 `resolved` | 恢复告警 |
+| Test 按钮（`alert_id` 和 `alert_type` 仍是未替换的 `{{alert.id}}`、`{{alert.alert_type}}`） | 创建一条独立的 Info 告警，不会恢复 |
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_id`（即 `{{alert.id}}`，Tactical RMM 中这条告警记录的编号）计算 Alert Key。同一条告警的失败和恢复 Webhook 渲染自同一条记录，编号相同。同一对象在恢复后再次失败会产生新的告警记录，因此在 Flashduty 中是一条新告警。严重程度、消息、主机名变化不会改变 Alert Key，缺少 `alert_id` 的请求会被拒绝。
+
+一个 Flashduty 集成对应一个 Tactical RMM 实例。多个 Tactical RMM 实例的告警编号可能重复，请为每个实例创建各自的集成。
+
+## 状态和告警等级
+---
+
+| Tactical RMM `severity` | Flashduty 等级 |
+| :--- | :--- |
+| `error` | Critical |
+| `warning` | Warning |
+| `info` | Info |
+| 其他或为空 | Warning |
+
+`status` 为 `resolved` 时告警恢复，保留最后一次的告警等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` / `alert_type` | 告警类型（`availability`、`check`、`task`、`custom`） |
+| `resource` / `host` | 代理主机名（`hostname`） |
+| `alert_id` | Tactical RMM 告警编号 |
+| `severity` | Tactical RMM 原始等级 |
+| `agent_id` | 代理 ID |
+| `client` / `site` | 代理所属客户和站点 |
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：错误信息会指出问题字段。常见原因是请求体缺少 `alert_id`，或 `alert_type` 不是 `availability`、`check`、`task`、`custom` 之一（例如用 Test 按钮时选择了测试对象）
+- **告警没有恢复**：确认已配置“恢复”Webhook 并绑定到告警模板的 Resolved action，且其 `status` 为 `resolved`；可在 Tactical RMM 的告警详情中查看动作的返回结果
+- **Flashduty 没有收到任何推送**：确认告警模板已应用到对应的代理，且告警等级没有被 Info/Warning 通知开关过滤
+- **请求体不是合法 JSON**：`{{alert.message}}` 的内容含有双引号时，Tactical RMM 渲染出的 JSON 会失效，此时 Flashduty 会拒绝该请求。可从模板中删除 `message` 行，Flashduty 会用告警类型和主机名生成标题
+- **测试告警没有关闭**：Test 按钮的推送不会恢复，需手动关闭
+
+更多变量请参阅 [Tactical RMM 告警文档](https://docs.tacticalrmm.com/functions/alerting/) 和 [Webhook 文档](https://docs.tacticalrmm.com/functions/webhooks/)。
