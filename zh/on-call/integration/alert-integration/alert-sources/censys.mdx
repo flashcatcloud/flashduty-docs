@@ -1,0 +1,113 @@
+---
+title: "Censys 告警集成"
+description: "通过 Webhook 将 Censys ASM 发现的新风险同步到 Flashduty On-call。"
+keywords: ["告警集成", "Censys", "Censys ASM", "Webhook", "攻击面管理", "风险"]
+---
+
+通过 Censys Attack Surface Management（ASM）的 Webhook Connection，将攻击面上新发现的风险同步到 Flashduty On-call。每个风险实例（某一类风险出现在某一个资产上）对应一条 Flashduty 告警。Censys 的 Webhook 只在风险被发现时推送，不推送风险关闭的通知，因此告警不会自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Censys**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Censys**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Censys ASM 中配置
+---
+
+Webhook Connection 仅对 Censys ASM 的 Advanced 和 Enterprise 访问级别开放。如果您的防火墙或网关限制来源 IP，请放行 Censys 的出口地址 `52.5.142.59`、`34.226.132.221` 和 `52.54.43.157`。
+
+<Steps>
+<Step title="添加 Webhook Connection">
+
+1. 登录 Censys ASM 控制台，点击 **Integrations**
+2. 找到 **Webhook Connection**，点击 **Set Up**
+3. 在 Authentication 页面，将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**，地址中需包含 `integration_key`
+4. **Authentication type** 按 Censys 页面提供的选项选择。Flashduty 通过地址中的 `integration_key` 认证，不校验其他认证信息
+5. 点击 **Connect**，再点击 **Next Step**
+
+</Step>
+
+<Step title="选择推送的风险等级">
+
+1. 在 Default Set Up 页面确认默认设置（该页面的字段不可编辑），点击 **Next Step**
+2. 在 Filters 页面勾选需要推送的风险等级
+3. 点击 **Submit**，再点击 **Close**
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Censys 不推送风险关闭的通知。请在接收这些告警的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议 7 天；也可以在风险修复后手动关闭告警。
+
+</Step>
+
+<Step title="验证">
+
+Censys 的 Webhook 文档没有提供测试按钮。ASM 在攻击面上发现新风险后会推送一条事件，在 Flashduty 中确认收到对应告警即可。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用 `event.data.risk_id`（风险类型 ID）和 `event.data.impacted_asset`（受影响资产，如 `Host: 1.1.1.1`）共同计算 Alert Key。同一类风险出现在同一个资产上，Alert Key 相同，重复推送会合并到同一条告警；同一类风险出现在不同资产上，或同一资产上出现不同类风险，生成不同的告警。
+
+风险名称、描述、等级、首次和最近发现时间以及事件 ID 的变化不会改变 Alert Key。缺少 `risk_id` 或 `impacted_asset` 的事件会被拒绝。`event.type` 不是 `risk_instance_opened` 的事件不会创建告警，Flashduty 收到后直接返回成功。
+
+## 状态和告警等级
+---
+
+所有事件都是触发事件，Flashduty 按 `risk_severity` 确定等级：
+
+| Censys 等级 | Flashduty 等级 |
+| :--- | :--- |
+| `critical`、`high` | Critical |
+| `medium` | Warning |
+| `low`、`info` | Info |
+| 空值或其他值 | Warning |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `event` | 事件类型，如 `risk_instance_opened` |
+| `workspace_id` | Censys 工作空间 ID |
+| `risk_id` / `risk_event_id` | 风险类型 ID 和风险事件 ID |
+| `check` / `risk_name` | 风险类型名称，如 `eol-openssl-software` |
+| `risk_severity` | Censys 原始风险等级 |
+| `resource` | 受影响的资产 |
+| `categories` | 风险分类 |
+| `first_seen_at` / `last_seen_at` | 风险首次和最近一次被发现的时间 |
+| `url` | Censys 控制台中该资产风险页面的链接 |
+
+告警标题由风险描述（`risk_description`，为空时用风险名称）和受影响资产组成。
+
+## 排查问题
+---
+
+- **找不到 Webhook Connection**：确认 Censys ASM 的访问级别为 Advanced 或 Enterprise
+- **集成不生效**：Censys 要求接收端接受顶层的 `event` 字段，使用 Flashduty 推送地址时无需额外处理
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **告警一直未关闭**：Censys 没有风险关闭的通知，请开启协作空间的超时自动关闭
+
+更多字段含义请参阅 [Censys Webhooks for ASM](https://docs.censys.com/docs/asm-webhook)。
