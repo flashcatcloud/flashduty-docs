@@ -1,0 +1,117 @@
+---
+title: "Kuvasz alert integration"
+description: "Send Kuvasz website, port, DNS, container and SSL certificate monitoring alerts to Flashduty On-call through the Kuvasz webhook integration. Alerts close automatically when the monitor recovers."
+keywords: ["alert integration", "Kuvasz", "webhook", "website monitoring", "SSL certificate monitoring", "open source monitoring"]
+---
+
+Kuvasz is an open-source, self-hosted uptime and SSL certificate monitor. Its **webhook** integration posts one JSON body to the configured URL whenever a monitor changes state (the default body, no custom template needed). Each monitor maps to one Flashduty alert: it opens when the monitor goes down and closes automatically when it recovers.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Kuvasz** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Kuvasz** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Kuvasz
+---
+
+Kuvasz integrations are configured only in the YAML configuration file, and you must restart the Kuvasz container after changing it.
+
+<Steps>
+<Step title="Add a webhook integration">
+
+Add a `webhook` integration to the Kuvasz configuration file. Set `url` to the full push URL, including `?integration_key=...`, and do **not** set `payload-template`, so Kuvasz sends its default body:
+
+```yaml
+integrations:
+  webhook:
+    - name: flashduty
+      url: https://api.flashcat.cloud/event/push/alert/kuvasz?integration_key=YOUR_INTEGRATION_KEY
+      http-method: POST
+      global: true
+```
+
+`global: true` makes every monitor use this integration by default. To limit it to some monitors, remove `global` and reference the integration ID `webhook:flashduty` in those monitors' configuration. The integration ID is the type plus the name.
+
+If you set `excluded-events`, do not exclude the `*_UP` events or `SSL_VALID`, or alerts will never recover.
+
+</Step>
+
+<Step title="Restart and send a test event">
+
+Restart Kuvasz, then click the test button on the integration in the web UI (or call `POST /api/v2/integrations/{integrationId}/test`). Kuvasz sends one sample message per monitor event type, all for a monitor named `Test monitor`. Flashduty recognizes these samples, returns `200`, and creates no alert.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a monitor fail (for example, create an HTTP monitor that points to a URL returning 500) and confirm Flashduty receives a Critical alert. Point it back to a healthy URL and, once Kuvasz detects the recovery, confirm the alert closes.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the monitor type plus `monitorId` as the Alert Key. Each Kuvasz monitor has a fixed numeric ID, and the down (`*_DOWN`) and up (`*_UP`) messages of one monitor carry the same `monitorId`, so they land on the same Flashduty alert.
+
+- Monitor IDs are independent per monitor type (HTTP monitor 12 and TCP monitor 12 are different monitors), so the Alert Key also contains the monitor type (HTTP, Push, ICMP, TCP, DNS, Docker)
+- SSL certificate events use a separate Alert Key, so an HTTP monitor's recovery message does not close them
+- Renaming a monitor does not change the Alert Key
+
+Flashduty rejects requests that have no `monitorId`.
+
+## Alert lifecycle
+---
+
+Flashduty handles messages by the `type` field:
+
+| Kuvasz `type` | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `HTTP_DOWN`, `PUSH_DOWN`, `ICMP_DOWN`, `TCP_DOWN`, `DNS_DOWN`, `DOCKER_DOWN` | Monitor is down | Trigger an alert (Critical) |
+| `HTTP_UP`, `PUSH_UP`, `ICMP_UP`, `TCP_UP`, `DNS_UP`, `DOCKER_UP` | Monitor recovered | Recover the alert |
+| `SSL_INVALID` | Certificate is invalid | Trigger an alert (Critical) |
+| `SSL_WILL_EXPIRE` | Certificate is about to expire | Trigger an alert (Warning) |
+| `SSL_VALID` | Certificate is valid again | Recover the alert |
+| `DNS_RECORDS_CHANGED` | Resolved DNS records changed | Trigger an alert (Warning); never recovers |
+| `MAINTENANCE_START`, `MAINTENANCE_END` | Maintenance window starts or ends | Ignored, returns `200` |
+
+Other types are ignored as well. `DNS_RECORDS_CHANGED` has no recovery message, so turn on [auto-close after timeout](/en/on-call/channel/create-edit) for the channel, start the timer from **Incident triggered**, and set about 24 hours.
+
+## Severity
+---
+
+Kuvasz messages carry no severity. Down events and `SSL_INVALID` mean the service is unavailable and are fixed at **Critical**; `SSL_WILL_EXPIRE` and `DNS_RECORDS_CHANGED` are fixed at **Warning**. A recovery event keeps the original alert's severity.
+
+## Alert content
+---
+
+- **Title**: the monitor name
+- **Description**: the event text Kuvasz generates (`eventDetails`)
+- **Labels**: `check` (monitor name), `monitor_id`, `monitor_type`, `monitor_name`, `monitor_urn`, `monitor_detail` (relative path of the monitor's details page), `event_type` (Kuvasz `type`), and `source` (always `kuvasz`)
+
+## Troubleshooting
+---
+
+- **The test event created no alert**: this is expected; test events only verify connectivity
+- **4xx or an invalid `integration_key` error**: check that `url` is the full push URL and the integration is not disabled
+- **An alert did not recover**: check that `excluded-events` does not exclude `*_UP` or `SSL_VALID`, and that no custom `payload-template` is set (a custom template changes the fields, which Flashduty cannot recognize)
+
+For the full option reference, see the Kuvasz [Integrations](https://kuvasz-uptime.dev/management/integrations/) documentation.
