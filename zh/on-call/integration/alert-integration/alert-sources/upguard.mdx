@@ -1,0 +1,128 @@
+---
+title: "UpGuard 告警集成"
+description: "通过 UpGuard 的 Webhook 集成，将安全评分下降、新的数据泄露等风险通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "UpGuard", "Webhook", "安全评分", "数据泄露", "供应商风险", "攻击面"]
+---
+
+UpGuard 是第三方风险与攻击面管理平台。在 UpGuard 中创建 Webhook 集成，并选择触发条件（例如公司评分低于某个阈值、供应商评分在一段时间内下降、发布新的数据泄露）后，每条触发的通知都会同步到 Flashduty On-call。UpGuard 的每条通知对应一条 Flashduty 告警，且没有"已恢复"通知，告警需要由协作空间的超时自动关闭或手动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **UpGuard**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **UpGuard**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 UpGuard 中配置
+---
+
+<Steps>
+<Step title="新增 Webhook 集成">
+
+1. 登录 UpGuard，进入 **Integrations**，新增一个 Webhook 集成
+2. 选择触发条件（Triggers）
+3. 填写集成名称，并把 Flashduty 集成的完整推送地址粘贴到 Webhook 地址，地址中需包含 `integration_key`
+
+</Step>
+
+<Step title="填写请求体模板">
+
+UpGuard 用 Liquid 模板生成请求体，Flashduty 解析下面这个模板渲染出的 JSON。请把它粘贴到请求体（payload）中，字符串字段需要带引号：
+
+```json
+{
+  "notification": {
+    "id": "{{ notification.id }}",
+    "type": "{{ notification.type }}",
+    "description": "{{ notification.description }}",
+    "occurredAt": "{{ notification.occurredAt }}",
+    "context": {
+      "LatestScore": "{{ notification.context.LatestScore }}",
+      "PrevScore": "{{ notification.context.PrevScore }}",
+      "Threshold": "{{ notification.context.Threshold }}",
+      "Domain": "{{ notification.context.Domain }}"
+    }
+  }
+}
+```
+
+`id` 必须保留，缺少 `notification.id` 的请求会被拒绝。`context` 里的字段按触发条件不同而不同，不存在的字段会渲染为空，Flashduty 会忽略空值。
+
+</Step>
+
+<Step title="开启集成并测试">
+
+1. 点击 **Send test message**，确认 Flashduty 收到告警。UpGuard 的文档没有给出测试消息的内容，Flashduty 按普通通知处理，会创建一条告警，验证后请手动关闭
+2. 启用该集成
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 7 天。UpGuard 不发送恢复通知，不开启时这些告警会一直保持未关闭状态。
+
+</Step>
+</Steps>
+
+## 事件类型
+---
+
+| 推送内容 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| 任意触发条件产生的通知 | 创建一条告警，严重程度为 Warning |
+
+## Alert Key
+---
+
+Flashduty 使用 `notification.id` 作为 Alert Key。每条 UpGuard 通知有自己的编号，因此不同通知各自对应一条告警，同一条通知被重复投递时合并到同一条告警；缺少 `notification.id` 的请求会被拒绝。UpGuard 的文档没有说明该编号的唯一性范围，上线前建议用测试消息和一次真实触发确认两条通知的 `id` 不同。
+
+## 状态和告警等级
+---
+
+UpGuard 的通知不带严重程度，所有通知都按 Warning 创建。需要区分时，可在协作空间的告警处理规则中按 `notification_type` 标签调整等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 通知类型（`notification.type`，如 `CustomerCSTARUnderThreshold`） |
+| `notification_id` | 通知编号 |
+| `notification_type` | 通知类型 |
+| `occurred_at` | 通知发生时间（`occurredAt`） |
+| `latest_score` / `previous_score` / `threshold` | 最新评分、上次评分和阈值（`context`） |
+| `domain` | 相关域名（`context.Domain`） |
+
+告警标题取自 `description`（例如 `The score for 'Example Company' dropped below 600 with a score of 599`），为空时使用通知类型。
+
+## 注意事项
+---
+
+- UpGuard 的通知可能包含泄露、身份等敏感信息，模板里只填写上文列出的字段即可，不要添加凭证或个人数据
+- UpGuard 从固定的一组 IP 发起请求，列表见 [webhook-ips.json](https://cdn.cyber-risk.upguard.com/webhook-ips.json)，如果 Flashduty 前置了 IP 白名单，请放行
+- 如果 `description` 中出现双引号，渲染出的 JSON 会不合法，请求会被拒绝为参数错误
+
+## 排查问题
+---
+
+- **Flashduty 没有收到推送**：确认 Webhook 地址完整且包含 `integration_key`，集成已启用
+- **返回参数错误**：提示缺少 `notification.id` 时，检查请求体模板是否保留了 `id`；提示 JSON 不合法时，检查字符串字段是否带引号
+- **告警一直不关闭**：UpGuard 没有恢复通知，请开启协作空间的超时自动关闭
+
+更多信息请参阅 [UpGuard 官方的 Webhook 集成文档](https://help.upguard.com/en/articles/4205928-how-to-integrate-upguard-with-other-services-using-webhooks)。
