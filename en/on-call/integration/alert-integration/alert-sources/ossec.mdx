@@ -1,0 +1,138 @@
+---
+title: "OSSEC Alert Integration"
+description: "OSSEC sends alert notifications by email. Use the Flashduty Email integration to bring OSSEC alerts into Flashduty On-call."
+keywords: ["alert integration", "OSSEC", "OSSEC HIDS", "HIDS", "intrusion detection", "email", "security alerts"]
+---
+
+The OSSEC server (ossec-maild) can send alerts by email to the recipients you configure. The Flashduty [Email integration](/en/on-call/integration/alert-integration/alert-sources/email) receives these emails, so no separate OSSEC integration is needed: create an Email integration in Flashduty, put its address in OSSEC as the recipient, and choose the push mode described below.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration email address in either of the two ways below. **Choose Email as the integration type** in both cases, not OSSEC.
+
+### Dedicated integration
+
+1. Go to the Flashduty console, select **Channels**, and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Email** and click **Save**
+4. Open the generated integration card, copy the **Email address**, then set the push mode as described below
+
+### Shared integration
+
+1. Go to the Flashduty console and select **Integration Center → Alert events**
+2. Select **Email**, enter an integration name, and copy the **Email address**
+3. Set the push mode as described below
+4. Configure the default route, select a channel, and click **Save**
+
+</div>
+
+## Configure the push mode in Flashduty
+---
+
+OSSEC sends one email when an alert is generated and never sends a recovery email, so no "close alert" rule is needed. Set **Push Mode** to **Trigger or Update Alert Based on Email Subject**: emails with the same title (same host, same log source, same level, same rule description) are merged into the one open alert, and emails with different titles each create a separate alert.
+
+The title format is described in [Email subject format](#email-subject-format).
+
+OSSEC does not send recovery notifications. Enable [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel that receives this integration, with a suggested window of 24 hours, or close alerts manually once handled.
+
+## Configure OSSEC
+---
+
+All configuration below is done in `/var/ossec/etc/ossec.conf` on the OSSEC server. Agents need no configuration because alerts are generated only on the server.
+
+<Steps>
+<Step title="Configure email delivery">
+
+In `<global>`, set the recipient, SMTP server, and sender. Set the **recipient** to the address of the Flashduty Email integration:
+
+```xml
+<ossec_config>
+  <global>
+    <email_notification>yes</email_notification>
+    <email_to>YOUR_FLASHDUTY_EMAIL_ADDRESS</email_to>
+    <smtp_server>mx.example.com</smtp_server>
+    <email_from>ossec@example.com</email_from>
+  </global>
+</ossec_config>
+```
+
+Consumer and hosted providers such as Gmail and Outlook.com generally do not accept unauthenticated relay. If your SMTP server requires authentication or TLS, follow the SMTP-authenticated email section of the OSSEC documentation.
+
+</Step>
+
+<Step title="Set the minimum alert level for email">
+
+```xml
+<ossec_config>
+  <alerts>
+    <email_alert_level>10</email_alert_level>
+  </alerts>
+</ossec_config>
+```
+
+Only alerts whose rule level is greater than or equal to this value are emailed. Choose a value that matches what your SOC can handle so low-level alerts do not bury on-call responders.
+
+</Step>
+
+<Step title="Avoid merging several alerts into one email (optional)">
+
+By default OSSEC batches alerts that arrive close together into a single email, and the subject reflects only one of them, so Flashduty cannot create one alert per OSSEC alert. To send each alert as its own email, add an `<email_alerts>` block for the same recipient with `<do_not_group />` and `<do_not_delay />` (the `<global>` section must already contain at least one `<email_to>`):
+
+```xml
+<ossec_config>
+  <email_alerts>
+    <email_to>YOUR_FLASHDUTY_EMAIL_ADDRESS</email_to>
+    <level>10</level>
+    <do_not_delay />
+    <do_not_group />
+  </email_alerts>
+</ossec_config>
+```
+
+`<email_alerts>` also accepts `<group>`, `<rule_id>` (comma-separated), and `<event_location>` to narrow which alerts are forwarded.
+
+</Step>
+
+<Step title="Restart and verify">
+
+```bash
+/var/ossec/bin/ossec-control restart
+```
+
+1. Trigger an alert at or above the email level on a monitored host, for example by entering wrong passwords repeatedly against SSH
+2. Confirm in Flashduty that an alert arrives, titled with the OSSEC email subject
+3. If nothing arrives, check `/var/ossec/logs/ossec.log` on the OSSEC server for SMTP errors
+
+</Step>
+</Steps>
+
+## Email subject format
+---
+
+OSSEC emails use the full subject by default (internal option `maild.full_subject=0`, the default value):
+
+```
+OSSEC Alert - <location> - Level <level> - <rule description>
+```
+
+Example:
+
+```
+OSSEC Alert - (slacker) 192.168.2.0 - Level 3 - SSHD authentication success.
+```
+
+The location is "(agent name) agent IP", or the server name for alerts from the server itself. The log file path after `->` is not included in the subject. The subject is limited to 127 characters, so a long rule description is truncated.
+
+The email body starts with `OSSEC HIDS Notification.`, followed by the alert time, `Received From` (the alert source), `Rule: <rule ID> fired (level <level>) -> "<rule description>"`, the source IP / user when present, and the triggering log excerpt (`Portion of the log(s)`). In Flashduty, the alert title is the email subject and the description is the email body.
+
+## Limitations
+---
+
+- **No recovery**: an OSSEC alert is a one-time event. Alerts in Flashduty do not resolve automatically; rely on [auto-resolve timeout](/en/on-call/channel/create-edit) or close them manually.
+- **Severity**: the Email integration sets every alert to Warning. The subject carries the OSSEC level (`Level N`), so you can adjust severity by level with an [Alert Pipeline](/en/on-call/integration/alert-integration/alert-pipelines).
+- **No rule ID in the subject**: the subject has the rule description only, so alerts from different rules that share the same description, location, and level are merged. The rule ID is in the email body.
+- **Sensitive data**: the body contains a raw log excerpt that may include usernames, IPs, and file paths. Filter with `<email_alert_level>` or the `<group>` and `<rule_id>` options of `<email_alerts>` and avoid forwarding raw authentication logs.
+- **Merging**: emails with the same subject merge into the same open alert; once that alert is closed, a new email creates a new alert.
