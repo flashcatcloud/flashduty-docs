@@ -1,0 +1,118 @@
+---
+title: "Blumira 告警集成"
+description: "通过 Blumira Webhook 将安全发现（Finding）的创建和解决事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Blumira", "Webhook", "安全告警", "Finding", "SIEM"]
+---
+
+通过 Blumira Webhook 将安全发现（Finding）同步到 Flashduty On-call。每个 Blumira Finding 对应一条 Flashduty 告警：`finding.created` 触发告警，`finding.status.changed` 且状态变为 `resolved` 时恢复同一条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Blumira**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Blumira**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Blumira 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+1. 在 Blumira 控制台进入 **Settings** → **Webhooks**（MSP 用户进入 **MSP Portal** → **Webhooks**）
+2. 点击 **Add Webhook**
+3. 将 Flashduty 集成的完整推送地址粘贴到 **Endpoint URL**（Blumira 只接受公网 HTTPS 地址，Flashduty 推送地址符合要求）
+4. 可选：填写描述
+
+</Step>
+
+<Step title="设置事件过滤">
+
+在 **Event filters** 中至少添加两个事件类型：
+
+- `finding.created`：新 Finding 产生
+- `finding.status.changed`：Finding 状态变化，变为 `resolved` 时恢复告警
+
+可以按 Finding 类型（`operational`、`risk`、`suspect`、`threat`、`system`）或优先级（`P1`、`P2`、`P3`）缩小范围。不添加过滤时 Blumira 发送全部事件，其中 `finding.owners.changed`、`finding.comment.added`、`case.*` 等事件 Flashduty 会返回成功但不生成告警。
+
+<Warning>
+如果设置了过滤，请务必同时保留 `finding.status.changed`，否则告警不会恢复。
+</Warning>
+
+</Step>
+
+<Step title="保存并发送测试">
+
+1. 点击 **Create webhook**，复制并保存 HMAC 签名密钥（只显示一次），点击 **Done**
+2. 在 Webhooks 列表中点击该行末尾的省略号，选择 **Send Test**
+
+测试投递（`webhook.test`）会在 Flashduty 中产生一条独立的 Info 等级告警，标题为 `Blumira test notification`，不会关联任何真实 Finding，也没有对应的恢复事件，请确认收到后手动关闭。
+
+</Step>
+
+<Step title="验证生命周期">
+
+等待 Blumira 产生真实 Finding，确认 Flashduty 收到活动告警；在 Blumira 中把该 Finding 标记为已解决，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 关于签名
+---
+
+Blumira 会在请求头 `X-Blumira-Signature`（格式 `t=<时间戳>,v1=<HMAC-SHA256>`）中带上签名。Flashduty 不校验该签名，也不需要您提供签名密钥；推送地址中的 `integration_key` 是唯一的凭证，请妥善保管。
+
+## Alert Key
+---
+
+Flashduty 使用 `data.finding_id` 作为 Alert Key。Blumira 文档中的 `finding.created` 与 `finding.status.changed` 示例携带同一个 `finding_id`，因此触发、状态更新和恢复落在同一条告警上。
+
+标题、优先级、状态和时间的变化不会改变 Alert Key。请求缺少 `data.finding_id` 时 Flashduty 会返回参数错误。
+
+## 状态和告警等级
+---
+
+| Blumira 事件 | Flashduty 处理 |
+| :--- | :--- |
+| `finding.created` | 触发告警 |
+| `finding.status.changed`，`status_change.current` 为 `resolved` | 恢复告警，保留原等级 |
+| `finding.status.changed`，其他状态 | 更新同一条告警，告警保持活动 |
+| `webhook.test` | 独立的 Info 告警，需手动关闭 |
+| 其他事件类型 | 返回成功，不生成告警 |
+
+| Blumira `priority` | Flashduty 等级 |
+| :--- | :--- |
+| `1`（P1） | Critical |
+| `2`（P2） | Warning |
+| `3`（P3） | Info |
+| 空值或其他 | Warning |
+
+Flashduty 只把 `resolved` 视为恢复状态。Blumira 文档只给出了这一种关闭状态；如果 Finding 以其他状态关闭，告警会保持活动，请在协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)兜底。
+
+告警标签包含 Finding 的 ID、短 ID、类型、分类、优先级、来源国家和链接。负责人和操作人的姓名、邮箱不会写入告警。
+
+## 排查问题
+---
+
+- **Blumira 显示投递失败或 Webhook 被自动禁用**：确认推送地址完整且包含 `integration_key`；连续失败的 Webhook 会被 Blumira 自动禁用，修复后在 **Edit** 中重新启用
+- **没有收到告警**：确认 Webhook 已启用，并检查事件过滤是否包含 `finding.created`
+- **告警没有恢复**：确认过滤包含 `finding.status.changed`，且 Finding 的新状态是 `resolved`
+- **收到测试告警**：这是 **Send Test** 产生的独立 Info 告警，手动关闭即可
+
+更多信息请参阅 Blumira 帮助中心文章 [Using Blumira Webhooks](https://support.blumira.com/hc/en-us/articles/52879102872339-Using-Blumira-Webhooks)。

@@ -1,0 +1,118 @@
+---
+title: "Blumira alert integration"
+description: "Send Blumira finding created and resolved events to Flashduty On-call through a Blumira webhook."
+keywords: ["alert integration", "Blumira", "webhook", "security alerts", "finding", "SIEM"]
+---
+
+Use a Blumira webhook to send security findings to Flashduty On-call. Each Blumira finding maps to one Flashduty alert: `finding.created` opens the alert, and `finding.status.changed` with the status changing to `resolved` recovers the same alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. Open the Flashduty console, choose **Channels**, and open a channel
+2. Choose **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Choose **Blumira** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. Open the Flashduty console and choose **Integration Center → Alert events**
+2. Choose **Blumira** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Blumira
+---
+
+<Steps>
+<Step title="Create the webhook">
+
+1. In the Blumira console, go to **Settings** → **Webhooks** (MSP users: **MSP Portal** → **Webhooks**)
+2. Click **Add Webhook**
+3. Paste the full Flashduty push URL into **Endpoint URL** (Blumira accepts only public HTTPS endpoints, which the Flashduty push URL is)
+4. Optional: add a description
+
+</Step>
+
+<Step title="Set event filters">
+
+Under **Event filters**, add at least these two event types:
+
+- `finding.created`: a new finding is created
+- `finding.status.changed`: a finding's status changes; a change to `resolved` recovers the alert
+
+You can narrow the scope by finding type (`operational`, `risk`, `suspect`, `threat`, `system`) or priority (`P1`, `P2`, `P3`). Without filters Blumira sends every event; Flashduty acknowledges `finding.owners.changed`, `finding.comment.added`, `case.*` and other events with a success response and creates no alert.
+
+<Warning>
+If you set filters, keep `finding.status.changed` in them. Without it, alerts never recover.
+</Warning>
+
+</Step>
+
+<Step title="Save and send a test">
+
+1. Click **Create webhook**, copy and store the HMAC signing secret (it is shown only once), then click **Done**
+2. In the Webhooks table, click the ellipsis at the end of the row and choose **Send Test**
+
+The test delivery (`webhook.test`) opens a standalone Info alert titled `Blumira test notification` in Flashduty. It is not tied to any real finding and no recovery follows, so close it manually once you see it.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Wait for a real Blumira finding and confirm Flashduty receives the active alert. Then mark that finding resolved in Blumira and confirm the original alert recovers.
+
+</Step>
+</Steps>
+
+## About signatures
+---
+
+Blumira signs each delivery in the `X-Blumira-Signature` header (format `t=<timestamp>,v1=<HMAC-SHA256>`). Flashduty does not verify this signature and does not need the signing secret. The `integration_key` in the push URL is the only credential, so keep it private.
+
+## Alert Key
+---
+
+Flashduty uses `data.finding_id` as the Alert Key. The `finding.created` and `finding.status.changed` examples in Blumira's documentation carry the same `finding_id`, so the trigger, status updates, and recovery land on one alert.
+
+Changes to the title, priority, status, or time do not change the Alert Key. A request without `data.finding_id` is rejected with a parameter error.
+
+## Status and severity
+---
+
+| Blumira event | Flashduty behavior |
+| :--- | :--- |
+| `finding.created` | Opens the alert |
+| `finding.status.changed` with `status_change.current` of `resolved` | Recovers the alert, keeping its severity |
+| `finding.status.changed` to any other status | Updates the same alert, which stays active |
+| `webhook.test` | Standalone Info alert, close it manually |
+| Any other event type | Acknowledged, no alert |
+
+| Blumira `priority` | Flashduty severity |
+| :--- | :--- |
+| `1` (P1) | Critical |
+| `2` (P2) | Warning |
+| `3` (P3) | Info |
+| Empty or other | Warning |
+
+Flashduty treats only `resolved` as recovery. Blumira's documentation shows no other closing status; if a finding closes with another status, the alert stays active, so turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) as a fallback.
+
+Alert labels include the finding ID, short ID, type, category, priority, source country, and link. Owner and actor names and emails are not written to the alert.
+
+## Troubleshooting
+---
+
+- **Blumira reports failed deliveries or auto-disabled the webhook**: check that the push URL is complete and includes `integration_key`. Blumira disables a webhook after sustained failures; fix the cause and re-enable it under **Edit**
+- **No alerts arrive**: confirm the webhook is enabled and the event filters include `finding.created`
+- **Alerts do not recover**: confirm the filters include `finding.status.changed` and the finding's new status is `resolved`
+- **A test alert appeared**: it is the standalone Info alert from **Send Test**; close it manually
+
+For more detail see the Blumira help center article [Using Blumira Webhooks](https://support.blumira.com/hc/en-us/articles/52879102872339-Using-Blumira-Webhooks).

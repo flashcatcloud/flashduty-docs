@@ -162,6 +162,7 @@ export const docMap = {
   Kuvasz: `${alertBase}/kuvasz.mdx`,
   ThinkstCanary: `${alertBase}/thinkst-canary.mdx`,
   Falco: `${alertBase}/falco.mdx`,
+  Blumira: `${alertBase}/blumira.mdx`,
   Cloudamqp: `${alertBase}/cloudamqp.mdx`,
   Canarytokens: `${alertBase}/canarytokens.mdx`,
   Okta: `${alertBase}/okta.mdx`,
