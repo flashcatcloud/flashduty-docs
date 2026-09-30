@@ -1,0 +1,142 @@
+---
+title: "DBmarlin 告警集成"
+description: "通过 DBmarlin 的 Webhook 集成把数据库实例和主机的告警开始与结束事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "DBmarlin", "数据库监控", "Webhook"]
+---
+
+通过 DBmarlin 的 Webhook 集成，把数据库实例（Instance）和主机（Host）告警推送到 Flashduty On-call。同一条告警规则在同一个实例或主机上的“开始”和“结束”通知会更新同一条 Flashduty 告警，结束时自动恢复。
+
+DBmarlin 的 Webhook 没有固定格式，请求体由您在 **Content Template** 中书写。本页给出的模板就是 Flashduty 解析的格式，请照抄。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **DBmarlin**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **DBmarlin**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 DBmarlin 中配置
+---
+
+Webhook 集成需要 DBmarlin v5.11 及以上版本，且一个 DBmarlin 只能配置一个 Webhook 集成。
+
+<Steps>
+<Step title="打开 Webhook 集成">
+
+在 DBmarlin 中进入 **Settings → Integrations**，在 **Webhook** 一行点击 **Edit**。
+
+</Step>
+
+<Step title="填写地址和请求头">
+
+- **Webhook URL**：填 Flashduty 的完整推送地址，形如 `https://api.flashcat.cloud/event/push/alert/dbmarlin?integration_key=<your-integration-key>`
+- **DBmarlin URL**：填您访问 DBmarlin 的地址，告警里的跳转链接会用到
+- **Headers**：建议添加 `Content-Type: application/json`
+
+</Step>
+
+<Step title="填写 Content Template（实例告警）">
+
+**Content Template** 用于实例（Instance）告警，粘贴以下 JSON：
+
+```json
+{
+  "body": {
+    "instance": "<datasourcename>",
+    "ruleid": "<ruleid>",
+    "rulename": "<rulename>",
+    "statistic": "<statistic>",
+    "startedended": "<startedended>",
+    "oldvalue": "<oldvalue>",
+    "newvalue": "<newvalue>",
+    "threshold": "<threshold>",
+    "units": "<units>",
+    "url": "<url>"
+  }
+}
+```
+
+</Step>
+
+<Step title="填写 Host Content Template（主机告警）">
+
+**Host Content Template** 用于主机（Host）告警，粘贴以下 JSON：
+
+```json
+{
+  "body": {
+    "node": "<hostname>",
+    "ruleid": "<ruleid>",
+    "rulename": "<rulename>",
+    "statistic": "<statistic>",
+    "startedended": "<startedended>",
+    "oldvalue": "<oldvalue>",
+    "newvalue": "<newvalue>",
+    "threshold": "<threshold>",
+    "units": "<units>",
+    "url": "<url>"
+  }
+}
+```
+
+<Warning>
+请保留 `ruleid`、`startedended`，以及实例告警的 `instance` 或主机告警的 `node`：缺少规则 ID 或实例/主机名时 Flashduty 会拒绝请求，因为无法可靠关联后续的结束通知。模板必须是合法 JSON。
+</Warning>
+
+</Step>
+
+<Step title="启用并验证">
+
+保存并启用集成。在 **Settings → Alert Rules** 中创建一条容易触发的规则，等待 DBmarlin 发出“开始”通知，确认 Flashduty 收到活动告警；规则恢复后 DBmarlin 发出“结束”通知，确认原告警恢复。文档中没有提到 Webhook 的测试按钮，请用真实告警验证。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用规则 ID（`ruleid`）加实例名（`instance`）或主机名（`node`）计算 Alert Key，实例告警和主机告警互不相同。同一规则在同一实例或主机上的“开始”和“结束”共用一个 Alert Key；`from`、`to`、数值和规则名称的变化不会改变它。
+
+- 规则被删除后重建会得到新的规则 ID，旧告警不会被恢复，需要手动关闭
+- 同一规则再次触发时，使用同一个 Alert Key
+
+## 状态和告警等级
+---
+
+| DBmarlin `startedended` | Flashduty 状态或等级 |
+| :--- | :--- |
+| 开始（如 `started`） | Warning |
+| 结束（如 `ended`） | 恢复，原等级为 Warning |
+
+DBmarlin 只有 warning 一种告警等级，因此所有告警按 Warning 处理。DBmarlin 文档没有列出 `startedended` 的取值，Flashduty 把以 `end` 开头的值当作结束，其余值按开始处理。
+
+## 恢复与自动关闭
+---
+
+DBmarlin 在告警结束时发送“结束”通知，Flashduty 据此恢复告警。为避免通知丢失导致告警一直打开，建议在协作空间或集成上配置 **超时自动关闭**，时长大于您规则可能持续的最长时间。
+
+## 排查问题
+---
+
+- **DBmarlin 日志出现 `status code 400`**：确认模板是合法 JSON，且包含 `ruleid`，以及 `instance`（实例告警）或 `node`（主机告警）
+- **出现 `404` 或 `401`**：确认 Webhook URL 完整并包含 `integration_key`
+- **告警没有恢复**：确认规则的“结束”通知已发出，且模板包含 `startedended`；规则名称含双引号或反斜杠时会破坏 JSON，请避免
+- **收不到主机告警**：主机告警使用 **Host Content Template**，不使用 **Content Template**
+
+更多参数请参阅 [DBmarlin Webhook 文档](https://docs.dbmarlin.com/docs/Integrations/webhook)。
