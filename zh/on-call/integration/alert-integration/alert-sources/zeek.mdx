@@ -1,0 +1,111 @@
+---
+title: "Zeek 告警集成"
+description: "Zeek 的 Notice 框架可以把通知以邮件发出，使用 Flashduty 的邮件集成将 Zeek 通知接入 Flashduty。"
+keywords: ["告警集成", "Zeek", "Bro", "Notice", "邮件", "Email", "网络安全监控", "NDR"]
+---
+
+Zeek 通过 Notice 框架把检测结果记为通知（notice），并可以用 `Notice::ACTION_EMAIL` 动作把每条通知发成一封邮件，没有 Webhook。Flashduty 的 [邮件集成](/zh/on-call/integration/alert-integration/alert-sources/email) 可以接收这些邮件，因此不需要单独的 Zeek 集成：在 Flashduty 创建邮件集成，把它的邮件地址配置为 Zeek 的通知收件人即可。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成邮件地址，任选其一即可。**集成类型都选择邮件 Email**，不是 Zeek。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **邮件 Email**，点击 **保存**
+4. 打开生成的集成卡片，复制 **邮件地址**，再按下文配置 Zeek
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **邮件 Email**，填写集成名称，复制 **邮箱地址**
+3. 按下文配置 Zeek
+4. 配置默认路由并选择协作空间，点击 **保存**
+
+</div>
+
+## 在 Flashduty 中配置推送模式
+---
+
+Zeek 的通知邮件只有触发，没有恢复邮件，所以不需要按规则关闭告警，保持邮件集成的默认推送模式即可：每封邮件新建一条告警。
+
+- 告警标题是邮件标题，例如 `[Zeek] SSH::Password_Guessing`（方括号前缀加通知类型）
+- 告警描述是邮件正文，包含通知消息、连接的源和目的地址与端口等
+- 严重程度统一为 Warning，可以通过 [告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 按通知类型调整
+
+Zeek 已经会在 `suppress_for`（默认 1 小时）内压制同一通知的重复发送，一般不需要再在 Flashduty 合并。如果希望同一通知类型合并为一条告警，可以把推送模式改为 **根据邮件标题触发或更新告警**，代价是标题只含通知类型，不同主机的同类通知会合并到一起。
+
+## 在 Zeek 中配置
+---
+
+### 配置收件人和发信程序（ZeekControl）
+
+在 ZeekControl 的配置文件 `zeekctl.cfg` 中设置下列选项，然后执行 `zeekctl deploy`：
+
+| 选项 | 说明 |
+| :--- | :--- |
+| `MailTo` | 非汇总邮件的收件地址，填 Flashduty 邮件集成的地址。对应 Zeek 脚本变量 `Notice::mail_dest` |
+| `SendMail` | sendmail 程序路径。留空则不发邮件，请确保主机上可以用 sendmail 发出邮件 |
+| `MailFrom` | 发件人，默认 `Zeek <zeek@localhost>`，按需修改 |
+| `MailSubjectPrefix` | 邮件标题前缀，默认 `[Zeek]` |
+
+如果不使用 ZeekControl，在 Zeek 脚本中设置 `Notice::mail_dest`、`Notice::mail_from`、`Notice::sendmail` 即可，含义相同。
+
+### 选择哪些通知发邮件
+
+Zeek 只会对应用了 `Notice::ACTION_EMAIL` 动作的通知发邮件。在 `local.zeek` 中用 `Notice::emailed_types` 按通知类型选择：
+
+```zeek
+redef Notice::emailed_types += {
+    SSH::Password_Guessing,
+    SSL::Invalid_Server_Cert,
+};
+```
+
+也可以在 `Notice::policy` 钩子里按条件添加动作，并直接指定收件人：
+
+```zeek
+hook Notice::policy(n: Notice::Info)
+    {
+    if ( n$note == SSH::Password_Guessing )
+        {
+        add n$actions[Notice::ACTION_EMAIL];
+        n$email_dest = set("<Flashduty 邮件集成地址>");
+        }
+    }
+```
+
+修改后重新部署 Zeek（`zeekctl deploy`）使其生效。
+
+## 邮件格式
+---
+
+单条通知邮件（`Notice::ACTION_EMAIL`）的标题是 `Notice::mail_subject_prefix`（默认 `[Zeek]`）加空格加通知类型，正文由下列部分组成：
+
+```
+Subject: [Zeek] SSH::Password_Guessing
+
+Message: 192.168.56.1 appears to be guessing SSH passwords (seen in 10 connections).
+Sub-message: Sampled servers:  192.168.56.103, 192.168.56.103
+
+Connection: 192.168.56.1:51234 -> 192.168.56.103:22
+Connection uid: CXWv6p3arKYeMETxOg
+```
+
+- `Message` 是通知消息，`Sub-message` 是补充信息，仅在通知带有时出现
+- 通知关联到连接时有 `Connection` 和 `Connection uid`；只关联到地址时是 `Address`
+- 通知带有文件信息时还有 `File Description`、`File MIME Type`
+- 脚本通过 `email_body_sections` 扩展的内容会附在正文末尾
+
+## 限制
+---
+
+- **只有触发，没有恢复**：Zeek 不会发送恢复邮件。请在接收该集成的协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时，否则告警需要手动关闭。
+- **汇总邮件**：`Notice::ACTION_ALARM` 不发单条邮件，而是把 `notice_alarm` 日志按周期（ZeekControl 的 `MailAlarmsInterval`，默认 86400 秒）打包成一封汇总邮件，标题形如 `[Zeek] Log Contents: ...`，一封包含多条通知，只会生成一条告警。需要逐条告警时请使用 `Notice::ACTION_EMAIL`。
+- **标题不含细节**：邮件标题只有通知类型，主机、地址等细节在正文里，在 Flashduty 中查看告警描述。
+- **严重程度**：Zeek 通知没有严重程度字段，告警严重程度统一为 Warning。
