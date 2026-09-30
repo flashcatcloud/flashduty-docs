@@ -101,6 +101,7 @@ export const docMap = {
   TacticalRmm: `${alertBase}/tactical-rmm.mdx`,
   Bgpalerter: `${alertBase}/bgpalerter.mdx`,
   Imperva: `${alertBase}/imperva.mdx`,
+  Wazuh: `${alertBase}/wazuh.mdx`,
   Langsmith: `${alertBase}/langsmith.mdx`,
   Nodeping: `${alertBase}/nodeping.mdx`,
   Elastic: `${alertBase}/elastic.mdx`,
