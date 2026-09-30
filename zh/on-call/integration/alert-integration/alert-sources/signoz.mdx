@@ -1,0 +1,67 @@
+---
+title: "SigNoz 告警集成"
+description: "通过 SigNoz 的 Webhook 通知渠道，使用 Flashduty 的 Prometheus 集成接收 SigNoz 告警，恢复通知自动关闭告警。"
+keywords: ["告警集成", "SigNoz", "Webhook", "Prometheus", "Alertmanager", "可观测性"]
+---
+
+SigNoz 的 Webhook 通知渠道向你填写的 URL 发送 Prometheus Alertmanager 格式的 JSON（`status`、`alerts`、`fingerprint`、`labels`、`annotations`、`startsAt`、`endsAt`）。Flashduty 的 [Prometheus 集成](/zh/on-call/integration/alert-integration/alert-sources/prometheus) 与该格式兼容，因此不需要单独的 SigNoz 集成：在 Flashduty 创建 Prometheus 集成，把它的推送地址填进 SigNoz 即可。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 Prometheus**，不是 SigNoz。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Prometheus**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/prometheus?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Prometheus**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 SigNoz 中配置
+---
+
+1. 进入 SigNoz 的 **Settings** → **Account Settings** → **Notification Channels**，点击 **New Channel**
+2. 填写渠道名称，类型选择 **Webhook**，在 endpoint URL 中填入上一步复制的完整推送地址（包含 `?integration_key=...`）
+3. 保持 **Send resolved alerts** 开启（默认开启），否则 Flashduty 收不到恢复通知
+4. 保存，然后在 SigNoz 告警规则的通知渠道中选择该渠道
+
+## 字段映射
+---
+
+| SigNoz 字段 | Flashduty |
+| :--- | :--- |
+| `alerts[].fingerprint` | Alert Key。同一 `fingerprint` 的通知归为同一条告警 |
+| `alerts[].status` | `firing` 按严重程度生成或更新告警；`resolved` 关闭告警 |
+| `alerts[].labels.severity` | `critical` → Critical；`warning` → Warning；`info` → Info；未带或无法识别 → Warning |
+| `alerts[].labels.alertname` | 检查项 `check`，并用于标题 |
+| `alerts[].labels.instance` | 标签 `resource` |
+| 其余 `labels`、`annotations` | 每个键展开为一个标签，`annotations.description` 作为告警描述 |
+| `startsAt`、`endsAt` | 标签 `starts_at`、`ends_at` |
+
+SigNoz 按告警名称分组，每 5 分钟发送一次合并通知，一次通知可包含多条告警；Flashduty 逐条处理（单次最多 100 条）。
+
+## 恢复与去重
+---
+
+- SigNoz 发送 `status` 为 `resolved` 的通知时，Flashduty 按相同的 `fingerprint` 关闭对应告警。
+- SigNoz 的严重程度是规则里的 `severity` 标签，取值由你定义。如果使用了 `error` 等未内置的取值，请在 Prometheus 集成中配置自定义严重程度映射，否则按 Warning 处理。
+- SigNoz 官方文档没有说明 Test 按钮发送的内容。首次配置后，用一条真实告警验证触发与恢复是否都出现在 Flashduty 中。
+
+## 排查问题
+---
+
+- **Flashduty 返回 `Invalid parameters`**：推送地址不完整，缺少 `integration_key`，或集成类型不是 Prometheus
+- **告警没有恢复**：确认 SigNoz 渠道的 **Send resolved alerts** 已开启，且恢复通知的 `fingerprint` 与触发时一致
+- **通知延迟**：SigNoz 每 5 分钟发送一次分组通知，这是 SigNoz 的默认行为
