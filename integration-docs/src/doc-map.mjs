@@ -73,6 +73,7 @@ export const docMap = {
   HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
   Cronitor: `${alertBase}/cronitor.mdx`,
   Pingdom: `${alertBase}/pingdom.mdx`,
+  Bgpalerter: `${alertBase}/bgpalerter.mdx`,
   Level: `${alertBase}/level.mdx`,
   DattoRmm: `${alertBase}/datto-rmm.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
