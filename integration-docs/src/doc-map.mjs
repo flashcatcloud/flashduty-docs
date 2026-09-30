@@ -71,6 +71,7 @@ export const docMap = {
   Site24x7: `${alertBase}/site24x7.mdx`,
   UptimeRobot: `${alertBase}/uptimerobot.mdx`,
   VeracodeSca: `${alertBase}/veracode-sca.mdx`,
+  Fleet: `${alertBase}/fleet.mdx`,
   Sublime: `${alertBase}/sublime.mdx`,
   HealthchecksIO: `${alertBase}/healthchecks-io.mdx`,
   Cronitor: `${alertBase}/cronitor.mdx`,
