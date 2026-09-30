@@ -118,6 +118,7 @@ export const docMap = {
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   MongodbAtlas: `${alertBase}/mongodb-atlas.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Zenoss: `${alertBase}/zenoss.mdx`,
   Semgrep: `${alertBase}/semgrep.mdx`,
   Sonarqube: `${alertBase}/sonarqube.mdx`,
   PRTG: `${alertBase}/prtg.mdx`,

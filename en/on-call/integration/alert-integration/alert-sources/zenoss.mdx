@@ -1,0 +1,122 @@
+---
+title: "Zenoss alert integration"
+description: "Send events from Zenoss Cloud (Virtana Service Observability) to Flashduty On-call through a webhook destination."
+keywords: ["alert integration", "Zenoss", "Virtana", "Service Observability", "webhook", "infrastructure monitoring"]
+---
+
+Use a webhook destination in Zenoss Cloud (now Virtana Service Observability) to send events to Flashduty On-call. Each Zenoss event maps to one Flashduty alert: it triggers when a Zenoss trigger matches the event and recovers when the event status becomes Closed.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Zenoss**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Zenoss** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Zenoss
+---
+
+Zenoss sends notifications through a **destination**, a **trigger**, and a **rule**. Creating a rule requires the Manager role.
+
+<Steps>
+<Step title="Add a webhook destination">
+
+1. Go to **ADMIN > Actions**, open the **DESTINATIONS** tab, and click **ADD DESTINATION**
+2. Select the **Webhook** destination type and enter a **Destination name**
+3. Paste the full Flashduty push URL into **URL**; it must include `integration_key`
+4. Leave **Headers** empty and keep **Custom Payload** off: Flashduty parses the default Zenoss message, and a custom JSON body cannot be recognized
+5. Click **SAVE**
+
+</Step>
+
+<Step title="Add an event trigger">
+
+1. Open the **TRIGGERS** tab, click **ADD TRIGGER**, and keep **Type** set to **Events**
+2. In **Trigger criteria**, select the events that need on-call handling, for example severity critical or error. Adding `Entity: Production State equal to Production` avoids alerts for non-production devices
+3. Keep **Match multiple events** off: when on, Zenoss merges several events into one notification and Flashduty cannot handle them one by one
+
+</Step>
+
+<Step title="Add a rule and turn on update notifications">
+
+1. Open the **RULES** tab, click **ADD RULE**, and enter a **Rule name**
+2. Select the trigger from the previous step under **Triggers** and the destination from the first step under **Destinations**
+3. Turn on **Send updates**: Zenoss then sends another notification when an event closes or its severity changes, and Flashduty uses it to recover and update the alert. Without it the alert never recovers automatically
+4. Click **SAVE**
+
+</Step>
+
+<Step title="Save and verify">
+
+1. Make Zenoss produce an event that matches the trigger and confirm Flashduty receives an active alert
+2. Close the event (or wait for it to close) and confirm the alert recovers
+
+The **TEST** button on the destination page sends a test message. The Zenoss documentation does not describe the test message body, so Flashduty cannot tell it apart from a real event and it may open an alert; close it manually after verifying.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the event ID (`context.Context.Event.id` in the message). Zenoss identifies an event by its name plus dimensions, so repeat notifications, updates, and the close of one event share one Alert Key. Changes to severity, summary, status, or time do not change it.
+
+The top-level `id` of the message is the notification ID, different on every delivery, and is not used. A message without an event ID is rejected.
+
+## Status and severity
+---
+
+| Zenoss status (`status`) | Flashduty status |
+| :--- | :--- |
+| 1 Open | Trigger or update |
+| 3 Closed | Recover; the severity keeps its last value |
+| 2 Suppressed | Ignored; Flashduty returns success |
+
+| Zenoss severity (`severity`) | Flashduty severity |
+| :--- | :--- |
+| 5 Critical | Critical |
+| 4 Error, 3 Warning | Warning |
+| 2 Info, 1 Debug | Info |
+| 0 or unrecognized | Warning |
+
+A notification that carries no event (for example from a non-event trigger) creates no alert; Flashduty returns success.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Event name (`name`), or the summary when empty |
+| `event_id` | Event ID |
+| `tenant` | Zenoss tenant name |
+| `rule` / `trigger` | Names of the rule and trigger that sent the notification |
+| `zenoss_status` / `zenoss_severity` | Raw event status and severity |
+| `source` / `source_type` and others | Event dimensions (`dimensions`): one label per scalar dimension, with `-` in the name turned into `_` |
+
+The event summary (`summary`) becomes the alert description.
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: Confirm that the URL is complete and includes `integration_key`, and that the destination does not use Custom Payload
+- **The alert does not recover**: Confirm that **Send updates** is on in the rule and that the trigger does not exclude Closed events
+- **No event arrives in Flashduty**: Confirm that the rule is enabled and the trigger matches; events with status Suppressed create no alert
+- **The same event notifies repeatedly**: **Repeat notification** in a Zenoss rule resends at its interval; these notifications merge into the same alert
+
+For field details, see the [Zenoss webhook message example](https://docs.zenoss.io/actions/reference/webhook.html).
