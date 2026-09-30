@@ -1,0 +1,140 @@
+---
+title: "OpenSearch alert integration"
+description: "Send trigger notifications from OpenSearch monitors to Flashduty On-call through a custom webhook notification channel of the Alerting plugin."
+keywords: ["alert integration", "OpenSearch", "Alerting", "Notifications", "webhook", "log monitoring"]
+---
+
+Use the triggers of OpenSearch Alerting monitors to send notifications from per query and per cluster metrics monitors to Flashduty On-call. OpenSearch has no fixed webhook payload; the content is set by the Mustache message template in the trigger's action. This page provides a template, and Flashduty parses exactly that template.
+
+Each trigger of each monitor maps to one Flashduty alert: while the trigger condition holds, the monitor sends a notification on every run, and these notifications merge into the same alert. OpenSearch sends no recovery notification when the condition clears, so the channel needs auto-close turned on.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **OpenSearch**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **OpenSearch** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure OpenSearch
+---
+
+The Alerting and Notifications plugins must be installed (OpenSearch ships with both), and you need permission to create notification channels and monitors.
+
+<Steps>
+<Step title="Create a custom webhook notification channel">
+
+1. In OpenSearch Dashboards, go to **Notifications → Channels → Create channel**
+2. Enter a channel name and set **Channel type** to **Custom webhook**
+3. Set **Define endpoints by** to **Webhook URL** and paste the full Flashduty push URL, which must include `integration_key`
+4. Set **Method** to `POST`
+5. Under **Webhook headers**, add `Content-Type: application/json`
+6. Click **Create**
+
+If the cluster sets `opensearch.notifications.core.http.host_deny_list`, make sure `api.flashcat.cloud` is not in it.
+
+</Step>
+
+<Step title="Add an action to the monitor trigger">
+
+1. Go to **Alerting → Monitors** and create or edit a **Per query monitor** or **Per cluster metrics monitor**
+2. Under **Triggers**, add a trigger and fill in **Trigger name**, **Severity level** (1 to 5), and the trigger condition
+3. Under the trigger, click **Add action** and select the channel you just created as the **Notification channel**
+4. Paste the whole template below into **Message**, without changing the quotation marks or field names:
+
+```text
+{
+  "monitor_id": "{{ctx.monitor._id}}",
+  "monitor_name": "{{ctx.monitor.name}}",
+  "trigger_id": "{{ctx.trigger.id}}",
+  "trigger_name": "{{ctx.trigger.name}}",
+  "severity": "{{ctx.trigger.severity}}",
+  "period_start": "{{ctx.periodStart}}",
+  "period_end": "{{ctx.periodEnd}}",
+  "hit_count": "{{ctx.results.0.hits.total.value}}",
+  "error": "{{ctx.error}}"
+}
+```
+
+5. Save the monitor
+
+`hit_count` is the number of documents the query of a per query monitor matched. A per cluster metrics monitor has no such value and sends an empty string, which does not affect the alert. Per bucket, per document, and composite monitors expose different notification variables from this template and are not supported.
+
+**Action throttling** limits how often notifications are sent. No notification is sent while throttled, and the alert still closes on the auto-close timeout set below.
+
+</Step>
+
+<Step title="Turn on auto-close">
+
+Triggers of per query and per cluster metrics monitors run their actions only while the condition holds, and OpenSearch sends nothing once it clears. In the channel that receives these alerts, turn on the [auto-close timeout](/en/on-call/channel/create-edit), set the **window timing start** to **Incident trigger**, and set the timeout to **1 hour**. After the condition clears, the alert closes when the timeout is reached; if the condition still holds, the monitor's next notification after the auto-close creates the alert again.
+
+</Step>
+
+<Step title="Verify">
+
+1. In **Notifications → Channels**, open the channel and click **Send test message**. Flashduty opens an Info alert titled `OpenSearch test notification`; close it manually after verifying
+2. Make the trigger condition actually hold (for example, temporarily lower the threshold), wait for the next monitor run, and confirm Flashduty receives an alert whose severity matches the trigger's Severity level
+3. Restore the threshold, wait for the auto-close timeout to be reached, and confirm the alert closes on its own
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the monitor ID and the trigger ID, which are `monitor_id` and `trigger_id` in the template. Every notification from the same trigger of the same monitor uses the same Alert Key and merges into one alert; different triggers and different monitors each get their own alert. Changes to the monitor name, trigger name, severity, hit count, or time period do not change the Alert Key. A notification with an empty `monitor_id` or `trigger_id` is rejected with an invalid-parameter error.
+
+The template does not use `ctx.alert.id`: when a trigger runs its action for the first time, OpenSearch has not created the alert yet, so the variable is empty.
+
+## Status and severity
+---
+
+The trigger's **Severity level** ranges from 1 (highest) to 5 (lowest). Flashduty maps it as follows:
+
+| Severity level | Flashduty severity |
+| :--- | :--- |
+| 1, 2 | Critical |
+| 3 | Warning |
+| 4, 5 | Info |
+| Empty or any other value | Warning |
+
+Every notification is a trigger. Flashduty never recovers an alert because of an OpenSearch notification; recovery comes from auto-close, or you can close the alert manually in Flashduty.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Monitor name and trigger name, in the form `Monitor name: Trigger name` |
+| `monitor_id` / `monitor_name` | ID and name of the monitor |
+| `trigger_id` / `trigger_name` | ID and name of the trigger |
+| `severity` | Raw Severity level of the trigger |
+| `period_start` / `period_end` | Time period of this monitor run |
+| `hit_count` | Number of documents the query matched (per query monitors only) |
+| `error` | Error message when the trigger could not get results or evaluate its condition |
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: make sure Message holds the complete template with values for both `monitor_id` and `trigger_id`, and that the URL is complete and includes `integration_key`
+- **The notification fails in OpenSearch**: click **Send test message** on the channel in **Notifications → Channels** to see the error. Common causes are a cluster that cannot reach `api.flashcat.cloud` or a domain listed in `host_deny_list`
+- **The alert does not close automatically**: confirm the channel has auto-close turned on, and the window timing start is **Incident trigger**
+- **No new notifications after you acknowledge the alert in OpenSearch**: OpenSearch stops running actions for an acknowledged alert, and the Flashduty alert closes when auto-close expires
+- **The alert title has an empty trigger name**: when the trigger has no name, Flashduty titles the alert with the monitor name only; when both are empty, the title is `OpenSearch alert: <trigger ID>`
+
+For more on the variables, see [OpenSearch Alerting triggers](https://docs.opensearch.org/latest/observing-your-data/alerting/triggers/) and [Notifications channels](https://docs.opensearch.org/latest/observing-your-data/notifications/).
