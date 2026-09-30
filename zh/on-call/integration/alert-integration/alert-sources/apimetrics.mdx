@@ -1,0 +1,138 @@
+---
+title: "APIContext（APImetrics）告警集成"
+description: "通过 APIContext（原 APImetrics）的 Performance Results Webhook，将 API 调用的失败、告警、变慢和恢复结果同步到 Flashduty On-call。"
+keywords: ["告警集成", "APIContext", "APImetrics", "API 监控", "Webhook", "call_id", "result_class"]
+---
+
+通过 APIContext（原 APImetrics）的 Performance Results Webhook，把 API 监控的调用结果同步到 Flashduty On-call。每次调用结果的 `result_class` 为 `FAIL`、`WARNING`、`SLOW` 时，Flashduty 触发或更新告警；同一个调用在同一个探测地点返回 `PASS` 时，关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **APImetrics**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **APImetrics**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 APIContext 中配置
+---
+
+<Steps>
+<Step title="新增 Generic Webhook">
+
+1. 登录 APIContext（`client.apimetrics.io`），进入要监控的项目
+2. 在左侧导航选择 **Alerts & Webhooks**，点击 **+ Add new action**
+3. **Type** 选择 **Generic**，填写名称，例如 `Flashduty`
+4. **URL** 粘贴 Flashduty 集成的完整推送地址（含 `integration_key`）
+5. **Authentication** 选择 **None**，无需自定义 HTTP Header
+
+</Step>
+
+<Step title="选择触发的结果类型">
+
+在 **Trigger alerts** 中同时勾选 **Fail**、**Warning**、**Slow** 和 **Pass**。必须勾选 **Pass**，否则 Flashduty 收不到恢复通知，告警不会自动关闭。
+
+**Only alert after this many failures in a row** 建议填 `1`，连续失败一次即告警；填 `0` 表示每个结果都发送。可用 **Include tags** / **Exclude tags** 限定哪些 API 调用发送通知。
+
+<Note>
+勾选 **Pass** 后，每次成功的调用都会向 Flashduty 发送一个请求。没有对应活动告警的 `PASS` 不会产生新告警，只有同一调用、同一探测地点的活动告警会被关闭。
+</Note>
+
+</Step>
+
+<Step title="启用并验证">
+
+1. 打开右侧的 **Enabled** 开关，点击 **Save**
+2. 让一个被监控的 API 真正失败（例如把调用指向一个返回 5xx 的地址），确认 Flashduty 收到活动告警
+3. 恢复该 API，确认下一次 `PASS` 结果到达后原告警关闭
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+APIContext 以 HTTP POST 发送 JSON，每个请求对应一次调用结果，无需配置模板。Flashduty 使用以下字段：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `call_id` | API 调用的固定 ID，每次执行都相同 | Alert Key，标签 `call_id` |
+| `location_id` | 探测地点 ID，例如 `apimetrics_azurenorwayeast` | Alert Key，标签 `location_id` |
+| `result_class` | `PASS`、`SLOW`、`WARNING`、`FAIL` | 告警状态和等级，标签 `result_class` |
+| `result` | 更细的原因，如 `HTTP_SERVER_ERROR`、`SLA_ERROR` | 告警标题，标签 `result` |
+| `call_meta.name` | 调用名称 | 告警标题，标签 `check` |
+| `call_meta.domain`、`call_meta.tags` | 调用的域名和标签 | 标签 `domain`、`tags` |
+| `project_meta.name`、`project_meta.organization` | 项目和组织名称 | 标签 `project`、`organization` |
+| `target_url` | 被探测的地址 | 标签 `resource` |
+| `http_code`、`http_reason` | HTTP 状态码和说明 | 告警描述，标签 `http_code` |
+| `workflow_name` | 所属工作流（如有） | 告警描述，标签 `workflow` |
+| `result_id`、`result_url`、`call_url` | 本次结果 ID，以及结果页和调用页链接 | 告警描述 |
+
+告警标题为“调用名称: result”，例如 `Orders API: HTTP_SERVER_ERROR`。
+
+## Alert Key
+---
+
+Alert Key 由 `call_id` 和 `location_id` 计算得到。APIContext 文档说明 `call_id` 是“每次执行该调用都相同的固定 ID”，所以同一个调用的失败和恢复结果落在同一条告警上；`location_id` 让每个探测地点各有一条告警，一个地点恢复不会关闭另一个地点仍在失败的告警。
+
+修改调用名称、结果详情、响应时间或 HTTP 状态码不会改变 Alert Key。请求缺少 `call_id` 时，Flashduty 返回参数错误，因为无法可靠地把恢复关联到原告警；不含 `call_id`、`result_id` 和 `result_class` 的请求（如空对象）视为测试请求，返回成功且不创建告警。
+
+## 状态和告警等级
+---
+
+| `result_class` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `FAIL`（HTTP 服务端错误、连接错误、Header 或内容错误、SLA 错误） | Critical |
+| `WARNING`（重定向、HTTP 客户端错误、内容或连接警告、SLA 警告） | Warning |
+| `SLOW` | Warning |
+| `PASS` | 恢复 |
+| 其他或缺失 | Warning |
+
+`SLOW` 表示调用成功但响应慢，Flashduty 记为 Warning，不会关闭已有的失败告警。需要调整等级时，可在协作空间的 **配置** 中用规则改写。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="告警没有自动恢复？">
+
+确认 APIContext 的 Webhook 已勾选 **Pass**，且失败和恢复来自同一个调用、同一个探测地点。APIContext 文档没有明确说明 `PASS` 会关闭失败，这是 Flashduty 按 `call_id` 与 `location_id` 一致做出的处理；如果在您的账号里没有生效，请联系我们。
+
+</Accordion>
+
+<Accordion title="同一个 API 在多个地点失败，会有几条告警？">
+
+每个探测地点一条。它们在 Flashduty 中各自恢复，可通过协作空间的告警聚合合并为同一个故障。
+
+</Accordion>
+
+<Accordion title="APIContext 的重试会产生重复告警吗？">
+
+不会。同一个调用和地点的 Alert Key 不变，重复的失败结果会合并到同一条告警。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **APIContext 收不到成功响应**：确认 URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：请求体缺少 `call_id`。请确认使用的是 Generic Webhook，而不是 OpenTelemetry 或其他类型的导出
+- **没有收到任何告警**：检查 Webhook 的 **Enabled** 开关、**Snooze** 状态，以及组织设置中 **Downtimes** 的 **Allow** 开关是否为 ON
+
+字段说明请参阅 APIContext 官方文档 [Performance Results Webhook](https://docs.apimetrics.io/docs/performance-results-webhook) 和 [Generic Webhook](https://docs.apimetrics.io/docs/generic-webhook)。

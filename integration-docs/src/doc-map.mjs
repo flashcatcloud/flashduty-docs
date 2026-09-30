@@ -81,6 +81,7 @@ export const docMap = {
   Dash0: `${alertBase}/dash0.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
   Netbeez: `${alertBase}/netbeez.mdx`,
+  Apimetrics: `${alertBase}/apimetrics.mdx`,
   Odown: `${alertBase}/odown.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,
   Xitoring: `${alertBase}/xitoring.mdx`,
