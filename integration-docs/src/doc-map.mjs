@@ -160,6 +160,7 @@ export const docMap = {
   Kuvasz: `${alertBase}/kuvasz.mdx`,
   Falco: `${alertBase}/falco.mdx`,
   Cloudamqp: `${alertBase}/cloudamqp.mdx`,
+  Canarytokens: `${alertBase}/canarytokens.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
   Instatus: `${alertBase}/instatus.mdx`,
