@@ -4,7 +4,7 @@ description: "通过 APIContext（原 APImetrics）的 Performance Results Webho
 keywords: ["告警集成", "APIContext", "APImetrics", "API 监控", "Webhook", "call_id", "result_class"]
 ---
 
-通过 APIContext（原 APImetrics）的 Performance Results Webhook，把 API 监控的调用结果同步到 Flashduty On-call。每次调用结果的 `result_class` 为 `FAIL`、`WARNING`、`SLOW` 时，Flashduty 触发或更新告警；同一个调用在同一个探测地点返回 `PASS` 时，关闭这条告警。
+通过 APIContext（原 APImetrics）的 Performance Results Webhook，把 API 监控的调用结果同步到 Flashduty On-call。每次调用结果的 `result_class` 为 `FAIL`、`WARNING`、`SLOW` 时，Flashduty 触发或更新告警；同一个调用在任一探测地点返回 `PASS` 时，关闭这条告警。
 
 <div className="hide">
 
@@ -50,7 +50,7 @@ keywords: ["告警集成", "APIContext", "APImetrics", "API 监控", "Webhook", 
 **Only alert after this many failures in a row** 建议填 `1`，连续失败一次即告警；填 `0` 表示每个结果都发送。可用 **Include tags** / **Exclude tags** 限定哪些 API 调用发送通知。
 
 <Note>
-勾选 **Pass** 后，每次成功的调用都会向 Flashduty 发送一个请求。没有对应活动告警的 `PASS` 不会产生新告警，只有同一调用、同一探测地点的活动告警会被关闭。
+勾选 **Pass** 后，每次成功的调用都会向 Flashduty 发送一个请求。没有对应活动告警的 `PASS` 不会产生新告警，只有同一调用的活动告警会被关闭。
 </Note>
 
 </Step>
@@ -72,7 +72,7 @@ APIContext 以 HTTP POST 发送 JSON，每个请求对应一次调用结果，�
 | 字段 | 含义 | 在 Flashduty 中 |
 | :--- | :--- | :--- |
 | `call_id` | API 调用的固定 ID，每次执行都相同 | Alert Key，标签 `call_id` |
-| `location_id` | 探测地点 ID，例如 `apimetrics_azurenorwayeast` | Alert Key，标签 `location_id` |
+| `location_id` | 探测地点 ID，例如 `apimetrics_azurenorwayeast` | 标签 `location_id` |
 | `result_class` | `PASS`、`SLOW`、`WARNING`、`FAIL` | 告警状态和等级，标签 `result_class` |
 | `result` | 更细的原因，如 `HTTP_SERVER_ERROR`、`SLA_ERROR` | 告警标题，标签 `result` |
 | `call_meta.name` | 调用名称 | 告警标题，标签 `check` |
@@ -88,7 +88,7 @@ APIContext 以 HTTP POST 发送 JSON，每个请求对应一次调用结果，�
 ## Alert Key
 ---
 
-Alert Key 由 `call_id` 和 `location_id` 计算得到。APIContext 文档说明 `call_id` 是“每次执行该调用都相同的固定 ID”，所以同一个调用的失败和恢复结果落在同一条告警上；`location_id` 让每个探测地点各有一条告警，一个地点恢复不会关闭另一个地点仍在失败的告警。
+Alert Key 由 `call_id` 计算得到，每个 API 调用对应一条告警。APIContext 文档说明 `call_id` 是“每次执行该调用都相同的固定 ID”，所以同一个调用的失败和恢复结果落在同一条告警上，无论结果来自哪个探测地点。默认调度下每次执行只从一个随机地点探测，因此任一地点返回的 `PASS` 都会关闭该调用的告警，下一次失败再重新打开。`location_id` 只作为标签和描述保留。
 
 修改调用名称、结果详情、响应时间或 HTTP 状态码不会改变 Alert Key。请求缺少 `call_id` 时，Flashduty 返回参数错误，因为无法可靠地把恢复关联到原告警；不含 `call_id`、`result_id` 和 `result_class` 的请求（如空对象）视为测试请求，返回成功且不创建告警。
 
@@ -111,19 +111,19 @@ Alert Key 由 `call_id` 和 `location_id` 计算得到。APIContext 文档说明
 <AccordionGroup>
 <Accordion title="告警没有自动恢复？">
 
-确认 APIContext 的 Webhook 已勾选 **Pass**，且失败和恢复来自同一个调用、同一个探测地点。APIContext 文档没有明确说明 `PASS` 会关闭失败，这是 Flashduty 按 `call_id` 与 `location_id` 一致做出的处理；如果在您的账号里没有生效，请联系我们。
+确认 APIContext 的 Webhook 已勾选 **Pass**。APIContext 会把 `PASS` 结果发送到 Webhook，Flashduty 关闭 `call_id` 一致的那条告警，与探测地点无关。若仍不关闭，检查该调用的 `PASS` 结果是否确实发出。
 
 </Accordion>
 
 <Accordion title="同一个 API 在多个地点失败，会有几条告警？">
 
-每个探测地点一条。它们在 Flashduty 中各自恢复，可通过协作空间的告警聚合合并为同一个故障。
+一条。告警按调用聚合，各地点的失败合并到同一条告警，任一地点返回 `PASS` 即关闭。如果一个调用只在部分地点失败，其他地点的成功结果会关闭告警，下一次失败再重新打开，可能出现反复打开和关闭。可以为协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)作为可选兜底，超时计时起点选择 **故障触发**；也可在 APIContext 的 **Schedules** 中固定 **Node Locations**，让调用总是从相同地点执行。
 
 </Accordion>
 
 <Accordion title="APIContext 的重试会产生重复告警吗？">
 
-不会。同一个调用和地点的 Alert Key 不变，重复的失败结果会合并到同一条告警。
+不会。同一个调用的 Alert Key 不变，重复的失败结果会合并到同一条告警。
 
 </Accordion>
 </AccordionGroup>
