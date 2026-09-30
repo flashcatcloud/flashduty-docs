@@ -1,0 +1,138 @@
+---
+title: "AWX / Ansible Automation Platform change integration"
+description: "Sync every run of your AWX or Ansible Automation Platform job templates and workflows to Flashduty On-call through a webhook notification, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "AWX", "Ansible", "Ansible Automation Platform", "webhook notification", "job template", "automation"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a [webhook notification template](https://docs.ansible.com/automation-controller/latest/html/userguide/notifications.html) in AWX or Ansible Automation Platform (AAP) to sync runs of job templates and workflow job templates to Flashduty On-call. Each run becomes one Flashduty change; the run's start and end update that same change.
+
+AWX cannot tell whether a template changes production, so enable the notification only on **templates that deploy or modify things**, not on read-only check templates.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **AWX / Ansible Automation Platform** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project` or `inventory`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure AWX
+---
+
+<Steps>
+<Step title="Create a webhook notification template">
+
+Go to **Administration → Notifications** (in AAP 2.5 and later, **Automation Execution → Administration → Notifiers**) and click **Add**:
+
+1. **Type**: select `Webhook`
+2. **Target URL**: the full Push URL of the Flashduty integration
+3. **HTTP Method**: select `POST`
+4. Leave **Customize messages** at its defaults. The default message body is `{{ job_metadata }}`, the JSON description of the run, which is the format Flashduty parses
+
+The Push URL already carries the integration key, so no username, password, or headers are needed.
+
+</Step>
+
+<Step title="Enable the notification on the job template">
+
+Open the job template or workflow job template to sync, switch to the **Notifications** tab, and turn on **Start**, **Success**, and **Failure** for the notification template you just created. All three are needed: Start makes the change appear when the run begins, Success and Failure give the end state, and without them the change stays in Processing.
+
+You can also enable the notification on an Organization, which sends it for every template in the organization; Flashduty ignores the project sync, inventory sync, and management job notifications that result.
+
+</Step>
+
+<Step title="Run the job">
+
+Save, then launch the job template; the change appears in the Flashduty change list. The **Test** button on the notification template sends a test message: Flashduty answers successfully but records no change, so it confirms the Push URL is reachable. AWX shows the result of each delivery in the notification template's sent notifications.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+Each run of a job template or workflow job is one change. The change key (change_key) is AWX's job ID (`id`), for example `4711`.
+
+- The start and end notifications of one run update the same change
+- Two runs of the same template are two changes; a relaunch is a new run
+- Jobs and workflow jobs share one ID sequence, and each job template run launched by a workflow is its own change
+- Job IDs are unique within one AWX instance. Create a separate integration per instance, otherwise the same job ID on two instances is merged into one change
+
+## Status mapping
+---
+
+| Notification | Job status (`status`) | Flashduty change status |
+|---|---|---|
+| Start | running | Processing |
+| Success | successful | Done |
+| Failure | failed | Failed |
+| Failure | error (could not run) | Failed |
+| Failure | canceled | Canceled |
+
+Done, Failed, and Canceled are end states; Flashduty records the change's end time.
+
+With a custom message body, `new` maps to Planned, and `pending` and `waiting` map to Ready; the default body never sends these three.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `run <template name> on <inventory>`, for example `run deploy-app on production`; `run <name>` when there is no inventory |
+| Description | Empty |
+| Link | The run's page in AWX |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `job_id` | Job ID |
+| `job` | Template name |
+| `job_type` | Run type: `playbook` (job template) or `workflow` |
+| `project` | Project name (job templates only) |
+| `playbook` | Playbook file (job templates only) |
+| `inventory` | Inventory name |
+| `actor` | User who launched the run; absent when a schedule launched it |
+| `awx_state` | Latest job status |
+
+Extra variables (`extra_vars`), credentials, and per-host results may contain sensitive data and are not recorded.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't I see any changes?">
+
+- Check that Start, Success, and Failure are all on in the job template's **Notifications** tab
+- Check that **Customize messages** did not change the message body; when the body is not JSON, AWX sends an empty object `{}` and Flashduty rejects it
+- Open the notification template's sent notifications under **Administration → Notifications** to see whether each delivery succeeded and which error came back
+
+</Accordion>
+
+<Accordion title="Why is the change stuck in Processing?">
+
+The end notification did not arrive. Check that the template has Success and Failure notifications on and that AWX can reach Flashduty. AWX does not resend a failed delivery.
+
+</Accordion>
+
+<Accordion title="Why don't project syncs show up as changes?">
+
+Project syncs, inventory syncs, and management jobs (such as cleanup jobs) do not change production, so Flashduty answers successfully and records nothing. The same goes for workflow approval node notifications.
+
+</Accordion>
+
+<Accordion title="Which deliveries does Flashduty reject?">
+
+Flashduty rejects a delivery when:
+
+- `unsupported status`: the `status` in the body is missing or not an AWX job status; this also appears when the body is not JSON, because AWX then sends `{}`
+- `id is missing`: a custom message body has no job ID; keep the `id` field in the body
+
+</Accordion>
+</AccordionGroup>
