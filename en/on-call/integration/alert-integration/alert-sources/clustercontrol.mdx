@@ -1,0 +1,133 @@
+---
+title: "ClusterControl alert integration"
+description: "Send Severalnines ClusterControl alarm and recovery notifications to Flashduty On-call through the Notification Services webhook."
+keywords: ["alert integration", "ClusterControl", "Severalnines", "Notification Services", "webhook", "database operations", "cmon-events"]
+---
+
+Use **Notification Services → Webhook** in Severalnines ClusterControl to send database cluster alarm creation (`CREATED`) and end (`ENDED`) notifications to Flashduty On-call. Each ClusterControl alarm maps to one Flashduty alert: the alert triggers when the alarm is raised and recovers when the alarm ends.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **ClusterControl** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **ClusterControl** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In ClusterControl
+---
+
+<Steps>
+<Step title="Add a webhook integration">
+
+1. Log in to the ClusterControl console and go to **Settings → Notification services → Add new integration → Webhook**
+2. Enter `Flashduty` as the **Integration name**
+3. Paste the full Flashduty push URL into **Url**
+4. Click **Test credentials** to check the configuration
+
+</Step>
+
+<Step title="Choose clusters and events">
+
+Under **Notification settings**, select the **Clusters** and **Events** to forward (for example All Warnings Events and All Critical Events), then click **Finish**.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Raise a real alarm (for example, stop a managed database node) and confirm Flashduty receives an active alert. After the node is back, ClusterControl sends an `ENDED` notification and the Flashduty alert recovers.
+
+</Step>
+</Steps>
+
+<Warning>
+ClusterControl sends notifications only with a valid ClusterControl license (a trial or paid one). With an expired or community license, `cmon-events` logs `Skipping an event due to no license` and nothing is sent.
+
+ClusterControl only notifies for alarms raised after the integration is created; alarms that already exist are not sent. Notifications come from the `cmon-events` process on the ClusterControl node (package `clustercontrol-notifications`, listening on port 9510 by default), so make sure that node can reach the Flashduty push URL.
+</Warning>
+
+## Payload
+---
+
+ClusterControl POSTs the following JSON fields. Flashduty parses them directly, with no template to configure:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `id` | Alarm ID | Alert Key, label `alarm_id` |
+| `status` | `CREATED`, `CHANGED` or `ENDED` | Trigger, update or recovery, label `status` |
+| `component` | Alarm category, such as `Node` or `Host` | Label `component` |
+| `hostname` | Related host | Label `host` |
+| `title` | Alarm title | Alert title, label `check` |
+| `message` | Details | Alert description |
+| `recommendation` | Suggested action | Alert description |
+| `severity` | `CRITICAL` or `WARNING` | Alert severity, label `severity` |
+
+The alert title is `title`; when empty, it is `ClusterControl alarm <id>`.
+
+## Alert Key
+---
+
+Flashduty uses the alarm `id` as the Alert Key. The ClusterControl documentation states that when an alarm ends it sends another event with the same alarm ID and `status` set to `ENDED`, so the created, changed and ended notifications land on the same Flashduty alert, and different `id` values produce different alerts. Changing the title, host or severity does not change the Alert Key.
+
+The documented payload has no cluster ID (ClusterControl 2.1.0 also sends `controller_hostname`, `cluster_id` and `cluster_name`, which Flashduty does not use), and alarm IDs are unique only within one ClusterControl controller. If you run several controllers, create a separate Flashduty integration for each.
+
+When a request has no `id`, Flashduty returns a parameter error, because a recovery could not be matched to its alert reliably.
+
+## Status and severity
+---
+
+| ClusterControl field | Flashduty status or severity |
+| :--- | :--- |
+| `severity` = `CRITICAL` | Critical |
+| `severity` = `WARNING`, empty or any other value | Warning |
+| `status` = `CREATED` / `CHANGED` | Trigger or update the alert with the severity above |
+| `status` = `ENDED` | Recovery; the severity stays that of the original alert |
+
+A request whose `status` is empty or any other value is rejected, so a request with an unknown state never enters the wrong alert lifecycle. ClusterControl forwards only `CREATED` and `ENDED` by default; `CHANGED` must be enabled with the `allowed_events` parameter of `cmon-events`.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Test credentials reports a failure in ClusterControl?">
+
+The button sends a fixed test alarm (`id` 1, `component` `ServiceCredentialsTest`, title "Test credentials alarm"). Flashduty answers HTTP 200 and opens one separate Info alert under its own Alert Key, so it never merges with a real alarm. No recovery follows; close the alert manually in the channel.
+
+</Accordion>
+
+<Accordion title="Why were existing alarms not synced?">
+
+ClusterControl forwards only alarms raised after the integration was created. The `ENDED` notification of an earlier alarm has no active alert in Flashduty and does not create a new one.
+
+</Accordion>
+
+<Accordion title="Are muted alarms pushed?">
+
+In ClusterControl, a muted alarm type sends no notification until it is unmuted.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty receives no alert**: confirm the URL is the complete push URL (including `integration_key`), that the `cmon-events` process is running, and that notifications are enabled for the cluster and events
+- **Flashduty returns a parameter error**: confirm the body is ClusterControl's JSON and that `id` and `status` are not empty
+- **The alert does not recover**: confirm the alarm has ended in ClusterControl and that the recovery notification carries the same `id` as the trigger
+
+For field details, see the ClusterControl documentation [Notification Services](https://docs.severalnines.com/clustercontrol/latest/user-guide/integration/notification-services/).
