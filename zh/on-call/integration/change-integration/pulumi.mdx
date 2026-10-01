@@ -1,0 +1,156 @@
+---
+title: "Pulumi Cloud 变更集成"
+description: "通过 Pulumi Cloud Webhook 将 Stack 更新和 Pulumi Deployments 部署同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Pulumi", "Pulumi Cloud", "Webhook", "Stack 更新", "Pulumi Deployments", "基础设施变更"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Pulumi Cloud 的 Webhook，将 Stack 更新和 Pulumi Deployments 部署同步到 Flashduty On-call。每一次 Stack 更新（`pulumi up`、`pulumi destroy`）和每一次 Deployments 部署，各对应一条 Flashduty 变更。
+
+Webhook 可以建在组织上（接收组织内所有 Stack 的事件），也可以建在单个 Stack 上。Flashduty 记录以下事件，其余事件返回成功但不生成变更：
+
+| Pulumi 事件类型（`Pulumi-Webhook-Kind`） | 处理 |
+|---|---|
+| `stack_update`（`update_succeeded`、`update_failed`、`destroy_succeeded`、`destroy_failed`） | 记录为变更 |
+| `deployment`（`deployment_queued`、`deployment_started`、`deployment_succeeded`、`deployment_failed`） | 记录为变更 |
+| `stack_preview`、`ping`、`stack`（创建和删除 Stack）、`drift_detection`、`drift_remediation`、`policy_violation` | 忽略 |
+| `stack_update` 中的 `refresh`；`deployment` 中操作为 `preview`、`refresh`、`detect-drift` 的部署 | 忽略：不改变基础设施 |
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Pulumi**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`stack`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Pulumi Cloud 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+- 组织 Webhook：进入 **Settings → Integrations → Webhooks**
+- Stack Webhook：进入对应 Stack 的 **Settings → Webhooks**
+
+点击 **Create webhook**。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Destination**：选择 **Webhook**（通用 JSON 格式，不要选 Slack 或 Microsoft Teams）
+2. **Display name**：自定义名称
+3. **Payload URL**：粘贴 Flashduty 集成的完整推送地址
+4. **Secret**：留空即可，Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `Pulumi-Webhook-Signature`
+
+</Step>
+
+<Step title="选择事件">
+
+在 **Events** 中按下面任一方式选择，不要两种都选（见下方“一条变更是什么”）：
+
+- 只关心更新结果：`update_succeeded`、`update_failed`、`destroy_succeeded`、`destroy_failed`
+- 使用 Pulumi Deployments 并要看到排队、运行、结束的全过程：`deployment_queued`、`deployment_started`、`deployment_succeeded`、`deployment_failed`
+
+点击 **Create**。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| Pulumi 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Stack 更新 | `update:<组织>/<项目>/<Stack>/<更新编号>`，取自 `updateUrl` 的路径 | Pulumi 只在更新结束时推送一次，所以这类变更只有一个事件，直接是 Done 或 Failed |
+| Deployments 部署 | `deployment:<组织>/<项目>/<Stack>/<部署版本>`，取自 `deploymentUrl` 的路径 | 排队、运行、结束的每个通知更新同一条变更 |
+
+通过 Pulumi Deployments 执行的更新，Pulumi 会同时发出 `deployment` 和 `stack_update` 两类事件，它们是两个不同的对象，会生成两条变更。因此请只选择其中一类事件。
+
+同一个 Stack 的两次更新是两条变更。更新编号和部署版本是 Pulumi 按 Stack 递增的编号，在同一个 Stack 内不会重复。
+
+## 状态映射
+---
+
+Stack 更新（`result`）：
+
+| Pulumi 结果 | Flashduty 变更状态 |
+|---|---|
+| `succeeded` | Done |
+| `failed` | Failed |
+| `cancelled` | Canceled |
+
+Deployments 部署（`status`）：
+
+| Pulumi 状态 | Flashduty 变更状态 |
+|---|---|
+| `not-started`、`accepted` | Ready |
+| `running` | Processing |
+| `succeeded` | Done |
+| `failed` | Failed |
+| `skipped` | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。Pulumi 的 `result` 和 `status` 还可能出现 `not started`、`requested`、`running` 等值，Flashduty 分别记为 Ready 和 Processing；遇到其他值时推送返回错误。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | Stack 更新：`<项目>/<Stack>: pulumi <操作> #<更新编号>`，例如 `website/website-prod: pulumi update #42`；部署：`<项目>/<Stack>: deployment #<部署版本> (<操作>)` |
+| 描述 | Stack 更新的资源变化数量，例如 `delete: 1, update: 3, update-replace: 2`；部署为空 |
+| 链接 | Pulumi Cloud 中这次更新或部署的页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `organization` | Pulumi 组织名 |
+| `project` | Pulumi 项目名 |
+| `stack` | Stack 名 |
+| `operation` | 操作，例如 `update`、`destroy` |
+| `actor` | 触发者的 GitHub 登录名，缺失时为显示名 |
+| `update_version` | Stack 更新编号（仅 Stack 更新） |
+| `deployment_version` | 部署版本（仅 Deployments 部署） |
+| `state` | 最新通知中的 Pulumi 结果或状态，例如 `succeeded`、`running` |
+
+`actor` 和 `operation` 在同一条变更的不同通知里可能不一致，不要用它们做路由；路由请使用 `organization`、`project`、`stack`。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="事件时间是什么？重复推送会重复记录吗？">
+
+Pulumi 的推送内容不包含时间，Flashduty 以收到通知的时间作为事件时间。因此在 Pulumi Cloud 里重新投递（Redeliver）同一条通知，会在变更下多记录一个事件，状态不变。
+
+Pulumi 不保证通知的先后顺序。如果某个 Deployments 部署的 `running` 通知晚于 `succeeded` 到达，变更会回到 Processing；这类情况很少出现，可以在 Pulumi Cloud 的投递记录中确认顺序。Stack 更新只推送一次结束结果，不受影响。
+
+</Accordion>
+
+<Accordion title="为什么没有看到预览（preview）和刷新（refresh）？">
+
+预览不改变基础设施，刷新只把云上现状同步回 Pulumi 状态，两者都不记录。`pulumi preview` 触发的 `stack_preview` 事件、Deployments 中的预览、刷新和漂移检测同理。
+
+</Accordion>
+
+<Accordion title="创建 Webhook 后会发送测试推送吗？">
+
+Pulumi 的 `ping` 事件会返回成功，不生成变更。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `Pulumi-Webhook-Kind header is missing`：请求不是来自 Pulumi Cloud Webhook，或中间的代理去掉了该请求头
+- `updateUrl is missing` / `deploymentUrl is missing`：推送内容不完整，请确认 Webhook 的 Destination 选择的是 **Webhook**，不是 Slack 或 Microsoft Teams
+- `unsupported result "..."` / `unsupported status "..."`：收到了 Flashduty 尚未支持的状态，请联系我们
+
+</Accordion>
+</AccordionGroup>
