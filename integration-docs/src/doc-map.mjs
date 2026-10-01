@@ -100,6 +100,7 @@ export const docMap = {
   Gatus: `${alertBase}/gatus.mdx`,
   Metoro: `${alertBase}/metoro.mdx`,
   Odown: `${alertBase}/odown.mdx`,
+  Bleemeo: `${alertBase}/bleemeo.mdx`,
   Fastnetmon: `${alertBase}/fastnetmon.mdx`,
   Updown: `${alertBase}/updown.mdx`,
   Hyperping: `${alertBase}/hyperping.mdx`,
