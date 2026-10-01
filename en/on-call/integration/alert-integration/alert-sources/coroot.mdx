@@ -1,0 +1,143 @@
+---
+title: "Coroot Alert Integration"
+description: "Sync Coroot alert and SLO incident open and resolve notifications to Flashduty On-call through a Webhook integration."
+keywords: ["alert integration", "Coroot", "Webhook", "Incident", "Alert", "observability"]
+---
+
+Sync the alerts (alerting rules) and SLO incidents of a Coroot project to Flashduty On-call through Coroot's Webhook integration. Coroot sends one notification when an alert or incident opens and one when it resolves; both map to the same Flashduty alert, which closes automatically on resolution.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Coroot** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Coroot** and enter an integration name
+3. Configure the default route and pick a channel; add more rules under **Routes** later
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Coroot
+---
+
+<Steps>
+<Step title="Create a Webhook integration">
+
+1. In Coroot, go to **Project Settings → Integrations** and create a **Webhook** integration
+2. Paste the full Flashduty push URL into **Webhook URL**
+3. Enable **Incidents** and **Alerts**. **Deployments** do not become alerts, so leave it off (if enabled, Flashduty receives and ignores deployment notifications)
+4. No HTTP basic authentication is needed; Coroot always sends `Content-Type: application/json`
+
+</Step>
+
+<Step title="Fill in the templates">
+
+Use Coroot's built-in `json` function in both the **Incident template** and the **Alert template**:
+
+```gotemplate
+{{ json . }}
+```
+
+<Warning>
+Keep `{{ json . }}` and do not replace it with a custom text template. Flashduty reads the alert or incident ID from the `url` field of the JSON as the Alert Key, and rejects the request when it is missing.
+</Warning>
+
+To carry fixed values such as the environment or team into Flashduty, add key-value pairs under **Custom fields** (for example `environment` = `production`). Coroot puts them at the top level of the JSON, and Flashduty turns them into labels.
+
+</Step>
+
+<Step title="Turn on notification routing">
+
+1. Go to **Project Settings → Applications** and select an application category
+2. Turn on **Webhook** for **Incidents** and **Alerts**; repeat for every category you want to cover
+
+Coroot only sends webhooks for categories that have notifications enabled.
+
+</Step>
+
+<Step title="Verify">
+
+1. Back in the Webhook integration form, click **Test**. Flashduty returns success and opens an Info alert titled `Coroot test notification`, which you close manually. Each click opens a new test alert
+2. Let an alerting rule or SLO actually fire and confirm Flashduty shows an active alert; then let it resolve and confirm the same alert closes
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the ID carried in the `url` field of the Coroot notification as the Alert Key:
+
+| Coroot notification | Source | Alert Key |
+| :--- | :--- | :--- |
+| Alert | `alert` parameter of `url`, such as `.../alerts?alert=abc123def456` | `alert:abc123def456` |
+| Incident | `incident` parameter of `url`, such as `.../incidents?incident=x1y2z3w4` | `incident:x1y2z3w4` |
+
+Coroot generates a unique ID when it creates an alert or incident, and the open and resolve notifications use the same one. If the same rule fires again on the same application, Coroot creates a new ID, so it is a new Flashduty alert. Changes to severity, rule name, summary or the domain in `url` never change the Alert Key.
+
+## Status and severity
+---
+
+Coroot sends a notification only when an alert or incident opens or resolves; a severity change in between is not notified.
+
+| Coroot `status` | Flashduty status or severity |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `WARNING` | Warning |
+| `INFO` | Info |
+| `OK` | Recovery |
+
+- When an alert resolves, the original severity comes from the `severity` field (`warning` or `critical`)
+- An incident notification carries only `status`, so its recovery event gets the Info severity
+- An unrecognized `status` is treated as Warning, so that Coroot is not made to pause later notifications by an error response
+
+## Labels
+---
+
+| Label | Meaning |
+| :--- | :--- |
+| `resource` | Application name |
+| `application`, `namespace`, `kind` | Parts of the Coroot application ID `[cluster:]namespace:Kind:name` |
+| `check` | Rule name for an alert; always `SLO` for an incident |
+| `rule_name`, `severity`, `project_name` | Rule, severity and project name of an alert |
+| `alert_id` or `incident_key` | The ID used for the Alert Key |
+| Custom fields | Custom fields configured on the integration |
+
+## Troubleshooting
+---
+
+<AccordionGroup>
+<Accordion title="Coroot logs show failed to send alert ... 400">
+Check that both templates are `{{ json . }}` and that the push URL is complete and includes `integration_key`. Flashduty returns 400 when it cannot read an ID from `url`; Coroot then keeps retrying for an hour and holds back later notifications to the same destination.
+</Accordion>
+
+<Accordion title="An alert does not recover">
+Check that neither the Alert template nor the Incident template was changed to custom text, and that the application category has Webhook enabled for both **Alerts** and **Incidents**. The resolve notification is linked to the trigger only through the ID in `url`.
+</Accordion>
+
+<Accordion title="No Alert notifications arrive">
+Coroot sends no Alert notification when the Alert template is empty, so make sure it is filled in. Also check that Webhook is enabled for **Alerts** on the category under **Project Settings → Applications**.
+</Accordion>
+
+<Accordion title="The test succeeds but real alerts do not arrive">
+The Test button sends one fixed test incident and bypasses application category routing. Check the notification settings of the category the application belongs to, and whether the alerting rule really fires.
+</Accordion>
+
+<Accordion title="Do deployment notifications become alerts?">
+No. Deployment notifications (`status` such as `Deployed` or `Stuck`) are accepted and ignored by Flashduty.
+</Accordion>
+</AccordionGroup>
+
+For the field reference, see Coroot's [Webhook](https://docs.coroot.com/alerting/webhook) and [Alerts](https://docs.coroot.com/alerting/alerts) documentation.
