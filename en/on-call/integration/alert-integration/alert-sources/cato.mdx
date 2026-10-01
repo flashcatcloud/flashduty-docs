@@ -1,0 +1,123 @@
+---
+title: "Cato Networks Alert Integration"
+description: "Send Site Operations stories and other alerts from the Cato Management Application (CMA) to Flashduty On-call through a custom-body webhook."
+keywords: ["alert integration", "Cato Networks", "Cato", "SASE", "webhook", "Site Operations"]
+---
+
+Cato Networks webhooks have no fixed request body; you write the body in CMA. This page gives a body template that Flashduty parses. `storyId` (the Site Operations story ID) identifies one event: Flashduty triggers or updates the alert while the story is open, and recovers it when `storyStatus` becomes `RESOLVED` (or `endDate` is set).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Cato** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Cato** and enter an integration name
+3. Configure the default route and choose a channel; you can add more rules under **Routes** later
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Cato
+---
+
+You need permission to manage Subscriptions in CMA.
+
+<Steps>
+<Step title="Create the webhook">
+
+1. In CMA, go to **Account > Subscriptions**, open the **Webhooks** tab, and click **New Webhook**
+2. Enter a name and enable it
+3. Choose **POST** (Create) as the request method and paste the full Flashduty push URL, which includes `integration_key`
+4. No authentication is needed; `integration_key` is already in the URL
+
+</Step>
+
+<Step title="Paste the body template">
+
+Set the body to **Custom** and paste the template below. Cato replaces each `${field:}` with the field value; the text after the colon is the default when the field has no value (empty here):
+
+```json
+{
+  "storyId": "${storyId:}",
+  "correlationId": "${correlationId:}",
+  "storyStatus": "${storyStatus:}",
+  "alertType": "${alertType:}",
+  "level": "${level:}",
+  "title": "${title:}",
+  "subject": "${subject:}",
+  "accountName": "${accountName:}",
+  "siteName": "${siteName:}",
+  "ISPName": "${ISPName:}",
+  "startDate": "${startDate:}",
+  "endDate": "${endDate:}"
+}
+```
+
+Field definitions: [Understanding the JSON Fields for Alert Integrations](https://knowledge.catonetworks.com/docs/understanding-the-json-fields-for-alert-integrations). Keep `storyId`, `correlationId`, `storyStatus` and `endDate`; they decide how alerts are merged and recovered.
+
+</Step>
+
+<Step title="Subscribe and verify">
+
+1. Under **Account > Subscriptions**, add this webhook as a delivery target for the alert types you want (Site Operations stories and so on)
+2. Click **Test** on the webhook page. Cato sends a request with auto-generated content, and Flashduty handles it as a normal alert, opening a separate alert that you close manually after the check
+3. Trigger a real event (for example, disconnect the Socket of a test site), confirm Flashduty receives an active alert, then confirm it recovers when the story resolves
+
+</Step>
+</Steps>
+
+<Warning>
+`storyId` exists only on Site Operations stories. Other alert types have no such field, so Flashduty uses `correlationId` as the Alert Key. Those alerts recover only when `endDate` is set; otherwise turn on [auto-close](/en/on-call/channel/create-edit) in the receiving channel (24 hours suggested). Follow-up updates for the same story depend on Cato's XOps correlation; without it, each notification may be a separate event.
+</Warning>
+
+## Alert Key
+---
+
+Flashduty uses `storyId` as the Alert Key, and `correlationId` when `storyId` is empty. Cato defines `storyId` as "Unique identifier for the Site Operations story" and `correlationId` as "Unique identifier used to correlate related events, messages, or operations". Changes to title, level or time never change the Alert Key. A request with neither field is rejected with the field name.
+
+## Status and severity
+---
+
+An alert recovers when `storyStatus` is `RESOLVED` or `endDate` is not empty; other states such as `OPEN` and `IN_PROGRESS` trigger or update it. Severity comes from `level`:
+
+| Cato `level` | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `HIGH` | Warning |
+| `MEDIUM` | Warning |
+| `LOW` | Info |
+| Empty or other | Warning |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `story_id` | `storyId` |
+| `correlation_id` | `correlationId` |
+| `story_status` | `storyStatus` |
+| `alert_type` | `alertType` |
+| `level` | `level` |
+| `check` | Title |
+| `account_name` | `accountName` |
+| `site` | `siteName` |
+| `isp` | `ISPName` |
+
+## Troubleshooting
+---
+
+- **Cato test fails**: confirm the URL is complete, includes `integration_key`, and the method is POST
+- **Flashduty returns a parameter error**: confirm the body is valid JSON and contains `storyId` or `correlationId`. If a title or subject contains double quotes, Cato's substitution may break the JSON; remove the `title` or `subject` field from the template
+- **Alert does not recover**: confirm the template keeps `storyStatus` and `endDate`, and that the resolution notification is also delivered to this webhook
