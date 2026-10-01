@@ -1,0 +1,144 @@
+---
+title: "Coroot 告警集成"
+description: "通过 Webhook 将 Coroot 的告警（Alert）和 SLO 事件（Incident）的触发、恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Coroot", "Webhook", "Incident", "Alert", "可观测性"]
+---
+
+通过 Coroot 的 Webhook 集成，把项目中的告警规则（Alert）和 SLO 事件（Incident）同步到 Flashduty On-call。Coroot 在告警或事件打开时发送一次，在恢复时再发送一次；两次通知对应同一条 Flashduty 告警，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Coroot**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Coroot**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Coroot 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 集成">
+
+1. 进入 Coroot 的 **Project Settings → Integrations**，创建 **Webhook** 集成
+2. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
+3. 勾选 **Incidents** 和 **Alerts**。**Deployments** 不用于告警，建议不勾选（勾选后 Flashduty 会收到并忽略部署通知）
+4. 无需配置 HTTP Basic 认证；Coroot 固定以 `Content-Type: application/json` 发送
+
+</Step>
+
+<Step title="填写模板">
+
+**Incident template** 和 **Alert template** 两个模板都填写 Coroot 内置的 `json` 函数：
+
+```gotemplate
+{{ json . }}
+```
+
+<Warning>
+必须使用 `{{ json . }}`，不要改成自定义文本模板。Flashduty 从 JSON 的 `url` 字段取出告警或事件的 ID 作为 Alert Key，缺少它时会拒绝请求。
+</Warning>
+
+如果希望把环境、团队等固定信息带到 Flashduty，可在集成的 **Custom fields** 中添加键值对（例如 `environment` = `production`）。Coroot 会把它们放在 JSON 顶层，Flashduty 将其作为标签。
+
+</Step>
+
+<Step title="开启通知路由">
+
+1. 进入 **Project Settings → Applications**，选择一个应用类别
+2. 为 **Incidents** 和 **Alerts** 开启 **Webhook**；需要覆盖的每个类别都要设置
+
+Coroot 只对已开启通知的类别发送 Webhook。
+
+</Step>
+
+<Step title="验证">
+
+1. 回到 Webhook 集成表单，点击 **Test**。Flashduty 返回成功，并创建一条等级为 Info 的测试告警（标题为 `Coroot test notification`），需要手动关闭。每点击一次，都会创建一条新的测试告警
+2. 让一条告警规则或 SLO 真正命中，确认 Flashduty 收到活动告警；再让它恢复，确认原告警自动关闭
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Coroot 通知中 `url` 字段携带的 ID 作为 Alert Key：
+
+| Coroot 通知 | 取值 | Alert Key |
+| :--- | :--- | :--- |
+| Alert | `url` 的 `alert` 参数，如 `.../alerts?alert=abc123def456` | `alert:abc123def456` |
+| Incident | `url` 的 `incident` 参数，如 `.../incidents?incident=x1y2z3w4` | `incident:x1y2z3w4` |
+
+每个 Coroot 告警和事件在创建时生成唯一 ID，打开和恢复通知使用同一个 ID。同一条规则在同一个应用上再次触发会生成新的 ID，因此是一条新的 Flashduty 告警。严重程度、规则名称、摘要和 `url` 的域名变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+Coroot 只在告警或事件打开、恢复时发送通知；打开后严重程度变化不会再通知。
+
+| Coroot `status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `WARNING` | Warning |
+| `INFO` | Info |
+| `OK` | 恢复 |
+
+- Alert 恢复时，原等级取通知中的 `severity`（`warning` 或 `critical`）
+- Incident 的通知只有 `status`，恢复事件的等级记为 Info
+- 无法识别的 `status` 按 Warning 处理，避免 Flashduty 返回错误后 Coroot 暂停后续通知
+
+## 标签
+---
+
+| 标签 | 含义 |
+| :--- | :--- |
+| `resource` | 应用名称 |
+| `application` | 完整的 Coroot 应用 ID，格式为 `[集群:]命名空间:类型:名称` |
+| `namespace`、`kind` | 应用 ID 中的命名空间和类型 |
+| `check` | Alert 为规则名称，Incident 固定为 `SLO` |
+| `rule_name`、`severity`、`project_name` | Alert 的规则、等级和项目名称 |
+| `alert_id` 或 `incident_key` | 用于 Alert Key 的 ID |
+| 自定义字段 | 集成中配置的 Custom fields |
+
+## 排查问题
+---
+
+<AccordionGroup>
+<Accordion title="Coroot 日志出现 failed to send alert ... 400">
+确认两个模板都是 `{{ json . }}`，且推送地址完整并包含 `integration_key`。Flashduty 在无法从 `url` 取得 ID 时返回 400，Coroot 会在一小时内持续重试，并暂停同一目的地的后续通知。
+</Accordion>
+
+<Accordion title="告警没有恢复">
+确认 Alert template 或 Incident template 没有被改成自定义文本，并且该应用类别的 **Alerts** 和 **Incidents** 都开启了 Webhook。恢复通知只靠 `url` 中的 ID 与触发通知关联。
+</Accordion>
+
+<Accordion title="没有收到 Alert 通知">
+Coroot 的 Alert template 为空时不会发送 Alert 通知，请确认已填写。另外在 **Project Settings → Applications** 中，对应类别的 **Alerts** 需要开启 Webhook。
+</Accordion>
+
+<Accordion title="Test 成功但真实告警没收到">
+Test 按钮只发送一条固定的测试 Incident，不经过应用类别路由。请检查应用所属类别的通知设置，以及告警规则是否真正命中。
+</Accordion>
+
+<Accordion title="部署通知会变成告警吗">
+不会。部署通知（`url` 指向应用的 Deployments 页面）会被 Flashduty 接收并忽略，与 `status` 取值无关。
+</Accordion>
+</AccordionGroup>
+
+更多字段含义请参阅 Coroot 官方文档 [Webhook](https://docs.coroot.com/alerting/webhook) 和 [Alerts](https://docs.coroot.com/alerting/alerts)。
