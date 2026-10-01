@@ -116,6 +116,7 @@ export const docMap = {
   Xitoring: `${alertBase}/xitoring.mdx`,
   Phare: `${alertBase}/phare.mdx`,
   Odown: `${alertBase}/odown.mdx`,
+  Bleemeo: `${alertBase}/bleemeo.mdx`,
   Tideways: `${alertBase}/tideways.mdx`,
   Wormly: `${alertBase}/wormly.mdx`,
   Flowtriq: `${alertBase}/flowtriq.mdx`,
