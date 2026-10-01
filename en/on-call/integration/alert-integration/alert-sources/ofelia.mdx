@@ -1,0 +1,126 @@
+---
+title: "Ofelia alert integration"
+description: "Send failure and recovery events from Ofelia scheduled jobs to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Ofelia", "cron", "Docker", "webhook", "scheduled jobs"]
+---
+
+Use an Ofelia webhook to send the results of scheduled jobs to Flashduty On-call. Each job on each Ofelia host maps to one Flashduty alert: a failed run opens a Critical alert, and a later successful run recovers it.
+
+This page covers the webhook feature of [netresearch/ofelia](https://github.com/netresearch/ofelia) (verified with v1.0.1). The upstream `mcuadros/ofelia` has no webhook feature, so this integration cannot be used with it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **Ofelia** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure Ofelia
+---
+
+<Steps>
+<Step title="Define a webhook">
+
+Add a webhook to the Ofelia configuration with only `url` and `trigger`. Do not set `preset`. Ofelia then uses its bundled `json-post` preset and POSTs a JSON request to that URL.
+
+```ini
+[webhook "flashduty"]
+url = <Flashduty push URL>
+trigger = always
+```
+
+<Warning>
+`trigger = always` is required. Ofelia's default is `error`, which sends failed runs only. Flashduty would never see a successful run, so the alert would not recover.
+</Warning>
+
+If you set `webhook-allowed-hosts` in `[global]`, add `api.flashcat.cloud` to the list.
+
+To define the webhook with Docker labels, put them on the Ofelia service container (the one with `ofelia.service: "true"`). Webhook labels on any other container are ignored:
+
+```yaml
+services:
+  ofelia:
+    image: ghcr.io/netresearch/ofelia:1.0.1
+    hostname: ofelia-prod-01
+    labels:
+      ofelia.enabled: "true"
+      ofelia.service: "true"
+      ofelia.webhook.flashduty.url: "<Flashduty push URL>"
+      ofelia.webhook.flashduty.trigger: "always"
+```
+
+</Step>
+
+<Step title="Attach the webhook to jobs">
+
+Reference the webhook by name in each job you want to monitor:
+
+```ini
+[job-exec "backup-database"]
+schedule = @daily
+container = postgres
+command = pg_dump -U postgres mydb > /backup/db.sql
+webhooks = flashduty
+```
+
+With Docker labels, use `ofelia.job-exec.backup-database.webhooks: "flashduty"`. To send for every job, set `webhook-webhooks = flashduty` in `[global]` (label: `ofelia.webhook-webhooks`).
+
+</Step>
+
+<Step title="Pin the hostname">
+
+Flashduty uses the hostname to tell apart jobs with the same name on different machines. Inside a container, the hostname defaults to the container ID, which changes when the container is recreated, and a successful run could then no longer recover an alert opened under the old ID. Set `hostname` in Compose (as above) or pass `--hostname` to `docker run`.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a job fail once (for example, temporarily change its command to `false`) and confirm that Flashduty receives a Critical alert. Restore the command, wait for the next successful run, and confirm that the alert recovers. Ofelia has no test-send feature, so a real run is the only way to verify.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from `host.hostname` and `job.name`, joined by a separator that cannot appear in either, then hashed with MD5. In our verification, failed and successful runs of the same job carried the same hostname and job name. `execution.id` differs on every run, so it is not part of the Alert Key.
+
+- Two different jobs on one host are two alerts, and the same job name on two hosts is also two alerts
+- Changes to the command, schedule, duration, or error text do not change the Alert Key
+- Jobs of different types in one Ofelia (`job-exec`, `job-run`, and so on) that share a name are treated as one alert, so keep job names unique
+- If `job.name` is missing, Flashduty returns 400 rather than writing a failure and its recovery to the wrong alert
+
+## Status and severity
+---
+
+| Ofelia `execution.status` | Flashduty handling |
+| :--- | :--- |
+| `failed` | Critical alert. The description holds the error and the first 2000 bytes of stderr |
+| `successful` | Recovers the job's alert |
+| `skipped` | Ignored with a 200 response. Opens and recovers nothing |
+
+A job skipped by `no-overlap` means the previous run is still going, so the job's health has not changed. A skipped run therefore leaves an open alert alone.
+
+Repeated failures update the same alert. If a job stops running altogether (deleted or disabled), its alert does not recover. Close it manually, or turn on [auto-close after timeout](/en/on-call/channel/create-edit) for the channel.
+
+## Alert content
+---
+
+- **Title**: `Ofelia job "<job name>" failed`, or `Ofelia job "<job name>" succeeded` on recovery
+- **Description**: `execution.error`, followed by `execution.stderr` on a new line
+- **Labels**: `check`, `job_name`, `job_type`, `job_schedule`, `execution_status`, `duration`, `resource` / `host` (the hostname), `ofelia_version`, `source=ofelia`
+
+The job command and stdout never reach labels or the description, because a command can carry credentials.
+
+## Troubleshooting
+---
+
+- **Flashduty receives nothing**: confirm the job has `webhooks = flashduty` and look for `Webhook error` in the Ofelia log. Ofelia retries a failed webhook 3 times by default, 5 seconds apart
+- **Failures arrive but never recover**: confirm the webhook has `trigger = always` and that the hostname did not change between runs
+- **Flashduty returns a parameter error**: confirm the webhook has no other `preset`. The body must be the JSON that the `json-post` preset sends
+- **Docker labels have no effect**: webhook labels are only processed on the container with `ofelia.service: "true"`. When an INI webhook and a label webhook share a name, the INI one wins
+- **"host not in allowed hosts list"**: add `api.flashcat.cloud` to `[global] webhook-allowed-hosts`
+
+For more options, see Ofelia's [Webhook Notifications](https://github.com/netresearch/ofelia/blob/main/docs/webhooks.md).

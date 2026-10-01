@@ -145,6 +145,7 @@ export const docMap = {
   Auvik: `${alertBase}/auvik.mdx`,
   Domotz: `${alertBase}/domotz.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Ofelia: `${alertBase}/ofelia.mdx`,
   Openobserve: `${alertBase}/openobserve.mdx`,
   Postman: `${alertBase}/postman.mdx`,
   Contrast: `${alertBase}/contrast.mdx`,
