@@ -126,6 +126,7 @@ export const docMap = {
   Panther: `${alertBase}/panther.mdx`,
   Axiom: `${alertBase}/axiom.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
+  Ntopng: `${alertBase}/ntopng.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
   Domotz: `${alertBase}/domotz.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
