@@ -1,0 +1,125 @@
+---
+title: "Phare Uptime alert integration"
+description: "Send Phare Uptime incident created and recovered events to Flashduty On-call through an outgoing webhook."
+keywords: ["alert integration", "Phare", "Phare Uptime", "outgoing webhook", "incident", "uptime"]
+---
+
+Use a Phare outgoing webhook to send Uptime incidents to Flashduty On-call. Created, propagated, partially recovered, and recovered notifications for one Phare incident land on one Flashduty alert: it triggers when the incident is created and closes automatically when it recovers.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **Phare** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure Phare
+---
+
+A Phare webhook body is written by you from placeholders, so the template below is the one to paste. Flashduty parses exactly this template.
+
+<Steps>
+<Step title="Create an outgoing webhook integration">
+
+1. Sign in to Phare, go to **Integrations**, and create an **Outgoing webhook**
+2. Paste the complete Flashduty Push URL (including `integration_key`) into **Callback URL**
+3. The signing secret can stay auto-generated. Flashduty does not verify the signature
+
+</Step>
+
+<Step title="Set the payload template">
+
+Paste this JSON as the payload template. Set `event` to the event key of the alert rule, for example `uptime.incident.created` or `uptime.incident.recovered`:
+
+```json
+{
+  "event": "uptime.incident.created",
+  "incident": {
+    "id": "{{ incident.id }}",
+    "slug": "{{ incident.slug }}",
+    "title": "{{ incident.title }}",
+    "description": "{{ incident.description }}",
+    "state": "{{ incident.state }}",
+    "status": "{{ incident.status }}",
+    "impact": "{{ incident.impact }}"
+  },
+  "project": {
+    "id": "{{ project.id }}",
+    "name": "{{ project.name }}",
+    "slug": "{{ project.slug }}"
+  },
+  "affected_monitors": {
+    "$each": "affected_monitors",
+    "$item": {
+      "id": "{{ item.id }}",
+      "name": "{{ item.name }}"
+    }
+  }
+}
+```
+
+<Warning>
+Keep `incident.id`. Flashduty rejects requests without it because it could not match a later recovery. Phare also sends the event key in the `X-Phare-Request-Event` header. Flashduty reads that header first and falls back to the `event` field.
+</Warning>
+
+</Step>
+
+<Step title="Create alert rules">
+
+In **Alert rules**, create one rule per event for this webhook integration:
+
+- **Incident created** (`uptime.incident.created`)
+- **Incident propagated**
+- **Incident partially recovered**
+- **Incident recovered** (`uptime.incident.recovered`)
+
+The **Incident recovered** rule is required, otherwise the Flashduty alert never closes. Do not set a rate limit so strict that it suppresses the recovery notification.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a monitored target actually fail and confirm Flashduty receives an active alert, then restore the target and confirm the alert recovers. Phare's documentation describes no test button for webhooks, so verify with a real event.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `incident.id` as the Alert Key. Phare's created, propagated, partially recovered, and recovered events all expose the same incident entity, and `{{ incident.id }}` is that incident's number, so every notification for one incident gets the same Alert Key. Changes to the title, description, state, impact, or affected monitors do not change it.
+
+## Status and severity
+---
+
+The event type comes from the `X-Phare-Request-Event` header:
+
+| Phare event | Flashduty behavior |
+| :--- | :--- |
+| `uptime.incident.created` | Trigger the alert |
+| `uptime.incident.propagated` | Update the alert |
+| `uptime.incident.partially_recovered` | Update the alert (some monitors still failing) |
+| `uptime.incident.recovered` | Recover |
+| Monitor, certificate, comment, and public update events | Return success, create no alert |
+
+Severity comes from `incident.impact`:
+
+| `impact` | Severity |
+| :--- | :--- |
+| `major_outage`, `unknown`, empty, or an unrecognized value | Critical |
+| `partial_outage`, `degraded_performance` | Warning |
+| `operational`, `maintenance` | Info |
+
+An incident is created when a monitor check fails, so an unknown impact is treated as Critical. A recovery event keeps the severity that `impact` maps to and sets the status to recovered.
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: confirm the template is valid JSON, `incident.id` is not empty, and the request carries `X-Phare-Request-Event` or an `event` field
+- **The alert does not recover**: confirm an **Incident recovered** rule exists and uses the same template
+- **No notification arrives**: check the request and response in Phare's webhook logs. Phare retries a non-2xx response up to 4 times
+- **You want certificate expiry events**: those events carry no incident number, so this integration does not handle them
+
+See [Phare Outgoing Webhooks](https://docs.phare.io/integrations/outgoing-webhook) and [Phare alert rules](https://docs.phare.io/uptime/alerting) for the full placeholder and header reference.
