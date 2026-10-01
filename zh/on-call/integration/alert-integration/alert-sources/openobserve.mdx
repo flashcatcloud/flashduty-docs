@@ -1,0 +1,133 @@
+---
+title: "OpenObserve 告警集成"
+description: "通过 OpenObserve 告警目的地的 Webhook 模板，将 OpenObserve 告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "OpenObserve", "Webhook", "日志告警", "可观测性"]
+---
+
+OpenObserve 的 Webhook 目的地没有固定的请求体，请求体就是您保存的模板。本集成约定一份 JSON 模板：把模板粘贴到 OpenObserve，告警触发时 OpenObserve 会把模板中的变量替换成实际值并推送到 Flashduty。每个 OpenObserve 告警（按组织、数据流类型、数据流和告警名称区分）对应一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **OpenObserve**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **OpenObserve**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 OpenObserve 中配置
+---
+
+需要能管理告警模板和目的地的权限。
+
+<Steps>
+<Step title="创建模板">
+
+1. 在 OpenObserve 中进入 **Management → Templates**，新建模板，类型选择 Webhook
+2. 将下面的 JSON 粘贴到模板内容中并保存：
+
+```json
+{
+  "org_name": "{org_name}",
+  "stream_type": "{stream_type}",
+  "stream_name": "{stream_name}",
+  "alert_name": "{alert_name}",
+  "alert_type": "{alert_type}",
+  "alert_level": "{alert_level}",
+  "alert_status": "{alert_status}",
+  "episode_id": "{episode_id}",
+  "alert_count": "{alert_count}",
+  "alert_agg_value": "{alert_agg_value}",
+  "alert_operator": "{alert_operator}",
+  "alert_threshold": "{alert_threshold}",
+  "alert_period": "{alert_period}",
+  "alert_url": "{alert_url}",
+  "alert_description": "{alert_description}"
+}
+```
+
+模板必须包含 `org_name`、`stream_name` 和 `alert_name`，缺少任何一个，Flashduty 会拒绝该推送。其余字段可按需删减。
+
+</Step>
+
+<Step title="创建目的地">
+
+1. 进入 **Management → Alert Destinations**，新建目的地
+2. **Template** 选择上一步的模板
+3. **URL** 填写 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
+4. **Method** 选择 `POST`
+5. **Headers** 可不填：Flashduty 通过地址中的 `integration_key` 认证，不依赖 `Content-Type`
+
+</Step>
+
+<Step title="在告警中使用目的地">
+
+1. 创建或编辑 OpenObserve 告警，在目的地中选择上一步的目的地
+2. OpenObserve 1.1 起，可在告警上开启恢复通知（`notify_on_recovery`），告警恢复时会再推送一次 `alert_status` 为 `resolved` 的请求。早期版本和未开启该选项的告警没有恢复通知
+3. 保存告警，等待告警条件满足，确认 Flashduty 收到活动告警
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用 `org_name`、`stream_type`、`stream_name` 和 `alert_name` 共同计算 Alert Key，同一个 OpenObserve 告警的触发、持续触发和恢复使用同一个 Alert Key。告警等级、查询结果数、阈值、触发时间和 `episode_id` 的变化不会改变 Alert Key；`stream_type` 为空时按空值参与计算。缺少 `org_name`、`stream_name` 或 `alert_name` 的请求会被拒绝。
+
+重命名 OpenObserve 告警、数据流或组织会产生新的 Alert Key。
+
+## 状态和告警等级
+---
+
+| `alert_level` | Flashduty 等级 |
+| :--- | :--- |
+| `critical` | Critical |
+| `warning`、`no_data`、空或其他值 | Warning |
+
+`alert_status` 为 `resolved` 时告警恢复，其余情况为触发。OpenObserve 1.1 之前不识别 `{alert_status}`、`{alert_level}` 和 `{episode_id}`，这些字段会以原样的模板文本到达，Flashduty 将其视为空值，告警按 Warning 触发。
+
+## 恢复
+---
+
+只有 OpenObserve 1.1 及以上、并为告警开启恢复通知时，Flashduty 才会收到恢复请求并自动关闭告警。其余情况每次触发都是独立的一次性通知，没有恢复请求。请在 Flashduty 的集成或协作空间中为这类告警配置 **超时自动关闭**，并设置合适的时长，否则告警会一直保持活动。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `org` | `org_name` |
+| `stream` / `stream_type` | 数据流名称和类型 |
+| `check` | 告警名称 |
+| `alert_type` | `realtime` 或 `scheduled` |
+| `alert_level` / `alert_status` | 等级和状态 |
+| `episode_id` | 一次触发过程的 ID（OpenObserve 1.1 起） |
+| `alert_count` / `alert_agg_value` | 查询结果数和聚合值 |
+| `alert_operator` / `alert_threshold` / `alert_period` | 条件的运算符、阈值和查询时间窗口 |
+| `url` | OpenObserve 中该告警的链接 |
+
+模板中没有 `{rows}`，Flashduty 不会收到查询返回的日志内容。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，模板中包含 `org_name`、`stream_name` 和 `alert_name`，并且模板是合法的 JSON
+- **告警没有恢复**：确认 OpenObserve 版本不低于 1.1，且告警已开启恢复通知；否则请配置超时自动关闭
+- **告警名称包含引号或换行时请求失败**：OpenObserve 按文本把变量值填入模板，告警名称中的双引号或换行会让 JSON 失效，请避免在告警名称中使用这些字符
+- **目的地没有测试按钮**：OpenObserve 的 Webhook 目的地文档没有提供测试发送，请用一条容易触发的实时告警验证
+
+更多变量请参阅 [OpenObserve 告警模板](https://openobserve.ai/docs/user-guide/management/templates/)。
