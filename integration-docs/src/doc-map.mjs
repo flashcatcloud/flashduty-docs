@@ -280,6 +280,7 @@ export const docMap = {
   SemaphoreChange: `${integrationBase}/change-integration/semaphore.mdx`,
   GrowthbookChange: `${integrationBase}/change-integration/growthbook.mdx`,
   FluxcdChange: `${integrationBase}/change-integration/fluxcd.mdx`,
+  PulumiChange: `${integrationBase}/change-integration/pulumi.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
