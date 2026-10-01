@@ -90,6 +90,7 @@ export const docMap = {
   Dash0: `${alertBase}/dash0.mdx`,
   ProjectDiscovery: `${alertBase}/projectdiscovery.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
+  Clustercontrol: `${alertBase}/clustercontrol.mdx`,
   Nobl9: `${alertBase}/nobl9.mdx`,
   Sevone: `${alertBase}/sevone.mdx`,
   HostedGraphite: `${alertBase}/hosted-graphite.mdx`,
