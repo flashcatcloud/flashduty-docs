@@ -263,6 +263,7 @@ export const docMap = {
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
+  RailwayChange: `${integrationBase}/change-integration/railway.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
   GiteaChange: `${integrationBase}/change-integration/gitea.mdx`,
   GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
@@ -290,6 +291,7 @@ export const docMap = {
   FluxcdChange: `${integrationBase}/change-integration/fluxcd.mdx`,
   PulumiChange: `${integrationBase}/change-integration/pulumi.mdx`,
   Env0Change: `${integrationBase}/change-integration/env0.mdx`,
+  ExpoEasChange: `${integrationBase}/change-integration/expo-eas.mdx`,
   HarnessFmeChange: `${integrationBase}/change-integration/harness-fme.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
