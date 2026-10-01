@@ -1,0 +1,125 @@
+---
+title: "env0 change integration"
+description: "Sync environment deploys and destroys from an env0 webhook notification target to Flashduty On-call as change events correlated with alerts and incidents."
+keywords: ["change integration", "env0", "env zero", "Deployment", "Destroy", "Terraform", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires the On-call Standard plan or above. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use an env0 webhook notification target to sync environment deploys and destroys to Flashduty On-call. Each env0 run (one deployment log) becomes one Flashduty change; every state of the run, from started and waiting for approval to resumed, succeeded, failed or canceled, updates that same change.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **env0** and enter an integration name
+3. To assign changes to specific channels, configure rules in the integration's **Routing** based on labels such as `project` or `environment`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In env0
+---
+
+<Steps>
+<Step title="Add a webhook notification target">
+
+This needs organization admin permission. Go to **Organization Settings → Notifications** and click **Add Notification Target**:
+
+1. **Name**: any name, unique within the organization
+2. **Type**: select **Webhook**
+3. **URL**: paste the full Push URL of the Flashduty integration (env0 requires HTTPS)
+4. **Secret**: leave empty. Flashduty authenticates with the `integration_key` in the Push URL and does not check `x-env0-signature`
+
+Use **Test endpoint → Send test event** to check connectivity: Flashduty returns success, but the test event does not create a change.
+
+</Step>
+
+<Step title="Select events in a project">
+
+This needs project admin permission. Go to **Project Settings → Notifications**, click the edit icon next to the notification target and select:
+
+- **Deployment started**, **Deployment waiting for user**, **Deployment resumed**, **Deployment cancelled**
+- **Deploy succeeded**, **Deploy failed**
+- To record destroys as well, **Destroy started**, **Destroy resumed**, **Destroy succeeded**, **Destroy failed**
+
+Click **Save**. Configure each project separately. Other events (drift, budget, TTL auto-destroy, PR plan failures) are not changes: Flashduty returns success for them but creates no change.
+
+</Step>
+</Steps>
+
+env0 does not retry a failed webhook delivery, and its delivery timeout is 10 seconds.
+
+## What one change is
+---
+
+| env0 object | Change key (change_key) | Notes |
+|---|---|---|
+| One deploy or destroy run (deployment log) | `data.deploymentLog.id` | Every event of one run updates the same change; two runs of the same environment are two changes |
+
+The key is not the environment ID: one environment has many runs, each with its own deployment log.
+
+## Status mapping
+---
+
+| env0 event | Flashduty change status |
+|---|---|
+| `com.env0.deploy.started` / `com.env0.destroy.started` | Processing |
+| `com.env0.deployment.waiting_for_user` (waiting for approval) | Planned |
+| `com.env0.deploy.resumed` / `com.env0.destroy.resumed` (approved, running again) | Processing |
+| `com.env0.deploy.succeeded` / `com.env0.destroy.succeeded` | Done |
+| `com.env0.deploy.failed` / `com.env0.destroy.failed` | Failed |
+| `com.env0.deployment.cancelled` | Canceled |
+
+Done, Failed and Canceled are end states; Flashduty records the change's end time.
+
+These deliveries return success and create no change: `com.env0.webhook.test`, `com.env0.pr_plan.failed`, `com.env0.environment.*`, `com.env0.drift.*`, `com.env0.budget.exceeded`, and any other event type that is not a deploy or destroy run.
+
+## Change content
+---
+
+| Field | Value |
+|---|---|
+| Title | `<project> / <environment>: deploy` or `<project> / <environment>: destroy`; the environment ID stands in for a missing name |
+| Description | The run's comment (`deploymentLog.comment`), empty if none |
+| Link | The run's page in env0; the environment page, then the project page, when it is missing |
+
+Labels are available for routing and for filtering the change list:
+
+| Label | Value |
+|---|---|
+| `project` / `project_id` | Project name / ID |
+| `environment` / `environment_id` | Environment name / ID |
+| `deployment_id` | Deployment log ID of the run |
+| `operation` | `deploy` or `destroy` |
+| `state` | The latest env0 event, for example `deploy.succeeded` |
+| `repo` / `ref` | The template's repository URL / branch or tag |
+| `actor` | Name of the user who started the run; absent for scheduled or automatic runs |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a repeated delivery create a duplicate record?">
+
+No. Flashduty uses the time carried by the env0 event, so the same event at the same time is recorded once; an older state that arrives late does not overwrite a finished change.
+
+</Accordion>
+
+<Accordion title="Why is there no Planned status for my environment?">
+
+Planned appears only when env0 sends `deployment.waiting_for_user` (the run waits for approval). A run that needs no approval goes from Processing straight to Done, Failed or Canceled.
+
+</Accordion>
+
+<Accordion title="A delivery returns an InvalidParameter error?">
+
+- `unsupported type`: a deployment-family event Flashduty does not support yet arrived. Select only the events listed above, or contact us
+- `data.deploymentLog.id is missing`: the body is incomplete; make sure it comes from a native env0 webhook notification target
+
+env0 does not retry, and the response of a failed delivery is visible on env0's test page.
+
+</Accordion>
+</AccordionGroup>
