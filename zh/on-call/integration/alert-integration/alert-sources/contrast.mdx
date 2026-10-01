@@ -1,0 +1,119 @@
+---
+title: "Contrast Security 告警集成"
+description: "通过 Generic Webhook 将 Contrast Security 的新漏洞、漏洞关闭、服务器离线等事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Contrast Security", "Webhook", "漏洞", "应用安全", "IAST"]
+---
+
+通过 Contrast Security 的 Generic Webhook，将新漏洞、漏洞关闭、服务器离线、新攻击等事件同步到 Flashduty On-call。每个漏洞对应一条 Flashduty 告警：发现新漏洞时触发，漏洞被关闭（Closed）时自动恢复。
+
+Contrast 的 Generic Webhook 没有固定的推送格式，推送内容由您在 **Payload** 中填写的模板决定。请使用下文给出的模板，Flashduty 只解析该模板中的字段。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Contrast Security**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Contrast Security**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Contrast Security 中配置
+---
+
+<Steps>
+<Step title="添加 Generic Webhook">
+
+1. 登录 Contrast，进入 **Organization settings → Integrations**
+2. 在 **Generic webhook** 一项点击 **Connect**
+3. 填写 Webhook 名称，将 Flashduty 集成的完整推送地址粘贴到 URL 字段，地址中需包含 `integration_key`
+4. 按需选择要推送的应用（Application）
+
+</Step>
+
+<Step title="填写 Payload 模板">
+
+在 **Payload** 字段粘贴以下内容（单行 JSON）：
+
+```json
+{"event_type":"$EventType","organization_id":"$OrganizationId","organization_name":"$OrganizationName","application_id":"$ApplicationId","application_name":"$ApplicationName","server_id":"$ServerId","server_name":"$ServerName","environment":"$Environment","trace_id":"$TraceId","severity":"$Severity","status":"$Status","vulnerability_title":"$VulnerabilityTitle","rule_name":"$VulnerabilityRuleName"}
+```
+
+Contrast 会把 `$` 开头的变量替换为实际值后以 POST 发送。请不要在模板中加入 `$Message`、`$VulnerabilityEvidence` 等可能含双引号或换行的变量，替换后会破坏 JSON，Flashduty 将返回参数错误。
+
+点击 **Add** 保存。Contrast 在连续 5 次收不到 2XX 响应后会断开该 Webhook，断开后需要重新测试并保存。
+
+</Step>
+
+<Step title="验证">
+
+1. 在已接入 Contrast Agent 的应用中产生一个新漏洞，确认 Flashduty 收到活动告警
+2. 在 Contrast 中将该漏洞状态改为 **Closed**（如 Remediated、Fixed），确认原告警恢复
+
+</Step>
+</Steps>
+
+## 事件和 Alert Key
+---
+
+| Contrast 事件 | `event_type` | 在 Flashduty 中的效果 | Alert Key 使用的字段 |
+| :--- | :--- | :--- | :--- |
+| 发现新漏洞 | `NEW_VULNERABILITY` | 触发告警 | `trace_id`（`$TraceId`，漏洞 ID） |
+| 漏洞被关闭 | `VULNERABILITY_CHANGESTATUS_CLOSED` | 恢复同一漏洞的告警 | `trace_id` |
+| 服务器离线 | `SERVER_OFFLINE` | 触发告警，同一服务器重复离线合并为一条 | `server_id` |
+| 新攻击、新的易受攻击库、License 即将过期 | `NEW_ATTACK`、`NEW_VULNERABLE_LIBRARY`、`EXPIRING_LICENSE` | 每次推送各触发一条告警，不会自动恢复 | 无稳定 ID，每次推送独立 |
+
+漏洞严重程度、状态、标题和应用等字段的变化不会改变 Alert Key。`NEW_VULNERABILITY` 和 `VULNERABILITY_CHANGESTATUS_CLOSED` 缺少 `trace_id`、`SERVER_OFFLINE` 缺少 `server_id` 时请求会被拒绝。未识别的事件类型按上表最后一行处理。
+
+服务器离线和最后一行的事件没有对应的恢复事件，请在集成或协作空间中配置 **超时自动关闭**（例如 24 小时），否则需要手动关闭。
+
+## 告警等级
+---
+
+按 `$Severity` 映射：
+
+| Contrast 严重程度 | Flashduty 等级 |
+| :--- | :--- |
+| Critical | Critical |
+| High、Medium | Warning |
+| Low、Note | Info |
+| 为空或其他值（含服务器离线、攻击等不带严重程度的事件） | Warning |
+
+漏洞被关闭时告警恢复，等级保留关闭事件中的严重程度。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `event_type` | 事件类型 |
+| `trace_id` | 漏洞 ID |
+| `application` / `application_id` | 应用名称和 ID |
+| `server` / `server_id` | 服务器名称和 ID |
+| `env` | 服务器环境（DEVELOPMENT、QA、PRODUCTION） |
+| `vendor_severity` | Contrast 的严重程度原值 |
+| `vulnerability_status` | 漏洞状态 |
+| `rule` | 触发漏洞的规则名称 |
+| `organization` / `organization_id` | 组织名称和 ID |
+
+## 排查问题
+---
+
+- **Contrast 提示 Webhook 已断开**：Flashduty 返回了非 2XX 响应。检查 URL 是否包含 `integration_key`，Payload 是否为上文的模板且是合法 JSON，然后在 Contrast 中重新测试并保存
+- **告警没有恢复**：确认 Contrast 中该漏洞的状态为 Closed 类状态。其他状态变化（如 Confirmed、Suspicious）不会推送事件
+- **保存或测试时多出一条 Info 告警**：当 Contrast 发送未替换变量的模板，或所有变量均为空的请求时，Flashduty 返回成功并创建一条独立的 Info 告警，验证后请手动关闭
+
+更多变量和事件说明请参阅 [Contrast Generic Webhooks](https://docs.contrastsecurity.com/en/generic-webhooks.html)。
