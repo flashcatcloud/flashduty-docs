@@ -122,6 +122,7 @@ export const docMap = {
   PRTG: `${alertBase}/prtg.mdx`,
   Netdata: `${alertBase}/netdata.mdx`,
   Stackrox: `${alertBase}/stackrox.mdx`,
+  TrivyOperator: `${alertBase}/trivy-operator.mdx`,
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   Panther: `${alertBase}/panther.mdx`,
   Axiom: `${alertBase}/axiom.mdx`,
