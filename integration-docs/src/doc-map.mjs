@@ -265,6 +265,7 @@ export const docMap = {
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
+  RailwayChange: `${integrationBase}/change-integration/railway.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
   GiteaChange: `${integrationBase}/change-integration/gitea.mdx`,
   GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
