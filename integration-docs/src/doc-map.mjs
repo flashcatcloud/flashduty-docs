@@ -102,6 +102,7 @@ export const docMap = {
   Pulsetic: `${alertBase}/pulsetic.mdx`,
   EdgeDelta: `${alertBase}/edge-delta.mdx`,
   Loadster: `${alertBase}/loadster.mdx`,
+  Cronicle: `${alertBase}/cronicle.mdx`,
   Atatus: `${alertBase}/atatus.mdx`,
   Calibre: `${alertBase}/calibre.mdx`,
   Uptimia: `${alertBase}/uptimia.mdx`,
