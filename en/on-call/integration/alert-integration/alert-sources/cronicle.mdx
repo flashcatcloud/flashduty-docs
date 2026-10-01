@@ -1,0 +1,131 @@
+---
+title: "Cronicle alert integration"
+description: "Send Cronicle job failures and launch failures to Flashduty On-call through the event web hook, and recover automatically on the next successful run."
+keywords: ["alert integration", "Cronicle", "job scheduler", "cron", "webhook"]
+---
+
+Use the Cronicle event web hook to send job failures and launch failures to Flashduty On-call. Each Cronicle event (a job definition) maps to one Flashduty alert: the alert triggers when a job fails or cannot be launched, and closes automatically when the next job of the same event completes successfully.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Cronicle** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Cronicle** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Cronicle
+---
+
+<Steps>
+<Step title="Enter the web hook URL">
+
+Paste the complete Flashduty push URL in one of the following places:
+
+- One event: in the Cronicle console, open **Schedule**, edit the event, and paste it into **Web Hook URL** in the **Notification** section
+- One category: go to **Admin → Categories**, edit the category, and fill in its Web Hook URL. Every event in the category sends it
+- Every event: set `universal_web_hook` in `conf/config.json` and restart Cronicle
+
+<Note>
+Cronicle sends an HTTP POST request (JSON) when a job starts and when it ends. Flashduty handles only job end (`job_complete`) and launch failure (`job_launch_failure`); job start (`job_start`) notifications are acknowledged and ignored. To stop sending start notifications, remove the `job_start` entry from `web_hook_text_templates`.
+</Note>
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Run the event with a job that fails (for example, a script that exits with a non-zero code) and confirm Flashduty receives a Critical alert. Fix the script, run the event again, and confirm the alert closes automatically.
+
+</Step>
+
+<Step title="Turn on auto-close">
+
+An alert closes only when the next job of the same event succeeds. Events that are deleted, disabled, or no longer run never send a recovery notification. In the channel that receives these alerts, enable [auto-close](/en/on-call/channel/create-edit) with a suggested duration of 24 hours.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Cronicle POSTs the following fields as JSON. Flashduty parses them directly, with no template to configure:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `action` | `job_start`, `job_complete`, or `job_launch_failure` | Decides whether an alert is created; label `action` |
+| `event` | Event ID | Alert Key; label `event_id` |
+| `event_title` | Event title | Alert title; label `check` |
+| `id` | Job ID, different for every run | Label `job_id` |
+| `code` | Exit code returned by the plugin; `0` means success | Decides trigger or recovery; label `code` |
+| `description` | Text returned by the plugin, usually the error message on failure | Added to the description |
+| `hostname` | Server that ran the job | Label `host`; added to the description |
+| `plugin_title` / `category_title` | Plugin and category names | Labels `plugin` and `category` |
+| `job_details_url` / `edit_event_url` | Links to the job details and the event editor | Added to the description |
+
+The body also contains the event parameters (`params`) and the web hook URL (`web_hook`). Flashduty neither reads nor stores these two fields.
+
+## Alert Key
+---
+
+Flashduty uses `event` (the event ID) as the Alert Key. Every job of the same event carries the same `event`, and only the job ID `id` changes per run, so failures, launch failures, and the later success of one event land on the same alert. Changing the event title, the exit code, or the server that ran the job does not change the Alert Key.
+
+## Status and severity
+---
+
+Cronicle notifications carry no severity, so a failed scheduled job is treated as Critical:
+
+| Notification | Flashduty status or severity |
+| :--- | :--- |
+| `job_complete` with `code` `0` | Recovery, with the original severity Critical |
+| `job_complete` with `code` not `0` | Critical |
+| `job_launch_failure` | Critical |
+| `job_start` | Ignored, no alert is created |
+
+The Cronicle web hook has no test button. To check connectivity, run an event once.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="If a job has retries configured, do I get a notification for every failed attempt?">
+
+No. Cronicle sends `job_complete` only when the job finally ends, after retries are used up. It sends nothing between retries.
+
+</Accordion>
+
+<Accordion title="Are launch failures sent repeatedly?">
+
+Yes. A scheduled event tries to launch again every minute, and while the target server is unavailable each attempt sends `job_launch_failure`. These notifications carry the same Alert Key and merge into one alert, so they do not create multiple alerts.
+
+</Accordion>
+
+<Accordion title="Can I send only some events?">
+
+The Web Hook URL can be set on a single event or on a category, so fill it in only where you need it. You can also split traffic in the routing rules of a Flashduty shared integration, by label `event_id` or `check`.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Cronicle does not send anything**: confirm the Web Hook URL is the complete push URL including `integration_key`, and set `debug_level` to 9 to see `Web Hook Error` and `Web Hook Response` entries in the Cronicle log
+- **Flashduty returns a parameter error**: confirm the body contains `action` and `event`, and that `job_complete` notifications contain `code`
+- **The alert does not recover**: confirm a later job of the same event ended with `code` `0`, and that the event has a Web Hook URL
+
+For field details, see the Cronicle documentation: [Event Web Hook](https://github.com/jhuckaby/Cronicle/blob/master/docs/WebUI.md#event-web-hook).
