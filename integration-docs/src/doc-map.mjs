@@ -90,6 +90,7 @@ export const docMap = {
   Level: `${alertBase}/level.mdx`,
   DattoRmm: `${alertBase}/datto-rmm.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
+  TriggerDev: `${alertBase}/trigger-dev.mdx`,
   Fivetran: `${alertBase}/fivetran.mdx`,
   Cato: `${alertBase}/cato.mdx`,
   Aikido: `${alertBase}/aikido.mdx`,
