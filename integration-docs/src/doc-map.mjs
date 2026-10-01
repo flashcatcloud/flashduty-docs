@@ -81,6 +81,7 @@ export const docMap = {
   Coralogix: `${alertBase}/coralogix.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
   TriggerDev: `${alertBase}/trigger-dev.mdx`,
+  Duplicati: `${alertBase}/duplicati.mdx`,
   Fivetran: `${alertBase}/fivetran.mdx`,
   Cato: `${alertBase}/cato.mdx`,
   Aikido: `${alertBase}/aikido.mdx`,
