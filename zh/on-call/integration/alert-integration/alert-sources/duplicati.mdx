@@ -1,0 +1,100 @@
+---
+title: "Duplicati 告警集成"
+description: "通过 Duplicati 的 HTTP JSON 通知，把备份任务的失败、警告和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Duplicati", "备份", "Webhook", "send-http-json-urls"]
+---
+
+Duplicati 每次备份结束后，都可以向指定地址发送一份 JSON 报告。把这个地址设为 Flashduty 的推送地址后，每个备份任务对应一条 Flashduty 告警：备份失败或带警告时触发告警，之后同一个任务再次备份成功，告警自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Duplicati**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Duplicati**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Duplicati 中配置
+---
+
+Duplicati 2.0.9.106 及以上版本支持 `--send-http-json-urls` 选项，本集成基于 2.4.0.0 验证。
+
+<Steps>
+<Step title="为备份任务添加高级选项">
+
+1. 打开 Duplicati 的网页界面，编辑要监控的备份任务，进入 **选项** 步骤（新建任务时为第 5 步）
+2. 展开 **高级选项**，点击 **添加高级选项**，选择 `send-http-json-urls`
+3. 将 Flashduty 集成的完整推送地址（含 `integration_key`）填入该选项
+
+如果希望所有备份任务都发送，可在 **设置 → 默认选项** 中添加同一个选项。命令行运行时，加上参数 `--send-http-json-urls="<推送地址>"` 即可。
+
+<Warning>
+请使用 `--send-http-json-urls`，不要使用 `--send-http-url`。后者默认发送表单格式的文本报告，Flashduty 无法解析。
+</Warning>
+
+</Step>
+
+<Step title="保持默认的发送级别">
+
+`--send-http-level` 的默认值是 `All`，即每次备份都发送报告，包括成功的备份。成功报告就是恢复信号，因此请不要把它改成 `Warning`、`Error` 或 `Fatal`，否则告警无法自动恢复。
+
+</Step>
+
+<Step title="验证生命周期">
+
+1. 手动运行一次备份，确认 Flashduty 收到结果为 `Success` 的事件
+2. 临时让备份失败，例如把某个备份源文件夹改名，再运行一次，确认 Flashduty 出现一条 Critical 告警
+3. 还原改动并再次运行备份，确认原告警恢复
+
+Duplicati 没有“发送测试通知”按钮，只能通过真实备份运行来验证。
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用 Duplicati 报告里的 `Extra.machine-id` 和 `Extra.backup-id` 共同生成 Alert Key。Duplicati 官方文档把 `%machine-id%` 定义为分配给这台机器的唯一随机标识，把 `%backup-id%` 定义为分配给该备份任务的标识；我们在真实的 Duplicati 2.4.0.0 上验证过，同一个备份任务先失败、后成功时，两个字段保持不变。
+
+- `backup-id` 在同一台机器上是 `DB-1`、`DB-2` 这样的序号，不同机器上会重复，所以必须和 `machine-id` 组合使用
+- 通过命令行直接运行（不经过 Duplicati 服务）时，`machine-id` 为空，`backup-id` 是目标地址的哈希，此时只由 `backup-id` 区分任务
+- 备份名称、结果、时间和日志内容的变化都不会改变 Alert Key
+- 缺少 `backup-id` 的请求会被拒绝，因为无法可靠关联后续恢复
+
+删除任务后重新创建，会得到新的 `backup-id`，旧任务上未恢复的告警需要手动关闭。
+
+## 状态和告警等级
+---
+
+| Duplicati `Data.ParsedResult` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `Success` | 恢复 |
+| `Warning` | Warning |
+| `Error` | Critical |
+| `Fatal` | Critical |
+
+空值或其他值（包括 `Unknown`）会被拒绝。Duplicati 只在备份运行时发送报告：如果任务被停用或不再运行，已有告警不会恢复，需要手动关闭。
+
+## 排查问题
+---
+
+- **Flashduty 没有收到事件**：确认选项名是 `send-http-json-urls`，Push URL 完整且包含 `integration_key`；报告发送失败时，Duplicati 会在该次备份的日志中记录错误
+- **Flashduty 返回参数错误**：确认没有误用 `--send-http-url` 或表单格式，报告必须是 JSON，且包含 `Extra.backup-id`
+- **告警没有恢复**：确认没有设置 `--send-http-level`，或者其值包含 `Success`
+- **备份只有警告也触发了告警**：`Warning` 结果同样会触发 Warning 告警，例如部分源文件夹不存在；修复原因后下一次备份成功即恢复
+
+更多字段含义请参阅 Duplicati 官方文档的 [Sending HTTP notifications](https://github.com/duplicati/documentation/blob/main/detailed-descriptions/monitoring-and-notifications/sending-reports-via-email/sending-http-notifications.md) 和 [Custom message content](https://github.com/duplicati/documentation/blob/main/detailed-descriptions/monitoring-and-notifications/sending-reports-via-email/custom-message-content.md)。

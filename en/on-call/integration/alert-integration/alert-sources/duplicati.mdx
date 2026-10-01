@@ -1,0 +1,100 @@
+---
+title: "Duplicati alert integration"
+description: "Send Duplicati backup failures, warnings, and recoveries to Flashduty On-call through its HTTP JSON notification."
+keywords: ["alert integration", "Duplicati", "backup", "webhook", "send-http-json-urls"]
+---
+
+After every backup run, Duplicati can send a JSON report to a URL you choose. Set that URL to a Flashduty Push URL and each backup job maps to one Flashduty alert: a failed or warning run triggers the alert, and the next successful run of the same job recovers it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration Push URL in either of the following two ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Duplicati** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Duplicati** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Duplicati
+---
+
+The `--send-http-json-urls` option is available in Duplicati 2.0.9.106 and later. This integration was verified with 2.4.0.0.
+
+<Steps>
+<Step title="Add an advanced option to the backup job">
+
+1. Open the Duplicati web UI, edit the backup job you want to monitor, and go to the **Options** step (step 5 when creating a job)
+2. Expand **Advanced options**, click **Add advanced option**, and select `send-http-json-urls`
+3. Enter the complete Flashduty Push URL, including `integration_key`
+
+To send reports for every backup job, add the same option under **Settings → Default options**. On the command line, pass `--send-http-json-urls="<Push URL>"`.
+
+<Warning>
+Use `--send-http-json-urls`, not `--send-http-url`. The latter sends a form-encoded text report by default, which Flashduty cannot parse.
+</Warning>
+
+</Step>
+
+<Step title="Keep the default send level">
+
+The default value of `--send-http-level` is `All`, so every run sends a report, including successful runs. The success report is the recovery signal. Do not change the level to `Warning`, `Error`, or `Fatal`, or alerts will never recover.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+1. Run a backup manually and confirm Flashduty receives an event with the result `Success`
+2. Make a run fail temporarily, for example by renaming a source folder, run the backup again, and confirm a Critical alert appears in Flashduty
+3. Undo the change, run the backup again, and confirm the alert recovers
+
+Duplicati has no "send test notification" button, so verification needs real backup runs.
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from `Extra.machine-id` and `Extra.backup-id` in the Duplicati report. The Duplicati documentation defines `%machine-id%` as the unique random identifier assigned to the machine and `%backup-id%` as the identifier assigned to the backup. We verified on a real Duplicati 2.4.0.0 that both fields stay the same when one backup job fails and then succeeds.
+
+- `backup-id` is a sequence number such as `DB-1` or `DB-2` on one machine and repeats across machines, so it is always combined with `machine-id`
+- When Duplicati runs from the command line without the Duplicati server, `machine-id` is empty and `backup-id` is a hash of the destination, so only `backup-id` tells jobs apart
+- Changes to the backup name, result, time, or log lines never change the Alert Key
+- A request without `backup-id` is rejected because later recoveries could not be correlated
+
+If you delete a job and create it again, it gets a new `backup-id`; close any open alert of the old job manually.
+
+## Status and severity
+---
+
+| Duplicati `Data.ParsedResult` | Flashduty status or severity |
+| :--- | :--- |
+| `Success` | Recovery |
+| `Warning` | Warning |
+| `Error` | Critical |
+| `Fatal` | Critical |
+
+An empty or any other value, including `Unknown`, is rejected. Duplicati only sends a report when a backup runs: if a job is disabled or stops running, its open alert does not recover and must be closed manually.
+
+## Troubleshooting
+---
+
+- **Flashduty receives no events**: confirm the option is `send-http-json-urls` and the Push URL is complete with `integration_key`; when a report cannot be sent, Duplicati records an error in the log of that run
+- **Flashduty returns a parameter error**: confirm you did not use `--send-http-url` or the form format; the report must be JSON and contain `Extra.backup-id`
+- **The alert does not recover**: confirm `--send-http-level` is not set, or that its value includes `Success`
+- **A warning-only run created an alert**: a `Warning` result also triggers a Warning alert, for example when some source folders do not exist; after you fix the cause, the next successful run recovers it
+
+For field details, see the Duplicati documentation: [Sending HTTP notifications](https://github.com/duplicati/documentation/blob/main/detailed-descriptions/monitoring-and-notifications/sending-reports-via-email/sending-http-notifications.md) and [Custom message content](https://github.com/duplicati/documentation/blob/main/detailed-descriptions/monitoring-and-notifications/sending-reports-via-email/custom-message-content.md).
