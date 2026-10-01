@@ -104,6 +104,7 @@ export const docMap = {
   Statusgator: `${alertBase}/statusgator.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,
   Xitoring: `${alertBase}/xitoring.mdx`,
+  Phare: `${alertBase}/phare.mdx`,
   Monitive: `${alertBase}/monitive.mdx`,
   Tideways: `${alertBase}/tideways.mdx`,
   Wormly: `${alertBase}/wormly.mdx`,
