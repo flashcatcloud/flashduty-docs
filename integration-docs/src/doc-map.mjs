@@ -92,6 +92,7 @@ export const docMap = {
   Rollbar: `${alertBase}/rollbar.mdx`,
   TriggerDev: `${alertBase}/trigger-dev.mdx`,
   Duplicati: `${alertBase}/duplicati.mdx`,
+  Robotalp: `${alertBase}/robotalp.mdx`,
   Fivetran: `${alertBase}/fivetran.mdx`,
   Cato: `${alertBase}/cato.mdx`,
   Aikido: `${alertBase}/aikido.mdx`,
