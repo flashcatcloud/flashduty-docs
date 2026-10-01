@@ -100,6 +100,7 @@ export const docMap = {
   ProjectDiscovery: `${alertBase}/projectdiscovery.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
   Pulsetic: `${alertBase}/pulsetic.mdx`,
+  Loadster: `${alertBase}/loadster.mdx`,
   Atatus: `${alertBase}/atatus.mdx`,
   Calibre: `${alertBase}/calibre.mdx`,
   Uptimia: `${alertBase}/uptimia.mdx`,
