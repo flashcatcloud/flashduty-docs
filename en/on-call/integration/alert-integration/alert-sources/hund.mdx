@@ -1,0 +1,162 @@
+---
+title: "Hund alert integration"
+description: "Use Hund status page webhooks to send status page issues and component availability changes to Flashduty On-call."
+keywords: ["alert integration", "Hund", "status page", "webhook", "component status"]
+---
+
+Use Hund status page outgoing webhooks (version 2) to send changes on your status page to Flashduty On-call:
+
+- An alert triggers when an issue is created on your status page, and recovers when the issue is resolved, ended, or cancelled
+- An alert triggers when a component becomes `degraded`, and recovers when it is `restored`
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Hund** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Hund** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Hund
+---
+
+<Steps>
+<Step title="Enable the Webhooks notifier">
+
+A Hund webhook is a subscription on a status page. The status page must have the Webhooks notifier enabled before an endpoint can be added through its **Subscribe** button. Enable the Webhooks notifier for the target status page in the Hund dashboard.
+
+</Step>
+
+<Step title="Add the webhook endpoint">
+
+1. Open the status page, click **Subscribe**, and choose Webhook
+2. Paste the complete Flashduty push URL (including `integration_key`) as the endpoint and save
+
+New webhook subscriptions always use the version 2 payload format. Several status pages can push to one integration, or each can have its own integration so that you can route them separately.
+
+</Step>
+
+<Step title="Choose notification types and components">
+
+By default Hund subscriptions receive most notification types except **Issue Updated**. To send issue updates (`issue_updated`) to Flashduty, change the subscription's notification level to include Issue Updated. Subscriptions include all components by default; select only the ones you need if you want to narrow them.
+
+</Step>
+
+<Step title="Verify">
+
+Click **Test Notifier** on the Webhooks notifier in the Hund dashboard. Hund sends a `notifier_tested` notification, and Flashduty opens a separate Info alert for it. Close that alert by hand.
+
+You can also verify with a real event: create an issue on the status page and an alert appears in Flashduty; mark the issue Resolved and the alert recovers.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Hund sends JSON. `event.kind` is the notification type:
+
+| `event.kind` | Meaning | Flashduty handling |
+| :--- | :--- | :--- |
+| `issue_created`, `issue_started` | Issue created, scheduled issue started | Triggers an alert |
+| `issue_upcoming` | Heads-up before a scheduled issue starts | Triggers an Info alert; the start updates the same alert |
+| `issue_updated`, `issue_addended` | New update or addendum on an issue | Updates the same alert; stays recovered when the issue is already resolved |
+| `issue_reopened` | A resolved issue is reopened | Triggers the alert again |
+| `issue_resolved`, `issue_ended`, `issue_cancelled` | Issue resolved, scheduled issue ended or cancelled | Recovers the alert |
+| `degraded` | Component availability degraded | Triggers an alert |
+| `restored` | Component back to operational | Recovers the alert |
+| `notifier_tested` | Test Notifier clicked | Opens a separate Info alert |
+| Any other kind (such as `subscription_edit_link_requested`) | | Returns success and creates no alert |
+
+Fields used for issues (`issue_*`):
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `event.eventable.id` | Issue ID | Alert Key, label `issue_id` |
+| `event.eventable.title` | Issue title | Alert title |
+| `event.contexts.update.body`, `event.eventable.body` | Latest update text, or the issue body when there is no update | Alert description |
+| `event.contexts.update.state_override`, `event.eventable.state_override` | State the issue forces on affected components: `-1` outage, `0` degraded, `1` operational | Alert severity, label `state_override` |
+| `event.eventable.specialization` | `general`, `maintenance`, or `information` | Label `specialization` |
+| `event.eventable.resolved` | Whether the issue is resolved | When `true`, every notification except `issue_reopened` is treated as a recovery |
+| `event.contexts.components` | Affected components | Label `components` (names, comma-separated) |
+| `status_page.name` | Status page name | Label `status_page` |
+
+Fields used for component status (`degraded`, `restored`):
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `event.contexts.component.id` | Affected component ID | Alert Key, label `component_id` |
+| `event.contexts.component.name` | Component name | Alert title, label `component` |
+| `event.contexts.component.group.name` | Component group | Label `group` |
+| `event.eventable.state` | State: `-1` outage, `0` degraded | Alert severity |
+
+Every alert also carries the labels `source=hund` and `event` (the notification type).
+
+## Alert Key
+---
+
+- Issues: the issue ID. Every notification from creation through updates to resolution lands on the same alert
+- Components: the component ID. Hund creates a new status object on every state change (one ID for degraded, another for restored), so component alerts are keyed on the component itself, and `degraded` through `restored` for one component lands on the same alert
+
+Issue alerts and component alerts are independent. An issue can affect several components, which may each have their own alert; use the channel's [alert grouping](/en/on-call/channel/noise-reduction) to merge them into one incident. Changing an issue title or a component name does not change the Alert Key.
+
+## Status and severity
+---
+
+| Hund notification | Flashduty status or severity |
+| :--- | :--- |
+| Issue, `state_override` is `-1` | Critical |
+| Issue, `state_override` is `0` | Warning |
+| Issue, `state_override` is `1` | Info |
+| Issue, no `state_override`, `specialization` is `general` | Warning |
+| Issue, no `state_override`, `specialization` is `maintenance` or `information` | Info |
+| Component `degraded`, state is outage (`-1`) | Critical |
+| Component `degraded`, any other state | Warning |
+| `issue_resolved`, `issue_ended`, `issue_cancelled`, `restored` | Recovered |
+
+An update that carries a `state_override` takes precedence; otherwise the issue's own value is used.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Issue updates do not reach Flashduty. Why?">
+
+Hund subscriptions do not send Issue Updated by default. Change the subscription's notification level to include Issue Updated and `issue_updated` is delivered. Issue creation and resolution are not affected.
+
+</Accordion>
+
+<Accordion title="Test Notifier created an extra Info alert.">
+
+The test notification opens a separate alert that never merges with a real issue and has no matching recovery. Close it by hand.
+
+</Accordion>
+
+<Accordion title="One issue affects several components. Do I get several alerts?">
+
+There is one issue alert, keyed by the issue ID. Each component's `degraded` and `restored` notifications produce their own alert per component.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: the payload has no `event.eventable.id` (issues) or `event.contexts.component.id` (component status)
+- **An issue alert does not recover**: confirm the issue is marked resolved or ended in Hund and that the subscription includes the matching notification
+- **No notifications arrive**: confirm the Webhooks notifier is enabled for the status page and the subscribed URL is complete (including `integration_key`)
