@@ -112,6 +112,7 @@ export const docMap = {
   Updown: `${alertBase}/updown.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,
   Xitoring: `${alertBase}/xitoring.mdx`,
+  Phare: `${alertBase}/phare.mdx`,
   Odown: `${alertBase}/odown.mdx`,
   Tideways: `${alertBase}/tideways.mdx`,
   Wormly: `${alertBase}/wormly.mdx`,
