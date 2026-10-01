@@ -1,0 +1,135 @@
+---
+title: "Fivetran 告警集成"
+description: "通过 Fivetran Webhook 将数据同步（sync）失败、连接测试失败以及随后的恢复事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Fivetran", "数据管道", "同步失败", "Webhook"]
+---
+
+通过 Fivetran 的 Webhook，将连接（connection）的同步结果和连接测试结果同步到 Flashduty On-call。每个连接对应两类告警：同步告警和连接测试告警。同步失败时触发告警，下一次同步成功时告警恢复；连接测试失败时触发告警，连接测试通过时告警恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Fivetran**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Fivetran**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Fivetran 中配置
+---
+
+Fivetran 的 Webhook 通过 [Webhook REST API](https://fivetran.com/docs/developer-resources/webhooks) 创建，使用 Fivetran API Key 和 API Secret 进行 Basic 认证。Webhook 分为账户级（覆盖账户下所有连接）和分组级（只覆盖某个 Group 下的连接）两种。
+
+<Steps>
+<Step title="创建 Webhook">
+
+将 `<推送地址>` 替换为 Flashduty 集成的完整推送地址（包含 `integration_key`），`<API_KEY>:<API_SECRET>` 替换为 Fivetran 的 API 凭据。账户级 Webhook：
+
+```bash
+curl -X POST https://api.fivetran.com/v1/webhooks/account \
+  -u '<API_KEY>:<API_SECRET>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "<推送地址>",
+    "events": ["sync_end", "connection_failure", "connection_successful"],
+    "active": true
+  }'
+```
+
+只覆盖某个 Group 时，改用 `POST https://api.fivetran.com/v1/webhooks/group/<groupId>`，请求体相同。
+
+Fivetran 要求 Webhook 地址为 HTTPS。创建（或激活）Webhook 时，Fivetran 会先向该地址发送一次测试请求，返回非 2xx 状态码则创建失败。
+
+</Step>
+
+<Step title="选择事件">
+
+| Fivetran 事件 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| `sync_end` | 同步结束：失败时触发同步告警，成功时恢复 |
+| `connection_failure` | 连接测试失败，触发连接测试告警 |
+| `connection_successful` | 连接测试通过，恢复连接测试告警 |
+
+需要同时订阅 `sync_end` 和 `connection_successful`，否则告警不会自动恢复。`sync_start`、转换（transformation）以及 `create_connector`、`pause_connector` 等管理类事件 Flashduty 会返回成功但不创建告警，无需订阅。
+
+<Warning>
+`status` 事件已被 Fivetran 标记为弃用，不要订阅。
+</Warning>
+
+</Step>
+
+<Step title="验证生命周期">
+
+在 Fivetran 中让一个连接同步失败（例如暂时撤销数据源凭据后手动触发同步），确认 Flashduty 收到活动告警；恢复凭据并再次同步成功后，确认原告警恢复。
+
+Fivetran 的 **Test a Webhook**（`POST /v1/webhooks/{webhookId}/test`，请求体 `{"event": "sync_end"}`）只用于验证地址可达。测试请求不带真实同步结果，如果其 `status` 为 `SUCCESSFUL`，Flashduty 会把它当作恢复事件处理，没有对应活动告警时不产生新告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用连接 ID（Webhook 中的 `connector_id`）加事件类别（同步、连接测试）作为 Alert Key。Fivetran 文档说明 `connector_id` 是「发送 Webhook 的连接的 ID」，同一连接的每次同步和连接测试都携带相同的值。同步和连接测试分属两个 Alert Key，因此一次成功的同步不会关闭尚未修复的连接测试告警。
+
+每次同步的 `sync_id`、失败原因和时间的变化都不会改变 Alert Key。缺少 `connector_id` 的同步或连接测试事件会被拒绝。
+
+## 状态和告警等级
+---
+
+| 事件 | `data.status` | 状态 | Flashduty 等级 |
+| :--- | :--- | :--- | :--- |
+| `sync_end` | `FAILURE` | 触发 | Critical |
+| `sync_end` | `FAILURE_WITH_TASK`（需要用户处理的错误） | 触发 | Warning |
+| `sync_end` | `RESCHEDULED`，`isRoutine` 不为 `true` | 触发 | Warning |
+| `sync_end` | `RESCHEDULED`，`isRoutine` 为 `true`（预期内的重新调度） | 不处理 | - |
+| `sync_end` | `SUCCESSFUL` | 恢复 | Info |
+| `sync_end` | `CANCELED` 或其他值 | 不处理 | - |
+| `connection_failure` | - | 触发 | Critical |
+| `connection_successful` | - | 恢复 | Info |
+
+被忽略的投递，Flashduty 返回成功但不创建告警，也不会关闭现有告警。
+
+每次 `sync_end` 都是一次独立投递，没有进度更新事件：触发后的告警保持活动，直到同一连接的下一次 `SUCCESSFUL` 同步。如果连接被暂停或删除，已触发的告警不会自动恢复，请在 Flashduty 中手动关闭，或在协作空间中为告警配置超时自动关闭。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `connector_id` | 连接 ID，参与 Alert Key |
+| `connector_name` | 连接名称，同时作为 `check` |
+| `connector_type` | 连接器类型，如 `postgres` |
+| `destination_group_id` | 目标 Group ID |
+| `sync_id` | 本次同步 ID |
+| `sync_status` | `sync_end` 的 `data.status` |
+| `sync_type` | `HISTORICAL` 或 `INCREMENTAL` |
+| `task_type` | 失败或重新调度对应的错误类型（如 `reconnect`） |
+| `test_name` | 连接测试失败的测试项名称 |
+| `event` | 本次推送的事件名 |
+
+告警描述取自失败原因（`data.reason`）或连接测试消息（`data.message`）。
+
+## 排查问题
+---
+
+- **创建 Webhook 时 Fivetran 返回 400**：确认地址为 HTTPS 且 Flashduty 可访问；Fivetran 在创建和激活时都会先发送一次测试请求，需返回 2xx
+- **告警没有恢复**：确认 Webhook 订阅了 `sync_end` 和 `connection_successful`；预期内的重新调度和 `CANCELED` 不会产生恢复事件
+- **Webhook 被停用**：Fivetran 对持续三天以上只返回非 2xx 的 Webhook 会自动停用，修复地址后通过 API 以 `"active": true` 重新启用
+- **同一事件收到多次**：Fivetran 在投递失败时最多重试五次（24 小时内），相同 Alert Key 的事件会合并
+
+Fivetran 可在创建 Webhook 时指定 `secret` 对请求体做 HMAC-SHA256 签名，Flashduty 不要求也不校验签名。更多字段含义请参阅 [Fivetran Webhooks](https://fivetran.com/docs/developer-resources/webhooks) 和 [Fivetran Logs](https://fivetran.com/docs/logs)。
