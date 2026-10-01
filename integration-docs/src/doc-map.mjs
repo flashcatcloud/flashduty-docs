@@ -224,6 +224,9 @@ export const docMap = {
   Papertrail: `${alertBase}/papertrail.mdx`,
   MonteCarlo: `${alertBase}/monte-carlo.mdx`,
   Limacharlie: `${alertBase}/limacharlie.mdx`,
+  Last9: `${alertBase}/last9.mdx`,
+  Signoz: `${alertBase}/signoz.mdx`,
+  VeeamOne: `${alertBase}/veeam-one.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   Jira: {
