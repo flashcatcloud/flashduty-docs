@@ -1,0 +1,122 @@
+---
+title: "Dotcom-Monitor 告警集成"
+description: "通过 Dotcom-Monitor 的 HTTP Webhook 和 JSON 告警模板，将网站、API 和服务器监控告警同步到 Flashduty On-call，设备恢复时自动关闭告警。"
+keywords: ["告警集成", "Dotcom-Monitor", "Webhook", "网站监控", "合成监控", "UserView", "WebView"]
+---
+
+Dotcom-Monitor 是云端的网站、API 和服务器监控服务。它的 **HTTP Webhook** 地址类型可以在设备状态变化时，用你写的告警模板向指定地址发送请求。Dotcom-Monitor 没有固定的 Webhook 请求体，所以本集成要求你在告警模板中粘贴下文的 JSON 模板，Flashduty 按这个模板的字段解析。每个监控设备对应一条 Flashduty 告警：设备出错时打开，收到恢复通知（ALL CLEAR）时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Dotcom-Monitor**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Dotcom-Monitor**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Dotcom-Monitor 中配置
+---
+
+<Steps>
+<Step title="创建告警模板">
+
+在 Dotcom-Monitor 控制台创建一个 **JSON** 格式的告警模板（参见 [Alert Template: Setup and Configuration](https://www.dotcom-monitor.com/wiki/knowledge-base/create-edit-alert-template/)），内容粘贴如下。字段名必须保持一致：
+
+```json
+{
+  "notification_type": "@Model.Type",
+  "device_name": "@Model.RootResponse.Device.Name",
+  "task_name": "@Model.RootResponse.Task?.Name",
+  "location": "@Model.RootResponse.Monitor.Name",
+  "incident_id": "@Model.CurrentState.ID",
+  "error_type": "@Model.FirstErrorResponse?.AllErrors?[0]?.ErrorType",
+  "error_code": "@Model.FirstErrorResponse?.AllErrors?[0]?.ErrorCode",
+  "error_reason": "@Model.FirstErrorResponse?.AllErrors?[0]?.Reason",
+  "error_target": "@Model.FirstErrorResponse?.Uri",
+  "alert_time": "@Model.RootResponse.Start",
+  "report_link": "@Model.DMUserLink/OnlineReporting.aspx"
+}
+```
+
+模板中的变量来自 Dotcom-Monitor 的 [Dynamic Variables Reference](https://www.dotcom-monitor.com/wiki/knowledge-base/dotcom-monitor-system-variables/)。恢复通知中没有错误信息，所以错误相关的变量使用 `?.` 空值安全写法。
+
+</Step>
+
+<Step title="添加 HTTP Webhook 地址">
+
+1. 在 Dotcom-Monitor 的告警组（Alert Group）中，新增一个地址，**Address Type** 选择 **HTTP Webhook**
+2. **Webhook URL** 填入完整的推送地址（包含 `?integration_key=...`），HTTP 方法选 **POST**
+3. **Data Type** 选择 **Raw**，格式选 **JSON**，内容选择上一步创建的告警模板
+4. 保存，并把该告警组分配给需要通知的监控设备
+
+参考 Dotcom-Monitor 文档 [HTTP Webhook Integration](https://www.dotcom-monitor.com/wiki/knowledge-base/http-webhook-integration/)。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个监控设备失败（例如把目标地址改成不存在的页面），确认 Flashduty 收到 Critical 告警；改回正确地址，Dotcom-Monitor 发出恢复通知后，确认原告警关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用设备名称（`device_name`）计算 Alert Key。Dotcom-Monitor 的告警和恢复通知都针对同一个监控设备，因此落在同一条 Flashduty 告警上。
+
+- `incident_id`（`@Model.CurrentState.ID`）在设备每次状态变化时都会更换，告警通知和恢复通知的值不同，所以它只作为标签，不参与 Alert Key
+- 设备改名后，新名称会产生新的 Alert Key，改名前未恢复的告警需要手动关闭
+- 请不同设备使用不同名称
+
+请求缺少 `device_name` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Flashduty 按 `notification_type` 字段处理消息，不区分大小写：
+
+| `notification_type` | 含义 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `ALERT`（或 `Error`） | 设备出错 | 触发告警（Critical） |
+| `ALL CLEAR`（或 `OK`、`Uptime`） | 设备恢复 | 恢复告警 |
+| `TEST` | 测试通知 | 打开一条独立的 Info 告警 |
+
+其他取值会被拒绝。设备持续出错期间收到的重复通知会合并到同一条告警。
+
+## 告警等级
+---
+
+Dotcom-Monitor 的消息没有等级字段。设备出错表示监控目标不可用，固定为 **Critical**。恢复事件保留原告警的等级。
+
+## 告警内容
+---
+
+- **标题**：设备名称
+- **描述**：错误类型、错误码、错误原因和出错的目标地址
+- **标签**：`check` 和 `device`（设备名称）、`resource`（出错的目标地址）、`task`（任务名称，UserView 没有）、`location`（监控节点）、`incident_id`、`error_type`、`error_code`、`alert_time`、`report_link`（在线报告链接）、`source`（固定为 `dotcom-monitor`）
+
+Dotcom-Monitor 会对模板中的文本做 HTML 转义，Flashduty 会还原后再使用。
+
+## 排查问题
+---
+
+- **测试通知产生了一条告警**：测试通知会打开一条独立的 Info 告警，不会影响真实设备的告警，请手动关闭
+- **请求被拒绝，提示 `device_name` 缺失或 `notification_type` 不支持**：检查告警模板的字段名是否与上文一致，以及 Data Type 是否选择了 Raw JSON
+- **告警没有恢复**：确认告警组会发送恢复（ALL CLEAR）通知，并且设备名称在告警期间没有修改
+- **提示 `integration_key` 无效或返回 4xx**：确认 Webhook URL 是完整的推送地址，并且集成没有被停用

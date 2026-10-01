@@ -1,0 +1,122 @@
+---
+title: "Dotcom-Monitor alert integration"
+description: "Send Dotcom-Monitor website, API and server monitoring alerts to Flashduty On-call through an HTTP Webhook and a JSON alert template. Alerts close automatically when the device recovers."
+keywords: ["alert integration", "Dotcom-Monitor", "webhook", "website monitoring", "synthetic monitoring", "UserView", "WebView"]
+---
+
+Dotcom-Monitor is a cloud service for website, API and server monitoring. Its **HTTP Webhook** address type sends a request, built from an alert template you write, to a URL when a device changes state. Dotcom-Monitor has no fixed webhook body, so this integration requires you to paste the JSON template below into your alert template, and Flashduty parses the fields of that template. Each monitored device maps to one Flashduty alert: it opens when the device fails and closes automatically when the recovery notification (ALL CLEAR) arrives.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Dotcom-Monitor** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Dotcom-Monitor** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Dotcom-Monitor
+---
+
+<Steps>
+<Step title="Create an alert template">
+
+In the Dotcom-Monitor console, create an alert template in **JSON** format (see [Alert Template: Setup and Configuration](https://www.dotcom-monitor.com/wiki/knowledge-base/create-edit-alert-template/)) and paste the content below. Keep the field names unchanged:
+
+```json
+{
+  "notification_type": "@Model.Type",
+  "device_name": "@Model.RootResponse.Device.Name",
+  "task_name": "@Model.RootResponse.Task?.Name",
+  "location": "@Model.RootResponse.Monitor.Name",
+  "incident_id": "@Model.CurrentState.ID",
+  "error_type": "@Model.FirstErrorResponse?.AllErrors?[0]?.ErrorType",
+  "error_code": "@Model.FirstErrorResponse?.AllErrors?[0]?.ErrorCode",
+  "error_reason": "@Model.FirstErrorResponse?.AllErrors?[0]?.Reason",
+  "error_target": "@Model.FirstErrorResponse?.Uri",
+  "alert_time": "@Model.RootResponse.Start",
+  "report_link": "@Model.DMUserLink/OnlineReporting.aspx"
+}
+```
+
+The variables come from the Dotcom-Monitor [Dynamic Variables Reference](https://www.dotcom-monitor.com/wiki/knowledge-base/dotcom-monitor-system-variables/). A recovery notification carries no error information, so the error variables use the null-safe `?.` form.
+
+</Step>
+
+<Step title="Add an HTTP Webhook address">
+
+1. In a Dotcom-Monitor Alert Group, add a new address and select **HTTP Webhook** as the **Address Type**
+2. Set **Webhook URL** to the full push URL, including `?integration_key=...`, and the HTTP method to **POST**
+3. Set **Data Type** to **Raw**, the format to **JSON**, and select the alert template created in the previous step
+4. Save, and assign the Alert Group to the monitoring devices that should notify Flashduty
+
+See the Dotcom-Monitor article [HTTP Webhook Integration](https://www.dotcom-monitor.com/wiki/knowledge-base/http-webhook-integration/).
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a monitoring device fail (for example, point its target at a page that does not exist) and confirm Flashduty receives a Critical alert. Restore the target; after Dotcom-Monitor sends the recovery notification, confirm the original alert closes.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the device name (`device_name`). Both the alert and the recovery notification of Dotcom-Monitor refer to the same monitoring device, so they land on the same Flashduty alert.
+
+- `incident_id` (`@Model.CurrentState.ID`) changes every time the device changes state, so the alert notification and the recovery notification carry different values. It is kept as a label and is not part of the Alert Key
+- After a device is renamed, the new name produces a new Alert Key, so an alert that was open before the rename must be closed by hand
+- Give different devices different names
+
+Requests without `device_name` are rejected.
+
+## Alert lifecycle
+---
+
+Flashduty handles messages by the `notification_type` field, case-insensitively:
+
+| `notification_type` | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `ALERT` (or `Error`) | Device error | Trigger an alert (Critical) |
+| `ALL CLEAR` (or `OK`, `Uptime`) | Device recovered | Recover the alert |
+| `TEST` | Test notification | Open a separate Info alert |
+
+Any other value is rejected. Repeated notifications received while the device stays in error merge into the same alert.
+
+## Severity
+---
+
+Dotcom-Monitor messages carry no severity field. A device error means the monitored target is unavailable, so it is fixed at **Critical**. A recovery event keeps the severity of the original alert.
+
+## Alert content
+---
+
+- **Title**: the device name
+- **Description**: error type, error code, error reason and the failing target URL
+- **Labels**: `check` and `device` (device name), `resource` (failing target URL), `task` (task name, absent for UserView), `location` (monitoring location), `incident_id`, `error_type`, `error_code`, `alert_time`, `report_link` (online report link), `source` (always `dotcom-monitor`)
+
+Dotcom-Monitor HTML-encodes the text it substitutes into the template; Flashduty decodes it before use.
+
+## Troubleshooting
+---
+
+- **A test notification created an alert**: a test notification opens a separate Info alert that never affects a real device's alert. Close it by hand
+- **Request rejected with a missing `device_name` or an unsupported `notification_type`**: check that the field names in the alert template match the template above and that Data Type is Raw JSON
+- **The alert does not recover**: confirm the Alert Group sends recovery (ALL CLEAR) notifications and that the device name was not changed during the alert
+- **`integration_key` invalid or a 4xx response**: confirm the Webhook URL is the full push URL and the integration is not disabled

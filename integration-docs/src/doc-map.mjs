@@ -176,6 +176,7 @@ export const docMap = {
   Firefly: `${alertBase}/firefly.mdx`,
   Hackerone: `${alertBase}/hackerone.mdx`,
   Kuvasz: `${alertBase}/kuvasz.mdx`,
+  DotcomMonitor: `${alertBase}/dotcom-monitor.mdx`,
   ThinkstCanary: `${alertBase}/thinkst-canary.mdx`,
   Falco: `${alertBase}/falco.mdx`,
   Blumira: `${alertBase}/blumira.mdx`,
