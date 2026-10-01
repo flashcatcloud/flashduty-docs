@@ -254,6 +254,7 @@ export const docMap = {
   Opnsense: `${alertBase}/opnsense.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
   GiteaChange: `${integrationBase}/change-integration/gitea.mdx`,
   GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
