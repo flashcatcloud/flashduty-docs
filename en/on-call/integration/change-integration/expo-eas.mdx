@@ -1,0 +1,137 @@
+---
+title: "Expo EAS change integration"
+description: "Sync Expo EAS Build and EAS Submit results to Flashduty On-call through EAS webhooks, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Expo", "EAS", "EAS Build", "EAS Submit", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use EAS webhooks to sync Expo EAS builds and submissions to Flashduty On-call. Each build and each submission becomes one Flashduty change, recorded once when it ends.
+
+EAS sends a webhook only when a build or submission ends and has no start event, so a change has no Processing state and is recorded directly with its end state: Done, Failed, or Canceled. A change here is an app build or a store submission, not a deployment of a running service.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Expo EAS** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project`, `platform`, or `kind`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Expo EAS
+---
+
+<Steps>
+<Step title="Create a webhook for builds">
+
+In the project directory (EAS CLI installed and logged in), run:
+
+```sh
+eas webhook:create --event BUILD --url '<push URL>'
+```
+
+The command asks for a signing secret of at least 16 characters. Flashduty authenticates with the `integration_key` in the push URL and does not verify `expo-signature`, so any value of that length works.
+
+</Step>
+
+<Step title="Create a webhook for submissions">
+
+To sync EAS Submit results as well, run the command again with the `SUBMIT` event:
+
+```sh
+eas webhook:create --event SUBMIT --url '<push URL>'
+```
+
+Both events use the same push URL; Flashduty tells builds and submissions apart from the payload.
+
+</Step>
+
+<Step title="Verify">
+
+Webhooks are configured per project: create them in each project you want to sync, and list them with `eas webhook:list`. EAS has no test delivery: run `eas build` or `eas submit`, and the change appears in the Flashduty change list when it ends.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| EAS object | Change key (change_key) | Notes |
+|---|---|---|
+| Build | `build:<id>` | `id` is the build ID (UUID). Two builds of the same project and platform are two changes; a retried build has a new ID and is a new change |
+| Submission | `submission:<id>` | `id` is the submission ID (UUID). A build and a submission never merge, even with the same ID |
+
+## Status mapping
+---
+
+| EAS `status` | Flashduty change status |
+|---|---|
+| `finished` | Done |
+| `errored` | Failed |
+| `canceled` | Canceled |
+
+The EAS documentation lists only these three end states. Any other value makes the delivery return InvalidParameter and records no change.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | Build: `<project>: <platform> build <app version> (<build profile>)`, for example `example: android build 1.0.2 (production)`. Submission: `<project>: <platform> submit`. Parts missing from the payload are omitted |
+| Description | Build: the `message` attached to the build, or the commit message (`gitCommitMessage`) when there is none. A failure appends a line `Error: <error message>` |
+| Link | The build's or submission's page in the EAS dashboard |
+| Change time | The end time (`completedAt`), or `updatedAt` when absent |
+
+Labels for routing and filtering the change list:
+
+| Label | Description |
+|---|---|
+| `kind` | `build` or `submit` |
+| `account` | Expo account or organization name |
+| `project` | Project name |
+| `platform` | `android` or `ios` |
+| `build_id` | Build ID; for a submission, the ID of the build it submits (when present) |
+| `submission_id` | Submission ID (submissions only) |
+| `app_version` | App version (builds only) |
+| `build_profile` | Build profile, for example `production` (builds only) |
+| `distribution` | Distribution type, for example `store` (builds only) |
+| `channel` | EAS Update channel (builds only) |
+| `sha` | Full Git commit SHA (builds only) |
+| `error_code` | The EAS error code (failures only) |
+| `expo_state` | The raw EAS `status` |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why is there no running state for a build?">
+
+EAS webhooks fire only when a build or submission ends and do not report queued or running states. The change appears with its final status when it ends.
+
+</Accordion>
+
+<Accordion title="Does an EAS retry record the change twice?">
+
+No. EAS retries with exponential back-off after a response outside 200–399, with the same content, and Flashduty deduplicates on the end time, so the change is recorded once.
+
+</Accordion>
+
+<Accordion title="Do I need to verify expo-signature?">
+
+No. Flashduty authenticates with the `integration_key` in the push URL and does not verify `expo-signature`. EAS requires a secret of at least 16 characters when you create the webhook; any value works.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `id is missing`: the payload is incomplete; make sure it comes from an EAS webhook
+- `unknown status`: a status value that is not mapped yet; contact us to add it
+- `delivery is neither a build nor a submission`: the payload has neither a build page URL (`buildDetailsPageUrl`) nor a submission page URL (`submissionDetailsPageUrl`)
+- `invalid completedAt` or `invalid updatedAt`: a timestamp field is malformed
+
+</Accordion>
+</AccordionGroup>
