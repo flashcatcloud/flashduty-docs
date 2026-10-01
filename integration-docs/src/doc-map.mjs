@@ -234,6 +234,7 @@ export const docMap = {
   CheckPointSmartEvent: `${alertBase}/check-point-smartevent.mdx`,
   Ossec: `${alertBase}/ossec.mdx`,
   Zeek: `${alertBase}/zeek.mdx`,
+  Chronosphere: `${alertBase}/chronosphere.mdx`,
   Papertrail: `${alertBase}/papertrail.mdx`,
   MonteCarlo: `${alertBase}/monte-carlo.mdx`,
   Limacharlie: `${alertBase}/limacharlie.mdx`,
