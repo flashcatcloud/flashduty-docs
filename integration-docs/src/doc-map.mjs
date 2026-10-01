@@ -125,6 +125,7 @@ export const docMap = {
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   Axiom: `${alertBase}/axiom.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
+  Ntopng: `${alertBase}/ntopng.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
   Domotz: `${alertBase}/domotz.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
