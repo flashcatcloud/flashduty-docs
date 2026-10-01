@@ -1,0 +1,145 @@
+---
+title: "Railway 变更集成"
+description: "通过 Railway 项目 Webhook 将服务的部署过程同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Railway", "部署", "Deployment", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Railway 项目的 Webhook，将服务的部署（Deployment）同步到 Flashduty On-call。每次部署对应一条 Flashduty 变更，随排队、构建、部署、成功或失败的推送更新状态。
+
+Railway 的 Webhook 按项目配置，项目内所有环境、所有服务的部署都会推送到同一个地址。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Railway**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`service`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Railway 中配置
+---
+
+<Steps>
+<Step title="打开项目的 Webhooks 设置">
+
+1. 在 Railway 中打开目标项目，点击右上角的 **Settings**
+2. 进入 **Webhooks** 标签页
+
+</Step>
+
+<Step title="填写推送地址与事件">
+
+1. 在 URL 输入框中粘贴 Flashduty 集成的完整推送地址
+2. 事件选择 Deployment 相关的全部状态（Queued、Building、Deploying、Deployed、Failed、Crashed 等）
+3. 点击 **Save Webhook**
+
+Railway 的 Webhook 不签名，Flashduty 通过推送地址中的 `integration_key` 鉴权，无需配置自定义请求头。
+
+</Step>
+
+<Step title="发送测试">
+
+点击 **Test Webhook**，Railway 会发送一条示例推送，页面显示 Flashduty 返回的状态码。之后在项目中触发一次部署，即可在 Flashduty 变更列表中看到记录。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| Railway 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Deployment | `resource.deployment.id`（缺失时用 `details.id`） | 每次部署有独立的 ID，同一次部署的所有状态推送属于同一条变更；同一服务、同一环境的两次部署是两条变更 |
+
+## 状态映射
+---
+
+Flashduty 以推送中的 `type`（`Deployment.<状态>`）为准判断状态，不读取 `details.status`。
+
+| Railway `type` | Flashduty 变更状态 |
+|---|---|
+| `Deployment.needsApproval` | Planned |
+| `Deployment.queued`、`Deployment.initializing` | Ready |
+| `Deployment.building`、`Deployment.deploying` | Processing |
+| `Deployment.deployed`、`Deployment.redeployed` | Done |
+| `Deployment.failed`、`Deployment.crashed` | Failed |
+
+以下推送返回成功但不生成变更：
+
+- `Deployment.removed`、`Deployment.removing`：旧部署被新部署替代或被手动移除，不是这次部署的进展
+- `Deployment.restarted`、`Deployment.oomKilled`、`Deployment.slept`、`Deployment.resumed`：运行期事件
+- 存储卷用量、CPU/内存监控等告警类事件（`type` 不以 `Deployment.` 开头）
+
+`Deployment.` 开头但不在上表和上述列表中的 `type`，推送返回 `InvalidParameter`（见常见问题）。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目名>/<服务名>: deploy <分支> (<短 SHA>) to <环境名>`，例如 `shop/api: deploy main (a3f2d1e) to production`；没有分支或提交信息的部署（镜像、CLI 上传）省略对应部分 |
+| 描述 | 提交说明（`details.commitMessage`） |
+| 链接 | Railway 控制台中该部署的页面 |
+| 变更时间 | 推送中的 `timestamp`，即该状态发生的时间 |
+
+标题和描述取自这条变更的第一次推送，之后不再更新。
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `workspace` | 工作区名称 |
+| `project` | 项目名称 |
+| `service` | 服务名称 |
+| `environment` | 环境名称 |
+| `deployment_id` | 部署 ID |
+| `ref` | 分支，仅在推送包含时出现 |
+| `sha` | 提交的完整 SHA，仅在推送包含时出现 |
+| `actor` | 提交作者，仅在推送包含时出现 |
+| `source` | 部署来源，例如 `GitHub` |
+| `railway_state` | `type` 中的状态原值，例如 `deployed` |
+
+`ref`、`sha`、`actor` 并非每次推送都有，按它们路由可能把同一次部署的后续状态分到其他协作空间。路由请使用 `workspace`、`project`、`service`、`environment`。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Railway 重试推送会重复记录吗？">
+
+不会。Railway 在非 2xx、3xx 响应或超时后最多重试 3 次，内容相同，Flashduty 以推送中的 `timestamp` 去重。Railway 不保证推送顺序，Flashduty 按 `timestamp` 排序，较早的状态晚到不会覆盖已结束的变更。
+
+</Accordion>
+
+<Accordion title="为什么被取消的部署一直是 Processing？">
+
+在 Railway 中中止（Abort）构建中的部署会把它标记为 Removed，Flashduty 不记录 Removed 推送，因此这类变更停留在最后收到的状态。
+
+</Accordion>
+
+<Accordion title="为什么部署成功后又变成 Failed？">
+
+部署成功后服务运行中崩溃，Railway 会发出 `Deployment.crashed`，Flashduty 把同一条变更更新为 Failed。
+
+</Accordion>
+
+<Accordion title="Railway 提示推送失败或停止推送？">
+
+Railway 在 6 小时内连续失败 100 次后会暂停该地址 24 小时。请确认推送地址完整，且集成未被删除。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `resource.deployment.id is missing`：推送内容不完整，请确认推送来自 Railway 原生 Webhook
+- `unknown type`：出现了未收录的部署状态，请联系我们补充映射
+- `invalid timestamp`：推送中的时间字段格式不正确
+
+</Accordion>
+</AccordionGroup>
