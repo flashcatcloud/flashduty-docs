@@ -1,0 +1,132 @@
+---
+title: "Uptimia alert integration"
+description: "Send Uptimia monitor down and up notifications to Flashduty On-call through a webhook contact."
+keywords: ["alert integration", "Uptimia", "Uptime", "webhook", "monitoring", "downtime"]
+---
+
+Use an Uptimia webhook integration to send monitor down (`down`) and recovery (`up`) notifications to Flashduty On-call. Each Uptimia monitor maps to one Flashduty alert: the alert triggers when the monitor goes down, severity changes and repeated notifications merge into the same alert, and the alert recovers when the monitor is up again.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Uptimia** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Uptimia** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Uptimia
+---
+
+<Steps>
+<Step title="Create a webhook integration">
+
+1. Log in to Uptimia, go to **Alerting → Integrations**, click **Add Integration**, and select **Webhooks**
+2. Enter `Flashduty` as the **Integration Name** (Uptimia uses it as the name of the contact it creates)
+3. Paste the full Flashduty push URL into **Webhook URL**
+4. Save. Every plan, including the free plan, can create webhooks
+
+</Step>
+
+<Step title="Attach the monitors">
+
+Edit each monitor you want to send, tick the new `Flashduty` contact in the left pane of the **Alerting** card, and save. One contact can be attached to many monitors.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a monitor actually fail (for example, point it at an unreachable address) and confirm that Flashduty receives an active alert. Then restore the target and confirm the same alert recovers.
+
+</Step>
+</Steps>
+
+<Note>
+The request sent by Uptimia's **Test** button (`monitor_status` and `severity` are both `test`) opens a separate Info alert in Flashduty. It never merges with a real alert and does not recover, so close it by hand. The "Test notification sent successfully" message only means Uptimia sent the request, not that Flashduty accepted it.
+</Note>
+
+## Payload
+---
+
+Uptimia POSTs a fixed set of 11 fields as `application/json`. Flashduty parses them directly, with no template to configure:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `id` | Monitor ID (numbered separately within each monitor type) | Part of the Alert Key, label `monitor_id` |
+| `monitor_type` | Monitor type, such as `uptime`, `ssl`, `domain`, `heartbeat`, `api` | Part of the Alert Key, label `monitor_type` |
+| `monitor_name` | Monitor name | Alert title, label `check` |
+| `monitor_unique_id` | Custom unique ID (uptime monitors only) | Label `monitor_unique_id` |
+| `monitor_status` | `down`, `up`, or `test` | Trigger or recovery, label `monitor_status` |
+| `severity` | `critical`, `trouble`, empty on recovery | Alert severity, label `severity` |
+| `incident_start_time` | Incident start time | Label `incident_start_time` |
+| `incident_end_time` | Incident end time, empty while open | Label `incident_end_time` |
+| `incident_duration_seconds` | Incident length in seconds | Not stored |
+| `message` | Alert text | Alert description |
+| `monitor_notes` | Monitor note | Appended to the description |
+
+When alert groups are enabled, Uptimia adds a `group` object on top of the same 11 fields (the fields describe the first failed monitor in the group). Flashduty processes the 11 fields and stores `group.id` and `group.size` as labels `group_id` and `group_size`.
+
+## Alert Key
+---
+
+Flashduty uses `monitor_type` together with `id` as the Alert Key. Uptimia numbers `id` separately within each monitor type, so it must be paired with `monitor_type`; the payload has no incident ID. Down, severity change, repeated notification, and recovery for one monitor carry the same two fields and land on the same alert. Renaming the monitor or changing its note, severity, or times does not change the Alert Key.
+
+If `monitor_type` or `id` is missing, Flashduty returns a parameter error, because a recovery could not be matched reliably to its alert.
+
+## Status and severity
+---
+
+| Uptimia fields | Flashduty status or severity |
+| :--- | :--- |
+| `monitor_status` is `down`, `severity` is `critical` | Critical |
+| `monitor_status` is `down`, `severity` is `trouble` | Warning |
+| `monitor_status` is `down`, `severity` is anything else | Critical (an outage is treated as severe) |
+| `monitor_status` is `up` | Recovery |
+
+Requests whose `monitor_status` is empty or any other value are rejected, so a request with an unknown state never enters the wrong alert lifecycle.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Do duplicate deliveries create several Flashduty alerts?">
+
+No. Uptimia delivers at least once and retries a failed delivery up to 5 times. Duplicates carry the same `monitor_type` and `id`, so they merge into one alert.
+
+</Accordion>
+
+<Accordion title="How are recoveries of grouped alerts handled?">
+
+Uptimia sends one recovery notification when the last member of a group recovers, and its fields describe a monitor in the group. Flashduty recovers only the alert that matches that notification's `monitor_type` and `id`; other monitors in the group may not receive a recovery of their own. If an alert stays open, close it by hand in the channel, or configure auto-close on timeout for the integration.
+
+</Accordion>
+
+<Accordion title="Uptimia says the test succeeded, but Flashduty shows no alert?">
+
+That message only means Uptimia sent the request. Check that the Webhook URL is the full push URL including `integration_key`, and look in Flashduty for an Info alert titled "Uptimia test notification".
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Uptimia reports a failed delivery**: confirm the Webhook URL is the full push URL. Flashduty returns 2xx on success
+- **Flashduty returns a parameter error**: confirm the body contains `monitor_type` and `id`, and that `monitor_status` is `down` or `up`
+- **No alert arrives**: confirm the monitor has the webhook contact ticked and is not paused
+
+For the field reference, see the Uptimia [Webhook payload reference](https://help.uptimia.com/articles/webhook-payload-reference).
