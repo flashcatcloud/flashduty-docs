@@ -1,0 +1,133 @@
+---
+title: "GitLab 变更集成"
+description: "通过 GitLab Webhook 将部署（Deployment）同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "GitLab", "Deployment", "Webhook", "部署事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 GitLab 项目或群组的 Webhook，将部署（Deployment）同步到 Flashduty On-call。每一次部署对应一条 Flashduty 变更；部署从等待审批、执行到成功、失败或取消的每个状态，都会更新同一条变更。
+
+GitLab CI/CD 中声明了 `environment` 的任务会自动创建部署，因此使用 GitLab CI/CD 发布的项目无需改动流水线即可接入。GitLab.com 和自托管 GitLab 均适用。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **GitLab**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 GitLab 中配置
+---
+
+<Steps>
+<Step title="打开 Webhook 设置">
+
+- 项目级：进入项目 **Settings → Webhooks**，点击 **Add new webhook**
+- 群组级（GitLab Premium 及以上）：进入群组 **Settings → Webhooks**，点击 **Add new webhook**，群组下所有项目的部署都会推送
+
+项目级需要项目的 Maintainer 或 Owner 角色，群组级需要群组的 Owner 角色。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **URL**：粘贴 Flashduty 集成的完整推送地址
+2. **Signing token** 和 **Secret token**：无需配置，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+</Step>
+
+<Step title="选择事件">
+
+1. 在 **Trigger** 中只勾选 **Deployment events**，取消默认勾选的 **Push events**
+2. 保持 **Enable SSL verification** 勾选，点击 **Add webhook**
+
+GitLab 的 **Test** 功能不能发送部署事件；用 Test 发送的其他事件（例如 Push events）Flashduty 返回成功但不会生成变更。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| GitLab 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Deployment | `deployment:<deployment_id>` | 同一次部署的所有 Deployment 事件更新同一条变更；同一项目、同一环境的两次部署（包括重试部署任务）是两条变更 |
+
+`deployment_id` 在同一个 GitLab 实例内唯一。如果要接入多个 GitLab 实例（例如 GitLab.com 和自托管实例），请为每个实例创建一个集成。
+
+## 状态映射
+---
+
+| GitLab 部署状态 | Flashduty 变更状态 |
+|---|---|
+| blocked（等待审批或手动操作） | Planned |
+| created | Ready |
+| running | Processing |
+| success | Done |
+| failed | Failed |
+| canceled、skipped | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。GitLab 实际只在 blocked、running、success、failed、canceled 时推送事件。
+
+以下推送返回成功但不生成变更：Deployment 以外的事件类型（Push、Pipeline 等）、受保护环境的审批事件 `approved` 和 `rejected`。审批事件描述的是审批记录而不是部署本身：批准后 GitLab 会在部署开始时推送 `running`，拒绝后会推送 `failed`，变更状态以这些部署事件为准。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目>: deploy <ref> (<短 SHA>) to <环境>` |
+| 描述 | 部署提交的标题（`commit_title`） |
+| 链接 | 执行部署的 CI/CD 任务页面；通过 API 或 trigger 任务创建的部署没有任务，链接为项目的 Environments 页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 内容 |
+|---|---|
+| `project` | 项目完整路径，例如 `acme/order-service` |
+| `project_id` | GitLab 项目 ID |
+| `environment` | 部署环境 |
+| `environment_tier` | 环境层级，例如 `production`、`staging` |
+| `ref` | 部署的分支或 tag |
+| `sha` | 部署提交的短 SHA |
+| `actor` | 触发部署的用户名 |
+| `deployment_id` | GitLab 部署 ID |
+| `state` | 最新的 GitLab 部署状态 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到部署变更？">
+
+- 确认 Webhook 勾选了 **Deployment events**。只勾选 **Push events** 时不会产生变更
+- 在 GitLab Webhook 编辑页的 **Recent events** 查看推送记录和 Flashduty 的响应
+- 只有 GitLab 部署才会产生部署事件，例如在 CI/CD 任务中声明 `environment`，或调用 Deployments API
+
+</Accordion>
+
+<Accordion title="在 GitLab 中重新推送（Resend Request）会重复记录吗？">
+
+不会。同一状态、同一时间的事件只记录一次。
+
+</Accordion>
+
+<Accordion title="被拒绝的部署显示为 Failed？">
+
+是的。GitLab 拒绝部署后会推送 `failed`，Flashduty 按部署状态记录为 Failed，标签 `state` 为 `failed`。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported deployment status`：收到了 Flashduty 尚未支持的部署状态，请联系我们
+- `deployment_id is missing`：推送内容不完整，请确认推送来自 GitLab 原生 Webhook
+
+</Accordion>
+</AccordionGroup>

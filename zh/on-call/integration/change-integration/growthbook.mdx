@@ -1,0 +1,136 @@
+---
+title: "GrowthBook 变更集成"
+description: "通过 GrowthBook Event Webhook 将功能开关（Feature）修订（Revision）的审核、发布、回滚同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "GrowthBook", "Feature Flag", "功能开关", "Webhook", "Event Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 GrowthBook 的 Event Webhook，将 Feature（功能开关）的修订（Revision）同步到 Flashduty On-call。GrowthBook 中对 Feature 的每次修改都会形成一个修订，Flashduty 中一个修订对应一条变更：从提交审核、通过审核，到发布、回滚或被丢弃，都记录在这一条变更上。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **GrowthBook**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `feature_id`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 GrowthBook 中配置
+---
+
+<Steps>
+<Step title="新建 Event Webhook">
+
+1. 以管理员身份登录 GrowthBook，进入 **Settings → Webhooks**
+2. 点击 **New Event Webhook**，填写 **Webhook Name**（必填）
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Payload Type**：选择 **JSON**。**Raw (Legacy)** 是旧格式，不会推送修订事件
+2. **Method**：保持 `POST`
+3. **Endpoint URL**：粘贴 Flashduty 集成的完整推送地址
+4. **Headers**：无需填写，Flashduty 通过推送地址中的 `integration_key` 鉴权。GrowthBook 会在请求头 `X-GrowthBook-Signature` 中附带签名，Flashduty 不校验该签名
+
+</Step>
+
+<Step title="选择事件和范围">
+
+1. **Events**：勾选以下事件，其余事件会被忽略
+   - `feature.revision.reviewRequested`、`feature.revision.changesRequested`、`feature.revision.approved`
+   - `feature.revision.published`、`feature.revision.reverted`
+   - `feature.revision.discarded`、`feature.revision.publishFailed`
+2. **Environments**、**Projects**、**Tags**：不选表示全部，也可以只选生产环境等需要关注的范围
+3. 点击 **Create**
+
+请逐个勾选，不要使用 `feature.revision.*` 通配符：GrowthBook 以后新增的修订事件会被 Flashduty 拒绝（见下文常见问题）。`feature.updated` 等 Feature 自身的事件订阅了也会被忽略。
+
+</Step>
+</Steps>
+
+需要所用的 GrowthBook 版本支持 `feature.revision.*` 事件。保存前可在创建窗口中点击 **Test Connection**：它发送不含 `event` 字段的请求体，Flashduty 返回 200 且不生成变更。当前版本中，已保存的 Webhook 没有 Test 按钮。之后在任一 Feature 上发布一次修订，即可在 Flashduty 变更列表中看到记录。
+
+## 一条变更是什么
+---
+
+| GrowthBook 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Feature 的一个修订（Revision） | `<Feature ID>/<修订版本号>`，例如 `checkout-banner/3` | 同一个修订的所有事件汇总为一条变更；同一个 Feature 的下一个修订是另一条变更 |
+
+Feature ID 创建后不可修改，修订版本号在同一个 Feature 内递增。如果删除某个 Feature 后又用相同的 ID 重新创建，版本号会从头开始，新的修订会与旧 Feature 中版本号相同的变更合并。
+
+## 状态映射
+---
+
+| GrowthBook 事件 | 含义 | Flashduty 变更状态 |
+|---|---|---|
+| `feature.revision.reviewRequested` | 提交审核 | Planned |
+| `feature.revision.changesRequested` | 审核人要求修改 | Planned |
+| `feature.revision.approved` | 审核通过，尚未发布 | Ready |
+| `feature.revision.published` | 修订已发布 | Done |
+| `feature.revision.reverted` | 回滚已生效（回滚会产生新的修订并同时推送 `published`） | Done |
+| `feature.revision.discarded` | 修订被丢弃 | Canceled |
+| `feature.revision.publishFailed` | 定时发布或审核通过后自动发布失败 | Failed |
+
+未开启审核流程时，发布只推送 `published`，变更从出现起就是 Done。
+
+以下推送返回成功但不生成变更：
+
+- 不改变修订进展的修订事件：`created`、`updated`、`rebased`、`commented`、`reopened`、`recalled`、`reviewRetracted`、`publishScheduleChanged`
+- `feature.created`、`feature.updated`、`feature.deleted` 等 Feature 自身的事件、安全发布（Safe Rollout）、渐进发布（Ramp Schedule）、实验（Experiment）、分群等其他资源的事件
+- Test Connection 发出的测试请求，以及缺少 `event` 的推送
+
+GrowthBook 后续新增的 `feature.revision.*` 事件，在加入上表之前会返回 `InvalidParameter`，不会生成变更。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<Feature ID>: revision <版本号>`，例如 `checkout-banner: revision 3` |
+| 描述 | 修订的备注（`comment`），取自该修订第一条被记录的事件 |
+| 链接 | 空。GrowthBook 推送的事件不含页面地址 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `feature_id` | Feature ID |
+| `revision` | 修订版本号 |
+| `state` | 修订当前状态：`draft`、`pending-review`、`approved`、`changes-requested`、`published`、`discarded` |
+| `actor` | 触发该事件的用户名；事件不带用户名时为空。邮箱不会写入标签 |
+| `event_type` | GrowthBook 事件名，例如 `feature.revision.published` |
+
+`state`、`actor`、`event_type` 会随每个事件更新，不要用它们做路由；请使用每个事件都有的 `feature_id`。项目、环境等范围因事件而异，Flashduty 不记录。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="GrowthBook 重试推送会重复记录吗？">
+
+不会。GrowthBook 在返回非 200 时最多推送 3 次。Flashduty 使用事件自身的时间（`created`）作为变更时间，同一事件重复推送只记录一次，迟到的旧状态也不会覆盖已经结束的变更。
+
+</Accordion>
+
+<Accordion title="为什么发布了修订，变更列表里没有对应的审核记录？">
+
+只有开启了审核流程的 Feature 才会产生 `reviewRequested` 和 `approved`。直接发布的修订只有一个 `published` 事件。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `data.object.featureId is missing`、`data.object.version is missing`：推送内容不完整。请确认 **Payload Type** 选择了 **JSON**
+- `created is missing or invalid`：推送缺少事件时间
+- `unknown revision event`：GrowthBook 推送了尚未支持的修订事件，请只勾选上文列出的事件
+- 请求体不是 JSON：请确认 **Payload Type** 选择了 **JSON**
+
+</Accordion>
+</AccordionGroup>

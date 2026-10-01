@@ -1,0 +1,136 @@
+---
+title: "GrowthBook change integration"
+description: "Sync GrowthBook feature revision reviews, publishes and reverts to Flashduty On-call through a GrowthBook Event Webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "GrowthBook", "Feature Flag", "feature flag", "Webhook", "Event Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a GrowthBook Event Webhook to sync feature revisions to Flashduty On-call. Every edit to a feature in GrowthBook becomes a revision, and one revision is one Flashduty change: its review request, approval, publish, revert or discard are all recorded on that change.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **GrowthBook** and enter an integration name
+3. To send changes to a specific channel, add rules in the integration's **Route** on labels such as `feature_id`
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure in GrowthBook
+---
+
+<Steps>
+<Step title="Create an Event Webhook">
+
+1. Log in to GrowthBook as an admin and go to **Settings → Webhooks**
+2. Click **New Event Webhook** and enter a **Webhook Name** (required)
+
+</Step>
+
+<Step title="Enter the push URL">
+
+1. **Payload Type**: choose **JSON**. **Raw (Legacy)** is the old format and does not send revision events
+2. **Method**: keep `POST`
+3. **Endpoint URL**: paste the full push URL of the Flashduty integration
+4. **Headers**: leave empty. Flashduty authenticates with the `integration_key` in the push URL. GrowthBook adds a signature in the `X-GrowthBook-Signature` header; Flashduty does not verify it
+
+</Step>
+
+<Step title="Select events and scope">
+
+1. **Events**: select the events below; other events are ignored
+   - `feature.revision.reviewRequested`, `feature.revision.changesRequested`, `feature.revision.approved`
+   - `feature.revision.published`, `feature.revision.reverted`
+   - `feature.revision.discarded`, `feature.revision.publishFailed`
+2. **Environments**, **Projects**, **Tags**: leave empty for all, or limit to the scope you care about, such as production
+3. Click **Create**
+
+Select the events one by one and do not use the `feature.revision.*` wildcard: revision events that GrowthBook adds later are rejected by Flashduty (see the FAQ below). Feature-level events such as `feature.updated` are ignored even when subscribed.
+
+</Step>
+</Steps>
+
+Your GrowthBook version must support `feature.revision.*` events. Before saving, you can click **Test Connection** in the create dialog: it sends a body without an `event` field, and Flashduty returns 200 and records no change. A saved webhook has no Test button in current versions. Then publish a revision on any feature to see it in the Flashduty change list.
+
+## What one change is
+---
+
+| GrowthBook object | Change key (change_key) | Notes |
+|---|---|---|
+| A revision of a feature | `<feature ID>/<revision version>`, for example `checkout-banner/3` | All events of one revision are merged into one change; the next revision of the same feature is another change |
+
+A feature ID cannot be changed after creation, and revision versions increase within a feature. If you delete a feature and re-create one with the same ID, versions start over and a new revision is merged into the change with the same version number from the old feature.
+
+## Status mapping
+---
+
+| GrowthBook event | Meaning | Flashduty change status |
+|---|---|---|
+| `feature.revision.reviewRequested` | Review requested | Planned |
+| `feature.revision.changesRequested` | Reviewer requested changes | Planned |
+| `feature.revision.approved` | Approved, not yet published | Ready |
+| `feature.revision.published` | Revision published | Done |
+| `feature.revision.reverted` | Revert took effect (a revert creates a new revision and also sends `published`) | Done |
+| `feature.revision.discarded` | Revision discarded | Canceled |
+| `feature.revision.publishFailed` | A scheduled or auto-on-approval publish failed | Failed |
+
+When a feature has no approval flow, publishing sends only `published`, so the change is Done from the start.
+
+These deliveries return success and record no change:
+
+- Revision events that do not move the revision forward: `created`, `updated`, `rebased`, `commented`, `reopened`, `recalled`, `reviewRetracted`, `publishScheduleChanged`
+- Feature-level events such as `feature.created`, `feature.updated` and `feature.deleted`, and events of other resources such as safe rollouts, ramp schedules, experiments and saved groups
+- The test request sent by Test Connection, and any delivery without an `event`
+
+A `feature.revision.*` event that GrowthBook adds later returns `InvalidParameter` until it is added to the table above, and no change is recorded.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<feature ID>: revision <version>`, for example `checkout-banner: revision 3` |
+| Description | The revision's comment (`comment`), taken from the first recorded event of that revision |
+| Link | Empty. GrowthBook events carry no page URL |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `feature_id` | Feature ID |
+| `revision` | Revision version |
+| `state` | Current revision status: `draft`, `pending-review`, `approved`, `changes-requested`, `published`, `discarded` |
+| `actor` | Name of the user behind the event; empty when the event carries no user name. Emails are never written to labels |
+| `event_type` | GrowthBook event name, for example `feature.revision.published` |
+
+`state`, `actor` and `event_type` are updated by every event, so do not route on them; use `feature_id`, which every event carries. Project and environment scope differs between events, so Flashduty does not record it.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a GrowthBook retry create duplicates?">
+
+No. GrowthBook tries a delivery up to 3 times when the endpoint does not return 200. Flashduty uses the event's own time (`created`) as the change time, so a repeated delivery is recorded once, and a late older state cannot overwrite a finished change.
+
+</Accordion>
+
+<Accordion title="Why is there no review record for a revision I published?">
+
+Only features with an approval flow produce `reviewRequested` and `approved`. A revision published directly has a single `published` event.
+
+</Accordion>
+
+<Accordion title="The push returns an InvalidParameter error?">
+
+- `data.object.featureId is missing`, `data.object.version is missing`: the payload is incomplete. Make sure **Payload Type** is **JSON**
+- `created is missing or invalid`: the payload has no event time
+- `unknown revision event`: GrowthBook sent a revision event that is not supported yet; select only the events listed above
+- The body is not JSON: make sure **Payload Type** is **JSON**
+
+</Accordion>
+</AccordionGroup>
