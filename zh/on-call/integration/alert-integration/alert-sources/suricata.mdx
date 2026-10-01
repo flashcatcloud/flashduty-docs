@@ -1,0 +1,115 @@
+---
+title: "Suricata 告警集成"
+description: "Suricata 没有 Webhook 输出，通过 Wazuh 采集 Suricata 的 eve.json 日志，再用 Flashduty 的 Wazuh 集成接收 Suricata 告警。"
+keywords: ["告警集成", "Suricata", "IDS", "入侵检测", "Wazuh", "eve.json", "网络安全"]
+---
+
+Suricata 只把事件写到 EVE JSON 日志，本身不能向外发 HTTP 请求。Wazuh 官方文档提供了 Suricata 集成：Wazuh Agent 读取 `/var/log/suricata/eve.json`，Wazuh 自带的 Suricata 规则把每条 Suricata 告警变成 Wazuh 告警。再用 Wazuh 管理节点内置的 `shuffle` 集成把这些告警推送到 Flashduty 的 [Wazuh 集成](/zh/on-call/integration/alert-integration/alert-sources/wazuh)，就不需要单独的 Suricata 集成。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 Wazuh**，不是 Suricata。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Wazuh**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/wazuh?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Wazuh**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 数据流
+---
+
+1. Suricata 把事件以 JSON 写入 `/var/log/suricata/eve.json`
+2. 装在同一台主机上的 Wazuh Agent 读取该文件
+3. Wazuh 管理节点用规则 `86601`（规则组 `ids`、`suricata`，等级 3，描述 `Suricata: Alert - <签名>`）为每条 `event_type` 为 `alert` 的事件生成告警
+4. 管理节点的 `shuffle` 集成把告警 POST 到 Flashduty
+
+规则 `86601` 只匹配 Suricata 的告警事件；同一份 `eve.json` 里的 `http`、`dns`、`tls` 等事件对应的规则等级是 0，不会产生告警。
+
+## 在 Wazuh Agent 上采集 Suricata 日志
+---
+
+在运行 Suricata 的主机的 Wazuh Agent 配置 `/var/ossec/etc/ossec.conf` 中加入：
+
+```xml
+<localfile>
+  <log_format>json</log_format>
+  <location>/var/log/suricata/eve.json</location>
+</localfile>
+```
+
+然后重启 Agent：
+
+```bash
+sudo systemctl restart wazuh-agent
+```
+
+确认 Suricata 已开启 EVE JSON 输出，且文件路径与上面的 `location` 一致。
+
+## 在 Wazuh 管理节点上推送到 Flashduty
+---
+
+在管理节点的 `/var/ossec/etc/ossec.conf` 中加入 `shuffle` 集成，只转发 Suricata 告警规则，并把 `hook_url` 换成 Flashduty 推送地址：
+
+```xml
+<integration>
+  <name>shuffle</name>
+  <hook_url>https://api.flashcat.cloud/event/push/alert/wazuh?integration_key=YOUR_INTEGRATION_KEY</hook_url>
+  <rule_id>86601</rule_id>
+  <alert_format>json</alert_format>
+</integration>
+```
+
+- 这里用 `<rule_id>` 过滤，不用 `<level>`：规则 `86601` 的等级是 3，任何 3 以上的 `<level>` 都会把它挡掉
+- `<alert_format>json</alert_format>` 必须配置
+- 不要配置 `<api_key>`，Flashduty 通过地址中的 `integration_key` 认证
+
+保存后重启管理节点：
+
+```bash
+systemctl restart wazuh-manager
+```
+
+Docker 部署时重启 manager 容器。Wazuh 集成的完整说明、字段映射和排查方法见 [Wazuh 集成](/zh/on-call/integration/alert-integration/alert-sources/wazuh)。
+
+## 触发并验证
+---
+
+Wazuh 官方 Suricata 示例用从另一台主机向被监控主机发 ICMP 来触发 Suricata 规则：
+
+```bash
+ping -c 20 <运行 Suricata 的主机 IP>
+```
+
+能否触发取决于 Suricata 是否加载了匹配 ICMP 的规则。触发后，在 Wazuh 控制台可用 `rule.groups:suricata` 过滤看到告警，Flashduty 中应出现标题为 `Suricata: Alert - <签名>` 的告警。没有收到时，查看管理节点的 `/var/ossec/logs/integrations.log` 和 `/var/ossec/logs/ossec.log`。
+
+## 事件与恢复
+---
+
+Suricata 和 Wazuh 都只在事件发生时产生一次告警，没有恢复通知。每条 Wazuh 告警有唯一 ID，Flashduty 以它作为 Alert Key，因此每条 Suricata 告警对应一条独立的 Flashduty 告警，不会自动关闭。
+
+请在接收该集成的协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时；同一签名反复触发时，可以在协作空间中配置降噪规则合并成一个故障。
+
+## 告警等级
+---
+
+规则 `86601` 的等级是 3，Flashduty 按 Wazuh 规则等级映射为 Info（0-6 为 Info，7-11 为 Warning，12-15 为 Critical）。Flashduty 不读取 Suricata 自己的 `alert.severity`，如果需要区分严重程度，用 [告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 按标题中的签名或 `rule_id` 标签调整。
+
+## 注意事项
+---
+
+- Suricata 事件包含源、目的 IP 和可能的载荷内容。Flashduty 不读取也不保存原始日志（`full_log`），但 `shuffle` 会把整条 Wazuh 告警发到 `hook_url`，请只转发需要人工响应的规则。
+- 想只转发特定签名或类别时，在 Wazuh 中为它们写自定义规则并提高等级，再用 `<rule_id>` 或 `<level>` 过滤。

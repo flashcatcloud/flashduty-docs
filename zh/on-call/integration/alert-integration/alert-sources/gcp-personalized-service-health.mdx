@@ -1,0 +1,133 @@
+---
+title: "Google Cloud Personalized Service Health 告警集成"
+description: "通过 Cloud Monitoring 日志告警策略和 Webhook 通知渠道接收 Personalized Service Health 事件，使用 Flashduty 的 Google Cloud Monitoring 集成，配合超时自动关闭收敛告警。"
+keywords: ["告警集成", "Google Cloud", "Personalized Service Health", "Service Health", "Cloud Monitoring", "日志告警", "Webhook"]
+---
+
+Personalized Service Health 把影响你项目的 Google Cloud 事件（事件的创建和更新）写入 Cloud Logging，并与 Cloud Monitoring 的日志告警策略集成。日志告警策略可以通过 Webhook 通知渠道把通知发出去。Flashduty 的 [Google Cloud Monitoring 集成](/zh/on-call/integration/alert-integration/alert-sources/google-cloud-monitoring) 接收这种 Webhook，因此不需要单独的 Personalized Service Health 集成：在 Flashduty 创建 Google Cloud Monitoring 集成，把它的推送地址填进 Webhook 通知渠道，再把渠道用在 Service Health 的告警策略上即可。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 Google Cloud Monitoring（GCP 云监控）**，不是 Personalized Service Health。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **GCP 云监控**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/google-cm?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **GCP 云监控**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Google Cloud 中配置
+---
+
+### 步骤 1：准备
+
+1. 在要接收事件的项目中启用 Service Health API，并确认项目已启用结算
+2. 配置告警的账号需要项目上的这些 IAM 角色：Logs Configuration Writer（`roles/logging.configWriter`）、Monitoring AlertPolicy Editor（`roles/monitoring.alertPolicyEditor`）、Monitoring NotificationChannel Viewer（`roles/monitoring.notificationChannelViewer`）、Personalized Service Health Viewer（`roles/servicehealth.viewer`）
+
+### 步骤 2：创建 Webhook 通知渠道
+
+1. 在 Google Cloud 控制台进入 **Monitoring** → **Alerting**，点击 **Edit notification channels**
+2. 在 **Webhook** 部分点击 **Add New**，`Endpoint URL` 填入上一步复制的推送地址，`Display Name` 填 `Flashduty`
+3. 点击 **Test Connection** 后点击 **Save**
+
+Google 的说明：Webhook 只支持公网端点，Flashduty 的推送地址满足要求。
+
+### 步骤 3：创建 Service Health 告警策略
+
+任选一种方式。
+
+**方式一：在 Service Health 控制台创建**
+
+1. 进入 Service Health 控制台，点击右上角 **Create Alert Policy**
+2. 选择一个告警策略模板，通知渠道选择步骤 2 创建的 Webhook 渠道，点击 **Create Policies**
+3. 需要修改条件时，在模板菜单中选择 **Customize alert policy**
+
+**方式二：用 gcloud 创建**
+
+```bash
+gcloud config set project PROJECT_ID
+gcloud monitoring policies create --policy-from-file="policy.json"
+```
+
+`policy.json` 示例，`NOTIFICATION_CHANNEL` 是步骤 2 中渠道的资源名（形如 `projects/PROJECT_ID/notificationChannels/885798905074`，可用 `gcloud beta monitoring channels list` 查询）：
+
+```json
+{
+  "displayName": "Google Cloud incident",
+  "combiner": "OR",
+  "conditions": [ {
+    "displayName": "Log match condition",
+    "conditionMatchedLog": {
+      "filter": "labels.\"servicehealth.googleapis.com/new_event\"=true AND jsonPayload.detailedCategory = \"CONFIRMED_INCIDENT\" AND jsonPayload.@type = \"type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog\""
+    } } ],
+  "notificationChannels": [ "NOTIFICATION_CHANNEL" ],
+  "enabled": true,
+  "severity": "WARNING",
+  "alertStrategy": { "notificationRateLimit": { "period": "300s" }, "autoClose": "1800s" }
+}
+```
+
+`filter` 是日志过滤条件，Google 文档给出的常用条件：
+
+| 场景 | 条件 |
+| :--- | :--- |
+| 某产品的新事件 | `labels."servicehealth.googleapis.com/new_event"=true AND jsonPayload.detailedCategory = "CONFIRMED_INCIDENT" AND jsonPayload.impactedProductIds =~ "<产品 ID>" AND jsonPayload.@type = "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog"` |
+| 某区域的新事件 | `labels."servicehealth.googleapis.com/new_event"=true AND jsonPayload.detailedCategory = "CONFIRMED_INCIDENT" AND jsonPayload.impactedLocations =~ "us-central1" AND jsonPayload.@type = "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog"` |
+| 已确认事件的任何更新 | `jsonPayload.detailedCategory = "CONFIRMED_INCIDENT" AND jsonPayload.@type = "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog"` |
+
+产品 ID 和位置名称的取值见 Google 文档 [Google Cloud products and locations](https://cloud.google.com/service-health/docs/supported-products-locations)。在告警策略中设置 **Policy severity level**（API 字段 `severity`），Flashduty 据此确定告警等级。
+
+### 步骤 4：测试
+
+按 Google 文档，向 Cloud Logging 写入一条测试日志，等待几分钟，在 **Monitoring** → **Incidents** 和 Flashduty 中确认收到告警。重复测试需要间隔至少 5 分钟。
+
+```bash
+gcloud logging write --payload-type=json LOG_NAME '{ "category": "INCIDENT", "relevance": "IMPACTED", "@type": "type.googleapis.com/google.cloud.servicehealth.logging.v1.EventLog", "description": "This is a test log entry"}'
+```
+
+`LOG_NAME` 使用 Service Health 的日志名，Google 文档中的格式为 `projects/PROJECT_ID/logs/servicehealth.googleapis.com%2Factivity`。
+
+## 开启超时自动关闭
+---
+
+对于日志告警策略，Cloud Monitoring 只在事件打开时发送通知，不会在关闭时发送通知（API 中日志告警策略的通知时机固定为 `OPENED`），所以 Flashduty 收不到恢复通知。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，超时计时起点选择 **故障触发**，建议时长 24 小时，再按你所关心事件的常见持续时间调整。
+
+告警策略里的 `autoClose` 只决定 Cloud Monitoring 中事件何时关闭（日志告警默认 7 天），不会通知 Flashduty。
+
+## 字段映射
+---
+
+| Cloud Monitoring 字段 | Flashduty |
+| :--- | :--- |
+| `incident.incident_id` | Alert Key |
+| `incident.state` | `closed` 时恢复告警，其他值触发或更新告警 |
+| `incident.policy_name`、`incident.condition_name` | 告警标题，格式为 `<策略名> / <条件名>`，例如 `Google Cloud incident / Log match condition` |
+| `incident.summary` | 告警描述 |
+| `incident.severity` | `Critical` → Critical；`Error`、`Warning` → Warning；其他（包括 `No severity`）→ Info |
+| `incident.url` | 标签 `url`，指向 Cloud Monitoring 事件页面 |
+| `incident.scoping_project_id`、`resource_name` 等 | 标签 `scoping_project_id`、`resource_name` 等 |
+| `incident.documentation.content` | 标签 `content` |
+| `incident.policy_user_labels` | 每个键展开为一个标签 |
+
+## 排查问题
+---
+
+- **没有收到告警**：在 **Monitoring** → **Incidents** 确认事件已打开；检查日志过滤条件是否匹配，通知有频率限制（Google 文档中的示例为每个策略每天每个项目 20 条告警）
+- **告警没有恢复**：日志告警不发送关闭通知，请开启协作空间的超时自动关闭
+- **Test Connection 失败**：确认 `Endpoint URL` 是完整的推送地址，包含 `integration_key`
+- **同一个事件的多次更新产生多条告警**：每个 Cloud Monitoring 事件（`incident_id`）对应一条 Flashduty 告警；用 `new_event` 条件只对新事件发出通知，可以减少告警数量
+
+更多说明请参阅 Google 文档 [Configure alerts through Cloud Logging](https://cloud.google.com/service-health/docs/configure-alerts-cloud-logging)、[Example alerting policies and conditions](https://cloud.google.com/service-health/docs/example-alerting-policies) 和 [Create and manage notification channels](https://cloud.google.com/monitoring/support/notification-options)。
