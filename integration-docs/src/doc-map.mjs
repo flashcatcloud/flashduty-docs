@@ -80,6 +80,7 @@ export const docMap = {
   Pingdom: `${alertBase}/pingdom.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
   Rollbar: `${alertBase}/rollbar.mdx`,
+  Cato: `${alertBase}/cato.mdx`,
   Aikido: `${alertBase}/aikido.mdx`,
   DattoRmm: `${alertBase}/datto-rmm.mdx`,
   Rbltracker: `${alertBase}/rbltracker.mdx`,
