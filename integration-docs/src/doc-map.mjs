@@ -133,6 +133,7 @@ export const docMap = {
   Netdata: `${alertBase}/netdata.mdx`,
   Stackrox: `${alertBase}/stackrox.mdx`,
   Honeycomb: `${alertBase}/honeycomb.mdx`,
+  Panther: `${alertBase}/panther.mdx`,
   Axiom: `${alertBase}/axiom.mdx`,
   Checkmk: `${alertBase}/checkmk.mdx`,
   Auvik: `${alertBase}/auvik.mdx`,
