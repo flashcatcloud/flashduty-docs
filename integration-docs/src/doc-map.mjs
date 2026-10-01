@@ -256,6 +256,7 @@ export const docMap = {
   Opnsense: `${alertBase}/opnsense.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
   GiteaChange: `${integrationBase}/change-integration/gitea.mdx`,
   GitlabChange: `${integrationBase}/change-integration/gitlab.mdx`,
@@ -281,6 +282,7 @@ export const docMap = {
   ScalrChange: `${integrationBase}/change-integration/scalr.mdx`,
   GrowthbookChange: `${integrationBase}/change-integration/growthbook.mdx`,
   FluxcdChange: `${integrationBase}/change-integration/fluxcd.mdx`,
+  PulumiChange: `${integrationBase}/change-integration/pulumi.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',

@@ -1,0 +1,143 @@
+---
+title: "TeamCity 变更集成"
+description: "通过 TeamCity 服务器的内置 Webhook 将构建的排队、开始和结束状态同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "TeamCity", "构建", "部署", "CI/CD", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 TeamCity 服务器的内置 Webhook，将构建（Build）的状态同步到 Flashduty On-call。每个构建对应一条 Flashduty 变更，随构建经历排队、运行、结束而更新状态。
+
+TeamCity 的 Webhook 在服务器级别配置，推送的是项目下所有构建配置（Build Configuration）的构建。如果只想记录部署类构建配置，把 Webhook 参数设置在包含这些构建配置的项目上，而不是根项目上，参见下文配置步骤。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **TeamCity**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`build_type_id`、`ref`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 TeamCity 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 参数">
+
+Webhook 由项目参数控制，子项目继承父项目的设置。在 TeamCity 中打开要记录的项目（记录全部构建则打开根项目 Root project），进入 **Parameters**，添加以下参数：
+
+| 参数 | 值 |
+|---|---|
+| `teamcity.internal.webhooks.enable` | `true` |
+| `teamcity.internal.webhooks.url` | Flashduty 集成的完整推送地址 |
+| `teamcity.internal.webhooks.events` | `BUILD_TYPE_ADDED_TO_QUEUE;BUILD_STARTED;BUILD_FINISHED;BUILD_INTERRUPTED` |
+
+只需要结束状态时，把 `events` 设为 `BUILD_FINISHED;BUILD_INTERRUPTED`。Flashduty 通过推送地址中的 `integration_key` 鉴权，无需配置 `teamcity.internal.webhooks.username` 和 `teamcity.internal.webhooks.password`。
+
+</Step>
+
+<Step title="指定推送字段">
+
+TeamCity 默认推送完整的 Build 对象，但文档没有列出默认包含哪些字段。为了让变更带上各状态的时间、构建配置名称和触发人，为每个事件各添加一个 `teamcity.internal.webhooks.<事件>.fields` 参数，`<事件>` 依次为 `BUILD_TYPE_ADDED_TO_QUEUE`、`BUILD_STARTED`、`BUILD_FINISHED`、`BUILD_INTERRUPTED`，值都为：
+
+```text
+fields=id,buildTypeId,number,status,statusText,branchName,webUrl,queuedDate,startDate,finishDate,buildType(name,projectName,projectId),triggered(user(username)),canceledInfo(timestamp)
+```
+
+`id` 是必需的。缺少日期字段时，Flashduty 以收到推送的时间作为变更时间，状态顺序按到达先后决定，TeamCity 重发同一推送时可能记录为重复事件。
+
+</Step>
+
+<Step title="运行一次构建">
+
+TeamCity 没有测试推送。在配置了 Webhook 的项目下运行一次构建，结束后即可在 Flashduty 变更列表中看到记录。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| TeamCity 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 构建（Build） | `id` | 构建的 ID 在整个 TeamCity 服务器内唯一，排队、运行、结束各事件都携带同一个 ID。同一构建配置、同一分支的两次构建是两条变更。不要使用构建号（`number`）：它按构建配置计数，排队时为空，取消的构建显示为 `N/A` |
+
+## 状态映射
+---
+
+| TeamCity 事件 | `status` | Flashduty 变更状态 |
+|---|---|---|
+| `BUILD_TYPE_ADDED_TO_QUEUE` | | Ready |
+| `BUILD_STARTED` | | Processing |
+| `BUILD_FINISHED` | `SUCCESS` | Done |
+| `BUILD_FINISHED` | `FAILURE`、`ERROR` | Failed |
+| `BUILD_FINISHED` | `UNKNOWN` | Canceled |
+| `BUILD_INTERRUPTED` | 任意 | Canceled |
+
+TeamCity 取消的构建触发 `BUILD_INTERRUPTED`，不触发 `BUILD_FINISHED`。
+
+以下推送返回成功但不生成变更：
+
+- 其他事件类型，例如 `AGENT_REGISTERED`、`AGENT_UNREGISTERED`、`AGENT_REMOVED`、`CHANGES_LOADED`、`BUILD_PROBLEMS_CHANGED`
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目名>: <构建配置名> on <分支>`，例如 `Shop: Deploy Production on main`。没有配置 `fields` 时使用构建配置 ID |
+| 描述 | 构建状态说明（`statusText`） |
+| 链接 | TeamCity 中该构建的页面（`webUrl`） |
+| 变更时间 | 各状态自己的时间：排队 `queuedDate`、开始 `startDate`、结束 `finishDate`；被取消时优先使用 `canceledInfo.timestamp` |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目名 |
+| `project_id` | 项目 ID |
+| `build_type` | 构建配置名 |
+| `build_type_id` | 构建配置 ID |
+| `build_id` | 构建 ID |
+| `build_number` | 构建号。排队时没有，不要用它做路由 |
+| `ref` | 分支名 |
+| `actor` | 触发构建的用户名 |
+| `teamcity_event` | TeamCity 事件类型原值 |
+| `teamcity_status` | 构建状态原值。排队时没有，不要用它做路由 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="TeamCity 重发推送会重复记录吗？">
+
+不会，前提是推送带有日期字段（见上文“指定推送字段”）：Flashduty 以各状态的时间去重，相同的推送只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `payload.id is missing`：推送内容里没有构建 ID，请确认 `fields` 参数包含 `id`
+- `unknown payload.status`：`BUILD_FINISHED` 带来了未收录的状态值，请联系我们补充映射
+- `invalid payload.<字段>`：日期字段不是 TeamCity 的 `yyyyMMdd'T'HHmmssZ` 格式
+
+</Accordion>
+
+<Accordion title="没有看到变更？">
+
+- 确认 `teamcity.internal.webhooks.enable` 为 `true`，参数设置在构建所属的项目或其父项目上
+- 确认 `teamcity.internal.webhooks.events` 包含需要的事件
+- 在 TeamCity 服务器日志中查看推送是否失败，可用 `teamcity.internal.webhooks.retry_count` 设置失败重试次数
+
+</Accordion>
+
+<Accordion title="如何只记录部署构建？">
+
+TeamCity 不按构建配置类型过滤 Webhook。把 Webhook 参数设置在只包含部署构建配置的项目上，或用 Flashduty 集成的路由按 `build_type_id` 标签分派。
+
+</Accordion>
+</AccordionGroup>
