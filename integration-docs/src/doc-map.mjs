@@ -91,6 +91,7 @@ export const docMap = {
   Dash0: `${alertBase}/dash0.mdx`,
   ProjectDiscovery: `${alertBase}/projectdiscovery.mdx`,
   StatusCake: `${alertBase}/statuscake.mdx`,
+  Coroot: `${alertBase}/coroot.mdx`,
   Pulsetic: `${alertBase}/pulsetic.mdx`,
   EdgeDelta: `${alertBase}/edge-delta.mdx`,
   Loadster: `${alertBase}/loadster.mdx`,
