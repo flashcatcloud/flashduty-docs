@@ -1,0 +1,156 @@
+---
+title: "Pulumi Cloud change integration"
+description: "Sync Pulumi stack updates and Pulumi Deployments runs to Flashduty On-call through Pulumi Cloud webhooks, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Pulumi", "Pulumi Cloud", "Webhook", "stack update", "Pulumi Deployments", "infrastructure changes"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use Pulumi Cloud webhooks to sync stack updates and Pulumi Deployments runs to Flashduty On-call. Each stack update (`pulumi up`, `pulumi destroy`) and each Deployments run becomes one Flashduty change.
+
+A webhook can be attached to an organization (it receives events from every stack in the organization) or to a single stack. Flashduty records the events below; every other event returns success and creates no change:
+
+| Pulumi event kind (`Pulumi-Webhook-Kind`) | Handling |
+|---|---|
+| `stack_update` (`update_succeeded`, `update_failed`, `destroy_succeeded`, `destroy_failed`) | Recorded as a change |
+| `deployment` (`deployment_queued`, `deployment_started`, `deployment_succeeded`, `deployment_failed`) | Recorded as a change |
+| `stack_preview`, `ping`, `stack` (stack created or deleted), `drift_detection`, `drift_remediation`, `policy_violation` | Ignored |
+| A `stack_update` whose kind is `refresh`; a `deployment` whose operation is `preview`, `refresh` or `detect-drift` | Ignored: they do not change infrastructure |
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Pulumi** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project` or `stack`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Pulumi Cloud
+---
+
+<Steps>
+<Step title="Create a webhook">
+
+- Organization webhook: go to **Settings → Integrations → Webhooks**
+- Stack webhook: open the stack, then **Settings → Webhooks**
+
+Click **Create webhook**.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **Destination**: select **Webhook** (the generic JSON format, not Slack or Microsoft Teams)
+2. **Display name**: any name
+3. **Payload URL**: paste the complete Flashduty integration Push URL
+4. **Secret**: leave empty. Flashduty authenticates with the `integration_key` in the Push URL and does not verify `Pulumi-Webhook-Signature`
+
+</Step>
+
+<Step title="Select events">
+
+Under **Events**, choose one of the following, not both (see "What one change is" below):
+
+- To track update results only: `update_succeeded`, `update_failed`, `destroy_succeeded`, `destroy_failed`
+- To use Pulumi Deployments and see queued, running, and finished: `deployment_queued`, `deployment_started`, `deployment_succeeded`, `deployment_failed`
+
+Click **Create**.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| Pulumi object | Change key (change_key) | Notes |
+|---|---|---|
+| Stack update | `update:<org>/<project>/<stack>/<update number>`, from the path of `updateUrl` | Pulumi sends a stack update once, when it ends, so this change has a single event and is Done or Failed right away |
+| Deployments run | `deployment:<org>/<project>/<stack>/<deployment version>`, from the path of `deploymentUrl` | Each queued, running, and finished notification updates the same change |
+
+An update run through Pulumi Deployments sends both a `deployment` and a `stack_update` event. They are different objects and create two changes, so select only one of the two kinds.
+
+Two updates of the same stack are two changes. The update number and the deployment version are per-stack counters and never repeat within a stack.
+
+## Status mapping
+---
+
+Stack updates (`result`):
+
+| Pulumi result | Flashduty change status |
+|---|---|
+| `succeeded` | Done |
+| `failed` | Failed |
+| `cancelled` | Canceled |
+
+Deployments runs (`status`):
+
+| Pulumi status | Flashduty change status |
+|---|---|
+| `not-started`, `accepted` | Ready |
+| `running` | Processing |
+| `succeeded` | Done |
+| `failed` | Failed |
+| `skipped` | Canceled |
+
+Done, Failed, and Canceled are end states; Flashduty records the change's end time. Pulumi's `result` and `status` can also hold `not started`, `requested`, or `running`, which Flashduty records as Ready or Processing; any other value makes the delivery return an error.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | Stack update: `<project>/<stack>: pulumi <operation> #<update number>`, for example `website/website-prod: pulumi update #42`; deployment: `<project>/<stack>: deployment #<deployment version> (<operation>)` |
+| Description | For a stack update, the resource change counts, for example `delete: 1, update: 3, update-replace: 2`; empty for a deployment |
+| Link | The Pulumi Cloud page of the update or deployment |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `organization` | Pulumi organization name |
+| `project` | Pulumi project name |
+| `stack` | Stack name |
+| `operation` | The operation, for example `update` or `destroy` |
+| `actor` | GitHub login of the user who triggered it, or the display name when there is no login |
+| `update_version` | Stack update number (stack updates only) |
+| `deployment_version` | Deployment version (Deployments runs only) |
+| `state` | Pulumi result or status in the latest notification, for example `succeeded` or `running` |
+
+`actor` and `operation` can differ between the notifications of one change, so do not route on them; route on `organization`, `project`, and `stack`.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="What is the event time? Does a redelivery record a duplicate?">
+
+Pulumi's payloads carry no timestamp, so Flashduty uses the time it receives the notification as the event time. Redelivering a notification from Pulumi Cloud therefore adds one more event to the change, with the same status.
+
+Pulumi does not guarantee the order of notifications. If the `running` notification of a Deployments run arrives after its `succeeded`, the change goes back to Processing. This is rare; the delivery log in Pulumi Cloud shows the order. A stack update sends only its final result and is not affected.
+
+</Accordion>
+
+<Accordion title="Why are previews and refreshes not recorded?">
+
+A preview does not change infrastructure, and a refresh only syncs the cloud's current state back into Pulumi state, so neither is recorded. The same applies to `stack_preview` events and to previews, refreshes, and drift detection in Deployments.
+
+</Accordion>
+
+<Accordion title="Does creating the webhook send a test delivery?">
+
+Pulumi's `ping` event returns success and creates no change.
+
+</Accordion>
+
+<Accordion title="Why does a delivery return InvalidParameter?">
+
+- `Pulumi-Webhook-Kind header is missing`: the request did not come from a Pulumi Cloud webhook, or a proxy removed the header
+- `updateUrl is missing` / `deploymentUrl is missing`: the payload is incomplete. Make sure the webhook's Destination is **Webhook**, not Slack or Microsoft Teams
+- `unsupported result "..."` / `unsupported status "..."`: Flashduty received a state it does not support yet. Contact us
+
+</Accordion>
+</AccordionGroup>
