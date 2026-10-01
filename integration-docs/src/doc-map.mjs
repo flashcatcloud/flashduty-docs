@@ -290,6 +290,7 @@ export const docMap = {
   FluxcdChange: `${integrationBase}/change-integration/fluxcd.mdx`,
   PulumiChange: `${integrationBase}/change-integration/pulumi.mdx`,
   Env0Change: `${integrationBase}/change-integration/env0.mdx`,
+  HarnessFmeChange: `${integrationBase}/change-integration/harness-fme.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
