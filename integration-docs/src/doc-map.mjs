@@ -136,6 +136,7 @@ export const docMap = {
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   MongodbAtlas: `${alertBase}/mongodb-atlas.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Ofelia: `${alertBase}/ofelia.mdx`,
   Openobserve: `${alertBase}/openobserve.mdx`,
   Postman: `${alertBase}/postman.mdx`,
   Contrast: `${alertBase}/contrast.mdx`,
