@@ -178,6 +178,7 @@ export const docMap = {
   SplitIo: `${alertBase}/split-io.mdx`,
   Firefly: `${alertBase}/firefly.mdx`,
   Kuvasz: `${alertBase}/kuvasz.mdx`,
+  DotcomMonitor: `${alertBase}/dotcom-monitor.mdx`,
   ThinkstCanary: `${alertBase}/thinkst-canary.mdx`,
   Falco: `${alertBase}/falco.mdx`,
   Blumira: `${alertBase}/blumira.mdx`,
