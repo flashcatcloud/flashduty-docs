@@ -1,0 +1,131 @@
+---
+title: "Falco alert integration"
+description: "Send Falco runtime security detections to Flashduty On-call through the Falcosidekick webhook output or Falco's built-in http_output."
+keywords: ["alert integration", "Falco", "Falcosidekick", "webhook", "runtime security"]
+---
+
+Use the Falcosidekick webhook output (or Falco's built-in `http_output`) to send runtime security events matched by Falco rules to Flashduty On-call. Each Falco event maps to one Flashduty alert. Falco is an event stream and never sends a recovery message after a rule fires, so these alerts do not recover on their own. Turn on the channel's auto-resolve timeout as described below.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Falco**, then click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Falco** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** after creating it
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Falco
+---
+
+Pushing through Falcosidekick is recommended because `minimumpriority` filters low-priority events at the source. Without Falcosidekick, Falco can push directly.
+
+<Tabs>
+<Tab title="Falcosidekick (recommended)">
+
+Set the webhook output address to the Flashduty push URL. The output is enabled as soon as `webhook.address` is not empty.
+
+With environment variables:
+
+```bash
+WEBHOOK_ADDRESS="<Flashduty push URL>"
+# Optional: only push warning and above
+WEBHOOK_MINIMUMPRIORITY="warning"
+```
+
+Or in `config.yaml`:
+
+```yaml
+webhook:
+  address: "<Flashduty push URL>"
+  # minimumpriority: "warning"
+```
+
+With Helm, use `config.webhook.address` and `config.webhook.minimumpriority`. Restart Falcosidekick after the change.
+
+</Tab>
+<Tab title="Falco direct push">
+
+Enable JSON output and the HTTP output in `falco.yaml`, then restart Falco:
+
+```yaml
+json_output: true
+
+http_output:
+  enabled: true
+  url: "<Flashduty push URL>"
+```
+
+</Tab>
+</Tabs>
+
+<Warning>
+The push URL contains `integration_key`. Paste it in full, including the parameters after the question mark.
+</Warning>
+
+## Verify
+---
+
+Send a request to the Falcosidekick `/test` endpoint (it listens on port 2801 by default):
+
+```bash
+curl -X POST http://<falcosidekick-host>:2801/test
+```
+
+Flashduty opens a new alert titled `Test rule` with Info severity. The test alert has its own Alert Key, so it never merges into a real alert and it does not recover. Close it by hand once you have seen it.
+
+Then trigger a real rule on a monitored host or container (for example, open an interactive shell in a container to fire `Terminal shell in container`) and confirm the alert appears in Flashduty.
+
+## Alert Key
+---
+
+Each Falco event is an independent detection with no lifecycle, so each event becomes its own alert:
+
+- Through Falcosidekick, the Alert Key is the event `uuid`. Falcosidekick generates a new `uuid` for every event, so a redelivered event does not create a duplicate alert.
+- Falco's direct JSON carries no `uuid`. The Alert Key is then an MD5 of `rule`, `hostname`, `source`, `time`, and `output`.
+
+A request without `rule` is rejected, because Flashduty cannot tell which rule fired.
+
+## Severity
+---
+
+| Falco `priority` | Flashduty severity |
+| :--- | :--- |
+| `Emergency` / `Alert` / `Critical` | Critical |
+| `Error` / `Warning` | Warning |
+| `Notice` / `Informational` / `Debug` | Info |
+| Empty or unknown | Warning |
+
+## Labels
+---
+
+The title is the rule name (`rule`) and the description is `output`. These fields become labels: `rule`, `priority`, `hostname` (also used as `resource`), `falco_source`, `falco_uuid`, and `tags` (comma-separated). Every field in `output_fields` also becomes a label, with `.` in the key replaced by `_`, for example `container.id` becomes `container_id` and `k8s.pod.name` becomes `k8s_pod_name`. At most 50 labels are kept.
+
+## Recovery
+---
+
+Falco sends no recovery event, so alerts do not resolve on their own. Turn on the [auto-resolve timeout](/en/on-call/channel/create-edit) for the channel that receives Falco alerts (24 hours suggested; adjust it to how quickly you need to respond), or close alerts by hand after handling them.
+
+## Troubleshooting
+---
+
+- **Falcosidekick logs a webhook error**: check that the address is complete, includes `integration_key`, and that `api.flashcat.cloud` is reachable from where Falcosidekick runs
+- **Flashduty returns a parameter error**: make sure Falco has `json_output: true` and the body is valid JSON containing `rule`
+- **No alert arrives**: confirm the rule actually fired (check Falco's own log first) and that `minimumpriority` is not filtering it out
+- **Too many alerts**: tune the rules in Falco or raise `minimumpriority`; repeated alerts from one rule can be merged with the channel's noise reduction settings
+
+For more details, see [Falco output channels](https://falco.org/docs/concepts/outputs/channels/) and the [Falcosidekick webhook output](https://github.com/falcosecurity/falcosidekick/blob/master/docs/outputs/webhook.md).

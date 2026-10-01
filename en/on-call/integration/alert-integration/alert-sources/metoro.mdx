@@ -1,0 +1,94 @@
+---
+title: "Metoro alert integration"
+description: "Send Metoro alert trigger and recovery events to Flashduty On-call through a webhook destination."
+keywords: ["alert integration", "Metoro", "Kubernetes", "webhook", "observability"]
+---
+
+Use a Metoro webhook to send alert triggers and recoveries to Flashduty On-call. The firing and resolved notifications of one fire instance update one Flashduty alert.
+
+You write the Metoro webhook body yourself in **Body Template**, and Metoro substitutes variables such as `$alert_name` with real values. The template on this page is the format Flashduty parses, so copy it as is.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **Metoro** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure Metoro
+---
+
+<Steps>
+<Step title="Add a webhook">
+
+In Metoro, go to **Settings → Integrations → Webhooks**, select **Add Webhook** and fill in:
+
+- **Name**: for example `Flashduty`
+- **URL**: the complete Flashduty Push URL, such as `https://api.flashcat.cloud/event/push/alert/metoro?integration_key=<your-integration-key>`
+- **HTTP Method**: `POST`
+- **Headers**: Metoro adds `Content-Type: application/json` to POST requests by default, so you don't need to add one
+- **Body Template**: paste the template below
+
+```json
+{
+  "alert_name": "$alert_name",
+  "alert_uuid": "$alert_uuid",
+  "alert_fire_uuid": "$alert_fire_uuid",
+  "state": "$alert_state",
+  "description": "$alert_description",
+  "attributes": "$attributes",
+  "metric_name": "$metric_name",
+  "value": "$breaching_datapoint_value",
+  "deep_link": "$deep_link"
+}
+```
+
+<Warning>
+Keep the `alert_fire_uuid` and `state` fields, and keep the quotes around each variable. Flashduty rejects a request with no `alert_fire_uuid`, or whose `state` is not `firing` or `resolved`, because it could not reliably match the later recovery.
+</Warning>
+
+</Step>
+
+<Step title="Use the webhook as an alert destination and enable recovery notifications">
+
+Add the webhook from the previous step to the alert's destinations and select **Notify when alarm recovers**. The interface then shows two webhook selectors; choose the same webhook for both firing and recovery. Without this option Metoro sends only `firing`, and the Flashduty alert does not recover automatically.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Metoro has no separate test button. Let an alert that uses this webhook fire for real and confirm that Flashduty receives an active alert; after the condition clears, confirm the alert recovers.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `alert_fire_uuid` (Metoro's `$alert_fire_uuid`, the UUID of one fire instance) as the Alert Key. Metoro's own Rootly integration guide pairs firing and resolved notifications on this same field (identifier `$.metoro_alert_fire_uuid`, state field `resolved`), and states that for alerts with a group by, each group value has its own `$alert_fire_uuid` while `$alert_uuid` is the same for all of them.
+
+- For an alert with a group by, each group value maps to its own Flashduty alert and recovers independently
+- When the same alert definition fires again, it gets a new `alert_fire_uuid` and opens a new Flashduty alert
+- Changes to `description`, `value`, and similar fields don't change the Alert Key
+
+## Status and severity
+---
+
+| Metoro `$alert_state` | Flashduty status or severity |
+| :--- | :--- |
+| `firing` | Warning |
+| `resolved` | Recovery, previous severity Warning |
+
+Metoro alerts have no severity field, so every alert is treated as Warning. An empty or other state value is rejected. To distinguish severity, adjust it with rules in the Flashduty channel.
+
+## Troubleshooting
+---
+
+- **Metoro reports a webhook failure (400)**: confirm the Body Template is valid JSON and that `alert_fire_uuid` and `state` are not empty. Metoro escapes variables automatically for JSON requests, so don't add escaping yourself
+- **404 or 401**: confirm the Push URL is complete and includes `integration_key`
+- **The alert doesn't recover**: confirm the destination has **Notify when alarm recovers** selected with the same webhook, and that `state` is `resolved`
+- **`attributes` is empty**: the field has a value only when the alert uses a group by
+
+For more variables, see the [Metoro webhook documentation](https://metoro.io/docs/integrations/webhooks).

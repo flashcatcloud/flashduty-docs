@@ -1,0 +1,103 @@
+---
+title: "Twingate alert integration"
+description: "Send Twingate connector offline, events sync and integration errors, and key expiration notifications to Flashduty On-call through notification webhooks. Alerts close automatically when a recoverable notification arrives."
+keywords: ["alert integration", "Twingate", "zero trust", "Connector", "webhook"]
+---
+
+Twingate Admin Console notifications can be delivered to a webhook. This integration receives those JSON notifications: connector offline, events sync errors, identity provider and device integration errors, service account key and device integration token expiration, and access requests. Connector status, events sync, and integration errors have matching recovery notifications and close their alert automatically; the other notifications never recover.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the push URL in either of the following ways.
+
+### Dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integration** and click **Add an integration**
+3. Select **Twingate** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Twingate** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** afterwards
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Twingate
+---
+
+<Steps>
+<Step title="Add a webhook">
+
+Sign in to the Twingate Admin Console as an admin, go to **Settings** → **Notification Channels**, open the **Webhooks** tab and click **Configure Webhook** (**Add Webhook** when one already exists): enter a webhook name, paste the full Flashduty push URL as the URL, and select the notifications to send to it.
+
+Recommended: Connectors offline / online, Events sync errors / resolved / requires attention, Integration errors / resolved, Identity provider integration error, Google Workspace sync error, Device integration API token expiration, and Service Account keys expiration. Select Access Requests only if you want them.
+
+</Step>
+
+<Step title="Test">
+
+Click **Test Payload** next to a notification and Twingate sends a sample notification to the URL. The Connectors offline and online samples have fixed content (connector `delectable-robin` in remote network `Acme Network`). Flashduty recognises them and opens one standalone Info alert that does not touch any real connector's alert; close it manually. The other samples have the same format as real notifications and Twingate does not mark them as tests, so Flashduty creates alerts from them; close those manually too.
+
+</Step>
+</Steps>
+
+<Note>Twingate notification webhooks carry no signature header and need no secret. The `integration_key` in the push URL acts as the credential; do not publish it.</Note>
+
+## Alert Key
+---
+
+Twingate notifications carry no alert ID, so Flashduty builds the Alert Key from the tenant (`tenant`) and the notification group:
+
+| Notification `type` | Alert Key parts | Lifecycle |
+| :--- | :--- | :--- |
+| `CONNECTOR_STATUS_OFFLINE` / `CONNECTOR_STATUS_ONLINE` | tenant + remote network `remote_network` + connector name `connector_name` | Offline triggers, online recovers |
+| `EVENTS_SYNC_ERRORS`, `EVENTS_SYNC_REQUIRES_ATTENTION` / `EVENTS_SYNC_ERROR_RESOLVED` | tenant + events sync | Errors trigger, the resolved notification closes |
+| `INTEGRATION_ERRORS`, `IDENTITY_PROVIDER_INTEGRATION_ERROR` / `INTEGRATION_ERROR_RESOLVED` | tenant + `integration` | Errors trigger, the resolved notification closes |
+| `DEVICE_INTEGRATION_API_TOKEN_EXPIRATION` | tenant + `integration` | One-shot |
+| `ACCESS_REQUEST` | tenant + `request_id` | One-shot |
+| `GOOGLE_WORKSPACE_SYNC_ERROR`, `SERVICE_ACCOUNT_KEYS_EXPIRATION`, and types added later | tenant + notification type | One-shot |
+
+The `table` of a connector notification lists the affected connectors (`connector_name`, `remote_network`, `version`, `link`) but has no connector ID. Flashduty tells connectors apart by remote network plus connector name: when one notification lists several connectors, each gets its own alert, and a connector coming online closes only its own alert. When the `table` names no connector, the connector notifications of one tenant merge into one alert. A renamed connector counts as a new connector. The events sync error notification has no `sync_type`, so the sync type is not part of its Alert Key.
+
+Changes to the message, timestamp, `days_remaining`, or `table` never change the Alert Key. Flashduty rejects a request without `tenant` or `type`, or without `integration` / `request_id` for the types that need them.
+
+These notifications create no alert and Flashduty returns success: `CLIENT_UPDATE_RECOMMENDED`, `CLIENT_UPDATE_REQUIRED`, `CONNECTOR_UPGRADE_AVAILABLE`.
+
+## Severity
+---
+
+Twingate notifications have no severity field, so Flashduty sets it from the type:
+
+| Notification type | Flashduty severity |
+| :--- | :--- |
+| `CONNECTOR_STATUS_OFFLINE` | Critical |
+| `ACCESS_REQUEST` | Info |
+| Any other type (including new, unrecognized ones) | Warning |
+
+A recovery notification keeps the severity of the notification it closes.
+
+## Alert content
+---
+
+- **Title**: the notification `message`; `Twingate <type>` when absent
+- **Description**: the access request `reason` and the key-value pairs of every `table` row (at most 20 rows; fields whose name contains key, token, or secret are left out)
+- **Labels**: `tenant`, `type`, `check` (notification group), `integration`, `sync_type`, `platform`, `days_remaining`, `request_id`, `user_name`, `resource_name`, `approval_mode`, `request_type`
+
+## Notifications that do not recover
+---
+
+Key and token expiration, Google Workspace sync errors, and access requests are one-shot: Twingate sends no recovery. Turn on [auto-close](/en/on-call/channel/create-edit) for the channel, with 24 hours as a suggested duration. Repeated notifications for the same object merge into one alert.
+
+## Troubleshooting
+---
+
+- **Twingate reports a webhook error**: the receiver must accept POST with JSON. Confirm you entered the full push URL including `integration_key`
+- **The alert did not close after the connector came back**: confirm the Connectors online notification is selected. Flashduty matches the online notification by remote network plus connector name; after a connector is renamed, close the alert under the old name manually
+- **The alert type is not what you expected**: check the `type` label, which is the `type` field of the Twingate notification

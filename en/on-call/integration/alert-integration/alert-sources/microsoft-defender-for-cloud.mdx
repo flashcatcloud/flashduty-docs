@@ -1,0 +1,131 @@
+---
+title: "Microsoft Defender for Cloud Alert Integration"
+description: "Run a Logic App from Defender for Cloud workflow automation and use its HTTP action to push security alerts to Flashduty's standard alert event integration."
+keywords: ["alert integration", "Microsoft Defender for Cloud", "Azure Security Center", "Logic App", "workflow automation", "cloud security", "standard alert event"]
+---
+
+Microsoft Defender for Cloud **Workflow automation** runs a Logic App when a security alert is created; it has no direct webhook output. The Logic App **HTTP** action can POST JSON to any address, so no separate Defender for Cloud integration is needed: create a [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard-alert) integration in Flashduty and let the Logic App push security alerts to it in the standard alert format.
+
+If the same tenant already sends Defender for Cloud alerts to Microsoft Sentinel, you can use the [Microsoft Sentinel integration](/en/on-call/integration/alert-integration/alert-sources/microsoft-sentinel) instead, which pushes per incident and supports recovery.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Standard Alert Event integration type** in both, not Microsoft Defender for Cloud.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Standard Alert Event** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Standard Alert Event** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Microsoft Defender for Cloud
+---
+
+You need the **Security admin** role or **Owner** on the resource group; creating and editing Logic Apps needs **Logic App Contributor**.
+
+### Create the Logic App
+
+1. In the Azure portal, create a **Consumption** Logic App. Workflow automation only triggers Consumption Logic Apps
+2. Choose **When a Defender for Cloud Alert is created or triggered** as the workflow trigger. Do not use the legacy **When a response to a Microsoft Defender for Cloud alert is triggered**; workflow automation does not run Logic Apps that use it
+3. After the trigger, add the built-in **HTTP** action and fill in its fields as described in the next section
+4. Save the workflow
+
+### Create the workflow automation
+
+1. In the Defender for Cloud sidebar, select **Workflow automation** and click **Add workflow automation**
+2. Enter a name and description
+3. In the trigger conditions, select security alerts and limit the severity if needed
+4. Under **Actions**, select the Logic App you created; click **Refresh** if it is not listed
+5. Save
+
+You can also open a single security alert and click **Trigger logic app** to run the Logic App for that alert manually.
+
+## HTTP action
+---
+
+Fields of the HTTP action:
+
+| Field | Value |
+| :--- | :--- |
+| **Method** | `POST` |
+| **URI** | The Flashduty push URL, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>` |
+| **Headers** | `Content-Type`: `application/json` |
+| **Body** | See below |
+
+Below is the JSON definition of this HTTP action; in the Logic App **Code view** it goes under `actions`. A string that starts with `@` and is a single expression is a Logic App expression evaluated from the alert trigger output; the value is emitted as JSON, so an alert name containing quotes does not break the body:
+
+```json
+"Send_to_Flashduty": {
+  "type": "Http",
+  "runAfter": {},
+  "inputs": {
+    "method": "POST",
+    "uri": "https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "title_rule": "@triggerBody()?['AlertDisplayName']",
+      "event_status": "@if(equals(triggerBody()?['Severity'], 'High'), 'Critical', if(equals(triggerBody()?['Severity'], 'Informational'), 'Info', 'Warning'))",
+      "alert_key": "@triggerBody()?['SystemAlertId']",
+      "description": "@triggerBody()?['Description']",
+      "labels": {
+        "alert_type": "@triggerBody()?['AlertType']",
+        "alert_url": "@triggerBody()?['AlertUri']",
+        "resource": "@coalesce(triggerBody()?['CompromisedEntity'], 'unknown')",
+        "product_name": "@triggerBody()?['ProductName']",
+        "vendor_name": "@triggerBody()?['VendorName']",
+        "defender_severity": "@triggerBody()?['Severity']"
+      }
+    }
+  }
+}
+```
+
+In the designer, the same values map to these dynamic contents (outputs of the **When a Defender for Cloud Alert is created or triggered** trigger):
+
+| Flashduty field | Dynamic content | Expression path |
+| :--- | :--- | :--- |
+| `title_rule` | Alert Display Name | `AlertDisplayName` |
+| `event_status` | Severity | `Severity` |
+| `alert_key` | System Alert Id | `SystemAlertId` |
+| `description` | Description | `Description` |
+| Label `alert_type` | Alert Type | `AlertType` |
+| Label `alert_url` | Alert Uri | `AlertUri` |
+| Label `resource` | Compromised Entity | `CompromisedEntity` |
+| Labels `product_name`, `vendor_name` | Product Name, Vendor Name | `ProductName`, `VendorName` |
+
+## Field mapping
+---
+
+| Defender for Cloud field | Flashduty |
+| :--- | :--- |
+| Alert Display Name | Alert title (`title_rule`, truncated beyond 512 characters) |
+| Severity | `High` → Critical; `Informational` → Info; `Medium` and `Low` → Warning. Also kept in the label `defender_severity` |
+| System Alert Id | Alert Key. A repeated trigger of the same alert merges into one Flashduty alert |
+| Description | Alert description (truncated beyond 2048 characters) |
+| Compromised Entity | Label `resource`; `unknown` when the alert has none |
+| Alert Uri | Label `alert_url`, which opens the alert details in the Azure portal |
+
+## Recovery and deduplication
+---
+
+Defender for Cloud workflow automation runs the Logic App only when an alert is created or triggered and sends nothing when the alert is dismissed, so alerts from this integration do not recover automatically. Enable [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel that receives this integration, with a suggested window of 3 days or the time your team usually takes to handle alerts; you can also close alerts manually in Flashduty.
+
+## Troubleshooting
+---
+
+- **Flashduty returns `InvalidParameter`**: check that `event_status` is one of the capitalized `Critical`, `Warning`, `Info`, and that `title_rule` is not empty
+- **The Logic App is missing from the workflow automation list**: the list shows only Consumption Logic Apps that use a Defender for Cloud connector; click **Refresh** after creating it
+- **The Logic App does not run**: confirm the trigger is **When a Defender for Cloud Alert is created or triggered** and that the workflow automation trigger conditions (severity) cover the alert

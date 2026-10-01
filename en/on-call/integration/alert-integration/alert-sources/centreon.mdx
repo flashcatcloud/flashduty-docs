@@ -1,0 +1,124 @@
+---
+title: "Centreon Alert Integration"
+description: "Push Centreon host and service alerts to the Flashduty PagerDuty integration through Centreon's PagerDuty Events stream connector; recovery states close the alerts automatically."
+keywords: ["alert integration", "Centreon", "stream connector", "PagerDuty", "Broker", "infrastructure monitoring"]
+---
+
+Centreon ships a PagerDuty Events stream connector (`pagerduty-events-apiv2.lua`). It sends host and service state changes as PagerDuty Events API v2 JSON to the address set in the `http_server_url` parameter, which defaults to `https://events.pagerduty.com/v2/enqueue`. The Flashduty [PagerDuty integration](/en/on-call/integration/alert-integration/alert-sources/pagerduty) accepts this format, so no separate Centreon integration is needed: create a PagerDuty integration in Flashduty and put its push URL into the connector's `http_server_url`.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the PagerDuty integration type** in both, not Centreon.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **PagerDuty** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/pagerduty?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **PagerDuty** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Centreon
+---
+
+### Step 1: Install the stream connector
+
+On the server that will send the data (central server, remote server or poller), run as root:
+
+```bash
+# Alma / RHEL / Oracle Linux 8 and 9
+dnf install centreon-stream-connector-pagerduty
+
+# Debian 12
+apt install centreon-stream-connector-pagerduty
+```
+
+### Step 2: Configure the Broker output
+
+1. On the central server, go to **Configuration** → **Pollers** → **Broker configuration** and click `central-broker-master` (choose the matching Broker configuration if a remote server or poller sends the events)
+2. On the **Output** tab, select **Generic - Stream connector** and click **Add** to add an output
+3. Fill in the fields as follows:
+
+| Field | Value |
+| :--- | :--- |
+| Name | `Flashduty` |
+| Path | `/usr/share/centreon-broker/lua/pagerduty-events-apiv2.lua` |
+| Filter category | `Neb` |
+
+4. Click **+Add a new entry** below the **Filter category** table to add these parameters:
+
+| Type | Name | Value |
+| :--- | :--- | :--- |
+| string | `pdy_routing_key` | The `integration_key` value from the push URL above (mandatory parameter) |
+| string | `http_server_url` | The full push URL (including `integration_key`) |
+| string | `pdy_centreon_url` | The address of your Centreon server (optional, used for the link in the alert) |
+
+5. Deploy the configuration and restart `centengine` on all pollers:
+
+```bash
+systemctl restart centengine
+```
+
+The Flashduty PagerDuty integration accepts the `integration_key` query parameter as well as `routing_key` in the request body; filling in both parameters above lets the connector's requests pass authentication. Keep `max_buffer_size` at its default so the connector sends one event per request.
+
+### Step 3: Verify
+
+Following the Centreon documentation, you can send a test event with curl from the connector's server, using the integration key as `routing_key` and the Flashduty push URL as the address:
+
+```bash
+curl -X POST -H 'content-type: application/json' '<push URL>' -d '{"dedup_key":"test_H","payload":{"component":"test","group":"hg_1","summary":"test: DOWN","class":"host","severity":"warning","source":"test"},"event_action":"trigger","client":"Centreon Stream Connector","routing_key":"<integration key>"}'
+```
+
+Flashduty should return HTTP 202 and an alert should appear; send it again with `event_action` set to `resolve` and the alert recovers.
+
+## Field mapping
+---
+
+How the fields sent by the Centreon connector (see the connector source) map to Flashduty:
+
+| Centreon connector field | Flashduty |
+| :--- | :--- |
+| `dedup_key` | Alert Key: `<host ID>_<service ID>` for a service, `<host ID>_H` for a host |
+| `event_action` | `resolve` is sent for state OK or UP and closes the alert; any other state sends `trigger` |
+| `payload.summary` | Alert title: `<host name>/<service name>: <state>` for a service, `<host name>: <state>` for a host |
+| `payload.severity` | `critical`, `error` → Critical; `warning` → Warning; `info` → Info |
+| `payload.source`, `component`, `group`, `class` | Labels `source` and `resource`, `component`, `group`, `class` (`group` holds the host groups, `class` is `host` or `service`) |
+| `payload.custom_details` | Each key becomes a label, including `Output` (the check output), `Hostgroups`, `Servicegroups` and so on |
+| `links`, `client`, `client_url` | Labels `Link to Centreon host summary`, `client`, `client_url` |
+
+Severity set by the connector for each Centreon state:
+
+| Centreon state | Connector `severity` | Flashduty |
+| :--- | :--- | :--- |
+| Service OK, host UP | `info`, sent together with `resolve` | Recovery |
+| Service WARNING, host DOWN | `warning` | Warning |
+| Service CRITICAL, host UNREACHABLE | `critical` | Critical |
+| Service UNKNOWN | `error` | Critical |
+
+## Recovery and deduplication
+---
+
+- A host or service always uses the same Alert Key, so a change from WARNING to CRITICAL updates the same alert and a return to OK or UP recovers it
+- With the connector library's default parameters only HARD states are sent, and objects that are acknowledged or in scheduled downtime are not sent; to change this, adjust `hard_only`, `acknowledged` and `in_downtime` in the connector parameters
+- To push only some objects, use the connector's filter parameters such as `accepted_hostgroups`, `accepted_servicegroups` and `accepted_pollers`
+
+## Troubleshooting
+---
+
+- **Flashduty receives no alert**: check `/var/log/centreon-broker/pagerduty-events.log` (the default log file; `log_level` goes up to 3); confirm `http_server_url` is the full push URL and `pdy_routing_key` is set
+- **The connector log shows a failed POST**: the connector only treats HTTP 202 as success, and Flashduty answers PagerDuty Events API v2 requests with 202; for other status codes, check that `integration_key` is correct
+- **The alert does not recover**: confirm the recovery states (service OK, host UP) are not excluded by filter parameters such as `service_status` or `host_status`
+- **No alert for acknowledged objects**: `acknowledged` defaults to 0, so acknowledged problems are not pushed
+
+For more details, see the Centreon documentation [PagerDuty Events](https://docs.centreon.com/docs/integrations/event-management/sc-pagerduty-events/) and the connector source [pagerduty-events-apiv2.lua](https://github.com/centreon/centreon-stream-connector-scripts/blob/master/centreon-certified/pagerduty/pagerduty-events-apiv2.lua).
