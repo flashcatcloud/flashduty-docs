@@ -1,0 +1,134 @@
+---
+title: "HCP Terraform change integration"
+description: "Sync Terraform runs to Flashduty On-call through HCP Terraform workspace notifications, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "HCP Terraform", "Terraform Cloud", "Run", "Webhook", "infrastructure changes"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use HCP Terraform (formerly Terraform Cloud) workspace notifications to sync Terraform runs to Flashduty On-call. Each run becomes one Flashduty change; every state of a run, from created through planning, waiting for confirmation, and applying to completed, errored, or canceled, updates that same change.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **HCP Terraform** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `organization` or `workspace`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure HCP Terraform
+---
+
+Notifications are configured per workspace, so configure one for each workspace you want to connect. You need admin permission on the workspace.
+
+<Steps>
+<Step title="Open notification settings">
+
+In the workspace, go to **Settings → Notifications** and click **Create a notification**.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **Destination**: select **Webhook**
+2. **Name**: enter a recognizable name, such as `Flashduty`
+3. **Webhook URL**: paste the complete Flashduty integration Push URL
+4. **Token**: leave it empty; Flashduty authenticates with the `integration_key` in the Push URL
+
+</Step>
+
+<Step title="Select triggers">
+
+1. Under **Run Events**, select **All events**
+2. Under **Workspace Events** (drift detection, auto destroy, and so on), select **No events**; Flashduty ignores these notifications
+3. Click **Create a notification**
+
+When you save, HCP Terraform sends a verification request. Flashduty accepts it without creating a change. You can verify again later with **Send a test**.
+
+</Step>
+</Steps>
+
+You can also manage this configuration with the Terraform `tfe` provider: a `tfe_notification_configuration` resource with `destination_type = "generic"`, `url` set to the Push URL, and `triggers` set to `["run:created", "run:planning", "run:needs_attention", "run:applying", "run:completed", "run:errored"]`.
+
+## What one change is
+---
+
+| HCP Terraform object | Change key (change_key) | Notes |
+|---|---|---|
+| Run | `run_id`, for example `run-FwnENkvDnrpyFC7M` | Every notification of one run updates the same change; two runs of the same workspace are two changes |
+
+## Status mapping
+---
+
+| Notification trigger | Run status (run_status) | Flashduty change status |
+|---|---|---|
+| run:created | pending | Ready |
+| run:planning | planning | Processing |
+| run:needs_attention | for example planned or policy_override (waiting for confirmation) | Planned |
+| run:applying | applying | Processing |
+| run:completed | applied, planned_and_finished, planned_and_saved | Done |
+| run:completed | discarded (the run was discarded at the confirm step) | Canceled |
+| run:errored | errored, policy_soft_failed | Failed |
+| run:errored | canceled, force_canceled | Canceled |
+
+Done, Failed, and Canceled are end states; Flashduty records the change's end time.
+
+`planned_and_finished` means a run that only planned (no changes, or a plan-only run). It is also recorded as Done; use the `run_status` label to tell it apart.
+
+The following deliveries are accepted without creating a change: the verification request sent on save or by **Send a test** (trigger `verification`), health assessment notifications (`assessment:drifted`, `assessment:check_failure`, `assessment:failed`), and workspace notifications (`workspace:auto_destroy_reminder`, `workspace:auto_destroy_run_results`, `workspace:deleted`).
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<organization>/<workspace>: terraform run <run_id>` |
+| Description | The run message (why the run was queued, such as a VCS commit message or a message entered manually) |
+| Link | The run's page in HCP Terraform |
+
+Use labels for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `organization` | HCP Terraform organization name |
+| `workspace` | Workspace name |
+| `workspace_id` | Workspace ID, for example `ws-XdeUVMWShTesDMME` |
+| `run_id` | Run ID |
+| `run_status` | Run status in the latest notification |
+| `actor` | User who created the run |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no changes arriving?">
+
+- Make sure the notification is enabled and **Run Events** are selected. **Workspace Events** alone create no changes
+- Check recent deliveries and Flashduty's responses on the notification configuration page
+- Notifications are per workspace; make sure the run's workspace has this notification configured
+
+</Accordion>
+
+<Accordion title="Are repeated deliveries recorded twice?">
+
+No. An event with the same run, status, and time is recorded only once.
+
+</Accordion>
+
+<Accordion title="Does drift detection create changes?">
+
+No. A health assessment reports resources drifting from their configuration, not a change. Flashduty accepts it and ignores it.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error">
+
+- `unsupported notifications[].trigger` or `unsupported notifications[].run_status`: Flashduty received a trigger or run status it does not support yet; contact us
+- `run_id is missing`: the payload is incomplete; make sure it comes from an HCP Terraform webhook notification
+
+</Accordion>
+</AccordionGroup>
