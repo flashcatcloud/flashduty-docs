@@ -181,6 +181,7 @@ export const docMap = {
   Intersight: `${alertBase}/intersight.mdx`,
   Insightidr: `${alertBase}/insightidr.mdx`,
   Upguard: `${alertBase}/upguard.mdx`,
+  Tracee: `${alertBase}/tracee.mdx`,
   Okta: `${alertBase}/okta.mdx`,
   Statuspage: `${alertBase}/statuspage.mdx`,
   Instatus: `${alertBase}/instatus.mdx`,
