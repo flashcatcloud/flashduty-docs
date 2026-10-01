@@ -1,0 +1,117 @@
+---
+title: "Trivy Operator 告警集成"
+description: "通过 Webhook 广播将 Aqua Trivy Operator 生成的漏洞、暴露密钥和配置审计报告同步到 Flashduty On-call。"
+keywords: ["告警集成", "Trivy Operator", "Aqua Security", "Trivy", "Kubernetes", "漏洞扫描", "容器安全", "Webhook"]
+---
+
+Trivy Operator 是 Aqua Security 开源的 Kubernetes 安全扫描组件，会把扫描结果保存为集群内的报告对象（漏洞、暴露密钥、配置审计、基础设施评估、RBAC 评估等）。启用 Webhook 广播后，Operator 每次生成或更新这些报告，就会把报告对象以 JSON 推送到指定地址。每个报告对象（`metadata.uid`）对应一条 Flashduty 告警，告警等级由报告摘要里各严重程度的数量决定。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Trivy Operator**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Trivy Operator**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Trivy Operator 中配置
+---
+
+需要有修改 Trivy Operator 部署配置的权限，且 Operator 所在网络能通过 HTTPS 访问 Flashduty 推送地址。
+
+<Steps>
+<Step title="设置 Webhook 广播地址">
+
+通过 Helm 安装时，设置 `operator.webhookBroadcastURL` 为 Flashduty 的完整推送地址（需包含 `integration_key`）：
+
+```bash
+helm upgrade --install trivy-operator aqua/trivy-operator \
+  --namespace trivy-system --create-namespace \
+  --reuse-values \
+  --set operator.webhookBroadcastURL="https://api.flashcat.cloud/event/push/alert/trivy-operator?integration_key=<your_integration_key>"
+```
+
+不使用 Helm 时，在 Operator 的部署中设置环境变量 `OPERATOR_WEBHOOK_BROADCAST_URL`。可选项：`operator.webhookBroadcastTimeout`（请求超时，默认 `30s`）。
+
+保持 `operator.webhookSendDeletedReports` 为默认的 `false` 即可。开启后每条消息会被包一层 `verb` 和 `operatorObject`（Flashduty 能解析），但报告被删除时发送的对象不含任何标识，Flashduty 会忽略这类消息。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Operator 只在报告生成或变化时推送，不发送“已解决”通知，所以漏洞被修复后，只有该报告被重新扫描且摘要里不再有任何级别的问题时，Flashduty 才会自动恢复对应告警。工作负载滚动更新会产生新的 ReplicaSet 和新的报告对象，旧报告对应的告警不会收到恢复。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，计时起点选择 **故障触发**，超时时长建议设置为 **7 天**。
+
+</Step>
+
+<Step title="验证">
+
+Trivy Operator 没有测试按钮。重启或等待 Operator 完成一次扫描后，在 Flashduty 中确认出现对应工作负载的告警。想快速触发，可以部署一个使用旧版本镜像的工作负载（例如 `nginx:1.16`）。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用报告对象的 UID（请求体中的 `metadata.uid`）作为 Alert Key。Trivy Operator 会在报告变化时重新推送同一个对象，UID 保持不变，这些推送会合并到同一条告警；不同的工作负载、容器或报告类型对应不同的 UID，互不影响。工作负载被重建、报告对象被删除后重新生成时会得到新的 UID，对应一条新的告警。
+
+报告名称、镜像标签、扫描器版本和摘要数量的变化都不会改变 Alert Key。缺少 `metadata.uid` 的请求会被拒绝。请求体超过 4 MiB 时会返回参数错误；描述最多列出最严重的 10 条发现，大报告不会让告警变大。
+
+## 状态和告警等级
+---
+
+Flashduty 按报告摘要（`report.summary`）中的数量映射告警等级：
+
+| 摘要情况 | Flashduty 等级 |
+| :--- | :--- |
+| `criticalCount` 大于 0 | Critical |
+| `highCount` 或 `mediumCount` 大于 0 | Warning |
+| 只有 `lowCount` 或 `unknownCount` 大于 0 | Info |
+| 所有数量都为 0 | 恢复（Ok） |
+
+同一个报告对象再次推送且摘要变为全 0 时，对应告警自动恢复。
+
+没有严重程度摘要的报告（SBOM 报告、合规报告）以及报告被删除的消息，Flashduty 返回成功但不创建告警。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `report_type` | 报告类型（`kind`，缺失时按内容推断为 `VulnerabilityReport`、`ExposedSecretReport` 或 `ConfigAuditReport`） |
+| `report_name` | 报告对象名称 |
+| `namespace` | 工作负载所在命名空间 |
+| `resource_kind` / `resource_name` | 被扫描的工作负载类型和名称 |
+| `resource` | `resource_kind/resource_name`，用于告警标题 |
+| `container` | 容器名称（漏洞和暴露密钥报告） |
+| `image` | 镜像仓库和标签 |
+| `critical_count` / `high_count` / `medium_count` / `low_count` / `unknown_count` | 报告摘要数量 |
+| `scanner_version` | 扫描器版本 |
+| `source` | 固定为 `trivy_operator` |
+
+告警描述包含摘要数量，以及最严重的前 10 条问题。暴露密钥只列出规则 ID 和文件路径，不包含匹配到的内容。完整报告可用 `kubectl get vulnerabilityreports -n <namespace> -o yaml` 查看。
+
+## 排查问题
+---
+
+- **没有收到告警**：确认 `operator.webhookBroadcastURL` 已生效（查看 Operator Pod 的环境变量 `OPERATOR_WEBHOOK_BROADCAST_URL`），Operator 日志中没有推送失败；Operator 不检查响应状态，也不重试失败的请求
+- **没有恢复**：Operator 不发送“已解决”通知；只有报告重新扫描且摘要全为 0 才会恢复，其余情况请开启协作空间的超时自动关闭
+- **同一工作负载出现多条告警**：每个报告对象（漏洞、暴露密钥、配置审计等）和每个容器各有一个 UID，各对应一条告警
+- **推送被拒绝，提示缺少 metadata.uid**：请求体不是 Trivy Operator 的报告对象
+
+更多信息请参阅 [Trivy Operator：Webhook 集成](https://aquasecurity.github.io/trivy-operator/latest/tutorials/integrations/webhook/)。
