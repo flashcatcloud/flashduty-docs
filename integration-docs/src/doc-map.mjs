@@ -123,6 +123,7 @@ export const docMap = {
   Honeycomb: `${alertBase}/honeycomb.mdx`,
   MongodbAtlas: `${alertBase}/mongodb-atlas.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
+  Postman: `${alertBase}/postman.mdx`,
   Contrast: `${alertBase}/contrast.mdx`,
   Censys: `${alertBase}/censys.mdx`,
   Jumpcloud: `${alertBase}/jumpcloud.mdx`,
