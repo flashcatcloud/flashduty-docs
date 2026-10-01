@@ -1,0 +1,111 @@
+---
+title: "Cisco Intersight alert integration"
+description: "Send alarms from Cisco Intersight servers, storage, and hyperconverged systems to Flashduty On-call through a webhook subscription."
+keywords: ["alert integration", "Cisco Intersight", "Intersight", "webhook", "UCS", "HyperFlex", "infrastructure"]
+---
+
+Cisco Intersight is Cisco's cloud platform for managing UCS, HyperFlex, and other infrastructure. After you create a webhook subscription on the alarm object (`cond.Alarm`) in Intersight, every alarm creation, change, and clear is sent to Flashduty On-call. Each Intersight alarm maps to one Flashduty alert: it is triggered when the alarm is created, updated when its severity changes, and recovered when Intersight clears it (`Cleared`).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Cisco Intersight** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Cisco Intersight** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Cisco Intersight
+---
+
+<Steps>
+<Step title="Create the webhook">
+
+1. Sign in to [Cisco Intersight](https://intersight.com) and go to **Settings** → **Webhooks**
+2. Create a webhook, enter a name, and paste the full Flashduty push URL, including `integration_key`, as the webhook URL
+3. Define the **Secret** field as any string you like. Intersight uses it to sign requests; Flashduty does not verify signatures, so any value works
+
+</Step>
+
+<Step title="Subscribe to alarms">
+
+Add a subscription to the webhook with the alarm object type `cond.Alarm`, and select the Created and Modified events. The Modified event is required: a severity change and a clear are both updates to the same alarm, so without it the Flashduty alert never recovers.
+
+Subscribe only to `cond.Alarm`. Flashduty rejects pushes for other object types, such as `workflow.WorkflowInfo`, with an object type error.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. Intersight can send a request that carries no alarm (`EventObjectType` empty, `Event` null, `Operation` `None`), the shape shown in Cisco's webhook validation guide; Cisco does not document exactly when it is sent. Flashduty turns that request into an Info test alert titled `Cisco Intersight test notification`. It does not recover on its own, so close it by hand
+2. Wait for a device to raise an alarm (or cause a fault in a test environment) and confirm the alert appears in Flashduty. When the alarm clears, confirm the alert recovers
+
+</Step>
+</Steps>
+
+## Event types
+---
+
+| Push | Effect in Flashduty |
+| :--- | :--- |
+| Alarm created or updated (`Severity` is `Critical`, `Warning`, or `Info`) | Triggers or updates the alert; severity follows `Severity` |
+| Alarm cleared (`Severity` is `Cleared`) | Recovers the alert and keeps its original severity |
+| Request without an alarm (`Operation` `None`, `Event` null) | Creates a separate Info alert that never recovers |
+
+## Alert Key
+---
+
+Flashduty uses the alarm's `Moid`, the fixed identifier Intersight assigns to each alarm, as the Alert Key. Creation, updates, and the clear of one alarm share the same Alert Key. Changes to the name, description, severity, or time do not change it, and a request without a `Moid` is rejected.
+
+## Status and severity
+---
+
+| Intersight `Severity` | Flashduty severity |
+| :--- | :--- |
+| Critical | Critical |
+| Warning | Warning |
+| Info, None, or any other value | Info |
+| Cleared | Recovery (severity from `OrigSeverity`, Info if it has no valid value) |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Alarm name (`Name`, for example `UCS-F1404`) |
+| `resource` | Display name of the affected object (`AffectedMoDisplayName`) |
+| `alarm_moid` | Alarm `Moid` |
+| `alarm_code` | Alarm code (`Code`) |
+| `severity` | Raw Intersight severity |
+| `affected_mo_type` / `affected_mo_id` | Type and ID of the affected object |
+| `ancestor_mo_type` | Parent object type, such as `compute.Blade` |
+| `create_time` / `last_transition` | Alarm creation time and time of the last severity change |
+
+## About signatures
+---
+
+Intersight signs requests with HMAC using the Secret you set (`Authorization` and `Digest` headers). Flashduty does not verify signatures, so the `integration_key` in the push URL is the only credential. Keep it private.
+
+## Troubleshooting
+---
+
+- **Flashduty receives nothing**: confirm the webhook URL is complete and includes `integration_key`, and that Intersight can reach the public internet
+- **Parameter error returned**: an object type error means the subscription covers an object other than `cond.Alarm`; a missing `Moid` means the push is not an alarm object
+- **An alert does not recover**: confirm the subscription includes the Modified event, because a clear is pushed as an update
+- **The test alert stays open**: the Info alert from the test request must be closed by hand
+
+For more information, see Cisco's [Intersight webhook validation guide](https://www.cisco.com/c/en/us/support/docs/cloud-systems-management/intersight/225593-validate-the-cisco-intersight-webhooks.html).

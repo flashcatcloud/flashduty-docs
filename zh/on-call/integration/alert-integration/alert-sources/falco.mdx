@@ -1,0 +1,131 @@
+---
+title: "Falco 告警集成"
+description: "通过 Falcosidekick 的 Webhook 输出，或 Falco 自带的 http_output，将运行时安全检测事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Falco", "Falcosidekick", "Webhook", "运行时安全"]
+---
+
+通过 Falcosidekick 的 Webhook 输出（或 Falco 自带的 `http_output`）将 Falco 规则命中的运行时安全事件推送到 Flashduty On-call。每条 Falco 事件对应一条 Flashduty 告警。Falco 是事件流，规则命中后不会再发送恢复消息，因此告警不会自动恢复，请按下文开启协作空间的超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Falco**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Falco**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Falco 中配置
+---
+
+推荐通过 Falcosidekick 推送，可以用 `minimumpriority` 在源头过滤低优先级事件。没有部署 Falcosidekick 时，可让 Falco 直接推送。
+
+<Tabs>
+<Tab title="Falcosidekick（推荐）">
+
+设置 Webhook 输出的地址为 Flashduty 推送地址。`webhook.address` 不为空时该输出即启用。
+
+环境变量方式：
+
+```bash
+WEBHOOK_ADDRESS="<Flashduty 推送地址>"
+# 可选：只推送 warning 及以上的事件
+WEBHOOK_MINIMUMPRIORITY="warning"
+```
+
+或在 `config.yaml` 中：
+
+```yaml
+webhook:
+  address: "<Flashduty 推送地址>"
+  # minimumpriority: "warning"
+```
+
+Helm 部署时对应 `config.webhook.address` 和 `config.webhook.minimumpriority`。修改后重启 Falcosidekick。
+
+</Tab>
+<Tab title="Falco 直接推送">
+
+在 `falco.yaml` 中开启 JSON 输出和 HTTP 输出，然后重启 Falco：
+
+```yaml
+json_output: true
+
+http_output:
+  enabled: true
+  url: "<Flashduty 推送地址>"
+```
+
+</Tab>
+</Tabs>
+
+<Warning>
+推送地址包含 `integration_key`，请完整粘贴，不要去掉问号后的参数。
+</Warning>
+
+## 验证
+---
+
+向 Falcosidekick 的 `/test` 接口发一次请求（默认监听 2801 端口）：
+
+```bash
+curl -X POST http://<falcosidekick 地址>:2801/test
+```
+
+Flashduty 会新建一条标题为 `Test rule`、等级为 Info 的告警。该测试告警使用独立的 Alert Key，不会并入任何真实告警，也不会自动恢复，确认收到后请手动关闭。
+
+随后在被监控主机或容器里触发一条真实规则（例如在容器中打开一个交互式 shell 触发 `Terminal shell in container`），确认 Flashduty 出现对应告警。
+
+## Alert Key
+---
+
+Falco 的每条事件是一次独立的检测，没有生命周期，所以每条事件对应一条告警：
+
+- 通过 Falcosidekick 推送时，Alert Key 为事件的 `uuid`。Falcosidekick 为每条事件生成一个新的 `uuid`，同一条事件被重复投递时不会产生重复告警。
+- Falco 直接推送的 JSON 不带 `uuid`，此时 Alert Key 由 `rule`、`hostname`、`source`、`time` 和 `output` 组合后取 MD5。
+
+请求缺少 `rule` 时 Flashduty 会拒绝，因为无法确定这是哪条规则的事件。
+
+## 告警等级
+---
+
+| Falco `priority` | Flashduty 等级 |
+| :--- | :--- |
+| `Emergency` / `Alert` / `Critical` | Critical |
+| `Error` / `Warning` | Warning |
+| `Notice` / `Informational` / `Debug` | Info |
+| 空值或未知值 | Warning |
+
+## 标签
+---
+
+标题为规则名（`rule`），描述为 `output`。以下字段写入标签：`rule`、`priority`、`hostname`（同时作为 `resource`）、`falco_source`、`falco_uuid`、`tags`（逗号分隔）。`output_fields` 中的每个字段也会写入标签，键名中的 `.` 替换为 `_`，例如 `container.id` 变为 `container_id`、`k8s.pod.name` 变为 `k8s_pod_name`，总数上限为 50 个标签。
+
+## 告警恢复
+---
+
+Falco 不发送恢复事件，告警不会自动恢复。请为接收 Falco 告警的协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议设置为 24 小时，按需要处理的时效调整。也可以在处理完成后手动关闭告警。
+
+## 排查问题
+---
+
+- **Falcosidekick 日志出现 webhook 错误**：确认地址完整且包含 `integration_key`，并能从 Falcosidekick 所在网络访问 `api.flashcat.cloud`
+- **Flashduty 返回参数错误**：确认 Falco 已开启 `json_output: true`，且请求体是有效 JSON、包含 `rule`
+- **没有收到告警**：确认规则确实命中（先看 Falco 自身日志），并检查 `minimumpriority` 是否把事件过滤掉了
+- **告警很多**：在 Falco 中调优规则，或提高 `minimumpriority`；相同规则的重复告警可用协作空间的降噪设置合并
+
+更多信息请参阅 [Falco 输出通道](https://falco.org/docs/concepts/outputs/channels/) 和 [Falcosidekick Webhook 输出](https://github.com/falcosecurity/falcosidekick/blob/master/docs/outputs/webhook.md)。

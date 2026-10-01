@@ -1,0 +1,96 @@
+---
+title: "AWS Security Hub Alert Integration"
+description: "Send AWS Security Hub findings to Flashduty's AWS EventBridge integration through an EventBridge rule; findings merge per finding and recover when their workflow status changes."
+keywords: ["alert integration", "AWS Security Hub", "Security Hub", "ASFF", "EventBridge", "cloud security", "AWS"]
+---
+
+AWS Security Hub sends each finding to Amazon EventBridge as a **Security Hub Findings - Imported** event. The Flashduty [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge) recognizes these events: each finding becomes one alert, and the alert recovers automatically when the finding is resolved or archived. No separate Security Hub integration is needed: create an AWS EventBridge integration in Flashduty, then create an EventBridge rule that forwards Security Hub events to it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the AWS EventBridge integration type** in both, not AWS Security Hub.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **AWS EventBridge** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/aws/eventbridge?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **AWS EventBridge** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in AWS
+---
+
+1. Follow "Option 1: API destination" in the [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge) to create the Connection and API destination, using the Flashduty push URL as the endpoint. "Option 2: SNS topic" also works
+2. In the EventBridge console, create a rule and choose **Rule with an event pattern** for **Rule type**
+3. To build the pattern from a template, choose **AWS services** for **Event source**, **Security Hub** for **AWS service** and **Security Hub Findings - Imported** for **Event type**. Or choose **Custom patterns (JSON editor)** and paste the pattern below
+4. For **Target types** choose **EventBridge API destination** and select the API destination created above
+
+Event pattern:
+
+```json
+{
+  "source": ["aws.securityhub"],
+  "detail-type": ["Security Hub Findings - Imported"]
+}
+```
+
+To receive only some findings, filter on finding attributes under `detail.findings`. For example, only findings produced by Amazon Inspector:
+
+```json
+{
+  "source": ["aws.securityhub"],
+  "detail-type": ["Security Hub Findings - Imported"],
+  "detail": {
+    "findings": {
+      "ProductArn": ["arn:aws:securityhub:us-east-1::product/aws/inspector"]
+    }
+  }
+}
+```
+
+<Warning>
+Do not filter on `Workflow.Status`, `RecordState`, `Compliance.Status` or `Severity`; the update events for resolved or archived findings would not reach Flashduty and alerts could not recover. A finding's severity can change when it is updated (for example, a passed control check is `INFORMATIONAL`). The product (`ProductArn`) stays the same, so it is safe to filter on. To handle only high-severity findings, filter in Flashduty with an [alert pipeline](/en/on-call/integration/alert-integration/alert-pipelines) on the `severity_label` label instead.
+</Warning>
+
+Create the rule in every Region where Security Hub is enabled. **Security Hub Findings - Custom Action** events, sent by custom actions, also carry findings and are handled the same way; add that `detail-type` to the rule if you use them.
+
+## Field mapping
+---
+
+The `detail.findings` array of a **Security Hub Findings - Imported** event holds a single finding. The mapping below is how Flashduty processes these AWS EventBridge events:
+
+| Security Hub field | Flashduty |
+| :--- | :--- |
+| `ProductArn` + `Id` | Alert Key. Later updates of the same finding merge into one alert |
+| `Workflow.Status`, `RecordState` | `Workflow.Status` of `RESOLVED` or `SUPPRESSED`, or `RecordState` of `ARCHIVED`, recovers the alert; any other state triggers or updates it |
+| `Title` | Label `summary` (the alert title is always `aws.securityhub / Security Hub Findings - Imported`) |
+| `Severity.Label` | Label `severity_label`; the alert severity is always Warning, and an [alert pipeline](/en/on-call/integration/alert-integration/alert-pipelines) can rewrite it based on this label |
+| `Resources[0].Id`, `Resources[0].Type` | Labels `resource`, `resource_type` |
+| `ProductName`, `GeneratorId`, `AwsAccountId`, `Compliance.Status`, `Workflow.Status`, `RecordState` | Labels `product_name`, `generator_id`, `aws_account_id`, `compliance_status`, `workflow_status`, `record_state` |
+| Event `source`, `region`, `account`, `detail-type`, `detail` | Labels `source`, `region`, `account`, `check`, `detail` |
+
+## Recovery and deduplication
+---
+
+- Changing a finding's workflow status to **Resolved** or **Suppressed** in Security Hub, or archiving the finding, produces a new **Security Hub Findings - Imported** event, and Flashduty closes the alert with the same Alert Key.
+- When an event contains several findings, each finding becomes its own alert.
+- If an event lacks `Id` or `ProductArn`, Flashduty returns HTTP 400.
+
+## Troubleshooting
+---
+
+- **The API destination call fails**: confirm the endpoint is the full push URL including `integration_key` and that `HTTP method` is `POST`
+- **Alerts do not recover**: check whether the rule's event pattern filters on `Workflow.Status` or `RecordState`, and whether the target has an Input transformer (the full event must be sent)
+- **Findings from a Region are missing**: an EventBridge rule only applies in its own Region; create a rule in every Region where Security Hub is enabled

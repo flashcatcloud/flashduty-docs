@@ -1,0 +1,138 @@
+---
+title: "OSSEC 告警集成"
+description: "OSSEC 通过邮件发送告警通知，使用 Flashduty 的邮件集成将 OSSEC 告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "OSSEC", "OSSEC HIDS", "HIDS", "入侵检测", "邮件", "Email", "安全告警"]
+---
+
+OSSEC 服务端（ossec-maild）可以把告警通过邮件发送到指定收件人。Flashduty 的 [邮件集成](/zh/on-call/integration/alert-integration/alert-sources/email) 可以接收这些邮件，因此不需要单独的 OSSEC 集成：在 Flashduty 创建邮件集成，把它的邮件地址填进 OSSEC 的收件人，再按下文选择推送模式。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成邮件地址，任选其一即可。**集成类型都选择邮件 Email**，不是 OSSEC。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **邮件 Email**，点击 **保存**
+4. 打开生成的集成卡片，复制 **邮件地址**，再按下文配置推送模式
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **邮件 Email**，填写集成名称，复制 **邮箱地址**
+3. 按下文配置推送模式
+4. 配置默认路由并选择协作空间，点击 **保存**
+
+</div>
+
+## 在 Flashduty 中配置推送模式
+---
+
+OSSEC 只在告警产生时发一封邮件，没有恢复邮件，因此不需要「关闭告警」规则。**推送模式** 选择 **根据邮件标题触发或更新告警**：同一台主机、同一日志来源、同一等级、同一条规则描述的邮件标题相同，会合并到同一条未关闭的告警上；标题不同的邮件各自产生一条告警。
+
+邮件标题的格式见下文 [邮件标题格式](#邮件标题格式)。
+
+OSSEC 不会发送恢复通知，请在接收该集成的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时；也可以处理完成后手动关闭。
+
+## 在 OSSEC 中配置
+---
+
+以下配置在 OSSEC 服务端（server）的 `/var/ossec/etc/ossec.conf` 中完成，Agent 上不需要配置（告警只在服务端生成）。
+
+<Steps>
+<Step title="配置邮件发送">
+
+在 `<global>` 中填写收件人、SMTP 服务器和发件人，把 **收件人** 设为 Flashduty 邮件集成的地址：
+
+```xml
+<ossec_config>
+  <global>
+    <email_notification>yes</email_notification>
+    <email_to>YOUR_FLASHDUTY_EMAIL_ADDRESS</email_to>
+    <smtp_server>mx.example.com</smtp_server>
+    <email_from>ossec@example.com</email_from>
+  </global>
+</ossec_config>
+```
+
+Gmail、Outlook.com 等公共邮箱通常不允许未认证的转发，SMTP 服务器需要认证或 TLS 时，参考 OSSEC 官方文档中的 SMTP 认证邮件配置。
+
+</Step>
+
+<Step title="设置发送邮件的最低等级">
+
+```xml
+<ossec_config>
+  <alerts>
+    <email_alert_level>10</email_alert_level>
+  </alerts>
+</ossec_config>
+```
+
+只有规则等级大于等于该值的告警才会发邮件。建议按 SOC 的处理能力设置，避免低等级告警淹没值班人员。
+
+</Step>
+
+<Step title="避免多条告警合并成一封邮件（可选）">
+
+OSSEC 默认会把短时间内的多条告警合并到一封邮件，邮件标题只反映其中一条，Flashduty 无法逐条生成告警。如果希望每条告警单独成信，可以用 `<email_alerts>` 给同一收件人增加一个 `<do_not_group />` 和 `<do_not_delay />` 的配置（`<global>` 中必须已有至少一个 `<email_to>`）：
+
+```xml
+<ossec_config>
+  <email_alerts>
+    <email_to>YOUR_FLASHDUTY_EMAIL_ADDRESS</email_to>
+    <level>10</level>
+    <do_not_delay />
+    <do_not_group />
+  </email_alerts>
+</ossec_config>
+```
+
+`<email_alerts>` 还可以用 `<group>`、`<rule_id>`（逗号分隔）和 `<event_location>` 进一步限定转发哪些告警。
+
+</Step>
+
+<Step title="重启并验证">
+
+```bash
+/var/ossec/bin/ossec-control restart
+```
+
+1. 在被监控主机上触发一条不低于邮件等级的告警，例如对 SSH 服务连续输入错误密码
+2. 在 Flashduty 中确认收到告警，标题为 OSSEC 邮件标题
+3. 没有收到时查看 OSSEC 服务端的 `/var/ossec/logs/ossec.log`，确认 SMTP 发送没有报错
+
+</Step>
+</Steps>
+
+## 邮件标题格式
+---
+
+OSSEC 邮件默认使用完整标题（内部选项 `maild.full_subject=0`，默认值），格式为：
+
+```
+OSSEC Alert - <位置> - Level <等级> - <规则描述>
+```
+
+示例：
+
+```
+OSSEC Alert - (slacker) 192.168.2.0 - Level 3 - SSHD authentication success.
+```
+
+其中位置是「（Agent 名称）Agent IP」，服务端本机的告警则是服务端名称；`->` 之后的日志文件路径不会出现在标题里。标题总长度最多 127 个字符，过长的规则描述会被截断。
+
+邮件正文以 `OSSEC HIDS Notification.` 开头，依次是告警时间、`Received From`（告警来源）、`Rule: <规则 ID> fired (level <等级>) -> "<规则描述>"`、来源 IP / 用户（存在时）以及触发告警的原始日志片段（`Portion of the log(s)`）。在 Flashduty 中，告警的标题是邮件标题，描述是邮件正文。
+
+## 限制
+---
+
+- **没有恢复**：OSSEC 告警是一次性事件，Flashduty 中的告警不会自动恢复，依赖 [超时自动关闭](/zh/on-call/channel/create-edit) 或手动关闭。
+- **严重程度**：邮件集成推送的告警严重程度统一为 Warning。标题中包含 OSSEC 等级（`Level N`），可以通过 [告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 按等级调整。
+- **标题不含规则 ID**：标题只有规则描述，不同规则但描述、位置、等级都相同的告警会合并；规则 ID 在邮件正文中。
+- **敏感信息**：邮件正文包含原始日志片段，可能带有用户名、IP 和文件路径，请通过 `<email_alert_level>` 或 `<email_alerts>` 的 `<group>`、`<rule_id>` 过滤，避免转发认证类原始日志。
+- **合并**：标题相同的邮件合并到同一条未关闭的告警，告警关闭后再次收到会产生新告警。

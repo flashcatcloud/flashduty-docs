@@ -1,0 +1,153 @@
+---
+title: "Opsview Alert Integration"
+description: "Push Opsview host and service alerts to the Flashduty Standard Alert Event integration through a custom notification method script; recovery notifications close the alerts."
+keywords: ["alert integration", "Opsview", "ITRS Opsview", "notification method", "custom notification", "standard alert event"]
+---
+
+Opsview supports custom notification methods: when it notifies, it runs the script you installed and hands the alert content over in environment variables that start with `NAGIOS_` (`NAGIOS_HOSTNAME`, `NAGIOS_SERVICEDESC`, `NAGIOS_NOTIFICATIONTYPE` and so on). A script pushes that content to Flashduty in the [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard-alert) format: problem notifications trigger alerts and recovery notifications close them.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Standard Alert Event integration type** in both, not Opsview.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Standard Alert Event** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Standard Alert Event** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Opsview
+---
+
+### Step 1: Create the notification script
+
+On the Opsview Orchestrator server, create a script named `notify_by_flashduty` and make it executable (`chmod +x`). The script uses `curl`; if the notification method runs on a Collector, that Collector also needs `curl` and access to `api.flashcat.cloud`. The push URL is passed as the script's first argument instead of being written into the script.
+
+```sh
+#!/bin/sh
+# Opsview custom notification method: forward host/service notifications to a
+# Flashduty Standard Alert Event integration. The push URL is the first argument.
+URL="$1"
+[ -n "$URL" ] || exit 1
+
+case "$NAGIOS_NOTIFICATIONTYPE" in
+  PROBLEM|RECOVERY) ;;
+  *) exit 0 ;;   # ignore acknowledgements, flapping and downtime notifications
+esac
+
+if [ -n "$NAGIOS_SERVICEDESC" ]; then
+  KEY="opsview:$NAGIOS_HOSTNAME:$NAGIOS_SERVICEDESC"
+  STATE="$NAGIOS_SERVICESTATE"
+  OUTPUT="$NAGIOS_SERVICEOUTPUT"
+  CHECK="$NAGIOS_SERVICEDESC"
+  TITLE="$NAGIOS_HOSTNAME - $NAGIOS_SERVICEDESC - $STATE"
+else
+  KEY="opsview:$NAGIOS_HOSTNAME"
+  STATE="$NAGIOS_HOSTSTATE"
+  OUTPUT="$NAGIOS_HOSTOUTPUT"
+  CHECK="host"
+  TITLE="$NAGIOS_HOSTNAME - $STATE"
+fi
+
+if [ "$NAGIOS_NOTIFICATIONTYPE" = "RECOVERY" ]; then
+  STATUS=Ok
+else
+  case "$STATE" in
+    CRITICAL|DOWN|UNREACHABLE) STATUS=Critical ;;
+    WARNING)                   STATUS=Warning ;;
+    OK|UP)                     STATUS=Ok ;;
+    *)                         STATUS=Info ;;
+  esac
+fi
+
+esc() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+JSON=$(printf '{"title_rule":"%s","event_status":"%s","alert_key":"%s","description":"%s","labels":{"resource":"%s","check":"%s","host_address":"%s","host_alias":"%s","opsview_keywords":"%s"}}' \
+  "$(esc "$TITLE")" "$STATUS" "$(esc "$KEY")" "$(esc "$OUTPUT")" "$(esc "$NAGIOS_HOSTNAME")" "$(esc "$CHECK")" \
+  "$(esc "$NAGIOS_HOSTADDRESS")" "$(esc "$NAGIOS_HOSTALIAS")" "$(esc "$OPSVIEW_KEYWORDS")")
+
+curl -fsS -m 10 -X POST -H 'Content-Type: application/json' -d "$JSON" "$URL" >/dev/null
+```
+
+Every environment variable the script reads is in the notification variable list of the Opsview documentation. The script handles them as follows:
+
+| Environment variable | Use |
+| :--- | :--- |
+| `NAGIOS_NOTIFICATIONTYPE` | Only `PROBLEM` and `RECOVERY` are handled; types such as `ACKNOWLEDGEMENT` and `FLAPPINGSTART` are ignored |
+| `NAGIOS_SERVICEDESC` | Non-empty means a service alert, otherwise it is a host alert |
+| `NAGIOS_HOSTNAME`, `NAGIOS_SERVICEDESC` | Alert Key: `opsview:<host name>:<service name>` for a service, `opsview:<host name>` for a host; the title is `<host name> - <service name> - <state>` or `<host name> - <state>` |
+| `NAGIOS_SERVICESTATE`, `NAGIOS_HOSTSTATE` | Severity: `CRITICAL`, `DOWN`, `UNREACHABLE` → Critical; `WARNING` → Warning; `OK`, `UP` → recovery; anything else (`UNKNOWN`) → Info. A `RECOVERY` notification is always treated as a recovery |
+| `NAGIOS_SERVICEOUTPUT`, `NAGIOS_HOSTOUTPUT` | Alert description |
+| `NAGIOS_HOSTADDRESS`, `NAGIOS_HOSTALIAS`, `OPSVIEW_KEYWORDS` | Labels `host_address`, `host_alias`, `opsview_keywords`; `NAGIOS_HOSTNAME` is written to the label `resource` |
+
+### Step 2: Install and test the script
+
+On the Orchestrator, import the script as the `opsview` user:
+
+```bash
+sudo -u opsview /opt/opsview/orchestrator/bin/orchestratorimportscripts notifications /path/to/notify_by_flashduty
+```
+
+Opsview provides a `test_notifications` tool that simulates the environment variables Nagios Core sets at notification time; use it to test the script (replace `<push URL>` with the address copied in Step 1):
+
+```bash
+# Host problem
+sudo -u opsview /opt/opsview/coreutils/utils/test_notifications hostproblem /path/to/notify_by_flashduty '<push URL>'
+# Service problem
+sudo -u opsview /opt/opsview/coreutils/utils/test_notifications serviceproblem /path/to/notify_by_flashduty '<push URL>'
+```
+
+The test sends a real event to Flashduty; once the alert appears, close it manually in Flashduty. If no alert appears, use "Troubleshooting" below to see the environment variables the script actually receives.
+
+<Note>
+If the notification method is set to run on a Collector, test the script on the Collector servers as well.
+</Note>
+
+### Step 3: Add the notification method
+
+1. Go to **Configuration** → **Apply Changes** to finish installing the script
+2. Go to **Configuration** → **Notification Methods** and click **Add New**
+3. Enter `Flashduty` as `Name`, tick `Enable`, and choose whether `Run on` is the Orchestrator or the Collector
+4. Enter `notify_by_flashduty <push URL>` as `Command` (scripts are read from `/opt/opsview/monitoringscripts/notifications` by default, and arguments follow the script name)
+5. After saving, go to **Configuration** → **Apply Changes** again to activate the new notification method
+
+### Step 4: Add the method to a notification profile
+
+Opsview notifications are driven by each user's Notification Profile, so every user who should receive Flashduty notifications must select this method:
+
+1. Go to **Configuration** → **Users and Roles** → **Users** and edit the user (or open **My Profile** from your username at the top right), open the **Notification Profiles** tab and click **Add New**
+2. Select `Flashduty` under **Alert me by** and the active time period under **During**
+3. Under **Host and Services**, select the host groups and service checks to notify about and tick the states to notify on; include both the problem states and the recovery states, otherwise Flashduty receives no recovery notification
+4. Click **Update**, then **Submit Changes**, and finally go to **Configuration** → **Apply Changes** to make it live
+
+You can also create a shared profile under Shared Notification Profiles and assign it to several users.
+
+## Recovery and deduplication
+---
+
+- A host or service always uses the same Alert Key, so repeated problem notifications (for example from Opsview's re-notification interval) only update the same alert, and the `RECOVERY` notification recovers it
+- When a service goes from WARNING to CRITICAL, the severity is updated on the same alert
+- Acknowledgement (`ACKNOWLEDGEMENT`), flapping (`FLAPPING*`) and downtime (`DOWNTIME*`) notifications are ignored by the script and produce no event in Flashduty
+
+## Troubleshooting
+---
+
+- **No alert arrives**: confirm the Notification Profile selects `Flashduty` and **Apply Changes** was run; check in Opsview's **Notifications View** whether the notification was sent; test the script on its own with `test_notifications`
+- **The test works but real alerts are not pushed**: in a real notification the script reads the environment variables Opsview passes; add `{ date; echo "Called with $@"; env; echo; } >> /tmp/env.txt` to the top of the script (the debugging method given in the Opsview documentation) to see what it actually receives
+- **The alert does not recover**: confirm the Notification Profile ticks the recovery states; Nagios only sends a recovery notification after a problem notification was sent
+- **Flashduty returns a parameter error**: confirm the push URL in `Command` is complete, including `integration_key`
+
+For more details, see the Opsview documentation [Custom Notification Methods](https://docs.itrsgroup.com/docs/opsview/6.9.0/monitoring/notifications/customized-notification-methods/index.html) and [Notification Profiles](https://docs.itrsgroup.com/docs/opsview/6.9.0/monitoring/notifications/notification-profiles/index.html).
