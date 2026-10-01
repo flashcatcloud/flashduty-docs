@@ -1,0 +1,137 @@
+---
+title: "Expo EAS 变更集成"
+description: "通过 EAS Webhook 将 Expo EAS Build 构建和 EAS Submit 提交的结果同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Expo", "EAS", "EAS Build", "EAS Submit", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 EAS Webhook 将 Expo EAS 的构建（Build）和提交（Submit）结果同步到 Flashduty On-call。每次构建、每次提交各对应一条 Flashduty 变更，在其结束时记录一次。
+
+EAS 只在构建或提交结束时推送，没有开始事件，因此变更没有 Processing 中间状态，直接记录为结束状态：Done、Failed 或 Canceled。这里的变更是应用的构建和向应用商店提交，不是线上服务的部署。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Expo EAS**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`platform`、`kind`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Expo EAS 中配置
+---
+
+<Steps>
+<Step title="为构建创建 Webhook">
+
+在项目目录下运行（需已安装并登录 EAS CLI）：
+
+```sh
+eas webhook:create --event BUILD --url '<推送地址>'
+```
+
+命令会提示输入签名密钥（Secret），至少 16 个字符。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `expo-signature`，密钥可填任意满足长度的值。
+
+</Step>
+
+<Step title="为提交创建 Webhook">
+
+如需同步 EAS Submit 的结果，再运行一次，事件类型改为 `SUBMIT`：
+
+```sh
+eas webhook:create --event SUBMIT --url '<推送地址>'
+```
+
+两种事件使用同一个推送地址，Flashduty 根据推送内容区分构建和提交。
+
+</Step>
+
+<Step title="验证">
+
+Webhook 按项目配置，需要在每个要同步的项目中分别创建，可用 `eas webhook:list` 查看。EAS 没有测试推送：运行一次 `eas build` 或 `eas submit`，结束后即可在 Flashduty 变更列表中看到记录。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| EAS 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 构建（Build） | `build:<id>` | `id` 为构建 ID（UUID）。同一项目、同一平台上的两次构建是两条变更；重试构建有新的 ID，也是新的变更 |
+| 提交（Submit） | `submission:<id>` | `id` 为提交 ID（UUID）。构建和提交的 ID 即使相同也不会合并 |
+
+## 状态映射
+---
+
+| EAS `status` | Flashduty 变更状态 |
+|---|---|
+| `finished` | Done |
+| `errored` | Failed |
+| `canceled` | Canceled |
+
+EAS 文档只列出这三种结束状态。出现其他状态值时推送返回 InvalidParameter，不生成变更。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | 构建：`<项目名>: <平台> build <应用版本> (<构建配置>)`，例如 `example: android build 1.0.2 (production)`；提交：`<项目名>: <平台> submit`。推送中缺少的部分会省略 |
+| 描述 | 构建：构建附带的 `message`，没有时为提交说明（`gitCommitMessage`）。失败时追加一行 `Error: <错误信息>` |
+| 链接 | EAS 控制台中该构建或提交的页面 |
+| 变更时间 | 结束时间（`completedAt`），没有时取 `updatedAt` |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `kind` | `build` 或 `submit` |
+| `account` | Expo 账号或组织名 |
+| `project` | 项目名 |
+| `platform` | `android` 或 `ios` |
+| `build_id` | 构建 ID；提交时为其所提交的构建 ID（如有） |
+| `submission_id` | 提交 ID（仅提交） |
+| `app_version` | 应用版本（仅构建） |
+| `build_profile` | 构建配置，例如 `production`（仅构建） |
+| `distribution` | 分发方式，例如 `store`（仅构建） |
+| `channel` | EAS Update 通道（仅构建） |
+| `sha` | Git 提交的完整 SHA（仅构建） |
+| `error_code` | EAS 的错误码（仅失败时） |
+| `expo_state` | EAS 的 `status` 原值 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么看不到构建的运行中状态？">
+
+EAS Webhook 只在构建或提交结束时推送，不推送排队和运行中的状态。变更在结束时以最终状态出现。
+
+</Accordion>
+
+<Accordion title="EAS 重试推送会重复记录吗？">
+
+不会。EAS 收到 200–399 以外的响应后会按退避策略重试，重试内容相同，Flashduty 以结束时间去重，只记录一次。
+
+</Accordion>
+
+<Accordion title="需要校验 expo-signature 吗？">
+
+不需要。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `expo-signature`。创建 Webhook 时 EAS 要求填写至少 16 个字符的密钥，填任意值即可。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `id is missing`：推送内容不完整，请确认推送来自 EAS Webhook
+- `unknown status`：出现了未收录的状态值，请联系我们补充映射
+- `delivery is neither a build nor a submission`：推送中既没有构建页面地址（`buildDetailsPageUrl`）也没有提交页面地址（`submissionDetailsPageUrl`）
+- `invalid completedAt` 或 `invalid updatedAt`：推送中的时间字段格式不正确
+
+</Accordion>
+</AccordionGroup>
