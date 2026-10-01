@@ -1,0 +1,128 @@
+---
+title: "updown.io alert integration"
+description: "Send updown.io down, recovery, SSL certificate, and performance drop notifications to Flashduty On-call through a webhook."
+keywords: ["alert integration", "updown.io", "Updown", "Uptime", "webhook", "SSL", "check.down", "check.up"]
+---
+
+Use an updown.io webhook to send check down (`check.down`), recovery (`check.up`), SSL certificate invalid or expiring, and performance drop (`check.performance_drop`) notifications to Flashduty On-call. A down event and its recovery, an invalid certificate and its recovery, and an expiring certificate and its renewal each land on one alert that closes automatically. A performance drop is a point-in-time event and never recovers.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **updown.io** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **updown.io** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure updown.io
+---
+
+<Steps>
+<Step title="Add a webhook URL">
+
+1. Sign in to updown.io and open the **Settings** page, where the list of webhook URLs is
+2. Add the complete Flashduty push URL (including `integration_key`) to the list and save
+3. Use the **Send a test webhook** link to send a test webhook and confirm Flashduty accepts it (see the FAQ below)
+
+updown.io only requires a 2xx response. Any other response is retried up to 25 times, and after 1000 failed deliveries the URL is removed from the account automatically.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a check actually go down (for example, create one that points to an unreachable address) and confirm Flashduty shows an active alert. Then restore the target and confirm the same alert recovers.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+updown.io POSTs a JSON array of events (one request can carry several). Flashduty parses it directly, with no template to configure:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `event` | Event type | Trigger, recovery, or one-shot alert; label `event` |
+| `check.token` | Check identifier | Alert Key; label `check_token` |
+| `check.alias` | Check alias | Alert title, label `check`; falls back to `check.url` when empty |
+| `check.url` | Monitored URL | Label `resource` |
+| `check.type` | Check type | Label `check_type` |
+| `check.error` | Failure reason | Label `error` |
+| `check.last_status` | Latest HTTP status code | Label `status_code` |
+| `downtime.id` | Downtime record ID | Label `downtime_id` |
+| `ssl.days_before_expiration` | Days until the certificate expires | Label `days_before_expiration` |
+| `apdex_dropped` | Apdex drop | Label `apdex_dropped` |
+| `description` | Plain-text summary of the event | Alert description |
+
+Event types that updown.io adds later are ignored and acknowledged, and create no alert.
+
+## Alert Key
+---
+
+- Down and recovery: the Alert Key is `check.token`. `check.down` and `check.up` of one check carry the same `check.token`, so they land on one alert; different checks produce different alerts. Renaming the check or a change in status code or error text does not change the Alert Key.
+- Invalid certificate: `check.token` plus `:ssl_invalid`, recovered by `check.ssl_valid`.
+- Expiring certificate: `check.token` plus `:ssl_expiration`, recovered by `check.ssl_renewed`. The reminders sent 1, 7, 14, and 30 days ahead merge into one alert.
+- Performance drop: `check.token` plus `:performance_drop`. Repeated notices for one check merge into one alert.
+
+Each event family has its own Alert Key, so a check recovering does not close its certificate or performance alert. An event without `check.token` cannot be matched to its recovery, so Flashduty skips it and still processes the other valid events in the same request; a parameter error is returned only when no event in the request is valid.
+
+## Status and severity
+---
+
+updown.io notifications carry no severity.
+
+| updown.io `event` | Flashduty status or severity |
+| :--- | :--- |
+| `check.down` | Critical |
+| `check.up` | Recovery, original severity Critical |
+| `check.ssl_invalid` | Warning |
+| `check.ssl_valid` | Recovery, original severity Warning |
+| `check.ssl_expiration` | Warning |
+| `check.ssl_renewed` | Recovery, original severity Warning |
+| `check.performance_drop` | Warning |
+
+## One-shot alerts need auto-resolve
+---
+
+A performance drop (`check.performance_drop`) has no matching close notification, so these alerts do not recover automatically. Turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) and set it to 6 hours, or close the alert by hand.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does the test webhook create an alert?">
+
+Yes, one separate Info alert. The "Send a test notification" page in updown.io settings lets you pick a recipient and an event type, and posts an event for a fixed sample check (`check.token` `xyz0`, URL `https://updown.io`). Flashduty recognises that fixed sample, answers success and opens a new Info alert for every press. It never merges into a real check's alert and no later notification recovers it, so close it by hand after verifying.
+
+</Accordion>
+
+<Accordion title="Do repeated down notices create multiple alerts?">
+
+No. Notices for one check carry the same `check.token` and merge into one alert.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **updown.io reports a failed delivery**: confirm the webhook URL is the complete push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: confirm the body is an updown.io JSON array and its events have a non-empty `check.token` (events without one are skipped; an error is returned only when none is valid)
+- **An alert does not recover**: confirm the recovery is sent to the same webhook URL, and that its `check.token` equals the one on the down notice
+
+For field details see the updown.io documentation, [API - Webhooks](https://updown.io/api).

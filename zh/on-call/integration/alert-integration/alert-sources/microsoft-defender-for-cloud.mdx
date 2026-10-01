@@ -1,0 +1,131 @@
+---
+title: "Microsoft Defender for Cloud 告警集成"
+description: "通过 Defender for Cloud 的工作流自动化运行 Logic App，用 HTTP 操作把安全警报推送到 Flashduty 标准告警事件集成。"
+keywords: ["告警集成", "Microsoft Defender for Cloud", "Azure Security Center", "Logic App", "工作流自动化", "云安全", "标准告警事件"]
+---
+
+Microsoft Defender for Cloud 的 **Workflow automation**（工作流自动化）在安全警报产生时触发一个 Logic App，没有直接的 Webhook 输出。Logic App 的 **HTTP** 操作可以向任意地址 POST JSON，因此不需要单独的 Defender for Cloud 集成：在 Flashduty 创建 [标准告警事件](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 集成，让 Logic App 把安全警报按标准告警格式推送过来。
+
+如果同一个租户已经把 Defender for Cloud 的告警接入 Microsoft Sentinel，可以改用 [Microsoft Sentinel 集成](/zh/on-call/integration/alert-integration/alert-sources/microsoft-sentinel)，按事件推送并支持恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择标准告警事件**，不是 Microsoft Defender for Cloud。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **标准告警事件**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **标准告警事件**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Microsoft Defender for Cloud 中配置
+---
+
+需要 **Security admin** 角色或资源组的 **Owner** 权限；创建和修改 Logic App 需要 **Logic App Contributor** 权限。
+
+### 创建 Logic App
+
+1. 在 Azure 门户创建一个 **Consumption** 类型的 Logic App。工作流自动化只会触发 Consumption Logic App
+2. 工作流的触发器选择 **When a Defender for Cloud Alert is created or triggered**。不要选择旧的 **When a response to a Microsoft Defender for Cloud alert is triggered**，工作流自动化不会运行使用它的 Logic App
+3. 在触发器后添加内置的 **HTTP** 操作，按下一节填写各字段
+4. 保存工作流
+
+### 创建工作流自动化
+
+1. 在 Defender for Cloud 左侧菜单选择 **Workflow automation**，点击 **Add workflow automation**
+2. 填写名称和描述
+3. 在触发条件中选择安全警报，并按需限定严重程度
+4. 在 **Actions** 中选择上一步创建的 Logic App；列表里没有时点击 **Refresh**
+5. 保存
+
+也可以在某条安全警报的页面上点击 **Trigger logic app**，手动对这一条警报运行 Logic App。
+
+## HTTP 操作
+---
+
+HTTP 操作各字段：
+
+| 字段 | 值 |
+| :--- | :--- |
+| **Method** | `POST` |
+| **URI** | Flashduty 推送地址，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>` |
+| **Headers** | `Content-Type`：`application/json` |
+| **Body** | 见下方 |
+
+下面是这个 HTTP 操作的 JSON 定义，可以在 Logic App 的 **Code view** 中放进 `actions`。`@` 开头的整段字符串是 Logic App 表达式，取值来自警报触发器的输出，按 JSON 类型输出，警报名称里含引号也不会破坏 JSON：
+
+```json
+"Send_to_Flashduty": {
+  "type": "Http",
+  "runAfter": {},
+  "inputs": {
+    "method": "POST",
+    "uri": "https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "title_rule": "@triggerBody()?['AlertDisplayName']",
+      "event_status": "@if(equals(triggerBody()?['Severity'], 'High'), 'Critical', if(equals(triggerBody()?['Severity'], 'Informational'), 'Info', 'Warning'))",
+      "alert_key": "@triggerBody()?['SystemAlertId']",
+      "description": "@triggerBody()?['Description']",
+      "labels": {
+        "alert_type": "@triggerBody()?['AlertType']",
+        "alert_url": "@triggerBody()?['AlertUri']",
+        "resource": "@coalesce(triggerBody()?['CompromisedEntity'], 'unknown')",
+        "product_name": "@triggerBody()?['ProductName']",
+        "vendor_name": "@triggerBody()?['VendorName']",
+        "defender_severity": "@triggerBody()?['Severity']"
+      }
+    }
+  }
+}
+```
+
+在设计器中，同样的取值对应下面这些动态内容（**When a Defender for Cloud Alert is created or triggered** 触发器的输出）：
+
+| Flashduty 字段 | 动态内容 | 表达式路径 |
+| :--- | :--- | :--- |
+| `title_rule` | Alert Display Name | `AlertDisplayName` |
+| `event_status` | Severity | `Severity` |
+| `alert_key` | System Alert Id | `SystemAlertId` |
+| `description` | Description | `Description` |
+| 标签 `alert_type` | Alert Type | `AlertType` |
+| 标签 `alert_url` | Alert Uri | `AlertUri` |
+| 标签 `resource` | Compromised Entity | `CompromisedEntity` |
+| 标签 `product_name`、`vendor_name` | Product Name、Vendor Name | `ProductName`、`VendorName` |
+
+## 字段映射
+---
+
+| Defender for Cloud 字段 | Flashduty |
+| :--- | :--- |
+| Alert Display Name | 告警标题（`title_rule`，超过 512 个字符自动截断） |
+| Severity | `High` → Critical；`Informational` → Info；`Medium`、`Low` → Warning。同时保留在标签 `defender_severity` |
+| System Alert Id | Alert Key。同一条警报重复触发时合并到同一条告警 |
+| Description | 告警描述（超过 2048 个字符自动截断） |
+| Compromised Entity | 标签 `resource`；警报没有该字段时为 `unknown` |
+| Alert Uri | 标签 `alert_url`，在 Azure 门户中打开警报详情 |
+
+## 恢复与去重
+---
+
+Defender for Cloud 工作流自动化只在警报产生（created or triggered）时运行 Logic App，不会在警报解除时再发通知，所以这个集成的告警不会自动恢复。请在接收该集成的协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 3 天，或按团队处理警报的周期调整；也可以在 Flashduty 中手动关闭。
+
+## 排查问题
+---
+
+- **Flashduty 返回 `InvalidParameter`**：检查 `event_status` 是否为首字母大写的 `Critical`、`Warning`、`Info` 之一，`title_rule` 是否为空
+- **工作流自动化的下拉列表里没有 Logic App**：列表只显示带有 Defender for Cloud 连接器的 Consumption Logic App，创建后点击 **Refresh**
+- **Logic App 没有运行**：确认触发器是 **When a Defender for Cloud Alert is created or triggered**，并且工作流自动化的触发条件（严重程度）覆盖了这条警报

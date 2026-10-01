@@ -1,0 +1,140 @@
+---
+title: "FastNetMon 告警集成"
+description: "通过 FastNetMon Advanced 的 Web Callback 将 DDoS 攻击的封禁与解封通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "FastNetMon", "DDoS", "Web Callback", "ban", "unban", "BGP Blackhole", "Flow Spec"]
+---
+
+通过 FastNetMon Advanced 的 Web Callback，把 DDoS 攻击的封禁（`ban`、`partial_block`）和解封（`unban`、`partial_unblock`）通知同步到 Flashduty On-call。每个被攻击的主机 IP（或主机组）对应一条告警：FastNetMon 封禁时触发，解封时关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **FastNetMon**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **FastNetMon**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 FastNetMon 中配置
+---
+
+<Steps>
+<Step title="启用 Web Callback">
+
+在 FastNetMon Advanced 所在服务器上，用 `fcli` 设置回调地址并提交（把 URL 换成 Flashduty 的完整推送地址，含 `integration_key`）：
+
+```bash
+sudo fcli set main web_callback_enabled enable
+sudo fcli set main web_callback_url 'https://api.flashcat.cloud/event/push/alert/fastnetmon?integration_key=YOUR_KEY'
+sudo fcli commit
+```
+
+FastNetMon 以 `POST` 发送 `Content-Type: application/json` 的 JSON 文档，Flashduty 直接解析，无需模板。
+
+</Step>
+
+<Step title="（可选）持续同步攻击状态">
+
+FastNetMon 2.0.375 及以上版本可以在封禁期间按固定间隔重复发送封禁通知：
+
+```bash
+sudo fcli set main web_callback_attack_status_updates true
+sudo fcli set main ban_status_delay 20
+sudo fcli commit
+```
+
+重复的通知携带同一个主机 IP，会合并到同一条告警，并刷新流量数据。
+
+</Step>
+
+<Step title="验证生命周期">
+
+触发一次攻击检测（例如用测试流量超过某个主机组的封禁阈值），确认 Flashduty 出现活动告警；攻击结束、FastNetMon 解封后，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `action` | `ban`、`partial_block`、`unban` 或 `partial_unblock` | 触发或恢复，标签 `action` |
+| `alert_scope` | `host`（单个主机）或 `hostgroup`（主机组）；缺省按 `host` 处理 | 标签 `alert_scope` |
+| `ip` | 被攻击的主机 IP（`host` 范围） | Alert Key，告警标题，标签 `ip`、`resource` |
+| `hostgroup_name` | 主机组名称（`hostgroup` 范围） | Alert Key，告警标题，标签 `hostgroup_name`、`resource` |
+| `attack_details.attack_severity` | 攻击严重程度 | 告警等级，标签 `attack_severity` |
+| `attack_details.attack_uuid` | 攻击 UUID | 标签 `attack_uuid` |
+| `attack_details.host_network`、`host_group` | 所属网段、主机组 | 标签 `host_network`、`host_group` |
+| `attack_details.total_incoming_pps`、`total_incoming_traffic_bits` 等 | 入站、出站的包速率与流量 | 告警描述 |
+
+封禁通知中的数据包采样（`packet_dump`）和 Flow Spec 规则不会写入告警。
+
+## Alert Key
+---
+
+按被攻击对象生成 Alert Key：主机范围使用 `ip`，主机组范围使用 `hostgroup_name`。同一个 IP 的封禁、状态更新和解封落在同一条告警上；不同 IP 或不同主机组是不同的告警。攻击等级、流量数据和 `attack_uuid` 的变化不会改变 Alert Key。
+
+这里没有使用 `attack_uuid`：FastNetMon 官方示例中，只有 Blackhole 的封禁与解封共用同一个 UUID，Flow Spec 和主机组示例的封禁与解封 UUID 不同，无法保证按 UUID 一定能关闭告警。
+
+同一个 IP 上同时进行 Blackhole 封禁和 Flow Spec 部分封禁时，两者共用一条告警，先到的解封通知会关闭它。
+
+请求缺少 `ip`（或主机组范围缺少 `hostgroup_name`）时，Flashduty 会返回参数错误，因为无法可靠地把解封通知关联到原告警。`action` 或 `alert_scope` 为其他值的请求同样被拒绝。
+
+## 状态和告警等级
+---
+
+| FastNetMon `attack_severity` | Flashduty 等级 |
+| :--- | :--- |
+| `high` | Critical |
+| `middle`、`medium` | Warning |
+| `low` | Info |
+| 为空或其他值 | Warning |
+
+官方示例只出现 `middle`，其他取值按常见命名映射。解封时告警恢复，原等级保持为最后一次攻击等级。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="FastNetMon 有测试按钮吗？">
+
+官方文档没有描述测试通知，Flashduty 也没有针对测试请求的特殊处理。手动用 `curl` 发送示例 JSON 会创建真实告警，请发送对应的 `unban` 通知关闭。
+
+</Accordion>
+
+<Accordion title="解封通知丢失时告警会一直打开吗？">
+
+会。FastNetMon 不保证重发解封通知。建议开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)，时长大于您的最长封禁时间。
+
+</Accordion>
+
+<Accordion title="Community 版可以使用吗？">
+
+本集成对应 FastNetMon Advanced 的 Web Callback 和通知脚本使用的 JSON 格式。Community 版是否发送相同格式请以 FastNetMon 官方文档为准。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **收不到告警**：在 FastNetMon 服务器上确认 `web_callback_enabled` 已启用，`fcli commit` 已执行，且服务器能访问 Flashduty 推送地址
+- **Flashduty 返回参数错误**：确认请求是 FastNetMon 的 JSON 通知，且 `ip`（主机范围）或 `hostgroup_name`（主机组范围）非空
+- **告警没有恢复**：确认解封通知已发出且携带同一个 `ip`；必要时开启超时自动关闭
+
+字段说明请参阅 FastNetMon 官方文档 [Web Callbacks](https://fastnetmon.com/docs-fnm-advanced/fastnetmon-advanced-web-callbacks/) 和 [JSON formats](https://fastnetmon.com/docs-fnm-advanced/fastnetmon-json-formats/)。

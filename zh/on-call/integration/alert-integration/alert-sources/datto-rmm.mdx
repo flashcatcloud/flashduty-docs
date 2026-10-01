@@ -1,0 +1,140 @@
+---
+title: "Datto RMM 告警集成"
+description: "通过 Datto RMM 的 Webhook 将设备告警的触发和自动恢复事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Datto RMM", "Webhook", "alert_uid", "RMM"]
+---
+
+通过 Datto RMM 的 Webhook 将设备告警同步到 Flashduty On-call。每个 Datto RMM 告警（alert）对应一条 Flashduty 告警；告警自动恢复时，Datto RMM 发出的"告警已解决"请求会关闭同一条 Flashduty 告警。
+
+Datto RMM 的 Webhook 请求体由您自己编写，因此需要把下文提供的 JSON 模板粘贴到 Datto RMM 中。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Datto RMM**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Datto RMM**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Datto RMM 中配置
+---
+
+Datto RMM 有两种配置位置：单个监控器（Monitor）的响应设置，或全局 Webhook。**开启全局 Webhook 会自动停用所有监控器上单独设置的 Webhook**，请二选一。
+
+<Steps>
+<Step title="填写地址和格式">
+
+- 全局：进入 **Setup → Integrations → Global Webhooks**，点击 **Turn On**，并选择需要外发 Webhook 的告警优先级
+- 单个监控器：在监控器的响应设置中添加 Webhook
+
+将 Flashduty 的完整推送地址粘贴到 **URL**（最长 500 个字符），**Content Type** 选择 **application/json**。
+
+</Step>
+
+<Step title="配置告警触发时的 Payload">
+
+在 **When alert is raised** 的 Payload 中粘贴：
+
+```json
+{
+  "event": "triggered",
+  "alert_uid": "[alert_uid]",
+  "alert_type": "[alert_type]",
+  "alert_category": "[alert_category]",
+  "alert": "[alert]",
+  "alert_message": "[alert_message_en]",
+  "device_uid": "[device_uid]",
+  "device_hostname": "[device_hostname]",
+  "device_os": "[device_os]",
+  "device_ip": "[device_ip]",
+  "site_name": "[sitename]",
+  "platform": "[platform]",
+  "severity": "Critical"
+}
+```
+
+`severity` 是可选的固定值，Datto RMM 没有提供优先级变量。全局 Webhook 可为每个优先级分别配置；不填时按 Warning 处理。可填 `Critical`、`High`、`Moderate`、`Low`、`Information`。
+
+</Step>
+
+<Step title="配置告警恢复时的 Payload">
+
+打开 **When alert is resolved (optional)**，Payload 与上面相同，只把 `event` 改为 `resolved`，`severity` 可省略：
+
+```json
+{
+  "event": "resolved",
+  "alert_uid": "[alert_uid]",
+  "alert_type": "[alert_type]",
+  "alert_category": "[alert_category]",
+  "alert": "[alert]",
+  "alert_message": "[alert_message_en]",
+  "device_uid": "[device_uid]",
+  "device_hostname": "[device_hostname]",
+  "device_os": "[device_os]",
+  "device_ip": "[device_ip]",
+  "site_name": "[sitename]",
+  "platform": "[platform]"
+}
+```
+
+<Warning>
+请保留 `event` 和 `alert_uid`。缺少 `alert_uid` 时 Flashduty 会拒绝请求，因为无法关联后续恢复；`event` 只能是 `triggered` 或 `resolved`。Datto RMM 变量在 JSON 字符串中被替换，若告警消息含双引号可能破坏 JSON，此时请去掉 `alert_message` 和 `alert`。
+</Warning>
+
+</Step>
+
+<Step title="测试并验证">
+
+点击 **Test Webhook**（全局为 **Test Alert Webhook**）确认 Datto RMM 能成功发送。同时配置了触发和恢复 Payload 时，两个 Payload 会一起发出。测试请求使用您填写的模板，Flashduty 无法把它与真实告警区分，会按普通告警处理，请在测试后手动关闭。再让真实告警触发并恢复，确认原告警被关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_uid`（Datto RMM 变量 `[alert_uid]`，文档定义为 "The alert ID"）作为 Alert Key。触发和恢复 Payload 使用同一个变量，因此对应同一条告警。设备、站点、告警类型、消息和等级的变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+| `event` | Flashduty 状态 |
+| :--- | :--- |
+| `triggered` | 触发，等级由 `severity` 决定 |
+| `resolved` | 恢复 |
+
+| `severity` | Flashduty 等级 |
+| :--- | :--- |
+| `Critical` | Critical |
+| `High`、`Moderate` | Warning |
+| `Low`、`Information` | Info |
+| 空值或其他值 | Warning |
+
+## 关于恢复
+---
+
+Datto RMM 只在告警被**自动**解决时发送恢复 Payload；在控制台手动解决告警不会发送任何请求。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 24 小时，避免手动解决的告警一直保持未恢复。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 Payload 是有效 JSON，`alert_uid` 非空，`event` 为 `triggered` 或 `resolved`
+- **告警没有恢复**：确认已开启 **When alert is resolved (optional)** 并使用了 `resolved` 模板；手动解决的告警不会发送恢复
+- **单个监控器的 Webhook 不再发送**：开启了全局 Webhook，它会停用监控器上单独设置的 Webhook
+- **请求体超限**：Datto RMM 的 Payload 最大 64 KB，请精简模板
