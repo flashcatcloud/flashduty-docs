@@ -1,0 +1,106 @@
+---
+title: "Dkron alert integration"
+description: "Send Dkron job failure and recovery events to Flashduty On-call through a webhook notification."
+keywords: ["alert integration", "Dkron", "cron", "scheduled jobs", "webhook"]
+---
+
+Dkron can send a webhook notification after every job execution. Point it at a Flashduty Push URL and a failed execution opens an alert in Flashduty; the next successful execution of the same job recovers that alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the Push URL in either of two ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add integration**
+3. Select **Dkron** and click **Save**
+4. Open the integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert events**
+2. Select **Dkron** and enter an integration name
+3. Configure the default route and choose a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Dkron
+---
+
+Dkron has no fixed webhook body. It renders the Go template you set in `webhook-payload` and posts the result. Flashduty parses only the fields the template below produces, so use it as is. The webhook is a server-wide Dkron setting that applies to every job. It is sent once per finished job execution (after retries are used up), by the leader node, for both successes and failures.
+
+<Steps>
+<Step title="Configure the webhook">
+
+Add the following to the Dkron configuration file (for example `/etc/dkron/dkron.yml`) and replace `webhook-endpoint` with the complete Flashduty Push URL:
+
+```yaml
+webhook-endpoint: "https://api.flashcat.cloud/event/push/alert/dkron?integration_key=YOUR_INTEGRATION_KEY"
+webhook-headers:
+  - "Content-Type:application/json"
+webhook-payload: '{"job_name":{{printf "%q" .JobName}},"success":{{.Success}},"node":{{printf "%q" .NodeName}},"reporting_node":{{printf "%q" .ReportingNode}},"started_at":"{{.StartTime}}","finished_at":"{{.FinishedAt}}"}'
+```
+
+You can also use the command-line flags `--webhook-endpoint`, `--webhook-headers` and `--webhook-payload`, or the environment variables `DKRON_WEBHOOK_ENDPOINT`, `DKRON_WEBHOOK_HEADERS` and `DKRON_WEBHOOK_PAYLOAD`.
+
+<Warning>
+- Keep `job_name` and `success`. Flashduty rejects a request that lacks either one.
+- Do not add `{{.Output}}` to the template. Job output can contain quotes, control characters, or sensitive data, and Dkron does not escape it for JSON, so one unescaped character invalidates the whole body.
+- `{{printf "%q" ...}}` quotes and escapes text such as the job name. Do not replace it with `"{{.JobName}}"`.
+</Warning>
+
+</Step>
+
+<Step title="Restart Dkron">
+
+Restart the Dkron servers so the configuration takes effect. In a cluster, give every server node the same configuration so notifications keep flowing after a leader change.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Create a job that fails, for example with the command `false`, and run it manually. Confirm a Critical alert appears in Flashduty. Then change the job to a command that succeeds and run it again, and confirm the alert recovers. Dkron has no webhook test button, so a real execution is the only way to test.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the job name, `job_name` (Dkron's `JobName`), as the Alert Key. The job name identifies a job in Dkron, and every execution result of that job, success or failure, carries the same name, so a failure and the success after it land on the same alert. Changes to the node, the start and end times, or the outcome do not change the Alert Key.
+
+## Status and severity
+---
+
+| Dkron execution result | Flashduty status or severity |
+| :--- | :--- |
+| `success` is `false` | Critical |
+| `success` is `true` | Recovered; original severity Critical |
+
+Dkron has no severity, so every failed job is Critical. A request whose `success` is empty or is neither `true` nor `false` is rejected, so a request with an unknown state never lands in the wrong alert lifecycle.
+
+## Alert labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `job_name`, `check`, `resource` | Job name |
+| `node` | Node that ran the job |
+| `reporting_node` | Leader node that sent the notification |
+| `started_at`, `finished_at` | Start and end time of the execution |
+
+## Troubleshooting
+---
+
+- **Flashduty receives nothing**: Dkron only logs webhook send errors and does not retry. Confirm the server can reach `api.flashcat.cloud` and that the Push URL is complete and includes `integration_key`
+- **Dkron logs `notifier: error parsing template`**: the `webhook-payload` template has a syntax error. Compare the quotes and braces with the template above
+- **Flashduty returns a parameter error**: confirm the body is valid JSON with a non-empty `job_name` and a `success` of `true` or `false`
+- **The alert does not recover**: recovery comes from the next successful execution of the same job. If the job keeps failing or runs only once, the alert stays open; turn on [auto-close](/en/on-call/channel/create-edit) in the channel as a fallback
+- **Job retries**: Dkron notifies only after retries are used up, so failures during retries do not create alerts
+
+For more settings, see [Dkron Configuration](https://dkron.io/docs/basics/configuration/).
