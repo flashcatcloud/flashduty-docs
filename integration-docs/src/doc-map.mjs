@@ -289,6 +289,7 @@ export const docMap = {
   GrowthbookChange: `${integrationBase}/change-integration/growthbook.mdx`,
   FluxcdChange: `${integrationBase}/change-integration/fluxcd.mdx`,
   PulumiChange: `${integrationBase}/change-integration/pulumi.mdx`,
+  Env0Change: `${integrationBase}/change-integration/env0.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
