@@ -1,0 +1,123 @@
+---
+title: "Red Hat OpenShift Alert Integration"
+description: "Receive OpenShift cluster alerts through the webhook receiver of OpenShift monitoring's built-in Alertmanager using a Flashduty Prometheus integration; alerts close automatically when they resolve."
+keywords: ["alert integration", "Red Hat OpenShift", "OpenShift", "Alertmanager", "webhook", "Prometheus", "Kubernetes"]
+---
+
+The OpenShift Container Platform monitoring stack ships its own Alertmanager (`alertmanager-main` in the `openshift-monitoring` project). The official documentation lists PagerDuty, Webhook, Email, Slack and Microsoft Teams as receiver types, and states that the features of a supported upstream Alertmanager version are supported in OpenShift as well. The webhook receiver sends Alertmanager JSON to the URL you set (`version` is `4`; each alert carries `status`, `labels`, `annotations`, `startsAt`, `endsAt`, `generatorURL`, `fingerprint`). The Flashduty [Prometheus integration](/en/on-call/integration/alert-integration/alert-sources/prometheus) accepts this format, so no separate OpenShift integration is needed: create a Prometheus integration in Flashduty and configure its push URL as a webhook receiver in the OpenShift Alertmanager.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Prometheus integration type** in both, not Chronosphere.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Prometheus** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/prometheus?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Prometheus** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in OpenShift
+---
+
+The OpenShift documentation offers two ways to configure a receiver; use either one. Both require the `cluster-admin` role.
+
+<Steps>
+<Step title="Option 1: the web console">
+
+1. In the **Administrator** perspective, go to **Administration** → **Cluster Settings** → **Configuration** → **Alertmanager**
+2. In the **Receivers** section, click **Create Receiver**
+3. Enter a **Receiver name** (for example `flashduty`) and select **Webhook** as the **Receiver type**
+4. In the webhook endpoint field, enter the full push URL copied above, including `?integration_key=...`
+5. **Show advanced configuration** has the option to send resolved alerts; it is on by default, leave it unchanged
+6. In **Routing labels**, use **Add label** to add label names and values that select which alerts go to this receiver; per the documentation, firing alerts whose labels match all selectors are sent to the receiver, and adding labels here makes the label values match exactly
+7. Click **Create**
+
+</Step>
+
+<Step title="Option 2: edit the alertmanager-main secret">
+
+1. Export the current configuration:
+
+   ```bash
+   oc -n openshift-monitoring get secret alertmanager-main --template='{{ index .data "alertmanager.yaml" }}' | base64 --decode > alertmanager.yaml
+   ```
+
+2. Add a receiver and a route to `alertmanager.yaml`. The example adds a `flashduty` receiver to the default configuration and routes alerts whose `severity` is `critical` or `warning` to it. `send_resolved` defaults to `true` in the Alertmanager webhook configuration; it is written out to make sure resolved notifications stay on:
+
+```yaml
+receivers:
+- name: default
+- name: watchdog
+- name: flashduty
+  webhook_configs:
+  - url: https://api.flashcat.cloud/event/push/alert/prometheus?integration_key=<integration key>
+    send_resolved: true
+route:
+  routes:
+  - matchers:
+    - "alertname=Watchdog"
+    repeat_interval: 2m
+    receiver: watchdog
+  - matchers:
+    - "severity=~critical|warning"
+    receiver: flashduty
+```
+
+   Replace `<integration key>` with your Flashduty integration key. Keep the new route after the `Watchdog` route: Watchdog is an alert that fires continuously, and the OpenShift documentation describes it as a check on the notification path, not a fault alert to forward to Flashduty.
+
+3. Replace the secret with the edited file:
+
+   ```bash
+   oc -n openshift-monitoring create secret generic alertmanager-main --from-file=alertmanager.yaml --dry-run=client -o=yaml | oc -n openshift-monitoring replace secret --filename=-
+   ```
+
+</Step>
+
+<Step title="Verify">
+
+Trigger a cluster alert (the OpenShift documentation points to the Red Hat Customer Portal article "Send test alerts to Alertmanager in OpenShift 4") and confirm Flashduty receives an active alert; after it resolves, confirm the original alert closes in Flashduty.
+
+</Step>
+</Steps>
+
+## Field mapping
+---
+
+| OpenShift Alertmanager field | Flashduty |
+| :--- | :--- |
+| `alerts[].fingerprint` | Alert Key; notifications with the same `fingerprint` belong to one alert |
+| `alerts[].status` | `firing` creates or updates the alert with the mapped severity; `resolved` closes it |
+| `alerts[].labels.severity` | `critical` → Critical; `warn` or `warning` → Warning; `info` → Info; missing or unrecognized → Warning |
+| `alerts[].labels.alertname` | Check (`check`), also used in the title |
+| `alerts[].labels.instance` | Label `resource` |
+| Other `labels`, `annotations`, `groupLabels`, `commonLabels` | Each key becomes a label; `annotations.description` becomes the alert description |
+| `startsAt`, `endsAt` | Labels `starts_at` and `ends_at` |
+
+One notification can carry several alerts, and Flashduty handles each one separately (up to 100 per request).
+
+## Recovery and deduplication
+---
+
+- `send_resolved` defaults to `true` for the Alertmanager webhook receiver. On recovery it sends a notification with `status` set to `resolved`, and Flashduty closes the alert with the same `fingerprint`.
+- If you turn resolved notifications off under **Show advanced configuration** (or set `send_resolved: false` in YAML), Flashduty receives no recovery requests; enable [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel.
+- Alertmanager repeats notifications for alerts that are still firing, per `repeat_interval`; Flashduty deduplicates by `fingerprint`, so no duplicate alerts are created.
+
+## Troubleshooting
+---
+
+- **Flashduty returns `Invalid parameters`**: the push URL is incomplete, `integration_key` is missing, or the integration type is not Prometheus
+- **Alerts do not resolve**: confirm the receiver does not set `send_resolved: false`
+- **No alerts arrive**: confirm the route `matchers` or **Routing labels** match the alert labels and the cluster can reach `api.flashcat.cloud` (with a cluster-wide HTTP proxy, see the `proxy_from_environment` note in the OpenShift documentation); `oc exec alertmanager-main-0 -n openshift-monitoring -- amtool config routes show --alertmanager.url http://localhost:9093` shows the effective routes

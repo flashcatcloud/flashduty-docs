@@ -244,6 +244,8 @@ export const docMap = {
   Ossec: `${alertBase}/ossec.mdx`,
   Zeek: `${alertBase}/zeek.mdx`,
   Chronosphere: `${alertBase}/chronosphere.mdx`,
+  Cubeapm: `${alertBase}/cubeapm.mdx`,
+  RedHatOpenshift: `${alertBase}/red-hat-openshift.mdx`,
   Papertrail: `${alertBase}/papertrail.mdx`,
   MonteCarlo: `${alertBase}/monte-carlo.mdx`,
   Limacharlie: `${alertBase}/limacharlie.mdx`,
