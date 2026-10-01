@@ -1,0 +1,132 @@
+---
+title: "GitHub change integration"
+description: "Sync GitHub deployments and releases to Flashduty On-call through a GitHub webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "GitHub", "Deployment", "Release", "Webhook", "deployment events"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a GitHub repository or organization webhook to sync deployments and releases to Flashduty On-call. Each deployment and each release becomes one Flashduty change; every state of a deployment, from created and queued through running to success or failure, updates that same change.
+
+GitHub Actions jobs that declare an `environment` create deployments automatically, so repositories that release with Actions can connect without changing their workflows.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **GitHub** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `repo` or `environment`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure GitHub
+---
+
+<Steps>
+<Step title="Open webhook settings">
+
+- Repository: go to the repository's **Settings → Webhooks** and click **Add webhook**
+- Organization: go to the organization's **Settings → Webhooks** and click **Add webhook**; events from every repository in the organization are sent
+
+You need admin permission on the repository or organization.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **Payload URL**: paste the complete Flashduty integration Push URL
+2. **Content type**: select `application/json` (`application/x-www-form-urlencoded` is also accepted)
+3. **Secret**: leave it empty; Flashduty authenticates the request by the `integration_key` in the Push URL
+
+</Step>
+
+<Step title="Select events">
+
+1. Select **Let me select individual events**
+2. Check **Deployments**, **Deployment statuses**, and **Releases**, and uncheck **Pushes**, which is selected by default
+3. Keep **Active** checked and click **Add webhook**
+
+After you save, GitHub sends a `ping`. Flashduty accepts it without creating a change.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| GitHub object | Change key (change_key) | Notes |
+|---|---|---|
+| Deployment | `deployment:<deployment.id>` | The `deployment` event and every `deployment_status` event of one deployment update the same change; two deployments of the same repository to the same environment are two changes |
+| Release | `release:<release.id>` | Publishing, unpublishing, and deleting one release update the same change |
+
+## Status mapping
+---
+
+| GitHub event | GitHub state | Flashduty change status |
+|---|---|---|
+| deployment | created | Ready |
+| deployment_status | waiting (waiting for environment approval) | Planned |
+| deployment_status | pending, queued | Ready |
+| deployment_status | in_progress | Processing |
+| deployment_status | success | Done |
+| deployment_status | failure, error | Failed |
+| deployment_status | error from a GitHub Actions job canceled on the run page (`workflow_run.conclusion` is `cancelled`) | Canceled |
+| release | published | Done |
+| release | unpublished, deleted | Canceled |
+
+Done, Failed, and Canceled are end states; Flashduty records the change's end time when one arrives.
+
+These deliveries are accepted without creating a change: `ping`, any other event type, the release actions `created`, `edited`, `released`, and `prereleased` (GitHub also sends `published` when a release is published, and that is the one recorded), and the deployment state `inactive` (an older deployment replaced by a newer one; its earlier result stays as it was).
+
+## Change content
+---
+
+| Field | Deployment | Release |
+|---|---|---|
+| Title | `<repository>: deploy <ref> (<short SHA>) to <environment>` | `<repository>: release <tag>` |
+| Description | The deployment's description | The release name (empty when it equals the tag) |
+| Link | The deployment log (`log_url` or `target_url`), or the repository's Deployments page when there is none | The release page |
+
+Labels can be used in routes and to filter the change list:
+
+| Label | Deployment | Release |
+|---|---|---|
+| `repo` | Full repository name, such as `octo-org/hello-world` | Same |
+| `environment` | Deployment environment | — |
+| `ref` | The branch, tag, or SHA deployed | The release's target branch or commit |
+| `sha` | Full commit SHA deployed | — |
+| `version` | — | Release tag |
+| `task` | Deployment task, usually `deploy` | — |
+| `actor` | The user who created the deployment | The release author |
+| `deployment_id` / `release_id` | GitHub object ID | GitHub object ID |
+| `state` | The latest GitHub deployment state | — |
+| `prerelease` | — | `true` for a pre-release |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no deployment changes arriving?">
+
+- Make sure the webhook has **Deployments** and **Deployment statuses** checked. **Pushes** alone creates no changes
+- Check the delivery history and Flashduty's responses under **Recent Deliveries** on the GitHub webhook page
+- Only releases that use GitHub Deployments send deployment events, for example a GitHub Actions job that declares an `environment`, or a call to the Deployments API
+
+</Accordion>
+
+<Accordion title="Does redelivering from GitHub record a duplicate?">
+
+No. An event with the same state and time is recorded once.
+
+</Accordion>
+
+<Accordion title="Why does a delivery return InvalidParameter?">
+
+- `unsupported deployment_status.state`: Flashduty received a deployment state it does not support yet. Contact us
+- `deployment.id is missing` or `release.id is missing`: the payload is incomplete. Make sure the delivery comes from a native GitHub webhook
+
+</Accordion>
+</AccordionGroup>

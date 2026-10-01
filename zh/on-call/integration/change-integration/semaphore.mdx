@@ -1,0 +1,147 @@
+---
+title: "Semaphore 变更集成"
+description: "通过 Semaphore 的 Webhook 通知将 Pipeline 的执行结果同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Semaphore", "Pipeline", "CI/CD", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Semaphore 的 Webhook 通知（Notifications），将 Pipeline 的执行结果同步到 Flashduty On-call。每个 Pipeline 对应一条 Flashduty 变更，在 Pipeline 结束时记录一次。
+
+Semaphore 只在 Pipeline 结束（state 为 `done`）时推送通知，没有开始事件，因此变更没有 Processing 中间状态，直接记录为结束状态：Done、Failed 或 Canceled。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Semaphore**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`ref`、`pipeline`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Semaphore 中配置
+---
+
+<Steps>
+<Step title="创建通知">
+
+在 Semaphore 控制台进入 **Notifications**，创建新的通知（Notification），添加一条规则（Rule）：
+
+1. **Name**：填写便于识别的名称，例如 `Flashduty`
+2. **Filters**（可选）：按项目（Projects）、分支（Branches）、Tag（Tags）、Pipeline 文件（Pipelines）、结果（Results）过滤。留空表示不限制；Results 可选值为 `passed`、`failed`、`stopped`、`canceled`，建议留空，让四种结果都推送
+3. **Webhook endpoint**：粘贴 Flashduty 集成的完整推送地址
+4. **Secret name**：填写的是 Semaphore 中已有 Secret 的名称，不是自由文本，留空即可。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `X-Semaphore-Signature-256`
+
+也可以用 Semaphore CLI 创建：
+
+```bash
+sem create notification flashduty \
+  --projects "<项目名>" \
+  --webhook-endpoint "<Flashduty 推送地址>"
+```
+
+</Step>
+
+<Step title="调整超时与重试（建议）">
+
+Semaphore 默认的响应超时为 500 毫秒，且不重试。Flashduty 响应较慢时，这次推送会被记为失败且不会补发。建议用 `sem edit notification flashduty` 在 webhook 配置中加上：
+
+```yaml
+timeout: 3000
+retries: 2
+```
+
+`retries` 只在超时时重试，重试沿用同一个推送内容，Flashduty 不会重复记录。
+
+</Step>
+
+<Step title="运行一次 Pipeline">
+
+Semaphore 没有测试推送。在配置了通知的项目上运行一次 Pipeline，结束后即可在 Flashduty 变更列表中看到记录。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| Semaphore 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Pipeline | `pipeline.id` | 每次运行的每个 Pipeline 有独立的 ID，对应一条 Flashduty 变更。同一分支上的两次运行是两条变更；一个 Workflow 中通过 Promotion 触发的后续 Pipeline 也是各自独立的变更 |
+
+## 状态映射
+---
+
+| Semaphore `pipeline.result` | Flashduty 变更状态 |
+|---|---|
+| `passed` | Done |
+| `failed` | Failed |
+| `stopped` | Canceled |
+| `canceled` | Canceled |
+
+以下推送返回成功但不生成变更：
+
+- `pipeline.state` 不是 `done` 的推送
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目名>: <Pipeline 名> on <分支或 Tag> (<短 SHA>)`，例如 `notifications: Build and test on webhook_impl (2d9f5fc)`。Pull Request 触发的运行使用源分支名和 PR 的最新提交 |
+| 描述 | 提交说明（Commit message） |
+| 链接 | Semaphore 中该 Pipeline 的页面，格式为 `https://<组织名>.semaphoreci.com/workflows/<Workflow ID>?pipeline_id=<Pipeline ID>`，与 Semaphore 自己的 Slack 通知使用的地址一致。自托管的 Semaphore 域名不同，此链接可能无法打开 |
+| 变更时间 | Pipeline 的结束时间（`pipeline.done_at`） |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目名 |
+| `project_id` | 项目 ID |
+| `organization` | 组织名 |
+| `repo` | 代码仓库，例如 `<组织>/<仓库>` |
+| `pipeline` | Pipeline 名称 |
+| `pipeline_id` | Pipeline ID |
+| `workflow_id` | Workflow ID |
+| `ref` | 分支、Tag，或 Pull Request 的源分支 |
+| `sha` | 提交的完整 SHA；Pull Request 触发的运行为 PR 的最新提交 |
+| `pull_request` | Pull Request 编号，仅 PR 触发的运行有 |
+| `actor` | 触发提交的用户名 |
+| `semaphore_result` | Semaphore 的 Pipeline 结果原值 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么看不到 Pipeline 的运行中状态？">
+
+Semaphore 的 Webhook 通知只在 Pipeline 结束时发送，不推送开始事件。变更在 Pipeline 结束时以最终状态出现。
+
+</Accordion>
+
+<Accordion title="Semaphore 重试推送会重复记录吗？">
+
+不会。重试使用同一个推送内容，Flashduty 以 Pipeline 结束时间去重，只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `pipeline.id is missing`：推送内容不完整，请确认推送来自 Semaphore 的 Webhook 通知
+- `unknown pipeline.result`：出现了未收录的 Pipeline 结果值，请联系我们补充映射
+- `invalid pipeline.done_at`：推送中的时间字段格式不正确
+
+</Accordion>
+
+<Accordion title="没有看到变更？">
+
+- 通知只发送给对项目有访问权限的用户创建的规则，请确认创建通知的用户至少是该项目的成员
+- 检查规则的过滤条件是否排除了该项目、分支或结果
+- 在 Semaphore 中默认的 500 毫秒超时可能不足以等到响应，参见上文调整超时与重试
+
+</Accordion>
+</AccordionGroup>
