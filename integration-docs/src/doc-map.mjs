@@ -282,6 +282,7 @@ export const docMap = {
   IbmQradar: `${alertBase}/ibm-qradar.mdx`,
   Opnsense: `${alertBase}/opnsense.mdx`,
   Vigil: `${alertBase}/vigil.mdx`,
+  Peekaping: `${alertBase}/peekaping.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
