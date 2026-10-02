@@ -93,6 +93,7 @@ export const docMap = {
   TriggerDev: `${alertBase}/trigger-dev.mdx`,
   Duplicati: `${alertBase}/duplicati.mdx`,
   Robotalp: `${alertBase}/robotalp.mdx`,
+  Infisical: `${alertBase}/infisical.mdx`,
   Fivetran: `${alertBase}/fivetran.mdx`,
   Cato: `${alertBase}/cato.mdx`,
   Aikido: `${alertBase}/aikido.mdx`,
@@ -111,6 +112,7 @@ export const docMap = {
   Calibre: `${alertBase}/calibre.mdx`,
   Uptimia: `${alertBase}/uptimia.mdx`,
   Clustercontrol: `${alertBase}/clustercontrol.mdx`,
+  Hertzbeat: `${alertBase}/hertzbeat.mdx`,
   Nobl9: `${alertBase}/nobl9.mdx`,
   Sevone: `${alertBase}/sevone.mdx`,
   Coralogix: `${alertBase}/coralogix.mdx`,
@@ -280,6 +282,8 @@ export const docMap = {
   Suricata: `${alertBase}/suricata.mdx`,
   IbmQradar: `${alertBase}/ibm-qradar.mdx`,
   Opnsense: `${alertBase}/opnsense.mdx`,
+  Vigil: `${alertBase}/vigil.mdx`,
+  Peekaping: `${alertBase}/peekaping.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
@@ -313,6 +317,8 @@ export const docMap = {
   HarnessFmeChange: `${integrationBase}/change-integration/harness-fme.mdx`,
   ExpoEasChange: `${integrationBase}/change-integration/expo-eas.mdx`,
   Env0Change: `${integrationBase}/change-integration/env0.mdx`,
+  NetboxChange: `${integrationBase}/change-integration/netbox.mdx`,
+  NautobotChange: `${integrationBase}/change-integration/nautobot.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',

@@ -1,0 +1,137 @@
+---
+title: "NetBox 变更集成"
+description: "通过 NetBox 事件规则（Event Rule）的 Webhook 动作，将站点、设备、IP 前缀等基础设施配置的新增、修改、删除同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "NetBox", "DCIM", "IPAM", "事件规则", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 NetBox 的事件规则（Event Rule）和 Webhook，将 NetBox 中对象（站点、机柜、设备、IP 前缀、VLAN 等）的新增、修改、删除同步到 Flashduty On-call。一次对某个对象的 Web 界面或 API 操作对应一条 Flashduty 变更，例如修改设备状态、分配 IP 前缀、删除一个站点。
+
+NetBox 推送的是已经保存的变更，因此每条变更都直接记录为 **Done**。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **NetBox**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `object_type`、`actor`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 NetBox 中配置
+---
+
+本文基于 NetBox 4.7 的默认 Webhook 请求体。
+
+<Steps>
+<Step title="创建 Webhook">
+
+1. 进入 **Operations → Integrations → Webhooks**，点击 **Add**
+2. **Name**：填写便于识别的名称，例如 `Flashduty`
+3. **URL**：粘贴 Flashduty 集成的完整推送地址
+4. **HTTP method** 选择 `POST`，**HTTP content type** 保持 `application/json`
+5. **Body template** 留空，使用 NetBox 默认请求体；**Additional headers** 无需填写
+6. **Secret** 无需填写，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+</Step>
+
+<Step title="创建事件规则">
+
+1. 进入 **Operations → Integrations → Event Rules**，点击 **Add**
+2. **Object types**：选择需要同步的对象类型，例如 `DCIM > site`、`DCIM > device`、`IPAM > prefix`
+3. **Event types**：勾选 **Object created**、**Object updated**、**Object deleted**
+4. 如只同步部分对象，在 **Conditions** 中添加 JSON 条件，例如 `{"and": [{"attr": "status.value", "value": "active"}]}`
+5. **Action type** 选择 **Webhook**，**Webhook** 选择上一步创建的 Webhook，保存
+
+</Step>
+</Steps>
+
+NetBox 没有测试推送按钮。保存后在已选对象类型下新增或修改一个对象，即可在 Flashduty 变更列表中看到记录。NetBox 通过后台任务（RQ worker）发送 Webhook，需要 `rqworker` 进程在运行。
+
+## 一条变更是什么
+---
+
+| NetBox 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 一次请求对一个对象的变更 | `<object_type>:<对象 id>:<请求 id>`，例如 `dcim.site:1:e5901c11-...` | `request.id` 是 NetBox 为每个请求生成的 UUID。同一个请求内对同一个对象的多次修改，NetBox 只推送一条；不同请求即使修改同一个对象，也是不同的变更 |
+
+批量操作（批量导入、批量编辑、批量删除）在一个请求里改动多个对象，每个对象各生成一条变更，它们的 `request_id` 标签相同，可据此在变更列表中找到同一次操作改动的全部对象。
+
+## 状态映射
+---
+
+| NetBox 事件（`event`） | Flashduty 变更状态 |
+|---|---|
+| `created` | Done |
+| `updated` | Done |
+| `deleted` | Done |
+
+以下推送返回成功但不生成变更：
+
+- `job_started`、`job_ended`：后台任务（脚本、数据源同步等）的开始和结束，它们不是配置变更。脚本在运行中创建、修改、删除的对象仍会作为 `created`、`updated`、`deleted` 推送
+
+NetBox 的 Webhook 只在变更保存后推送，没有"失败"或"取消"状态。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<object_type> <对象名称> <事件>`，例如 `dcim.site fd-site-a created`；对象名称取 `display`，其次 `name`，再次 `#<id>` |
+| 描述 | 触发变更的请求和操作人，例如 `PATCH /api/dcim/sites/1/ by admin`；修改事件在第二行列出发生变化的字段，例如 `Changed: description` |
+| 链接 | 无。NetBox 的推送内容只包含相对路径，不含 NetBox 的访问地址 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `object_type` | 对象类型，例如 `dcim.site`、`ipam.prefix` |
+| `object_id` | 对象 ID |
+| `event` | `created`、`updated` 或 `deleted` |
+| `actor` | 发起请求的用户名 |
+| `request_id` | NetBox 请求 ID；同一次批量操作的变更相同 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 确认事件规则已启用，且 **Object types** 包含该对象类型、**Event types** 勾选了对应事件，没有被 **Conditions** 排除
+- 确认 NetBox 的 `rqworker` 进程在运行；在 NetBox 的 **System → Background Tasks** 中可以看到失败的 Webhook 任务，并可重新入队
+- 事件规则的 Webhook 必须使用默认请求体；填写了自定义 **Body template** 会改变推送格式，导致推送失败或字段缺失
+
+</Accordion>
+
+<Accordion title="NetBox 重新推送会重复记录吗？">
+
+不会。NetBox 重新入队的失败任务发送的内容与原推送完全相同（包括时间戳），Flashduty 识别为重复推送，只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+NetBox 的失败任务中会看到响应内容：
+
+- `unknown event "<值>"`：`event` 不是 `created`、`updated`、`deleted` 或 `job_*`，请确认没有自定义请求体
+- `data.id is missing`、`request.id is missing`、`object_type is missing`：请求体缺少必要字段，请清空 **Body template**
+- `invalid timestamp "<值>"`：`timestamp` 不是 ISO 8601 格式
+
+</Accordion>
+
+<Accordion title="为什么变更没有链接？">
+
+NetBox 的 Webhook 推送中，对象地址只有相对路径（例如 `/dcim/sites/1/`），不包含 NetBox 的域名，Flashduty 无法拼出完整链接。可以通过标题中的对象类型和名称，或 `object_id` 标签在 NetBox 中定位对象。
+
+</Accordion>
+
+<Accordion title="删除对象也是 Done 吗？">
+
+是。删除已经在 NetBox 中生效，因此记录为 Done，`event` 标签为 `deleted`。
+
+</Accordion>
+</AccordionGroup>
