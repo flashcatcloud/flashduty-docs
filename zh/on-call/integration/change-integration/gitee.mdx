@@ -1,0 +1,140 @@
+---
+title: "Gitee 变更集成"
+description: "通过 Gitee WebHook 将分支推送、Tag 推送和 Pull Request 合并同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Gitee", "码云", "WebHook", "Push", "Tag", "Pull Request", "合并"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Gitee 仓库或企业的 WebHook，将代码合入记录同步到 Flashduty On-call：每一次分支推送、每一个新推送的 Tag、每一次 Pull Request 合并，各对应一条 Flashduty 变更，状态为 Done。Gitee 的 WebHook 不提供部署事件，需要部署类变更时，请使用部署工具自己的变更集成。
+
+Gitee 的 WebHook 不能按分支过滤推送：勾选 **Push** 后，仓库中每个分支的每次推送都会成为变更。请用 `ref` 标签在 Flashduty 中路由或筛选出需要关注的分支，例如 `master`、`release`。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Gitee**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `repo`、`ref`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Gitee 中配置
+---
+
+<Steps>
+<Step title="添加 WebHook">
+
+进入仓库主页，选择 **管理 → WebHooks**，添加 WebHook。企业级 WebHook 对企业内所有仓库生效。需要仓库或企业的管理员权限。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **URL**：粘贴 Flashduty 集成的完整推送地址
+2. **密码** 和 **签名密钥**：留空即可，Flashduty 通过推送地址中的 `integration_key` 鉴权，不读取也不校验 Gitee 随请求发送的密码和签名
+
+</Step>
+
+<Step title="选择钩子">
+
+勾选需要的钩子：
+
+- **Push**：推送代码到分支
+- **Tag Push**：新建 Tag
+- **Pull Request**：Pull Request 合并（其他 Pull Request 动作不会生成变更）
+
+不要勾选 **Issue** 和 **评论**，它们不会生成变更。保存后可使用 Gitee 的 **测试 WebHook** 检查连通性。
+
+</Step>
+</Steps>
+
+合并 Pull Request 会向目标分支产生一次提交。同时勾选 **Push** 和 **Pull Request** 时，同一次合并可能生成两条变更：一条是目标分支的推送，一条是 Pull Request 合并。只关心其中一类时，只勾选对应的钩子。
+
+## 一条变更是什么
+---
+
+| Gitee 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 分支推送 | `push:<仓库 ID>/<分支>@<推送后的提交 SHA>` | 每次推送的提交不同，所以是不同的变更；同一个提交、同一个分支的重复推送是同一条变更 |
+| Tag 推送 | `tag:<仓库 ID>/<Tag>@<提交 SHA>` | 同名 Tag 指向新提交后是新的变更 |
+| Pull Request 合并 | `pull_request:<仓库 ID>/<Pull Request ID>` | 使用 Pull Request 的 `id` 字段，不是仓库内的编号 `number` |
+
+同一个提交被推送到两个分支，是两条变更。
+
+## 状态映射
+---
+
+| Gitee 钩子 | 条件 | Flashduty 变更状态 |
+|---|---|---|
+| Push | 推送到分支（`refs/heads/*`） | Done |
+| Tag Push | 推送 Tag（`refs/tags/*`） | Done |
+| Pull Request | `action` 为 `merge` | Done |
+
+Done 是结束状态，Flashduty 会记录变更结束时间。
+
+以下推送返回成功但不生成变更：Issue 和评论钩子、删除分支或 Tag 的推送、`action` 不是 `merge` 的 Pull Request 钩子（`open`、`update`、`approved`、`close`、`tested` 等），以及无法识别的钩子类型。
+
+## 变更内容
+---
+
+| 字段 | 分支推送 | Tag 推送 | Pull Request 合并 |
+|---|---|---|---|
+| 标题 | `<仓库>: push <分支> (<短 SHA>)` | `<仓库>: tag <Tag>` | `<仓库>: merge #<编号> <标题> into <目标分支>` |
+| 描述 | 最新一次提交的提交信息 | 同左 | Pull Request 的描述 |
+| 链接 | 最新提交的页面 | 同左 | Pull Request 页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `event` | `push`、`tag` 或 `pull_request` |
+| `repo` | 仓库路径，例如 `octo-org/hello-world` |
+| `repo_id` | Gitee 仓库 ID |
+| `ref` | 推送的分支，或 Pull Request 的目标分支（Tag 推送没有） |
+| `version` | Tag 名称（仅 Tag 推送） |
+| `source_branch` | Pull Request 的源分支（仅 Pull Request 合并） |
+| `sha` | 推送后的提交 SHA；Pull Request 合并为合并提交 SHA |
+| `actor` | 触发钩子的用户（Gitee 用户名） |
+| `pull_request_id` / `pull_request_number` | Pull Request 的 `id` / `number`（仅 Pull Request 合并） |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么所有分支的推送都变成了变更？">
+
+Gitee 的 WebHook 不能按分支筛选。请在集成的 **路由** 中按 `ref` 标签把需要关注的分支分派到对应协作空间，或只勾选 **Tag Push** 和 **Pull Request**。
+
+</Accordion>
+
+<Accordion title="为什么合并 Pull Request 后没有变更？">
+
+- 确认 WebHook 勾选了 **Pull Request**
+- 只有合并动作生成变更；新建、更新、关闭等动作返回成功但不记录
+- 在 WebHook 的推送记录中查看请求和 Flashduty 的响应
+
+</Accordion>
+
+<Accordion title="Gitee 重新推送同一条通知会重复记录吗？">
+
+不会。同一变更、同一时间的事件只记录一次。
+
+</Accordion>
+
+<Accordion title="测试 WebHook 会生成变更吗？">
+
+Gitee 的 **测试 WebHook** 按所选钩子发送测试数据，格式与真实推送相同，所以可能生成一条变更，属于预期行为。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `ref is missing`、`after is missing`、`repository.id is missing`、`pull_request.id is missing` 或 `pull_request is missing`：推送内容不完整，请确认推送来自 Gitee 原生 WebHook
+- 请求体不是 JSON：请使用 Gitee 当前的 WebHook（`Content-Type: application/json`）；旧版钩子以表单格式发送，不受支持
+
+</Accordion>
+</AccordionGroup>
