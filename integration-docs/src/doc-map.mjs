@@ -153,6 +153,7 @@ export const docMap = {
   Kener: `${alertBase}/kener.mdx`,
   Vigil: `${alertBase}/vigil.mdx`,
   Ofelia: `${alertBase}/ofelia.mdx`,
+  DependencyTrack: `${alertBase}/dependency-track.mdx`,
   Peekaping: `${alertBase}/peekaping.mdx`,
   Openobserve: `${alertBase}/openobserve.mdx`,
   Postman: `${alertBase}/postman.mdx`,
