@@ -160,6 +160,8 @@ Add the **On-call incident** trigger when you want AI SRE to start automatically
   </Step>
 </Steps>
 
+The form also offers a **Merge similar incidents into one analysis** switch under this trigger, on by default: when it is on, a new incident from this rule is first compared for similarity against the incidents being analyzed now (or analyzed within the last 10 minutes); one scoring at least 0.9 — the same bar intelligent grouping uses — joins that analysis instead of starting a session of its own, and one analysis takes in at most 20 incidents. When it is off, every incident is analyzed on its own. The rule's detail page shows the switch's state (**Enabled** / **Disabled**) in the trigger information.
+
 If you create or update a rule through the API, use these fields:
 
 | Field | Type | Notes |
@@ -167,10 +169,13 @@ If you create or update a rule through the API, use these fields:
 | `oncall_incident_trigger_enabled` | boolean | Whether the On-call incident trigger is enabled. |
 | `oncall_incident_channel_ids` | int64[] | On-call channel IDs to watch. Creating or enabling this trigger requires at least one valid ID. |
 | `oncall_incident_severities` | string[] | Incident severities to watch. Supported values are `Critical`, `Warning`, and `Info`; creating or enabling this trigger requires at least one value. |
+| `oncall_incident_merge_similar` | boolean | Whether **Merge similar incidents into one analysis** is on. Defaults to `true` (a request that omits the field is treated as on). When on, a new incident scoring at least 0.9 joins the analysis in progress instead of creating a session of its own. |
 
 When a matching event arrives, the system creates a run with `trigger_kind: "oncall_incident"` and passes event context such as `incident_id`, `channel_id`, and `severity` into the session. The same trigger and the same `incident_id` reuse the same run, avoiding duplicate hidden sessions for one incident.
 
 When the run finishes, AI SRE writes one summary comment back to the incident that triggered it: conclusion first, body kept concise, with a link to the full session at the end. That write-back record also carries a persistent **Continue conversation** entry, so you can open that session straight from the conclusion on the incident timeline — see [Incident Timeline · AI SRE Action Records](/en/on-call/incident/search-view-incident#ai-sre-action-records). The comment travels through the incident's existing notification chain (for example, incident card refreshes and thread replies in IM), so whoever is watching the incident sees the analysis without opening the console. This applies to every rule with the On-call incident trigger enabled — including rules with custom prompts — with no extra configuration.
+
+When an incident is folded into another analysis, the platform performs no incident merge and each incident's bindings stay unchanged: the Agent receives an `incident_joined` task notification telling it that the new incident joined the analysis in progress because it cleared the similarity bar. The analysis summary comment gains a **concurrent incidents** dimension in turn, listing other incidents created in any channel within 15 minutes either side of this incident's start time, as clues to a common root cause.
 
 ## Run History
 
@@ -182,7 +187,7 @@ Run history is shown as a table with these columns:
 
 | Column | Notes |
 |---|---|
-| Name | The hidden session behind this run. The backend batch-resolves each run's session title (`session_name`, the hidden session's auto-generated name); when it can't be resolved, the cell falls back to the session ID (`session_id`) |
+| Name | The hidden session behind this run. The backend batch-resolves each run's session title (`session_name`, the hidden session's auto-generated name); when it can't be resolved, the cell falls back to the session ID (`session_id`). A run folded into another analysis by similar-incident merging has no session of its own, so the Name column shows `#<incident-no>` plus the incident title instead; the run record also carries `joined_session_id` / `joined_session_name` fields |
 | Started at | The start time of the run |
 | Duration | How long the run took |
 | Triggers | The trigger type of the run, such as `Schedule`, `HTTP POST`, `On-call incident`, or `Run manually` |
@@ -208,7 +213,9 @@ Three filters are available above the table:
 
 Run records returned by the API also include `trigger_kind`, which can be `schedule`, `manual`, `http_post`, `oncall_incident`, or `debug`. `manual` means the run was started through the run-now API, and `oncall_incident` means it was started by a matching On-call incident event.
 
-Click any row to jump to the chat page of the hidden session for that run (`chat?session_id=<sessionID>`), where you can view the full messages, tool calls, and artifacts of that run.
+Click any row to jump to the chat page of the hidden session for that run (`chat?session_id=<sessionID>`), where you can view the full messages, tool calls, and artifacts of that run; a run folded into another analysis by similar-incident merging opens the analysis session it joined instead.
+
+A run that ended abnormally (status `failed`, `blocked`, `abandoned`, or `skipped`) also shows a failure-reason line under the session name in the Name column: when AI SRE is not enabled, or this period's credits or balance are used up, the line says the run did not execute and links to **Go to AI SRE billing**; when the On-call subscription has lapsed or its plan does not include AI SRE, it says AI SRE is paused and links to **Go to On-Call subscription**; the remaining cases use fixed wording — the run did not finish in time and was abandoned, this run was interrupted, or the run ended without a final reply; and a run folded into another analysis by similar-incident merging shows **Joined "analysis name"**.
 
 <Note>
 Run history is embedded in the rule's detail page, and opening the detail page itself already requires edit permission on that rule — a rule you cannot edit cannot be opened at all (it shows "Automation rule not found or access denied"), so its run history is likewise unreachable.

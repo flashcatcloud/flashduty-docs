@@ -36,7 +36,7 @@ Of these, the 5 **diagnostic-only types** — Redis Node, Redis Sentinel, MongoD
 
 The data source list shows only the data sources you are allowed to query, with the following information:
 
-- **Name**: The identifier for the data source
+- **Name**: The identifier for the data source. A row with team authorization configured shows team tags after the name: one green tag for the managing team and one gray tag per query-allowed team, each labelling its role on hover ("Managing team" / "Query-allowed team"); when an authorized team has been deleted, its tag reads "Deleted team". Rows with no authorization configured carry no tags
 - **Type**: Data source type with icon
 - **Connection URL**: The access address of the data source
 - **Associated Alert Engine**: The bound alert engine cluster name, with engine online status indicator
@@ -46,6 +46,8 @@ The data source list shows only the data sources you are allowed to query, with 
 The list is filtered by query permission: when you have no query (readonly) permission on a data source, the whole row is absent from the response — you can neither see it nor find it with the search box — so the list may hold fewer rows than the account actually has. The owner account, the Admin role, the creator, and members of the managing team or the readonly teams always see it. See the "Data source permissions (team authorization)" section below for the authorization model.
 
 You can filter data sources by name or type using the search box. The list auto-refreshes every 5 seconds to reflect real-time engine connection status.
+
+The data source page also supports a `?create=<type_ident>` deep link (used by the AI SRE "add in Monitors" entry to jump here with a type): on landing it opens the add drawer with that type preselected. Three checks must all pass — the type is in the console's supported type list, the current user holds the create data source permission (`MonitDatasourceCreate`), and the account plan meets the type's version requirement (Aliyun SLS and Tencent CLS require the Standard plan or above). If any check fails the parameter is treated as absent; only a version rejection adds a message — "xxx data source requires the Standard plan or above; your current plan cannot add it." (with xxx being the type name). The parameter is removed from the address bar once handled, so a refresh does not reopen the drawer.
 
 ### Enable datasource
 
@@ -90,13 +92,15 @@ There are exactly three legal authorization configurations:
 
 - **List**: only data sources you are allowed to query are returned. A data source you may not query is absent from the response entirely; each row carries a `my_perm` field whose value is `manage` or `readonly`, plus the authorization fields (`manage_team_id`, `readonly_team_ids`, `creator_id`). The frontend only consumes these decisions; it never computes them.
 - **Management operations**: the data source detail (which returns connection credentials), edit, delete and the enable toggle all require `manage`, otherwise the request is rejected with an access-denied error (`only the managing team can manage this datasource`).
-- **Query and reference**: instant queries, data exploration, dashboard panel queries, datasource tool calls, and referencing the data source in an alert rule all require `readonly`; without it the request is refused explicitly, without exposing data source details.
+- **Query and reference**: instant queries, data exploration, dashboard panel queries, datasource tool calls, referencing the data source in an alert rule, and the data source list in the rule runtime details drawer (see [Rule runtime details](/en/monitors/quickstart/quickstart#rule-runtime-details)) all require `readonly`; without it the request is refused explicitly, without exposing data source details. The rule runtime details list filters silently: a data source without `readonly` is dropped entirely, so a restricted viewer may see fewer data sources than the rule actually binds.
 - **Saving alert rules**: saving a rule requires the author to hold `readonly` on every data source the rule references, including data sources matched by a name pattern at save time; otherwise the save is rejected and names the data source that may not be referenced. The only exemption is a pure disable (a field update that only sets `enabled` to `false`). Once saved, rules are executed under the system identity, so later changes to member permissions do not affect them.
 - **Audit**: changes to the authorization fields are written as a `datasource_auth_update` audit record.
 
 ### How to configure it
 
-The authorization fields travel with the data source create and update requests (`POST /monit/datasource/create`, `POST /monit/datasource/update`): you can set them while creating a data source, and changing them on an existing data source is a management operation that requires `manage` on that data source. Omitting an authorization field in an update keeps the current value; passing an explicit `null` clears it. The console data source form does not offer inputs for these two fields yet, so they are set through the API.
+The authorization fields travel with the data source create and update requests (`POST /monit/datasource/create`, `POST /monit/datasource/update`): you can set them while creating a data source, and changing them on an existing data source is a management operation that requires `manage` on that data source. Omitting an authorization field in an update keeps the current value; passing an explicit `null` clears it.
+
+In the console create/edit drawer the two fields are the **Managing team** (`manage_team_id`) and **Query-allowed teams** (`readonly_team_ids`) team selectors, settable both on create and on edit. The form runs the same validation as the backend before submitting: query-allowed teams without a managing team are blocked immediately ("A managing team is required when query-allowed teams are set", matching the backend's HTTP 400). Managing team candidates depend on your role: the owner account and the Admin role can pick any team, while other users can only pick teams they belong to — selecting a team you are not in would immediately lose you the manage right on that data source.
 
 <Note>
 Authorization is granted at team granularity only; per-member authorization is not supported. To authorize an individual member, create a small team for them.
@@ -115,6 +119,8 @@ Click the **New** button and select the data source type (e.g., Prometheus, MySQ
 | **Name** | Unique identifier for the data source; alert rules can reference data sources via wildcard by name or exact match by ID (see below) |
 | **Notes** | Optional supplementary description |
 | **Associated Alert Engine** | Select the engine cluster responsible for querying this data source; typically choose a cluster in the same datacenter |
+| **Managing team** | Optional, maps to `manage_team_id`. Once set, only the creator, the owner account, the Admin role and members of that team can edit, delete, enable or disable this data source; leave empty to let everyone manage it. The owner account and the Admin role can pick any team; other users can only pick their own teams |
+| **Query-allowed teams** | Optional, maps to `readonly_team_ids`. Restricts which teams can query and reference this data source; leave empty to let everyone query it. Setting query-allowed teams requires selecting a managing team, otherwise the save is blocked |
 
 </Step>
 <Step title="Configure connection parameters">
@@ -435,12 +441,13 @@ Diagnostic-only types cannot enter the query workbench, so the list offers no **
 
 The Name column also carries an **Ask in AI SRE →** link that takes you from this data source straight into an AI SRE conversation with a prefilled question naming the data source and its type (prefilled only, never sent automatically). It appears only when the data source is enabled, the account has AI SRE enabled, and the current user holds both the AI SRE access permission and the chat permission (`AiSreChatVisit`) — AI SRE cannot query a disabled data source, so no entry is offered for one.
 
-## Edit and delete
+## View, edit and delete
 
-- **Edit**: Click the **Edit** button in the data source list to modify the configuration and save.
+- **View**: as long as you hold the data source edit permission (`MonitDatasourceUpdate`), the row button opens the drawer even when you lack `manage` on that data source (`my_perm=readonly`) — it opens as a read-only view: the drawer title reads "View data source" and the row button tooltip reads "View", the whole form is disabled, the data source type cannot be switched, and no connection test is available. The read-only view does not call the data source detail endpoint (which is behind the `manage` check): basic fields come from the list row and the connection configuration renders in the original form layout with all 19 string connection and credential fields showing `******` (switches, numbers and enums stay empty). The save button is disabled, and the drawer's submit path has its own separate hard guard.
+- **Edit**: with manage permission the drawer loads the data source detail (which returns connection credentials); modify and save.
 - **Delete**: Click the **Delete** button in the data source list and confirm to delete the data source.
 
-Both go through the data source `manage` check first: you must be the creator of the data source, the owner account or an Admin, or a member of its managing team; otherwise the request is rejected (`only the managing team can manage this datasource`). The edit drawer loads the data source detail, and the detail returns connection credentials — which is why viewing the connection configuration, editing, deleting and enabling all sit behind the same gate. See the "Data source permissions (team authorization)" section for the decision rules.
+Edit and delete both go through the data source `manage` check first: you must be the creator of the data source, the owner account or an Admin, or a member of its managing team; otherwise the request is rejected (`only the managing team can manage this datasource`). See the "Data source permissions (team authorization)" section for the decision rules.
 
 <Warning>
 Before deleting a data source, ensure no alert rules reference it, otherwise the related alert rules will not execute properly.
