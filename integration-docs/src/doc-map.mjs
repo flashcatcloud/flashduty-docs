@@ -316,6 +316,7 @@ export const docMap = {
   HarnessFmeChange: `${integrationBase}/change-integration/harness-fme.mdx`,
   ExpoEasChange: `${integrationBase}/change-integration/expo-eas.mdx`,
   Env0Change: `${integrationBase}/change-integration/env0.mdx`,
+  NetboxChange: `${integrationBase}/change-integration/netbox.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
