@@ -152,6 +152,7 @@ export const docMap = {
   Kener: `${alertBase}/kener.mdx`,
   Vigil: `${alertBase}/vigil.mdx`,
   Ofelia: `${alertBase}/ofelia.mdx`,
+  Peekaping: `${alertBase}/peekaping.mdx`,
   Openobserve: `${alertBase}/openobserve.mdx`,
   Postman: `${alertBase}/postman.mdx`,
   Contrast: `${alertBase}/contrast.mdx`,
