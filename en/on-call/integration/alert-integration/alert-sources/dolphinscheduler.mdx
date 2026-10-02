@@ -1,0 +1,157 @@
+---
+title: "Apache DolphinScheduler Alert Integration"
+description: "Send workflow instance failure, success, and timeout notifications from DolphinScheduler's HTTP alert plugin to Flashduty On-call."
+keywords: ["alert integration", "DolphinScheduler", "workflow", "Webhook", "job scheduling"]
+---
+
+When a workflow instance ends or times out, Apache DolphinScheduler sends a notification to the alert instances in the selected alarm group. If you point an alert instance of the **HTTP** plugin at the Flashduty push URL, a failed workflow instance creates one Critical alert in Flashduty, and the alert recovers when the same instance is re-run and succeeds.
+
+This integration was verified against DolphinScheduler 3.4.3. You must fill in **Body** as shown in [Configure the body](#configure-the-body), or DolphinScheduler sends no alert content.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of two ways. Pick one.
+
+### Use a dedicated integration
+
+1. Go to the Flashduty console, select **Channels**, and open a channel
+2. Select **Settings** → **Integration data** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Dolphinscheduler**, then click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. Go to the Flashduty console and select **Integration Center → Alert events**
+2. Select **Dolphinscheduler** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** after it is created
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In DolphinScheduler
+---
+
+<Steps>
+<Step title="Create an HTTP alarm instance">
+
+1. Sign in to DolphinScheduler with an account that has permission, go to **Security → Alarm Instance Manage**, and click **Create Alarm Instance**
+2. For **Select plugin** choose `Http`, and enter an **Alarm instance name**
+3. Fill in the plugin parameters:
+
+| Parameter | Value |
+| :--- | :--- |
+| URL | The full Flashduty push URL, including `integration_key` |
+| Request Type | `POST` |
+| Headers | Leave empty |
+| Body | `{"content":"${msg}"}` |
+| Content Type | `application/json` |
+| Timeout(s) | Default 120 |
+
+4. Save. The DolphinScheduler server must be able to reach Flashduty on the public internet.
+
+<a id="configure-the-body"></a>
+
+**Configure the body**: the HTTP plugin sends only what you put in **Body**, and replaces `${msg}` inside a string value of the body with the alert content. Without `${msg}`, Flashduty receives no alert content. The value of `content` must be `"${msg}"`; other keys are ignored. After replacement, `content` is a JSON string that holds an array of alert objects, and Flashduty parses it a second time.
+
+</Step>
+
+<Step title="Create an alarm group">
+
+1. Go to **Security → Alarm Group Manage** and click **Create Alarm Group**
+2. Enter an **Alert Group Name**, select the alarm instance from the previous step under **Alarm Plugin Instance**, and save
+
+</Step>
+
+<Step title="Select the alarm group and notification strategy on the workflow">
+
+When you start a workflow, or set a schedule for it:
+
+1. Select the alarm group from the previous step for **Alarm Group**
+2. Set **Notification Strategy** to **All** (`ALL`). With **Failure**, only failures are sent and alerts in Flashduty never recover
+
+</Step>
+
+<Step title="Verify">
+
+In **Alarm Instance Manage**, click **Test Send** on the alarm instance and confirm Flashduty shows one Info alert titled `DolphinScheduler test notification`. Then make a task in a workflow fail (for example a Shell task that runs `exit 1`) and confirm a Critical alert titled `DolphinScheduler workflow failed: <workflow instance name>` appears.
+
+</Step>
+</Steps>
+
+## Recovery and auto-close
+---
+
+DolphinScheduler sends a notification according to the state the workflow instance ends in:
+
+| Workflow instance state | What Flashduty does |
+| :--- | :--- |
+| `FAILURE` | Triggers a Critical alert |
+| `SUCCESS` | Recovers the alert of the same instance |
+| `STOP`, `PAUSE`, and other states | Ignored. A manual stop or pause is neither a failure nor a recovery |
+
+When you re-run a failed instance with **Recovery Failed** (`START_FAILURE_TASK_PROCESS`), the instance ID stays the same and `runTimes` increases by 1. If the re-run fails again, the same alert is updated. If it succeeds and the notification strategy is **All**, the alert recovers.
+
+Workflow and task timeout alerts are sent once and never recover. If nobody re-runs a failed workflow, no recovery is sent either. In the channel that receives this integration, turn on [auto-close](/en/on-call/channel/create-edit). We suggest 12 hours; adjust to how quickly your team handles failed workflows.
+
+Sub-workflow states are not notified on their own.
+
+## Alert types
+---
+
+The `content` array of one request can hold several alert objects. Each object becomes one Flashduty alert.
+
+- **Workflow instance failure or success**: the title is `DolphinScheduler workflow failed: <workflow instance name>` or `DolphinScheduler workflow succeeded: <workflow instance name>`
+- **Workflow timeout**: the title is `DolphinScheduler workflow timeout: <workflow instance name>`, Warning severity
+- **Task timeout**: the title is `DolphinScheduler task timeout: <task name>`, Warning severity
+- **Test send**: the test message of an alarm instance is fixed. Flashduty recognizes it and creates a separate Info alert; every press is a new alert and never merges with or closes a real alert. Close it by hand
+
+If the alarm group also receives alerts that carry no workflow information (for example a service-down alert), Flashduty rejects them with an invalid-parameter error. To keep failed sends out of DolphinScheduler, create a separate alarm group for this integration.
+
+## Alert Key
+---
+
+| Alert type | Alert Key |
+| :--- | :--- |
+| Workflow instance failure or success | project code `projectCode` + workflow instance ID `workflowInstanceId` |
+| Workflow timeout | project code + workflow instance ID, plus the fixed marker `timeout` |
+| Task timeout | project code + workflow instance ID + task code `taskCode`, plus the fixed marker `timeout` |
+
+Changes to the workflow instance name, state, run count, or times do not change the Alert Key. A failure and the later success of the same instance share one Alert Key, so the success recovers the failure. An alert object without `projectCode` or `workflowInstanceId` makes the whole request be rejected.
+
+## Status and severity
+---
+
+| Source | Status | Severity |
+| :--- | :--- | :--- |
+| `FAILURE` | Triggered | Critical |
+| `SUCCESS` | Recovered | Keeps the severity it was triggered with |
+| Timeout | Triggered | Warning |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `source` | Always `dolphinscheduler` |
+| `check` | Workflow instance name (`workflow instance <ID>` when missing) |
+| `resource` | Project name `projectName` |
+| `project_code` / `project_name` | Project code and name |
+| `workflow_instance_id` / `workflow_instance_name` | Workflow instance ID and name |
+| `workflow_definition_code` | Workflow definition code |
+| `command_type` | How it was started, for example `START_PROCESS`, `START_FAILURE_TASK_PROCESS` |
+| `run_times` | Run count |
+| `workflow_status` | Workflow instance state |
+| `workflow_host` | Master address that ran the workflow |
+| `event` / `warn_level` | Event and level of a timeout alert |
+| `task_code` / `task_name` | Task code and name (task timeout) |
+
+## Troubleshooting
+---
+
+- **Flashduty receives no events**: confirm the workflow was started with an alarm group and a notification strategy other than **None**, that the alarm group contains the alarm instance, and that the push URL is complete and includes `integration_key`. **Test Send** in **Alarm Instance Manage** checks the network path
+- **Flashduty returns an invalid-parameter error**: usually **Body** is not `{"content":"${msg}"}`, or an alert without workflow information (for example service-down) was received
+- **An alert never closes**: the failed instance was not re-run successfully, or the notification strategy is not **All**. Turn on auto-close for the channel
+- **No success notifications**: the notification strategy is **Failure**
