@@ -1,0 +1,120 @@
+---
+title: "Kapacitor Alert Integration"
+description: "Receive Kapacitor alerts through Kapacitor's post event handler using a Flashduty InfluxData integration; alerts close automatically when they recover."
+keywords: ["alert integration", "Kapacitor", "InfluxData", "TICKscript", "post event handler", "time series alerting"]
+---
+
+Kapacitor's [post event handler](https://docs.influxdata.com/kapacitor/v1/reference/event_handlers/post/) sends every alert event as JSON by HTTP POST to a URL. The body is Kapacitor's alert data (`id`, `message`, `details`, `time`, `duration`, `level`, `data`, `previousLevel`, `recoverable`), and the Flashduty [InfluxData integration](/en/on-call/integration/alert-integration/alert-sources/influxdata) parses this format, so no separate Kapacitor integration is needed: create an InfluxData integration in Flashduty and paste its push URL into Kapacitor.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the InfluxData integration type** in both.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **InfluxData** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **InfluxData** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Kapacitor
+---
+
+Use any one of the three ways below. Always enter the full push URL, including `?integration_key=...`.
+
+<Steps>
+<Step title="Put the URL in the TICKscript">
+
+Add `post` to the `alert()` node:
+
+```javascript
+stream
+    |from()
+        .measurement('cpu')
+        .groupBy('host')
+    |alert()
+        .crit(lambda: "usage_idle" < 10)
+        .post('https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<integration key>')
+```
+
+</Step>
+
+<Step title="Or use an endpoint from kapacitor.conf">
+
+Define an `[[httppost]]` in `kapacitor.conf` and refer to it by name, so the integration key is not written into every script:
+
+```toml
+[[httppost]]
+  endpoint = "flashduty"
+  url = "https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<integration key>"
+```
+
+```javascript
+|alert()
+    .crit(lambda: "usage_idle" < 10)
+    .post()
+        .endpoint('flashduty')
+```
+
+</Step>
+
+<Step title="Or use a topic handler">
+
+When several tasks send alerts to one topic, define the handler once. Handler file `flashduty.yaml`:
+
+```yaml
+id: flashduty
+topic: cpu-alerts
+kind: post
+options:
+  url: https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<integration key>
+```
+
+Then run `kapacitor define-topic-handler flashduty.yaml` and use `.topic('cpu-alerts')` on the task's `alert()` node.
+
+</Step>
+</Steps>
+
+Adding a `post` handler in the Chronograf 1.x Alert Rule Builder uses this same Kapacitor handler; see the [InfluxData integration](/en/on-call/integration/alert-integration/alert-sources/influxdata) for those steps.
+
+## Field mapping
+---
+
+| Kapacitor field | Flashduty |
+| :--- | :--- |
+| `id` | Alert Key (its MD5); events with the same `id` belong to one alert; also the alert title and the label `check` |
+| `level` | `CRITICAL` → Critical; `WARNING` or `WARN` → Warning; `INFO` → Info; `OK` → recovery, closes the alert |
+| `previousLevel` | Severity carried by the recovery event |
+| `message` | Alert description, also the label `message` |
+| Last series in `data.series` | `name` becomes the label `measurement` and each key in `tags` becomes a label; if the series has a column named `value`, its last value becomes the label `value` |
+| Label `host` | Also written to the label `resource`; `resource` is the value of `host` by default, or the IP when `host` is in `ip:port` form |
+| `details`, `time`, `duration`, `recoverable` | Not used |
+
+For any other `level`, Flashduty rejects the event with `level ... is not supported`.
+
+## Recovery and deduplication
+---
+
+- When the level returns to `OK`, Kapacitor sends an event with `level` `OK`, and Flashduty closes the alert with the same `id`. Do not use `.noRecoveries()` on `alert()`, or Kapacitor sends no recovery events.
+- The default `id` is `{{ .Name }}:{{ .Group }}` (measurement name and group). If you set a custom `.id()`, make sure the trigger and the recovery of one object use the same value.
+- To see Flashduty's error in the Kapacitor log, add `.captureResponse()` to `.post()` (`capture-response: true` for a topic handler); the response is logged when the status is not 2xx.
+
+## Troubleshooting
+---
+
+- **Flashduty returns `Invalid parameters`**: the push URL is incomplete, `integration_key` is missing, or the integration type is not InfluxData
+- **`level ... is not supported`**: the `level` in the body is not `CRITICAL`, `WARNING`, `INFO` or `OK`; make sure the original Kapacitor alert data is sent, not a forwarded or rewritten body
+- **An alert does not recover**: confirm the recovery event has the same `id` as the trigger and that the task emits an `OK` event
+- **No alerts arrive**: confirm the Kapacitor host can reach `api.flashcat.cloud`

@@ -18,6 +18,7 @@ export const docMap = {
   BaiDuBCM: `${alertBase}/baidu-bcm.mdx`,
   HuaWeiCES: `${alertBase}/huawei-ces.mdx`,
   InfluxDB: `${alertBase}/influxdata.mdx`,
+  Kapacitor: `${alertBase}/kapacitor.mdx`,
   OpenFalcon: `${alertBase}/open-falcon.mdx`,
   PagerDuty: `${alertBase}/pagerduty.mdx`,
   TencentBK: `${alertBase}/blueking.mdx`,
@@ -115,6 +116,7 @@ export const docMap = {
   Metoro: `${alertBase}/metoro.mdx`,
   Odown: `${alertBase}/odown.mdx`,
   Bleemeo: `${alertBase}/bleemeo.mdx`,
+  Whatap: `${alertBase}/whatap.mdx`,
   Fastnetmon: `${alertBase}/fastnetmon.mdx`,
   Updown: `${alertBase}/updown.mdx`,
   Hyperping: `${alertBase}/hyperping.mdx`,
@@ -287,6 +289,7 @@ export const docMap = {
   Opnsense: `${alertBase}/opnsense.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  HerokuChange: `${integrationBase}/change-integration/heroku.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
   RailwayChange: `${integrationBase}/change-integration/railway.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
