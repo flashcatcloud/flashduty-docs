@@ -1,0 +1,99 @@
+---
+title: "Peekaping Alert Integration"
+description: "Sync Peekaping monitor down and recovery events to Flashduty On-call through a Webhook notification channel."
+keywords: ["alert integration", "Peekaping", "Webhook", "uptime monitoring", "monitoring", "self-hosted"]
+---
+
+Peekaping is an open-source, self-hosted monitoring system. With a Peekaping Webhook notification channel, monitor state changes sync to Flashduty On-call: a monitor going down triggers an alert in Flashduty, and the alert recovers automatically when the monitor comes back up.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integration data** → **Dedicated integration**, and click **Add an integration**
+3. Select **Peekaping** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Peekaping** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Peekaping
+---
+
+You need Peekaping 0.0.46 or later and an account that can manage notification channels and monitors. The Peekaping server must be able to reach the Flashduty push URL.
+
+<Steps>
+<Step title="Create a Webhook notification channel">
+
+1. In Peekaping, create a notification channel and select the **Webhook** type
+2. Paste the full Flashduty push URL into **URL**; it must include `integration_key`
+3. Set **Content Type** to **json**. Flashduty does not support the `form-data` and `custom` formats
+4. Save the notification channel
+
+</Step>
+
+<Step title="Attach the channel to monitors">
+
+1. Open each monitor you want alerts for, select the channel you just created under its notification channels, and save
+
+</Step>
+
+<Step title="Verify">
+
+1. Click the test button on the notification channel and confirm Peekaping reports success. The test request is a fixed built-in body (monitor name `Test Monitor`). Flashduty opens a separate Info alert for it that never merges with a real alert and never recovers on its own, so close it manually in Flashduty afterwards
+2. Make the monitored service unavailable and confirm a Critical active alert appears in Flashduty
+3. Restore the service and confirm the alert recovers automatically
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `monitor.id` from the request as the Alert Key. A monitor sends the same `monitor.id` when it goes down and when it recovers, so the recovery closes the matching alert. `heartbeat.id` differs on every heartbeat and is not part of the Alert Key.
+
+Changes to the monitor name, status message, or time do not change the Alert Key. A request without `monitor.id` is rejected. `monitor.id` is unique only within one Peekaping instance, so point one Flashduty integration at a single Peekaping instance.
+
+## Status and severity
+---
+
+| `heartbeat.status` | Meaning | Flashduty handling |
+| :--- | :--- | :--- |
+| `0` | Down | Triggers a Critical alert |
+| `1` | Up | Recovers the alert |
+| `2` | Pending | Ignored, no event |
+| `3` | Maintenance | Ignored, no event |
+
+Peekaping has no severity of its own, so every down event maps to Critical. The alert title is the monitor name and the description is the heartbeat message (for example `TCP connection failed: ...`).
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | `monitor.name`, the monitor name |
+| `source` | Always `peekaping` |
+| `monitor_id` | `monitor.id` |
+| `monitor_type` | `monitor.type`, for example `http` or `tcp` |
+
+The monitor `config` (which holds hosts and credentials) and `push_token` never reach labels or the description.
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: confirm the URL is complete and includes `integration_key`, and that the channel's Content Type is `json`; the response names the missing field
+- **The Peekaping test fails**: confirm the Peekaping server can reach the Flashduty push URL, and check the Peekaping log for the HTTP status code
+- **The alert does not recover**: confirm the monitor has actually returned to the up state and the notification channel is still attached to it
+- **Repeated down notifications**: if the monitor sets a Resend Interval, down notifications repeat while it stays down; Flashduty merges them into the same alert by Alert Key

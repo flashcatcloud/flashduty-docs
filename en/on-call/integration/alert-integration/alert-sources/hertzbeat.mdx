@@ -1,0 +1,130 @@
+---
+title: "Apache HertzBeat Alert Integration"
+description: "Send Apache HertzBeat alerts and recoveries to Flashduty On-call through a Webhook notice receiver."
+keywords: ["alert integration", "Apache HertzBeat", "HertzBeat", "webhook", "notice receiver", "monitoring", "alert rules"]
+---
+
+Use the Webhook type of a notice receiver under **Alarm Notification → Notice Receiver** in Apache HertzBeat to sync alert rule triggers (`firing`) and recoveries (`resolved`) to Flashduty On-call. Each alert rule on each monitored target maps to one Flashduty alert: it is created when the rule fires and closed automatically when it resolves.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the push URL in either of two ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integration data** → **Dedicated integration**, then click **Add an integration**
+3. Select **Apache HertzBeat** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Apache HertzBeat** and enter an integration name
+3. Set the default route and pick a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure HertzBeat
+---
+
+<Steps>
+<Step title="Add a notice receiver">
+
+1. Log in to HertzBeat and go to **Alarm Notification → Notice Receiver → Add Receiver**
+2. Select **WebHook** as the notification method
+3. Paste the full Flashduty push URL into the callback address
+4. Save. You can click **Send test message** to check connectivity
+
+</Step>
+
+<Step title="Add a notice policy">
+
+A new receiver gets no alerts by itself. Under **Alarm Notification → Notice Policy**, add a policy that selects the receiver and, if needed, the severities and labels to notify, then save.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make an alert rule fire (for example, stop a monitored port) and confirm Flashduty receives an active alert. When the rule condition no longer holds, HertzBeat sends a `resolved` notification and the Flashduty alert recovers automatically.
+
+</Step>
+</Steps>
+
+<Warning>
+Flashduty parses only the default Webhook template that ships with HertzBeat. If you edit the receiver's custom template, the body changes and Flashduty cannot guarantee it parses. Custom templates are not supported.
+</Warning>
+
+## Payload
+---
+
+HertzBeat POSTs the default template as JSON. One request can carry several alerts in `alerts`, and Flashduty handles each one:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `status` | `firing` or `resolved`, shared by the whole request | Trigger or recovery |
+| `alerts[].labels.alertname` | Alert rule name | Alert title, labels `check` and `alertname` |
+| `alerts[].labels.instance` | Monitored target | Labels `resource` and `instance` |
+| `alerts[].labels.defineid` | Alert rule ID | Label `defineid` |
+| `alerts[].labels.severity` | Severity defined in the rule | Alert severity, label `severity` |
+| `alerts[].content` | Alert content | Alert description |
+| `alerts[].annotations` | Annotations defined in the rule | Alert description, sorted by key, one `key: value` per line |
+| Other keys in `alerts[].labels` | For example `instancename` and custom rule labels | Labels of the same name |
+
+`commonLabels` and `commonAnnotations` are not read.
+
+## Alert Key
+---
+
+The HertzBeat payload carries no alert ID. Flashduty builds the Alert Key from `alertname`, `instance` and `defineid` in `alerts[].labels`. In real HertzBeat 1.9.0 deliveries these three values were identical on trigger, repeated notification while firing, and recovery, so all three land on one Flashduty alert. Changing the severity, content or monitor name does not change the Alert Key.
+
+A request without `labels.alertname` is rejected with a parameter error, because a recovery could not be tied to its alert. A missing `instance` or `defineid` counts as empty.
+
+## Status and severity
+---
+
+| HertzBeat field | Flashduty status or severity |
+| :--- | :--- |
+| `labels.severity` = `critical` | Critical |
+| `labels.severity` = `warning`, empty or any other value | Warning |
+| `labels.severity` = `info` | Info |
+| `status` = `firing` | Trigger or update the alert, severity from the table above |
+| `status` = `resolved` | Recovery; the alert keeps its severity |
+
+A request with any other `status`, or an empty `alerts`, is rejected. In the default template `commonLabels.severity` is rewritten to decorated text (such as "Critical"), so it is not used for severity.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="What does Flashduty show after I click Send test message?">
+
+The button sends a fixed firing request (rule name `CPU Usage Alert`, instance `127.0.0.1`, content starting with `test send msg!`). Flashduty returns HTTP 200 and opens a separate Info alert under its own Alert Key, so it never merges into a real alert. No recovery follows; close it by hand in the channel.
+
+</Accordion>
+
+<Accordion title="Does a long-firing alert create duplicates?">
+
+No. HertzBeat resends `firing` while the alert stays active. The Alert Key is the same, so Flashduty merges them into one alert.
+
+</Accordion>
+
+<Accordion title="An availability alert did not close in Flashduty after the monitor came back?">
+
+Flashduty recovers an alert only when HertzBeat sends `resolved`. In one test on HertzBeat 1.9.0, an availability alert was still firing several minutes after the monitor came back and sent no `resolved`, while a metric-threshold rule did. If you see this, check in the HertzBeat alert center whether the alert has recovered.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty receives no alerts**: confirm the URL is the full push URL (with `integration_key`), a notice policy exists, and the alert matches it
+- **Flashduty returns a parameter error**: confirm the body is the default HertzBeat template JSON, `status` is `firing` or `resolved`, and every alert has `labels.alertname`
+- **An alert does not recover**: confirm HertzBeat sent `resolved` and that its `alertname`, `instance` and `defineid` equal those of the trigger
+
+For HertzBeat notification setup, see the official [Webhook notification](https://hertzbeat.apache.org/docs/help/alert_webhook/) guide.
