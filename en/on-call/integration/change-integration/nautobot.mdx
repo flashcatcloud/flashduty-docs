@@ -1,0 +1,135 @@
+---
+title: "Nautobot change integration"
+description: "Sync creates, updates and deletes of Nautobot network and infrastructure data (devices, IP addresses, locations and more) to Flashduty On-call through a webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Nautobot", "webhook", "network automation", "configuration change", "source of truth"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Nautobot [webhook](https://docs.nautobot.com/projects/core/en/stable/user-guide/platform-functionality/webhook/) to sync creates, updates and deletes of Nautobot objects (devices, interfaces, IP addresses, locations and more) to Flashduty On-call. The edits one request makes to one object become one Flashduty change, so during an incident you can see what changed in Nautobot beforehand.
+
+A Nautobot webhook is sent once, after the object is saved. There is no start and end phase, so every change is recorded as Done.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Nautobot** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `object_type` or `actor`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Nautobot
+---
+
+<Steps>
+<Step title="Create a webhook">
+
+Go to **Extensibility → Webhooks** and click **Add**:
+
+1. **Name**: any name, for example `flashduty`
+2. **Content types**: the object types to sync. Select only types that affect production (for example `dcim | device`, `ipam | ip address`), not types that change constantly
+3. **Enabled**: checked
+4. **Type create / Type update / Type delete**: select the operations to send; all three are recommended
+5. **URL**: the full Push URL of the Flashduty integration
+6. **HTTP method**: `POST`
+7. **HTTP content type**: `application/json`
+8. **Body template**: **leave empty**. Nautobot then sends its default JSON body, which is the format Flashduty parses
+
+The Push URL already contains the integration key, so no extra header is needed. **Secret** can stay empty; if you set it, Nautobot signs the request in the `X-Hook-Signature` header, which Flashduty does not verify.
+
+</Step>
+
+<Step title="Verify">
+
+Edit and save an object of a selected type in Nautobot; the change appears in the Flashduty change list. Nautobot has no webhook test button. When a delivery fails, the error is in the Nautobot Celery worker log.
+
+</Step>
+</Steps>
+
+<Warning>Nautobot refuses webhook URLs that resolve to loopback or link-local addresses; Flashduty's Push URL is a public address and is not affected. Nautobot sends webhooks from its Celery worker, so make sure the worker is running and can reach the internet.</Warning>
+
+## What one change is
+---
+
+The change key (`change_key`) has three parts: `<model>:<object id>:<request id>`, for example `location:a16ea2bb-…:db6c8eb8-…`.
+
+- Nautobot's request id (`request_id`) is different for every request; several edits to one object within a request are merged into one webhook
+- Edits to the same object in two separate requests are two changes
+- In a bulk edit (one request, several objects) each object is its own change; they share the same `request_id` label, which lets you group them
+- Saving through the web UI and through the API are separate requests, so they are separate changes
+
+## Status mapping
+---
+
+| Webhook event (`event`) | Flashduty change status |
+|---|---|
+| `created` | Done |
+| `updated` | Done |
+| `deleted` | Done |
+
+Any other event value (for example from a customized body template) is rejected; see the FAQ below.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<object type>: <object name> <event>`, for example `dcim.location: dc-east-1 created` |
+| Description | Empty |
+| Link | Empty. A Nautobot webhook carries only relative paths and no host, so no link can be built |
+| Change time | The `timestamp` of the webhook body |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `object_type` | Object type, for example `dcim.location` |
+| `model` | Model name, for example `location` |
+| `object_id` | Object id |
+| `object_name` | The object's display name |
+| `event` | `created`, `updated` or `deleted` |
+| `actor` | Nautobot user who made the edit |
+| `request_id` | Nautobot request id |
+
+The object's fields and the before/after snapshots (`snapshots`) may contain sensitive data and are not recorded.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't I see any changes?">
+
+- Check that the webhook's **Enabled** box is ticked, that **Content types** includes the edited object type, and that the matching Type create/update/delete box is ticked
+- Check that the Nautobot Celery worker is running; webhooks are sent asynchronously
+- Look up the response code of the delivery in the Celery worker log
+
+</Accordion>
+
+<Accordion title="Which deliveries does Flashduty reject?">
+
+Flashduty returns 400, and only when you customized the **Body template**, in these cases:
+
+- `unsupported event`: `event` is missing or is not `created`, `updated` or `deleted`
+- `model is missing`, `request_id is missing`, `data.id is missing`: the body lacks that field
+- `invalid timestamp` / `timestamp is missing`: `timestamp` is missing or not in the `2026-10-02 02:53:45+00:00` or ISO 8601 format
+
+Clear the **Body template** to use the default body.
+
+</Accordion>
+
+<Accordion title="Does a resent or retried webhook create duplicates?">
+
+No. The same change with the same event time and status is recognized as a repeat and discarded.
+
+</Accordion>
+
+<Accordion title="Why did edits to one object turn into several changes?">
+
+Each request is one change. Nautobot sends the webhook once per object for all edits within one request, but edits made in separate requests are separate changes.
+
+</Accordion>
+</AccordionGroup>
