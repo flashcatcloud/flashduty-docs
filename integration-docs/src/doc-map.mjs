@@ -313,6 +313,7 @@ export const docMap = {
   HarnessFmeChange: `${integrationBase}/change-integration/harness-fme.mdx`,
   GiteeChange: `${integrationBase}/change-integration/gitee.mdx`,
   YunxiaoAppstackChange: `${integrationBase}/change-integration/yunxiao-appstack.mdx`,
+  ZadigChange: `${integrationBase}/change-integration/zadig.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
