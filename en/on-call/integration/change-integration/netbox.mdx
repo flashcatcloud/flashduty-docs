@@ -1,0 +1,137 @@
+---
+title: "NetBox change integration"
+description: "Sync additions, edits, and deletions of infrastructure records such as sites, devices, and IP prefixes to Flashduty On-call through a NetBox event rule webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "NetBox", "DCIM", "IPAM", "event rule", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a NetBox event rule with a webhook action to sync additions, edits, and deletions of NetBox objects (sites, racks, devices, IP prefixes, VLANs, and so on) to Flashduty On-call. One web UI or API request that changes an object becomes one Flashduty change, for example editing a device's status, assigning a prefix, or deleting a site.
+
+NetBox sends changes that have already been saved, so each change is recorded as **Done** directly.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **NetBox** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `object_type` or `actor`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure NetBox
+---
+
+This page is based on the default webhook body of NetBox 4.7.
+
+<Steps>
+<Step title="Create a webhook">
+
+1. Go to **Operations → Integrations → Webhooks** and click **Add**
+2. **Name**: enter a recognizable name, such as `Flashduty`
+3. **URL**: paste the full push URL from the Flashduty integration
+4. Set **HTTP method** to `POST` and keep **HTTP content type** as `application/json`
+5. Leave **Body template** empty to use NetBox's default body, and leave **Additional headers** empty
+6. Leave **Secret** empty; Flashduty authenticates with the `integration_key` in the push URL
+
+</Step>
+
+<Step title="Create an event rule">
+
+1. Go to **Operations → Integrations → Event Rules** and click **Add**
+2. **Object types**: select the object types to sync, such as `DCIM > site`, `DCIM > device`, or `IPAM > prefix`
+3. **Event types**: select **Object created**, **Object updated**, and **Object deleted**
+4. To sync only some objects, add a JSON condition under **Conditions**, for example `{"and": [{"attr": "status.value", "value": "active"}]}`
+5. Set **Action type** to **Webhook**, select the webhook you just created for **Webhook**, and save
+
+</Step>
+</Steps>
+
+NetBox has no test button. After saving, create or edit an object of a selected type and the change appears in the Flashduty change list. NetBox sends webhooks from a background job, so the `rqworker` process must be running.
+
+## What one change is
+---
+
+| NetBox object | Change key (change_key) | Notes |
+|---|---|---|
+| One object changed by one request | `<object_type>:<object id>:<request id>`, for example `dcim.site:1:e5901c11-...` | `request.id` is a UUID NetBox generates for every request. Within one request, repeated edits to the same object are sent as one event; the same object edited by two requests is two changes |
+
+A bulk operation (bulk import, bulk edit, bulk delete) changes several objects in one request and produces one change per object. They share the same `request_id` label, so you can find everything one operation touched in the change list.
+
+## Status mapping
+---
+
+| NetBox event (`event`) | Flashduty change status |
+|---|---|
+| `created` | Done |
+| `updated` | Done |
+| `deleted` | Done |
+
+These deliveries return success but record no change:
+
+- `job_started` and `job_ended`: the start and end of a background job (a script, a data source sync); they are not configuration changes. Objects a script creates, edits, or deletes while running are still sent as `created`, `updated`, and `deleted`
+
+NetBox sends a webhook only after a change is saved, so there is no failed or canceled state.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<object_type> <object name> <event>`, for example `dcim.site fd-site-a created`; the name is `display`, then `name`, then `#<id>` |
+| Description | The request and the user behind it, for example `PATCH /api/dcim/sites/1/ by admin`; an update lists the fields that changed on a second line, for example `Changed: description` |
+| Link | None. NetBox sends relative paths only, without the address of your NetBox |
+
+Labels you can route on and filter the change list by:
+
+| Label | Description |
+|---|---|
+| `object_type` | Object type, for example `dcim.site` or `ipam.prefix` |
+| `object_id` | Object ID |
+| `event` | `created`, `updated`, or `deleted` |
+| `actor` | Username that made the request |
+| `request_id` | NetBox request ID; the same for every change from one bulk operation |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't I see a change?">
+
+- Check that the event rule is enabled, that **Object types** includes the object type, that **Event types** includes the event, and that **Conditions** does not exclude the object
+- Check that NetBox's `rqworker` process is running; failed webhook jobs are listed under **System → Background Tasks**, where you can re-queue them
+- Keep the default body: a custom **Body template** changes the payload format and can make deliveries fail or lose fields
+
+</Accordion>
+
+<Accordion title="Does a NetBox re-queue record a change twice?">
+
+No. A failed job that NetBox re-queues sends exactly the same content as the original, including the timestamp, so Flashduty treats it as a repeat and records it once.
+
+</Accordion>
+
+<Accordion title="The delivery fails with an InvalidParameter error?">
+
+The failed job in NetBox shows the response content:
+
+- `unknown event "<value>"`: `event` is not `created`, `updated`, `deleted`, or a `job_*` event; check that no custom body is set
+- `data.id is missing`, `request.id is missing`, `object_type is missing`: the body lacks a required field; clear **Body template**
+- `invalid timestamp "<value>"`: `timestamp` is not in ISO 8601 format
+
+</Accordion>
+
+<Accordion title="Why does a change have no link?">
+
+In NetBox webhook deliveries an object's address is a relative path (for example `/dcim/sites/1/`) with no domain, so Flashduty cannot build a full URL. Use the object type and name in the title, or the `object_id` label, to find the object in NetBox.
+
+</Accordion>
+
+<Accordion title="Is a deletion also Done?">
+
+Yes. The deletion has already taken effect in NetBox, so it is recorded as Done with the `event` label set to `deleted`.
+
+</Accordion>
+</AccordionGroup>
