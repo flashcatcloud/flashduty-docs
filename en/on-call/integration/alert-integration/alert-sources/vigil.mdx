@@ -1,0 +1,123 @@
+---
+title: "Vigil Alert Integration"
+description: "Sync Vigil status page changes (dead, sick, healthy) to Flashduty On-call through the Vigil webhook notifier."
+keywords: ["alert integration", "Vigil", "Webhook", "status page", "monitoring", "self-hosted"]
+---
+
+Vigil is an open-source microservices status page and probing system. With Vigil's webhook notifier (`[notify.webhook]`), you can sync the overall status of the status page to Flashduty On-call: an alert is triggered when the status becomes `dead` or `sick`, and it recovers automatically when the status returns to `healthy`.
+
+Vigil's webhook body has a fixed format, so no template is needed.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. Go to the Flashduty console, select **Channels**, and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, and click **Add an integration**
+3. Select **Vigil** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. Go to the Flashduty console and select **Integration Center → Alert Events**
+2. Select **Vigil** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Vigil
+---
+
+You need Vigil 1.29.x and access to edit Vigil's configuration file (`config.cfg`). The server running Vigil must be able to reach the Flashduty push URL.
+
+<Steps>
+<Step title="Configure the webhook notifier">
+
+In `config.cfg`, add (or edit) `[notify.webhook]` and set `hook_url` to the full Flashduty push URL, which must include `integration_key`:
+
+```toml
+[notify]
+reminder_interval = 300
+
+[notify.webhook]
+hook_url = "https://api.flashcat.cloud/event/push/alert/vigil?integration_key=<your_integration_key>"
+```
+
+Flashduty authenticates with the `integration_key` in the URL, so no extra headers are needed. `reminder_interval` is how often Vigil repeats the notification while the status stays abnormal, in seconds; adjust it as needed. Restart Vigil after saving so the configuration takes effect.
+
+</Step>
+
+<Step title="Configure probe targets">
+
+Under `[[probe.service]]`, configure the services and nodes to monitor. Vigil combines the status of all nodes into the overall status of the status page. The notifier needs no other settings.
+
+</Step>
+
+<Step title="Verify">
+
+Vigil has no test button. To verify:
+
+1. Make a probed node fail, wait for Vigil to mark it as dead, and confirm a Critical alert appears in Flashduty with the failed node listed in its description
+2. Let the node recover and confirm the alert recovers automatically in Flashduty
+
+If `startup_notification = true` is set under `[notify]`, Vigil sends a `startup` notification when it starts. Flashduty returns success without creating an alert, which you can use to confirm the URL and network connectivity.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the status page URL `page.url` as the Alert Key. Vigil notifications describe only the aggregate status of the whole status page and carry no per-alert ID, so one Vigil status page maps to one Flashduty alert: it is created or updated when the status becomes `dead` or `sick`, and recovered when it becomes `healthy`.
+
+- When several nodes fail at once, one notification lists all failing nodes. If one node recovers while another is still failing, the status stays `dead`, the alert stays open, and the node list in its description shrinks until the overall status is `healthy`
+- The recovery notification has an empty `replicas` list, so it cannot say which node recovered
+- Changes to the page title, status, node list, or notification time do not change the Alert Key. A request without `page.url` is rejected
+- `page.url` comes from `page_url` under `[branding]` in `config.cfg` and is unique only within one Vigil instance. Do not give several Vigil instances the same `page_url`, and send only one Vigil instance to each Flashduty integration
+
+## Status and severity
+---
+
+| Notification `type` | Flashduty handling |
+| :--- | :--- |
+| `changed` (status change) | Handled by `status`, see the table below |
+| `reminder` (repeat while still abnormal) | Handled by `status`, refreshes the same alert |
+| `startup` (Vigil started) | Returns success, no alert is created |
+
+| `status` | Flashduty status | Severity |
+| :--- | :--- | :--- |
+| `dead` | Triggered | Critical |
+| `sick` | Triggered | Warning |
+| `healthy` | Recovered | Info |
+
+Any other `status` is rejected. Vigil's notification time has only hours, minutes and seconds with no date, so Flashduty uses the time it receives the request as the event time.
+
+The alert title looks like `Vigil: Example Status is dead`, built from the status page title (or the page URL when the title is empty) and the status. The description lists the failing nodes in alphabetical order, in the format `service ID:node ID:probe URL`.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Status page title, or the page URL when the title is empty |
+| `resource` / `page_url` | Status page URL `page.url` |
+| `page_title` | Status page title `page.title` |
+| `vigil_status` | Original Vigil status: `dead`, `sick`, or `healthy` |
+| `notification_type` | Notification type: `changed` or `reminder` |
+| `replicas` | Failing nodes, sorted alphabetically and joined with commas |
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: confirm `hook_url` is complete and includes `integration_key`; the response names the missing field or the unsupported status
+- **No alert received**: confirm Vigil was restarted, `hook_url` under `[notify.webhook]` is correct, and the overall status Vigil computes actually became `dead` or `sick`; Vigil sends notifications only on status changes and when the reminder interval elapses
+- **Alert does not recover**: a recovery is sent only when the whole status page returns to `healthy`; while any node is still failing the status stays `dead` or `sick`
+- **Repeated notifications for the same status page**: these are the reminders triggered by `reminder_interval`, and Flashduty merges them into the same alert
+
+For more details, see the [Vigil project page](https://github.com/valeriansaliou/vigil).

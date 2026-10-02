@@ -149,6 +149,7 @@ export const docMap = {
   Domotz: `${alertBase}/domotz.mdx`,
   Honeybadger: `${alertBase}/honeybadger.mdx`,
   Kener: `${alertBase}/kener.mdx`,
+  Vigil: `${alertBase}/vigil.mdx`,
   Ofelia: `${alertBase}/ofelia.mdx`,
   Openobserve: `${alertBase}/openobserve.mdx`,
   Postman: `${alertBase}/postman.mdx`,
