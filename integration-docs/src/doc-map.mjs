@@ -281,6 +281,7 @@ export const docMap = {
   Suricata: `${alertBase}/suricata.mdx`,
   IbmQradar: `${alertBase}/ibm-qradar.mdx`,
   Opnsense: `${alertBase}/opnsense.mdx`,
+  Vigil: `${alertBase}/vigil.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
