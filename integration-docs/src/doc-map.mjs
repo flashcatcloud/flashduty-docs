@@ -125,6 +125,7 @@ export const docMap = {
   Apimetrics: `${alertBase}/apimetrics.mdx`,
   Gatus: `${alertBase}/gatus.mdx`,
   Metoro: `${alertBase}/metoro.mdx`,
+  Whatap: `${alertBase}/whatap.mdx`,
   Hyperping: `${alertBase}/hyperping.mdx`,
   Updown: `${alertBase}/updown.mdx`,
   SimpleObservability: `${alertBase}/simple-observability.mdx`,

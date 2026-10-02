@@ -1,0 +1,124 @@
+---
+title: "WhaTap 告警集成"
+description: "通过第三方插件（Webhook JSON）将 WhaTap 的事件告警与恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "WhaTap", "监控", "Webhook", "事件告警"]
+---
+
+通过 WhaTap 的第三方插件（3rd party plugin）中的 Webhook JSON 类型，把项目内的事件告警同步到 Flashduty On-call。事件触发时创建告警，WhaTap 发出恢复通知（Resolved notification）时关闭同一条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **WhaTap**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **WhaTap**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 WhaTap 中配置
+---
+
+以下界面名称为 WhaTap 英文界面。
+
+<Steps>
+<Step title="添加 Webhook JSON 插件">
+
+1. 登录 WhaTap，进入目标项目，选择 **Alert → Notifications**，打开 **3rd party plugin** 页面，点击 **Add**
+2. 选择 **Webhook JSON** 标签页
+3. **Webhook Name** 填写显示名称，**Webhook URL** 填入 Flashduty 集成的完整推送地址（含 `integration_key`）。WhaTap 的 Webhook JSON 请求体为固定格式，没有请求体编辑项，也无需自定义请求头
+4. 如需测试，点击 **Test alert**。测试会在 Flashduty 中产生一条独立的 Info 告警，请手动关闭
+5. 点击 **Registration** 保存
+
+</Step>
+
+<Step title="启用事件规则并确认恢复通知">
+
+进入 **Alert → Event Configuration**，在需要推送的规则行中点击编辑，设置 Critical、Warning 或 Info 的触发条件，保持 **Resolved notification** 开启（默认开启），并启用该规则。恢复通知关闭时，Flashduty 收不到恢复，告警不会自动关闭。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个指标越过阈值（例如临时调低 CPU 阈值），确认 Flashduty 收到活动告警；再恢复阈值，确认原告警恢复。WhaTap 的历史记录可在 **Alert → Event History** 中查看。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+WhaTap 以 `application/json` 格式 POST 通知，所有字段均为字符串，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `uuid` | 事件 ID | Alert Key |
+| `status` | `on` 触发，`off` 恢复 | 告警状态 |
+| `level` | `Critical`、`Warning`、`Info` | 告警等级 |
+| `title` | 事件标题，恢复时带 `RECOVERED: ` 前缀 | 告警标题，标签 `check` |
+| `message` | 事件说明 | 告警描述 |
+| `projectName`、`pcode` | 项目名称与项目代码 | 标签 `project_name`、`pcode` |
+| `oname`、`oid` | 监控对象名称与 ID | 标签 `oname`、`oid`、`resource` |
+| `okind`、`onode` | 对象类型与节点，通常为空 | 标签 `okind`、`onode`（非空时） |
+| `metricName`、`metricValue`、`metricThreshold` | 指标名、当前值、阈值 | 标签 `metric_name`、`metric_value`、`metric_threshold` |
+
+数值字段可能带有千位分隔符（例如 `55,223.0`），Flashduty 原样保存为文本标签，不做数值解析。
+
+## Alert Key
+---
+
+使用 `uuid` 作为 Alert Key。WhaTap 同一个事件的触发通知和恢复通知携带相同的 `uuid`，落在同一条 Flashduty 告警上。同一对象、同一规则的等级发生变化时（例如 Critical 恢复后又触发 Warning），WhaTap 会生成新的事件和新的 `uuid`，在 Flashduty 中是各自独立的告警。标题、等级、数值和时间的变化不会改变 Alert Key。
+
+请求中缺少 `uuid` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+先按 `status` 判断是否恢复，再读取 `level`：WhaTap 的恢复通知固定带 `level` 为 `Info`。
+
+| WhaTap `status` / `level` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `off`（任意等级） | 恢复 |
+| `on` + `Critical` | Critical |
+| `on` + `Warning` | Warning |
+| `on` + `Info` | Info |
+| `on` + `None`、空值或其他等级 | Info |
+
+`status` 既不是 `on` 也不是 `off` 的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="持续超过阈值时会重复产生告警吗？">
+
+默认不会。WhaTap 对一个事件只在触发和恢复时各发送一次通知，持续期间不重复发送（通知页面的 Recurring alert (escalation) 设置默认为 0，即关闭）；即便有重复投递，同一事件的 `uuid` 相同，也会合并到同一条告警。
+
+</Accordion>
+
+<Accordion title="WhaTap 的 Webhook 需要什么套餐？">
+
+以 WhaTap 当前的套餐说明为准。第三方插件可在试用期内使用。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **测试通知产生了一条 Info 告警**：点击 **Test alert** 发送的测试通知没有 `uuid`。Flashduty 按其全部固定内容识别（`oid` 为 `123456789`、`oname` 为 `sample-name`、标题为 `[Test] Alert reception test`、消息为 `This is a test of WhaTap alert message`、等级 `Info`、状态 `on`，指标与 `okind`、`onode` 字段为空），并产生一条独立的 Info 告警，不会自动恢复，请手动关闭。其他缺少 `uuid` 的请求仍会被拒绝
+- **WhaTap 推送失败**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **告警没有恢复**：确认对应规则的 **Resolved notification** 已开启，且恢复通知使用同一个 Webhook 插件发送
