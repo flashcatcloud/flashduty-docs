@@ -1,0 +1,134 @@
+---
+title: "Nautobot 变更集成"
+description: "通过 Nautobot 的 Webhook，将网络与基础设施数据（设备、IP 地址、站点等）的新增、修改、删除同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Nautobot", "Webhook", "网络自动化", "配置变更", "源数据管理"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Nautobot 的 [Webhook](https://docs.nautobot.com/projects/core/en/stable/user-guide/platform-functionality/webhook/)，把 Nautobot 中对象（设备、接口、IP 地址、站点等）的新增、修改和删除同步到 Flashduty On-call。一次请求对一个对象的修改对应一条 Flashduty 变更，故障发生时可以直接看到此前 Nautobot 里改了什么。
+
+Nautobot 的 Webhook 只在对象保存后发送一次，没有"开始、结束"两个阶段，所以每条变更都是 Done 状态。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Nautobot**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `object_type`、`actor`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Nautobot 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+进入 **Extensibility → Webhooks**，点击 **Add**：
+
+1. **Name**：任意名称，例如 `flashduty`
+2. **Content types**：选择需要同步的对象类型。只选会影响线上环境的类型（例如 `dcim | device`、`ipam | ip address`），不要选变动频繁的类型
+3. **Enabled**：勾选
+4. **Type create / Type update / Type delete**：按需勾选，建议三项都选
+5. **URL**：填写 Flashduty 集成的完整推送地址
+6. **HTTP method**：`POST`
+7. **HTTP content type**：`application/json`
+8. **Body template**：**留空**。留空时 Nautobot 发送默认的 JSON 消息体，Flashduty 按这个格式解析
+
+推送地址已包含集成密钥，无需再配置请求头。**Secret** 可以留空；填写后 Nautobot 会在请求头 `X-Hook-Signature` 中附带签名，Flashduty 不校验该签名。
+
+</Step>
+
+<Step title="验证">
+
+在 Nautobot 中修改一个已选类型的对象并保存，Flashduty 的变更列表中即可看到对应的变更。Nautobot 没有 Webhook 测试按钮；推送失败时，错误记录在 Nautobot 的 Celery worker 日志中。
+
+</Step>
+</Steps>
+
+<Warning>Nautobot 默认拒绝回环地址和链路本地地址的推送地址；Flashduty 的推送地址是公网地址，不受影响。Nautobot 的 Webhook 由 Celery worker 发送，请确认 worker 已运行且能访问外网。</Warning>
+
+## 一条变更是什么
+---
+
+变更标识（change_key）由三部分组成：`<model>:<对象 id>:<请求 id>`，例如 `location:a16ea2bb-…:db6c8eb8-…`。
+
+- Nautobot 的请求 id（`request_id`）每个请求不同；同一个请求内对同一对象的多次修改合并为一次 Webhook
+- 同一对象在两次不同请求中的修改是两条变更
+- 批量修改（一个请求改多个对象）中，每个对象各是一条变更，它们的 `request_id` 标签相同，可以据此把同一批修改关联在一起
+
+## 状态映射
+---
+
+| Webhook 事件（`event`） | Flashduty 变更状态 |
+|---|---|
+| `created` | Done |
+| `updated` | Done |
+| `deleted` | Done |
+
+事件不是以上三个值时（例如在 Body template 中自定义了内容），Flashduty 拒绝推送，见下方常见问题。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<对象类型>: <对象名称> <事件>`，例如 `dcim.location: dc-east-1 created` |
+| 描述 | 空 |
+| 链接 | 空。Nautobot 的 Webhook 只带相对路径，没有主机地址，无法生成链接 |
+| 变更时间 | Webhook 消息体中的 `timestamp` |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `object_type` | 对象类型，例如 `dcim.location` |
+| `model` | 模型名称，例如 `location` |
+| `object_id` | 对象 id |
+| `object_name` | 对象的显示名称 |
+| `event` | `created`、`updated` 或 `deleted` |
+| `actor` | 执行修改的 Nautobot 用户名 |
+| `request_id` | Nautobot 请求 id |
+
+对象的字段内容和修改前后的快照（`snapshots`）可能包含敏感信息，不会被记录。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 确认 Webhook 的 **Enabled** 已勾选，且 **Content types** 包含被修改的对象类型、Type create/update/delete 包含对应的操作
+- 确认 Nautobot 的 Celery worker 正在运行；Webhook 是异步发送的
+- 在 Celery worker 日志中查看推送的返回码
+
+</Accordion>
+
+<Accordion title="Flashduty 会拒绝哪些推送？">
+
+Flashduty 在以下情况拒绝推送（返回 400），仅在自定义了 **Body template** 时出现：
+
+- `unsupported event`：`event` 缺失，或不是 `created`、`updated`、`deleted`
+- `model is missing`、`request_id is missing`、`data.id is missing`：消息体缺少对应字段
+- `invalid timestamp` / `timestamp is missing`：`timestamp` 缺失或不是 `2026-10-02 02:53:45+00:00` 或 ISO 8601 格式
+
+请清空 **Body template**，使用默认消息体。
+
+</Accordion>
+
+<Accordion title="Nautobot 重发或重试同一个 Webhook 会重复记录吗？">
+
+不会。相同的变更、事件时间和状态会被识别为重复并丢弃。
+
+</Accordion>
+
+<Accordion title="为什么同一对象的修改变成了多条变更？">
+
+每个请求是一条变更。通过界面保存和通过 API 保存是两个请求，所以是两条变更。同一个请求内对该对象的多次修改，Nautobot 只发送一次 Webhook。
+
+</Accordion>
+</AccordionGroup>

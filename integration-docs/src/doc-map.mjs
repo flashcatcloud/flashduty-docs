@@ -318,6 +318,7 @@ export const docMap = {
   ExpoEasChange: `${integrationBase}/change-integration/expo-eas.mdx`,
   Env0Change: `${integrationBase}/change-integration/env0.mdx`,
   NetboxChange: `${integrationBase}/change-integration/netbox.mdx`,
+  NautobotChange: `${integrationBase}/change-integration/nautobot.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
