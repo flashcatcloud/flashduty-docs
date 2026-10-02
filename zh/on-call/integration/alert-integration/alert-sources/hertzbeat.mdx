@@ -1,0 +1,130 @@
+---
+title: "Apache HertzBeat 告警集成"
+description: "通过 Apache HertzBeat 通知接收人（Notice Receiver）的 Webhook，将 HertzBeat 的告警和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Apache HertzBeat", "HertzBeat", "Webhook", "通知接收人", "监控", "告警规则"]
+---
+
+通过 Apache HertzBeat 的 **告警通知 → 通知接收人** 中的 Webhook 类型，把告警规则的触发（`firing`）和恢复（`resolved`）同步到 Flashduty On-call。每条告警规则在每个监控实例上对应一条 Flashduty 告警：触发时创建，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Apache HertzBeat**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Apache HertzBeat**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 HertzBeat 中配置
+---
+
+<Steps>
+<Step title="新增通知接收人">
+
+1. 登录 HertzBeat，进入 **告警通知 → 通知接收人 → 新增接收人**
+2. **通知方式** 选择 **WebHook**
+3. 将 Flashduty 集成的完整推送地址粘贴到 **回调地址**
+4. 保存，可点击 **发送测试消息** 验证连通性
+
+</Step>
+
+<Step title="新增通知策略">
+
+新增接收人本身不会收到告警，还需要在 **告警通知 → 通知策略** 中新增策略，选择刚创建的接收人，并按需选择要通知的告警等级和标签，保存后生效。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一条告警规则触发（例如停掉被监控的端口），确认 Flashduty 收到活动告警；规则条件不再满足后，HertzBeat 发送 `resolved` 通知，Flashduty 中的原告警自动恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+Flashduty 只解析 HertzBeat 自带的默认 Webhook 模板。如果修改了接收人的自定义模板，请求体结构会变化，Flashduty 不保证能解析，不支持自定义模板。
+</Warning>
+
+## 推送内容
+---
+
+HertzBeat 以 JSON 格式 POST 默认模板，一次请求可包含多条告警（`alerts`），Flashduty 逐条处理：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `status` | `firing` 或 `resolved`，整个请求共用 | 触发或恢复 |
+| `alerts[].labels.alertname` | 告警规则名称 | 告警标题，标签 `check`、`alertname` |
+| `alerts[].labels.instance` | 监控目标 | 标签 `resource`、`instance` |
+| `alerts[].labels.defineid` | 告警规则 ID | 标签 `defineid` |
+| `alerts[].labels.severity` | 规则中定义的等级 | 告警等级，标签 `severity` |
+| `alerts[].content` | 告警内容 | 告警描述 |
+| `alerts[].annotations` | 规则中定义的注解 | 告警描述，按键排序，每行 `键: 值` |
+| `alerts[].labels` 中的其他键 | 例如 `instancename` 和规则自定义标签 | 同名标签 |
+
+`commonLabels` 和 `commonAnnotations` 不被读取。
+
+## Alert Key
+---
+
+HertzBeat 的推送内容不含告警 ID。Flashduty 使用 `alerts[].labels` 中的 `alertname`、`instance` 和 `defineid` 三项组合生成 Alert Key。在 HertzBeat 1.9.0 的实际推送中，这三项在告警触发、持续告警重复通知和恢复时完全一致，因此三类通知落在同一条 Flashduty 告警上。修改等级、内容或监控名称不会改变 Alert Key。
+
+请求中缺少 `labels.alertname` 时，Flashduty 返回参数错误，因为无法可靠地把恢复通知关联到原告警。`instance` 或 `defineid` 缺失时按空值参与计算。
+
+## 状态和告警等级
+---
+
+| HertzBeat 字段 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `labels.severity` = `critical` | Critical |
+| `labels.severity` = `warning`、为空或其他值 | Warning |
+| `labels.severity` = `info` | Info |
+| `status` = `firing` | 触发或更新告警，使用上表的等级 |
+| `status` = `resolved` | 恢复，等级保持原告警的等级 |
+
+`status` 为其他值或 `alerts` 为空的请求会被拒绝。`commonLabels.severity` 在默认模板中被改写成带图标的文字（如 "Critical"），不用于判断等级。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="点击发送测试消息后 Flashduty 出现了什么？">
+
+测试按钮发送一条固定的触发请求（规则名 `CPU Usage Alert`，实例 `127.0.0.1`，内容以 `test send msg!` 开头）。Flashduty 返回 HTTP 200，并以独立的 Alert Key 新建一条 Info 告警，不会与真实告警合并。测试没有对应的恢复通知，请在协作空间中手动关闭。
+
+</Accordion>
+
+<Accordion title="告警持续触发时会重复创建告警吗？">
+
+不会。告警保持触发期间 HertzBeat 会重复发送 `firing` 通知，Alert Key 相同，Flashduty 将它们合并到同一条告警。
+
+</Accordion>
+
+<Accordion title="可用性（available）告警恢复后 Flashduty 没有关闭？">
+
+只有 HertzBeat 发送了 `resolved` 通知，Flashduty 才会恢复告警。在 HertzBeat 1.9.0 的一次测试中，监控恢复后可用性类告警在数分钟内仍处于触发状态，没有发送 `resolved`；指标阈值类规则则正常发送。如果遇到这种情况，请先在 HertzBeat 告警中心确认该告警是否已恢复。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 没有收到告警**：确认 URL 是完整的推送地址（含 `integration_key`），并确认已配置通知策略且告警命中该策略
+- **Flashduty 返回参数错误**：确认请求体为 HertzBeat 默认模板的 JSON，`status` 为 `firing` 或 `resolved`，且每条告警含 `labels.alertname`
+- **告警没有恢复**：确认 HertzBeat 已发送 `resolved` 通知，且其 `alertname`、`instance`、`defineid` 与触发通知相同
+
+HertzBeat 通知配置请参阅官方文档 [Webhook 通知](https://hertzbeat.apache.org/docs/help/alert_webhook/)。
