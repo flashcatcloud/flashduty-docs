@@ -18,6 +18,7 @@ export const docMap = {
   BaiDuBCM: `${alertBase}/baidu-bcm.mdx`,
   HuaWeiCES: `${alertBase}/huawei-ces.mdx`,
   InfluxDB: `${alertBase}/influxdata.mdx`,
+  Kapacitor: `${alertBase}/kapacitor.mdx`,
   OpenFalcon: `${alertBase}/open-falcon.mdx`,
   PagerDuty: `${alertBase}/pagerduty.mdx`,
   TencentBK: `${alertBase}/blueking.mdx`,
