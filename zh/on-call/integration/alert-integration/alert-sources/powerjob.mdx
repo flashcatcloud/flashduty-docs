@@ -1,0 +1,122 @@
+---
+title: "PowerJob 告警集成"
+description: "通过 PowerJob 用户的 WebHook 报警，把任务实例和工作流实例的执行失败同步到 Flashduty On-call。"
+keywords: ["告警集成", "PowerJob", "定时任务", "工作流", "Webhook", "任务调度"]
+---
+
+PowerJob 的任务实例或工作流实例执行失败时，会向任务（或工作流）所选报警通知人员的 WebHook 地址发送一条 JSON 报警。把该地址设为 Flashduty 的推送地址后，每一次失败的执行对应一条 Flashduty 告警，等级为 Critical。
+
+PowerJob 只在执行失败时报警，执行成功不会通知，因此告警不会自动恢复。请在协作空间中开启超时自动关闭，见下文 [告警不会自动恢复](#告警不会自动恢复)。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **PowerJob**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **PowerJob**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 PowerJob 中配置
+---
+
+PowerJob 的报警对象是用户：先在用户上设置 WebHook 地址，再在任务或工作流上选择要通知的用户。本集成基于 PowerJob 5.1.7 验证。
+
+<Steps>
+<Step title="为用户设置 WebHook 地址">
+
+1. 使用有权限的账号登录 PowerJob 控制台，进入 **个人信息** 页面
+2. 在 **WebHook** 一栏填入 Flashduty 集成的完整推送地址（含 `integration_key`），保存
+
+PowerJob 会在地址没有 `http://` 或 `https://` 前缀时自动补上 `http://`，请直接填写带 `https://` 的完整地址。PowerJob 服务端需要能访问公网上的 Flashduty。
+
+</Step>
+
+<Step title="在任务或工作流上选择报警通知人员">
+
+1. 编辑要监控的任务，在 **报警配置** 一栏的 **选择报警通知人员** 中选中上一步的用户，保存
+2. 对要监控的工作流做同样的设置
+
+只有被选中且设置了 WebHook 的用户才会收到报警。PowerJob 会向每个这样的用户各发送一次请求。
+
+</Step>
+
+<Step title="验证">
+
+PowerJob 没有“发送测试通知”按钮。让一个任务失败，例如使用内置的 `StandaloneProcessorDemo` 处理器并把任务参数设为 `failed`，运行后确认 Flashduty 出现一条 Critical 告警，标题为 `PowerJob job failed: <任务名称>`。
+
+</Step>
+</Steps>
+
+## 告警不会自动恢复
+---
+
+PowerJob 不发送恢复通知，也不在任务后来执行成功时报警。在接收该集成的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 12 小时，并按团队处理失败任务的时效调整。
+
+每一次失败的执行都是一条独立告警。高频调度的任务（例如每分钟一次）连续失败时，会产生大量告警，可以配合 Flashduty 的告警聚合降噪。
+
+## 任务失败和工作流失败
+---
+
+本集成按请求内容区分两种报警：
+
+- **任务失败**：包含 `jobId` 和 `instanceId`。标题为 `PowerJob job failed: <任务名称>`，缺少任务名称时用 `job <jobId>`
+- **工作流失败**：包含 `workflowId` 和 `wfInstanceId`。PowerJob 5.1.7 的工作流报警不带工作流名称，标题为 `PowerJob workflow failed: workflow <workflowId>`，请在 PowerJob 控制台用该 ID 找到对应的工作流
+
+如果工作流中的某个任务失败，且该任务本身也选了报警通知人员，PowerJob 会同时发送任务失败和工作流失败两条报警，在 Flashduty 中是两条独立告警。
+
+告警描述中包含 PowerJob 报告的执行结果 `result`（超过 1000 字节会被截断）。任务参数、实例参数和处理器信息（例如 Shell 脚本内容）可能包含敏感信息，Flashduty 不读取这些字段。
+
+## Alert Key
+---
+
+| 报警类型 | Alert Key |
+| :--- | :--- |
+| 任务失败 | 应用 ID `appId` + 任务 ID `jobId` + 任务实例 ID `instanceId` |
+| 工作流失败 | 工作流 ID `workflowId` + 工作流实例 ID `wfInstanceId` |
+
+每次执行都有新的实例 ID，所以每次失败都是新告警，同一次执行不会重复告警。任务名称、执行结果、时间的变化不会改变 Alert Key。缺少上述字段的请求会被拒绝。
+
+实例 ID 是超过 2^53 的长整数，Flashduty 按原文保留每一位数字。
+
+## 状态和告警等级
+---
+
+PowerJob 的报警没有等级字段，且只在执行失败时发送，所以所有告警都是触发状态、Critical 等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `powerjob` |
+| `kind` | `job` 或 `workflow` |
+| `check` | 任务名称（缺失时为 `job <jobId>`），工作流为 `workflow <workflowId>` |
+| `resource` | `app <appId>` |
+| `app_id` | 应用 ID |
+| `job_id` / `job_name` / `instance_id` | 任务 ID、任务名称、任务实例 ID（任务失败） |
+| `workflow_id` / `wf_instance_id` | 工作流 ID、工作流实例 ID（工作流失败） |
+| `time_expression` | 时间表达式，例如 CRON 表达式 |
+| `task_tracker_address` | 执行该任务的 TaskTracker 地址（任务失败） |
+
+## 排查问题
+---
+
+- **Flashduty 没有收到事件**：确认执行失败的任务或工作流选了报警通知人员，且该用户填写了 WebHook；确认 PowerJob 服务端能访问 Flashduty，推送地址完整且包含 `integration_key`。PowerJob 发送失败时只在服务端日志中记录一条 `[WebHookAlarmService] invoke webhook ... failed`，不会重试
+- **Flashduty 返回参数错误**：请求缺少 Alert Key 一节所列的字段，或不是 PowerJob 的 JSON 报警
+- **告警一直不关闭**：这是预期行为，请开启协作空间的超时自动关闭
+- **看不到工作流名称**：见上文，PowerJob 5.1.7 的工作流报警不带名称

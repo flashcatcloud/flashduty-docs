@@ -1,0 +1,156 @@
+---
+title: "Apollo 配置中心变更集成"
+description: "通过 Apollo Portal 的配置发布 Webhook，将每次配置发布、回滚、灰度发布和全量发布同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Apollo", "携程 Apollo", "配置中心", "配置发布", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Apollo Portal 的配置发布 Webhook，把 Apollo 配置中心的配置发布同步到 Flashduty On-call。每次发布操作（发布、回滚、灰度发布、全量发布）对应一条 Flashduty 变更，在 Apollo 完成该操作后记录一次。
+
+Apollo 只在操作完成后推送，没有开始事件，因此变更没有 Processing 中间状态，直接记录为 Done。这里的变更是配置的改动，不包含应用的部署。
+
+<Warning>Apollo 的推送内容包含发布后的全部配置（key 和 value），其中可能有密码、令牌等敏感值。Flashduty 不读取、不保存这部分内容：变更中没有任何配置项的 key 或 value。</Warning>
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Apollo**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `app_id`、`environment`、`namespace`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Apollo 中配置
+---
+
+Apollo 从 1.8.0 版本开始支持配置发布 Webhook。配置项存放在 `ApolloPortalDB.ServerConfig` 表中，也可以在 Apollo Portal 的 **管理员工具 → 系统参数** 页面修改，修改后约一分钟生效。
+
+<Steps>
+<Step title="指定要推送的环境">
+
+新增或修改配置项 `webhook.supported.envs`，值为开启 Webhook 的环境列表，多个环境以英文逗号分隔：
+
+```
+DEV,FAT,UAT,PRO
+```
+
+环境名以 Portal 中实际的环境名为准，例如快速启动（all-in-one）镜像的环境名是 `LOCAL`。
+
+</Step>
+
+<Step title="填写推送地址">
+
+新增或修改配置项 `config.release.webhook.service.url`，值为 Flashduty 的 **推送地址**：
+
+```
+https://api.flashcat.cloud/event/push/change/apollo/<integration_key>
+```
+
+请原样粘贴 Flashduty 显示的推送地址。推送地址把集成 key 放在路径里，而不是 `?integration_key=` 查询参数，因为 Apollo 会在配置的地址末尾追加 `?env=<环境>`，如果地址里已有查询参数，集成 key 会被破坏，推送无法通过鉴权。
+
+Flashduty 用 `env` 参数区分环境，请不要在地址末尾自行添加查询参数。
+
+</Step>
+
+<Step title="验证">
+
+Apollo 没有测试推送：在 Portal 中对任一已开启 Webhook 的环境发布一次配置，即可在 Flashduty 变更列表中看到记录。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+一条变更对应 Apollo 的一次发布操作，变更标识（change_key）为 `<环境>/<发布历史 ID>`，例如 `PRO/1234`。
+
+发布历史 ID 是 Apollo 为每次发布操作生成的记录 ID，同一个环境内不重复，不同环境的 ID 可能相同，因此标识中带有环境名。
+
+不使用推送内容中的 `releaseId` 作为标识：回滚时 Apollo 推送的 `releaseId` 是回滚后生效的那个旧版本的 ID，与该版本当初发布时推送的 `releaseId` 相同。以 `releaseId` 区分会把回滚合并进旧的发布记录。
+
+同一个命名空间的两次发布是两条变更；发布后回滚也是两条变更。
+
+## 状态映射
+---
+
+Apollo 推送的 `operation` 决定变更的类型，状态都是 Done：
+
+| Apollo `operation` | 含义 | 标题动词 | 标签 `operation` | Flashduty 变更状态 |
+|---|---|---|---|---|
+| `0` | 正常发布 | 发布 | `release` | Done |
+| `1` | 配置回滚 | 回滚到 | `rollback` | Done |
+| `2` | 灰度发布 | 灰度发布 | `gray` | Done |
+| `4` | 全量发布（灰度合并到主分支） | 全量发布 | `full` | Done |
+
+推送中 `isReleaseAbandoned` 为 `true` 时（该次发布对应的版本已被废弃），变更状态为 Canceled。
+
+出现以上四种之外的 `operation` 值时，推送返回 InvalidParameter，不生成变更。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<AppId>/<集群>/<命名空间> [<环境>]: <动词> <发布标题>`，例如 `SampleApp/default/application [PRO]: 发布 20261002-release-1`。回滚时的发布标题是回滚后生效的版本的标题。没有发布标题时用 `#<releaseId>` |
+| 描述 | 发布备注（`releaseComment`） |
+| 链接 | 无。Apollo 的推送内容不含 Portal 地址 |
+| 变更时间 | 发布时间（`releaseTime`） |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `app_id` | 应用 AppId |
+| `cluster` | 集群名 |
+| `namespace` | 命名空间 |
+| `environment` | 环境，来自推送地址上的 `env` 参数 |
+| `branch` | 分支名；正常发布为 `default`，灰度发布为灰度分支名 |
+| `operation` | `release`、`rollback`、`gray` 或 `full` |
+| `operator` | 发布人（登录名；如果是邮箱则不记录） |
+| `release_id` | Apollo 的发布 ID（`releaseId`） |
+| `history_id` | 发布历史 ID（变更标识的组成部分） |
+| `emergency` | 紧急发布时为 `true` |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么看不到配置项的内容？">
+
+Apollo 的推送内容带有发布后的全部配置，其中可能有密码和令牌。Flashduty 不解析这部分内容，变更中不包含任何配置项的 key 或 value。如需知道改了什么，请在 Apollo Portal 的发布历史中查看。
+
+</Accordion>
+
+<Accordion title="灰度发布规则的修改会生成变更吗？">
+
+不会。Apollo 只在正常发布、回滚、灰度发布和全量发布完成时推送，修改灰度规则不推送。
+
+</Accordion>
+
+<Accordion title="Apollo 推送失败会重试吗？">
+
+不会。Apollo 对每个推送地址只发送一次，失败时只在 Portal 日志里记录错误。如果一次推送丢失，对应的发布不会出现在 Flashduty 中。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `env is missing`：请求中没有 `env` 参数。请确认 `config.release.webhook.service.url` 的值是 Flashduty 显示的推送地址，没有额外添加查询参数
+- `id is missing`：推送内容不完整，请确认推送来自 Apollo Portal 的配置发布 Webhook
+- `operation is missing` 或 `unknown operation`：推送中的 `operation` 缺失或不在 `0`、`1`、`2`、`4` 之内
+- `invalid releaseTime`：推送中的发布时间格式不正确
+
+Apollo 不会展示推送的响应，请在 Portal 日志中查看 `Notify webHook server failed` 获取失败信息。
+
+</Accordion>
+
+<Accordion title="多个环境共用一个集成可以吗？">
+
+可以。变更标识中带有环境名，不同环境的发布不会合并。如果想把不同环境分派到不同协作空间，可以在集成的路由中按 `environment` 标签配置规则。
+
+</Accordion>
+</AccordionGroup>

@@ -1,0 +1,141 @@
+---
+title: "Zadig 变更集成"
+description: "通过 Zadig 的系统钩子或工作流 Webhook 通知，将工作流任务的开始与结果同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Zadig", "工作流", "CI/CD", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Zadig v5 的 Webhook，将工作流任务（Workflow Task）的执行情况同步到 Flashduty On-call。每次工作流执行对应一条 Flashduty 变更：开始执行时创建，状态变化时更新，结束时记录最终状态。
+
+Zadig 有两种 Webhook 可用，推送内容相同：
+
+- **系统钩子**：由管理员在系统级配置一次，对所有工作流生效，在任务开始执行和执行完成时各推送一次，推荐使用
+- **工作流的 Webhook 通知**：在单个工作流中添加，按所选的工作流状态推送
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Zadig**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`workflow`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Zadig 中配置
+---
+
+### 方式一：系统钩子
+
+<Steps>
+<Step title="打开系统钩子">
+
+系统管理员进入 **系统设置 → 系统配置 → 系统钩子**。
+
+</Step>
+
+<Step title="填写推送地址与触发事件">
+
+1. **启用系统钩子**：打开
+2. **Hook 地址**：粘贴 Flashduty 集成的完整推送地址
+3. **Secret Token**：无需填写。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `X-Zadig-Token`
+4. **触发事件**：同时勾选 **开始执行** 和 **执行完成**
+
+</Step>
+
+<Step title="运行工作流">
+
+执行一次工作流，即可在 Flashduty 变更列表中看到记录。
+
+</Step>
+</Steps>
+
+### 方式二：工作流的 Webhook 通知
+
+编辑工作流，添加 **Webhook** 类型的通知，**Webhook 地址** 填写 Flashduty 推送地址，**通知事件** 选择需要同步的工作流状态（例如执行成功、执行失败、已取消、超时）。该方式只在所选状态出现时推送，没有选择的状态不会出现在变更中。
+
+同时配置两种方式不会产生重复变更：同一个任务的同一状态只记录一次。
+
+## 一条变更是什么
+---
+
+| Zadig 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 工作流任务 | `<项目标识>/<工作流标识>/<任务 ID>` | 任务 ID 在每个工作流内递增，所以同一个工作流的两次执行是两条变更；项目标识和工作流标识是创建后不变的英文标识，不是显示名称 |
+
+对已有任务点击 **重试** 会重新开始同一个任务（任务 ID 不变），因此重试会重新打开原来的变更，状态回到 Ready 并随后更新。
+
+## 状态映射
+---
+
+| Zadig `workflow.status` | Flashduty 变更状态 |
+|---|---|
+| `created`、`queued`、`pending`、`prepare` | Ready |
+| `running`、`debug_before`、`debug_after` | Processing |
+| `pause`、`wait_for_approval`、`waiting`、`blocked`、`wait_for_manual_error_handling` | Planned |
+| `passed`、`unstable` | Done |
+| `failed`、`timeout`、`reject` | Failed |
+| `cancelled` | Canceled |
+
+系统钩子只会推送 `created`（开始执行）和结束状态（`passed`、`failed`、`timeout`、`cancelled`），等待手动执行等中间状态只可能来自工作流的 Webhook 通知。
+
+以下推送返回成功但不生成变更：
+
+- 发布计划（`object_kind` 为 `release_plan`）的推送。发布计划只在规划完成、开始执行、全部任务完成三个时点推送，取消、拒绝、超时不会推送，用它建立变更会出现一直不结束的记录；由发布计划触发的工作流任务会照常记录，并带有 `release_plan` 标签
+- 测试、代码扫描、交付版本任务（`task_type` 为 `test`、`scan`、`delivery`）
+- 其他 `object_kind` 的推送
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目名称>: <工作流名称> #<任务 ID>`，例如 `K8sYAML-1: Cache Test #300` |
+| 描述 | 执行时填写的备注（`remark`），仅取第一条推送的内容 |
+| 链接 | Zadig 中该任务的详情页（`detail_url`） |
+| 变更时间 | 该状态自己的时间：有结束时间用结束时间，否则取最后一个已结束阶段的结束时间，再否则取开始时间 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目标识 |
+| `workflow` | 工作流标识 |
+| `task_id` | 任务 ID |
+| `actor` | 任务创建者名称 |
+| `zadig_state` | Zadig 的任务状态原值 |
+| `release_plan` | 发布计划名称（由发布计划触发时） |
+| `release_plan_id` | 发布计划 ID（由发布计划触发时） |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="只构建、不部署的工作流也会生成变更吗？">
+
+会。Zadig 的推送不区分工作流是否包含部署任务，所有工作流任务都会记录。可以在集成的 **路由** 中按 `workflow` 标签筛选需要关注的工作流。
+
+</Accordion>
+
+<Accordion title="为什么看不到「等待审批」「等待手动执行」状态？">
+
+系统钩子不推送中间状态。需要这些状态时，在工作流中添加 Webhook 通知并选择对应的通知事件。
+
+</Accordion>
+
+<Accordion title="Zadig 推送失败后会重试吗？">
+
+Zadig 发送失败只记录日志，不会自动重试。Flashduty 以变更时间和状态去重，同一状态重复收到只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `workflow is missing`、`workflow.project_name is missing`、`workflow.workflow_name is missing`、`workflow.task_id is missing`：推送内容不完整，请确认推送来自 Zadig 原生 Webhook
+- `unknown workflow.status`：出现了未收录的任务状态值，请联系我们补充映射
+
+</Accordion>
+</AccordionGroup>
