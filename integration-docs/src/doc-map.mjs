@@ -325,6 +325,7 @@ export const docMap = {
   GiteeChange: `${integrationBase}/change-integration/gitee.mdx`,
   ZadigChange: `${integrationBase}/change-integration/zadig.mdx`,
   YunxiaoAppstackChange: `${integrationBase}/change-integration/yunxiao-appstack.mdx`,
+  ApolloChange: `${integrationBase}/change-integration/apollo.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
