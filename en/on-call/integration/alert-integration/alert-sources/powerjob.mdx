@@ -1,0 +1,122 @@
+---
+title: "PowerJob alert integration"
+description: "Send failed job instances and failed workflow instances from PowerJob to Flashduty On-call through a user WebHook alarm."
+keywords: ["alert integration", "PowerJob", "scheduled jobs", "workflow", "webhook", "job scheduling"]
+---
+
+When a job instance or a workflow instance fails, PowerJob posts a JSON alarm to the WebHook address of each notified user selected on the job (or workflow). Set that address to the Flashduty push URL, and every failed run creates one Flashduty alert with Critical severity.
+
+PowerJob alarms only on failure and sends nothing when a run succeeds, so the alert does not recover on its own. Turn on auto-close in the channel, see [Alerts do not recover](#alerts-do-not-recover).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integration data** → **Dedicated integration**, then click **Add an integration**
+3. Select **PowerJob** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert events**
+2. Select **PowerJob** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In PowerJob
+---
+
+PowerJob sends alarms to users: first set a WebHook address on a user, then select that user on the job or workflow. This integration is verified against PowerJob 5.1.7.
+
+<Steps>
+<Step title="Set the WebHook address on a user">
+
+1. Sign in to the PowerJob console and open the **Personal Info** page
+2. Enter the complete Flashduty push URL (including `integration_key`) in the **WebHook** field and save
+
+If the address has no `http://` or `https://` prefix, PowerJob adds `http://`, so enter the full address starting with `https://`. The PowerJob server must be able to reach Flashduty on the public internet.
+
+</Step>
+
+<Step title="Select the notified users on a job or workflow">
+
+1. Edit the job you want to monitor. In **Alarm config**, select the user from the previous step in **Alarm receiver(s)**, then save
+2. Do the same for each workflow you want to monitor
+
+Only selected users that have a WebHook receive the alarm. PowerJob sends one request for each such user.
+
+</Step>
+
+<Step title="Verify">
+
+PowerJob has no test button. Make a job fail, for example with the built-in `StandaloneProcessorDemo` processor and the job parameter set to `failed`. Run it and confirm Flashduty shows one Critical alert titled `PowerJob job failed: <job name>`.
+
+</Step>
+</Steps>
+
+## Alerts do not recover
+---
+
+PowerJob sends no recovery notification, and it does not alarm when a job later succeeds. In the channel that receives this integration, turn on [auto-close](/en/on-call/channel/create-edit). We suggest 12 hours; adjust to how quickly your team handles failed jobs.
+
+Each failed run is a separate alert. A job that is scheduled often (for example every minute) and keeps failing creates many alerts; use Flashduty alert grouping to reduce the noise.
+
+## Job failures and workflow failures
+---
+
+The integration tells the two alarms apart by their content:
+
+- **Job failure**: contains `jobId` and `instanceId`. The title is `PowerJob job failed: <job name>`, or `job <jobId>` when the name is missing
+- **Workflow failure**: contains `workflowId` and `wfInstanceId`. The workflow alarm of PowerJob 5.1.7 carries no workflow name, so the title is `PowerJob workflow failed: workflow <workflowId>`; find the workflow in the PowerJob console by that ID
+
+If a job inside a workflow fails and that job also has notified users, PowerJob sends both a job failure alarm and a workflow failure alarm. They are two separate alerts in Flashduty.
+
+The alert description contains the execution `result` reported by PowerJob (cut at 1000 bytes). Job parameters, instance parameters, and the processor info (for example the body of a shell script) may hold secrets, so Flashduty does not read those fields.
+
+## Alert Key
+---
+
+| Alarm type | Alert Key |
+| :--- | :--- |
+| Job failure | app ID `appId` + job ID `jobId` + job instance ID `instanceId` |
+| Workflow failure | workflow ID `workflowId` + workflow instance ID `wfInstanceId` |
+
+Every run has a new instance ID, so each failure is a new alert and the same run never alerts twice. Changes to the job name, result, or times do not change the Alert Key. A request without these fields is rejected.
+
+Instance IDs are long integers above 2^53; Flashduty keeps every digit of the original text.
+
+## Status and severity
+---
+
+PowerJob alarms carry no severity field and are sent only on failure, so every alert is in the triggered state with Critical severity.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `source` | Always `powerjob` |
+| `kind` | `job` or `workflow` |
+| `check` | Job name (`job <jobId>` when missing), or `workflow <workflowId>` |
+| `resource` | `app <appId>` |
+| `app_id` | App ID |
+| `job_id` / `job_name` / `instance_id` | Job ID, job name, and job instance ID (job failure) |
+| `workflow_id` / `wf_instance_id` | Workflow ID and workflow instance ID (workflow failure) |
+| `time_expression` | Time expression, for example a CRON expression |
+| `task_tracker_address` | Address of the TaskTracker that ran the job (job failure) |
+
+## Troubleshooting
+---
+
+- **Flashduty receives no event**: confirm the failed job or workflow has notified users selected and that user has a WebHook; confirm the PowerJob server can reach Flashduty and that the push URL is complete with `integration_key`. When delivery fails, PowerJob only logs `[WebHookAlarmService] invoke webhook ... failed` on the server and does not retry
+- **Flashduty returns an invalid-parameter error**: the request lacks the fields listed under Alert Key, or it is not a PowerJob JSON alarm
+- **The alert never closes**: this is expected; turn on auto-close in the channel
+- **No workflow name**: see above, the workflow alarm of PowerJob 5.1.7 carries no name
