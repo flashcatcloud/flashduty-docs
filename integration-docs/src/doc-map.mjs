@@ -320,6 +320,7 @@ export const docMap = {
   Env0Change: `${integrationBase}/change-integration/env0.mdx`,
   NetboxChange: `${integrationBase}/change-integration/netbox.mdx`,
   NautobotChange: `${integrationBase}/change-integration/nautobot.mdx`,
+  GiteeChange: `${integrationBase}/change-integration/gitee.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
