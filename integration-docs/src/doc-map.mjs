@@ -322,6 +322,7 @@ export const docMap = {
   NautobotChange: `${integrationBase}/change-integration/nautobot.mdx`,
   GiteeChange: `${integrationBase}/change-integration/gitee.mdx`,
   ZadigChange: `${integrationBase}/change-integration/zadig.mdx`,
+  YunxiaoAppstackChange: `${integrationBase}/change-integration/yunxiao-appstack.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
     en: 'legacy/en/jira-change.md',
