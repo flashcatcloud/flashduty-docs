@@ -312,6 +312,7 @@ export const docMap = {
   ExpoEasChange: `${integrationBase}/change-integration/expo-eas.mdx`,
   HarnessFmeChange: `${integrationBase}/change-integration/harness-fme.mdx`,
   GiteeChange: `${integrationBase}/change-integration/gitee.mdx`,
+  YunxiaoAppstackChange: `${integrationBase}/change-integration/yunxiao-appstack.mdx`,
   ZadigChange: `${integrationBase}/change-integration/zadig.mdx`,
   Jira: {
     zh: 'legacy/zh/jira-change.md',
