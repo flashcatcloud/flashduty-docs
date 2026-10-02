@@ -1,0 +1,93 @@
+---
+title: "Infisical alert integration"
+description: "Send Infisical secret rotation failures and honey token triggers to Flashduty On-call through a project webhook."
+keywords: ["alert integration", "Infisical", "secrets management", "secret rotation", "honey token", "webhook"]
+---
+
+Use an Infisical project webhook to send two kinds of security events to Flashduty On-call: a failed secret rotation (`secrets.rotation-failed`) and a triggered honey token (`honey-token.triggered`). Both create Critical alerts. Infisical sends no notification when a rotation later succeeds or when a honey token is dealt with, so these alerts do not recover on their own. Close them manually, or let the channel's auto-close timeout close them.
+
+Secret modifications (`secrets.modified`), change requests, and access requests are not alerts. Flashduty returns success for them without creating an alert, and you can clear those events on the Infisical side.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration Push URL in either of the following two ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Infisical** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Infisical** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Infisical
+---
+
+<Steps>
+<Step title="Create a webhook">
+
+1. Open the Infisical project, go to **Project Settings → Webhooks**, and click **Add Webhook**
+2. Set **Type** to **General**
+3. Set **Environment** to the environment to watch. One webhook covers one environment, so create one per environment you want to monitor
+4. Set **Secret Path** to `/**` to cover every folder in that environment. `/` alone matches only the root folder, so a rotation configured in a subfolder would not trigger it
+5. Paste the complete Flashduty Push URL (including `integration_key`) into **Webhook URL**
+6. Expand **Advanced Settings** and select only **Secret Rotation Failed** and **Honey Token Triggered** under **Events**
+7. **Secret Key** can stay empty. If you set one, Infisical adds a signature in the `x-infisical-signature` header; Flashduty records it but does not verify it, and authenticates requests by the `integration_key` in the Push URL
+
+</Step>
+
+<Step title="Verify">
+
+In the webhook list, open the actions menu on the webhook's row and select **Test**. Flashduty creates an Info alert titled `Infisical test notification`. It does not recover on its own, so close it manually after checking.
+
+</Step>
+
+<Step title="Turn on auto-close timeout">
+
+In the channel that receives these alerts, turn on [auto-close timeout](/en/on-call/channel/create-edit) with a duration of 24 hours. If the same rotation or the same honey token sends again within the merge window, the same alert is updated; once it is closed, a new alert is triggered.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+The Infisical request body has no alert ID, so Flashduty uses the monitored object itself as the Alert Key:
+
+- **Rotation failure**: project ID + environment + folder path + rotation name (`project.projectId`, `project.environment`, `project.secretPath`, `project.rotationName`)
+- **Honey token**: project ID + environment + folder path + token name (`project.projectId`, `project.environment`, `project.secretPath`, `honeyToken.name`)
+
+Repeated failures of one rotation (including manual runs and retries), or one honey token triggered several times from different IPs, merge into the same alert. A change in the error message, project name, source IP, or timestamp does not change the Alert Key. A request missing `project.projectId`, `project.environment`, `project.rotationName`, or `honeyToken.name` is rejected.
+
+## Status and severity
+---
+
+| Infisical event | Flashduty severity | Notes |
+| :--- | :--- | :--- |
+| `secrets.rotation-failed` | Critical | The rotation failed and the credential may be stale. The description is the error message Infisical reports |
+| `honey-token.triggered` | Critical | A honey token was used, which means the credential leaked. The description has the AWS event, source IP, and region |
+| `test` (Test button) | Info | A separate test alert |
+| Any other event | No alert | Success is returned |
+
+Neither alert has a recovery event.
+
+## Troubleshooting
+---
+
+- **Infisical reports a failed webhook**: check that the Push URL is complete and includes `integration_key`, and that the webhook **Type** is **General** (the Slack and Microsoft Teams types send their own message formats)
+- **No alert after a rotation failure**: check that the webhook's **Environment** matches the rotation's environment, that **Secret Path** matches the rotation's folder (for example `/**`), and that **Secret Rotation Failed** is selected
+- **The alert does not recover**: Infisical sends no recovery notification; close the alert manually or turn on the channel's auto-close timeout
+- **The test alert stays open**: the Test button's request never recovers; close it manually
+
+For more detail, see the Infisical documentation: [Webhooks](https://infisical.com/docs/documentation/platform/webhooks).
