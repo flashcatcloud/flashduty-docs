@@ -1,0 +1,131 @@
+---
+title: "阿里云云效 AppStack 变更集成"
+description: "通过云效应用交付 AppStack 的 Webhook，将部署单的准备、运行、成功、失败和取消同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "阿里云云效", "云效", "AppStack", "应用交付", "部署单", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过云效应用交付 AppStack 的 Webhook，将部署单（ChangeOrder）的状态更新同步到 Flashduty On-call。每个部署单对应一条 Flashduty 变更，随部署单从准备、运行到结束更新状态。部署、扩缩容、回滚、销毁四种类型的部署单都会记录。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **阿里云云效 AppStack**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `app`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在云效 AppStack 中配置
+---
+
+<Steps>
+<Step title="新建 Webhook">
+
+- 全局 Webhook（对组织下所有应用生效）：进入 AppStack 首页，选择 **全局设置 → Webhooks**，点击 **新建 Webhook**
+- 应用内 Webhook（仅对当前应用生效）：进入目标应用，选择 **设置 → Webhooks**，点击 **新建 Webhook**
+
+</Step>
+
+<Step title="填写地址">
+
+将 **URL** 设为 Flashduty 集成的完整推送地址。**Secret Token** 可留空，Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验该令牌。
+
+</Step>
+
+<Step title="选择触发事件">
+
+在 **触发事件** 中勾选 **部署单** 的 **状态更新**。其他事件（应用、环境、应用编排、变量组、变更、研发阶段）勾选了也不会生成变更，不必勾选。
+
+</Step>
+</Steps>
+
+云效的 **测试 Webhook** 按钮会发送一条模拟的“新建应用”事件，Flashduty 返回成功但不生成变更，只用于确认地址可达。要看到变更记录，需要实际执行一次部署。
+
+## 一条变更是什么
+---
+
+| 云效对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 部署单（ChangeOrder） | 部署单标识 `objectAttributes.sn` | 同一部署单的各次状态更新是同一条变更；再次部署，即使是同一应用、同一环境，也会生成新的部署单，即另一条变更 |
+
+请求体顶层的 `id` 是每次推送的事件记录 ID，不是部署单 ID，不参与变更标识。
+
+## 状态映射
+---
+
+| 云效部署单状态（`objectAttributes.state`） | Flashduty 变更状态 |
+|---|---|
+| INIT | Ready |
+| PREPARING | Ready |
+| RUNNING | Processing |
+| SUSPENDED | Processing |
+| SUCCESS | Done |
+| FAILED | Failed |
+| CANCELED | Canceled |
+
+以下推送返回成功但不生成变更：
+
+- 部署单以外的事件：应用（App）、环境（Env）、应用编排（AppOrchestration）、变量组（VariableGroup）、变更（ChangeRequest）、研发阶段（ReleaseStageExecution）。变更是代码分支上的开发流程，研发阶段是流水线的运行状态，二者都不是一次部署；通过流水线触发的部署，会由它自己的部署单记录
+
+云效文档列出的部署单状态以上七种。出现其他状态时返回 `InvalidParameter`，并在错误信息中给出状态值，该部署单之后的其他状态更新不受影响。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<应用>: <类型> <版本> on <环境>`，例如 `myapp-demo: deploy 20240815144312-310 on test`；缺少应用或版本时使用部署单名称 |
+| 描述 | 部署单的描述，没有则为空 |
+| 链接 | 推送内容不含可用的页面地址，变更没有链接 |
+| 时间 | 推送中的 `time`，即这次状态更新的发生时间 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `app` | 应用名称 |
+| `environment` | 部署单涉及的环境名称，多个环境以逗号分隔 |
+| `version` | 部署单版本，例如 `20240815144312-310` |
+| `change_order_id` | 部署单标识 |
+| `change_type` | 部署单类型：Deploy、Scale、Rollback、Destroy |
+| `source_type` | 触发来源：CUSTOMIZE（环境页面）、FLOW（流水线）、OPEN_API |
+| `org_id` | 云效组织 ID |
+| `yunxiao_state` | 云效部署单状态，例如 `FAILED` |
+
+环境名称取自部署单中的作业（jobs）。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="云效重复推送会重复记录吗？">
+
+不会。同一部署单的同一状态、同一时间的推送只记录一次；已经结束的部署单，不会被迟到的较早状态重新打开。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `objectAttributes.sn is required`：部署单事件中没有部署单标识，请确认推送来自云效 AppStack 的部署单事件
+- `unknown objectAttributes.state`：出现了未适配的部署单状态，请联系我们
+- `time is required` / `invalid time`：推送中缺少事件时间或格式无法识别
+
+</Accordion>
+
+<Accordion title="为什么没有流水线或代码变更的记录？">
+
+当前只记录部署单。云效流水线（Flow）和代码库（Codeup）有各自的事件，不在本集成范围内；流水线中的 AppStack 部署步骤会生成部署单，会被本集成记录。
+
+</Accordion>
+
+<Accordion title="为什么部署单暂停（SUSPENDED）时变更仍是 Processing？">
+
+暂停的部署单没有结束，也没有被撤回，Flashduty 保持其处理中状态，直到出现成功、失败或取消。
+
+</Accordion>
+</AccordionGroup>
