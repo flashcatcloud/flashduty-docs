@@ -284,6 +284,7 @@ export const docMap = {
   Opnsense: `${alertBase}/opnsense.mdx`,
   Vigil: `${alertBase}/vigil.mdx`,
   Peekaping: `${alertBase}/peekaping.mdx`,
+  DependencyTrack: `${alertBase}/dependency-track.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
