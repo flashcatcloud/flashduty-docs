@@ -116,6 +116,7 @@ export const docMap = {
   Metoro: `${alertBase}/metoro.mdx`,
   Odown: `${alertBase}/odown.mdx`,
   Bleemeo: `${alertBase}/bleemeo.mdx`,
+  Whatap: `${alertBase}/whatap.mdx`,
   Fastnetmon: `${alertBase}/fastnetmon.mdx`,
   Updown: `${alertBase}/updown.mdx`,
   Hyperping: `${alertBase}/hyperping.mdx`,
