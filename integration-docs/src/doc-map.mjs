@@ -290,6 +290,7 @@ export const docMap = {
   DependencyTrack: `${alertBase}/dependency-track.mdx`,
 
   CustomChange: `${integrationBase}/change-integration/custom-event.mdx`,
+  HerokuChange: `${integrationBase}/change-integration/heroku.mdx`,
   TeamcityChange: `${integrationBase}/change-integration/teamcity.mdx`,
   RailwayChange: `${integrationBase}/change-integration/railway.mdx`,
   GithubChange: `${integrationBase}/change-integration/github.mdx`,
