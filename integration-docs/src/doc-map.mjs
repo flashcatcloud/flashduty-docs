@@ -85,6 +85,7 @@ export const docMap = {
   TriggerDev: `${alertBase}/trigger-dev.mdx`,
   Duplicati: `${alertBase}/duplicati.mdx`,
   Robotalp: `${alertBase}/robotalp.mdx`,
+  Formant: `${alertBase}/formant.mdx`,
   Powerjob: `${alertBase}/powerjob.mdx`,
   Dolphinscheduler: `${alertBase}/dolphinscheduler.mdx`,
   AlertSite: `${alertBase}/alertsite.mdx`,
