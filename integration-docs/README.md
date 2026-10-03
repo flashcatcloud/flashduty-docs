@@ -16,7 +16,3 @@ cd integration-docs
 npm run build
 npm run check
 ```
-
-The `legacy/` directory is only for compatibility fallbacks when a document
-exists in the old embedded docs contract but has not yet been migrated to the
-Mintlify documentation tree.

@@ -327,11 +327,7 @@ export const docMap = {
   ApolloChange: `${integrationBase}/change-integration/apollo.mdx`,
   NetboxChange: `${integrationBase}/change-integration/netbox.mdx`,
   NautobotChange: `${integrationBase}/change-integration/nautobot.mdx`,
-  Jira: {
-    zh: 'legacy/zh/jira-change.md',
-    en: 'legacy/en/jira-change.md',
-    legacy: true
-  },
+  Jira: `${integrationBase}/change-integration/jira.mdx`,
 
   Lark: `${integrationBase}/instant-messaging/lark.mdx`,
   Dingtalk: `${integrationBase}/instant-messaging/dingtalk.mdx`,
