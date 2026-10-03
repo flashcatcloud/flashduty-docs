@@ -1,0 +1,97 @@
+---
+title: "Lacework FortiCNAPP 告警集成"
+description: "通过 FortiCNAPP（原 Lacework）的自定义 Webhook 告警通道，将云安全告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Lacework", "FortiCNAPP", "Fortinet", "Webhook", "CNAPP", "云安全告警"]
+---
+
+通过 Lacework FortiCNAPP 的自定义 Webhook 告警通道（Alert Channel），将合规变更、异常行为等告警同步到 Flashduty On-call。每个 FortiCNAPP 事件对应一条 Flashduty 告警。FortiCNAPP 只在生成告警时推送一次，文档中没有关闭或状态变更通知，因此 Flashduty 告警不会自动恢复，请务必开启协作空间的超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Lacework FortiCNAPP**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Lacework FortiCNAPP**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 FortiCNAPP 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 告警通道">
+
+1. 使用管理员账号登录 FortiCNAPP 控制台
+2. 进入 **Settings > Notifications > Channels**，点击 **+ Add new**
+3. 选择 **Webhook**，点击 **Next**
+4. 填写通道名称，例如 `Flashduty`
+5. 在 **Webhook URL** 中粘贴 Flashduty 集成的完整推送地址（必须是 `https` 地址，`integration_key` 保留在查询参数中）
+6. 点击 **Save**
+
+FortiCNAPP 对 Webhook 发送 HTTP `POST` 的 JSON 请求，请求体字段固定，无需编写模板。
+
+</Step>
+
+<Step title="创建告警规则">
+
+在 **Settings > Notifications > Alert rules** 中点击 **+ Add New**，选择上一步创建的通道，再按需选择告警等级、资源组和告警类别。只有命中告警规则的告警才会推送到 Flashduty。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+为接收 FortiCNAPP 告警的协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 24 小时，可按团队处置时效调整。
+
+</Step>
+
+<Step title="验证">
+
+在通道列表中对该通道执行 **Test Integration**（如可用），或等待告警规则命中，确认 Flashduty 收到对应告警。FortiCNAPP 文档没有给出测试请求的内容，Flashduty 把它当作普通告警处理；测试告警不关联任何真实告警，也没有恢复事件，请确认收到后手动关闭。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用请求体中的 `lacework_account` 与 `event_id` 生成 Alert Key。FortiCNAPP 文档对 `event_id` 的说明是 “The FortiCNAPP ID for the event”。同一事件的重复推送（例如告警通道按资源分组时每个资源一条通知）会落在同一条 Flashduty 告警上，不同事件各自产生告警。
+
+标题、等级、描述、时间等字段的变化不会改变 Alert Key。请求缺少 `event_id` 时，Flashduty 为该请求单独生成一条告警；请求中 `event_id`、`event_title` 与 `event_description` 都缺失时返回参数错误。
+
+## 状态和告警等级
+---
+
+FortiCNAPP 的 Webhook 没有状态字段，Flashduty 每次收到的都是触发事件。`event_severity` 取值 1 到 5，1 最高。
+
+| FortiCNAPP `event_severity` | 含义 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `1`、`2` | Critical、High | Critical |
+| `3` | Medium | Warning |
+| `4`、`5` | Low、Info | Info |
+| 空值或其他 | | Warning |
+
+告警标题取 `event_title`，描述取 `event_description`。告警标签包含 Lacework 账号（`lacework_account`）、事件来源（`event_source`）、事件类型（`event_type`）、事件 ID、原始等级、合规建议 ID（`rec_id`，仅合规事件有）、事件时间和事件链接。
+
+## 排查问题
+---
+
+- **没有收到告警**：确认告警规则选择了该通道，且规则的等级、资源组和告警类别覆盖了该告警；被禁用的通道不会投递
+- **保存通道失败**：Webhook URL 必须是 `https`，并包含完整的 `integration_key` 查询参数
+- **告警一直不关闭**：FortiCNAPP 不推送关闭通知，请开启协作空间的超时自动关闭
+- **收到测试告警**：这是 **Test Integration** 产生的告警，按普通告警处理，手动关闭即可
+
+更多信息请参阅 Fortinet 文档 [Custom webhook alert channel](https://docs.fortinet.com/document/forticnapp/latest/administration-guide/465696/custom-webhook-alert-channel)。
