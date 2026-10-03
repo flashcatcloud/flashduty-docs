@@ -1,0 +1,107 @@
+---
+title: "SmartBear AlertSite 告警集成"
+description: "通过 JSON 告警将 SmartBear AlertSite 监控的可用性告警和性能告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "AlertSite", "SmartBear", "拨测", "Synthetic", "Webhook"]
+---
+
+通过 AlertSite 的 JSON 告警（POST JSON request to web server）将监控的可用性告警和性能告警同步到 Flashduty On-call。每个 AlertSite 监控的可用性问题和性能问题各对应一条 Flashduty 告警：出错时触发，恢复正常（clear）时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **SmartBear AlertSite**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **SmartBear AlertSite**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 AlertSite 中配置
+---
+
+<Steps>
+<Step title="创建 JSON 告警接收人">
+
+1. 登录 AlertSite UXM，进入右上角 **Alerts → Alert Recipients**（AlertSite 1.0 为 **Notifiers → Notifiers**）
+2. 新增接收人，**Method** 选择 **POST JSON request to web server**
+3. **Recipient** 填写 Flashduty 集成的完整推送地址（以 `https://` 开头，包含 `integration_key`）
+4. 保存接收人
+
+只有 Admin、Co-Admin 和 Power User 可以编辑接收人。默认情况下，接收人会收到所有监控的告警；如只需部分监控，请使用 AlertSite 的接收人分组（Recipient Groups）。
+
+</Step>
+
+<Step title="选择告警类型并开启恢复通知">
+
+编辑刚创建的接收人：
+
+- **Availability alerts**：选择 **Enabled**，并勾选 **Alert whenever an error clears**。不勾选时 AlertSite 不发送 `clear`，Flashduty 中的告警不会自动恢复
+- **Performance alerts**（可选）：选择 **Enabled**，**Type** 选择 **Errors only** 或 **Warnings and errors**。响应时间恢复正常时 AlertSite 会发送 `perf_clear`
+- **Alert after this # of consecutive errors** 和 **Stop alerting after this # of consecutive alerts** 按需设置；持续出错期间重复发送的告警会合并到同一条 Flashduty 告警
+
+性能告警默认关闭，需在监控的 **Alerts** 标签页中启用并设置阈值。
+
+</Step>
+
+<Step title="发送测试告警">
+
+在接收人设置中使用 **Send test notification**，选择一个监控节点发送。测试告警的 `notify_type` 为 `test`，Flashduty 会为每次测试新建一条独立的 Info 告警，不会合并到真实告警中，也不会自动恢复，请手动关闭。
+
+</Step>
+</Steps>
+
+<Warning>
+请使用 JSON 告警的默认模板。本集成按默认模板的字段名解析；如果为 JSON 接收人配置了自定义模板（Custom Alert Templates）或在接收人分组中指定了自定义模板，字段可能无法识别，Flashduty 会拒绝缺少 `notify_type` 或 `device_id` 的请求。
+</Warning>
+
+## Alert Key
+---
+
+Flashduty 用告警类型（可用性或性能）加 `device_id` 计算 Alert Key。AlertSite 文档说明监控名称可能被修改，应以 `device_id` 作为标识；同一监控的出错和恢复告警携带相同的 `device_id`，因此会落在同一条告警上。
+
+可用性告警（`error` / `clear`）和性能告警（`perf_warning` / `perf_error` / `perf_clear`）分开计算：性能恢复不会关闭仍在出错的可用性告警。监控名称、出错节点、出错步骤、状态码、时间和响应时间的变化都不会改变 Alert Key。请求缺少 `device_id` 时 Flashduty 会拒绝，因为无法关联后续恢复。
+
+## 状态和告警等级
+---
+
+| AlertSite `notify_type` | Flashduty 状态 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `error`（可用性出错） | 触发 | Critical |
+| `perf_error`（响应时间超过错误阈值，`status` 为 `20`） | 触发 | Warning |
+| `perf_warning`（响应时间超过警告阈值，`status` 为 `10`） | 触发 | Info |
+| `clear` | 恢复 | Critical |
+| `perf_clear` | 恢复 | Warning |
+| `test` | 独立的 Info 告警 | Info |
+
+空值或其他 `notify_type` 会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 告警内容
+---
+
+- **标题**：监控名称 `device_name`
+- **描述**：状态说明、出错节点、URL、HTTP 状态、出错步骤、检测时间；轮换节点（`rotated_locations`）各节点的状态；性能告警中各节点的响应时间和阈值（`locations`）
+- **标签**：`device_id`、`device_type`、`custid`、`notify_type`、`alert_type`（`availability` 或 `performance`）、`status_code`（AlertSite 状态码，`0` 表示正常）、`status_text`、`location`、`location_num`、`http_status`、`check`（监控名称）、`resource`（被监控的 URL）、`source`（固定为 `alertsite`）
+
+## 排查问题
+---
+
+- **AlertSite 投递失败**：确认 **Recipient** 填写的是完整推送地址，包含 `https://` 和 `integration_key`
+- **Flashduty 返回参数错误**：确认使用默认模板，请求中有 `notify_type` 和 `device_id`
+- **告警没有恢复**：确认接收人勾选了 **Alert whenever an error clears**，且监控已真正恢复正常
+- **性能告警没有收到**：确认监控的性能告警已启用，且接收人的 **Performance alerts** 为 **Enabled**
+- **使用私有节点**：私有节点从 2.1.2 版本起支持 JSON 告警，推送地址需能从私有节点访问
+
+字段含义请参阅 [AlertSite JSON Alerts](https://support.smartbear.com/alertsite/docs/alerts/delivery/json.html) 和 [Alert Data Fields](https://support.smartbear.com/alertsite/docs/alerts/fields.html)。
