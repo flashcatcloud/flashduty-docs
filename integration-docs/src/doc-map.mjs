@@ -21,6 +21,7 @@ export const docMap = {
   Kapacitor: `${alertBase}/kapacitor.mdx`,
   OpenFalcon: `${alertBase}/open-falcon.mdx`,
   PagerDuty: `${alertBase}/pagerduty.mdx`,
+  OpsgenieCompat: `${alertBase}/opsgenie.mdx`,
   TencentBK: `${alertBase}/blueking.mdx`,
   TencentCLS: `${alertBase}/tencent-cls.mdx`,
   TencentCSS: `${alertBase}/tencent-css.mdx`,
