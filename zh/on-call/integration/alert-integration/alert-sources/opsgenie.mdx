@@ -1,0 +1,165 @@
+---
+title: "Opsgenie 兼容告警集成"
+description: "使用兼容 Opsgenie Alert API 的协议向 Flashduty On-call 推送告警，已对接 Opsgenie 的工具只需修改 API 地址。"
+keywords: ["告警集成", "Opsgenie", "Alert API", "Alertmanager", "Grafana", "迁移"]
+---
+
+Flashduty 实现了 Opsgenie Alert API 中告警的创建与关闭，请求和响应格式与 Opsgenie 一致。已经向 Opsgenie 发送告警的工具（如 Prometheus Alertmanager、Grafana Alerting），只需把 Opsgenie API 地址改为 Flashduty 的推送地址，即可把告警推送到 Flashduty On-call。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Opsgenie 兼容**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Opsgenie 兼容**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 推送地址
+---
+
+推送地址的格式如下，`integration_key` 是路径的一部分：
+
+```
+{api_host}/event/push/alert/opsgenie/<integration_key>/
+```
+
+Opsgenie 客户端会在 API 地址后拼接 `v2/alerts`、`v2/alerts/<alias>/close` 等路径，查询参数中的 `integration_key` 可能被丢弃或拼错位置，因此 Flashduty 从路径中读取 `integration_key`。请求头 `Authorization: GenieKey <key>` 不参与鉴权，客户端要求必填时可填写任意非空值。
+
+支持的接口：
+
+| Opsgenie 接口 | 请求 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| Create Alert | `POST v2/alerts` | 创建或更新告警 |
+| Close Alert | `POST v2/alerts/<alias>/close?identifierType=alias` | 恢复告警 |
+| Acknowledge、Add Note、Update Message、Update Description 等 | `POST` 或 `PUT v2/alerts/<alias>/<action>` | 返回 202，不做处理 |
+
+成功的请求返回 HTTP 202 和 `{"result": "Request will be processed", "took": 0, "requestId": "..."}`，与 Opsgenie 相同。
+
+## 在 Prometheus Alertmanager 中配置
+---
+
+在 `alertmanager.yml` 的接收器中添加 `opsgenie_configs`，`api_url` 填写推送地址：
+
+```yaml
+receivers:
+  - name: flashduty
+    opsgenie_configs:
+      - api_key: any-non-empty-value
+        api_url: https://api.flashcat.cloud/event/push/alert/opsgenie/<integration_key>/
+        send_resolved: true
+        priority: '{{ if eq .CommonLabels.severity "critical" }}P1{{ else }}P3{{ end }}'
+```
+
+<Warning>
+`api_url` 必须以 `/` 结尾。Alertmanager 直接在地址后拼接 `v2/alerts`，缺少结尾的 `/` 会得到错误的路径并返回 404。
+</Warning>
+
+- `send_resolved: true` 才会在告警恢复时发送 Close 请求
+- Alertmanager 默认把分组的公共标签放在 `details` 中，Flashduty 把它们保存为告警标签
+- 不设置 `priority` 时按 Opsgenie 默认的 `P3` 处理，即 Warning
+- `update_alerts: true` 发送的 Update Message、Update Description 请求会被接受但不做处理；标题与描述随下一次 Create 请求更新
+
+## 在 Grafana 中配置
+---
+
+<Steps>
+<Step title="创建 OpsGenie 联络点">
+
+1. 进入 **Alerting → Contact points**，点击 **+ Add contact point**
+2. **Integration** 选择 **OpsGenie**
+3. **API Key** 填写任意非空值
+4. **Alert API URL** 填写推送地址加上 `v2/alerts`：
+
+   ```
+   https://api.flashcat.cloud/event/push/alert/opsgenie/<integration_key>/v2/alerts
+   ```
+
+5. 勾选 **Auto close incidents**，告警恢复时 Grafana 才会发送 Close 请求
+6. **Send notification tags as** 保持默认的 **Tags**，或选择 **Tags & Extra Properties**
+
+</Step>
+
+<Step title="关联通知策略">
+
+在 **Notification policies** 中把需要推送的告警路由到该联络点。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一条告警规则进入 Firing，确认 Flashduty 收到告警；再让规则恢复 Normal，确认原告警恢复。
+
+</Step>
+</Steps>
+
+Grafana 把告警标签以 `key:value` 形式放在 `tags` 中，Flashduty 会还原为同名标签。Grafana 默认不发送 `priority`，即按 `P3`（Warning）处理；如需按规则设置等级，请在联络点中开启 **Override priority**，并在告警规则上添加注解 `og_priority`，值为 `P1` 到 `P5`。
+
+联络点的 **Test** 按钮每次都会使用新的 alias，在 Flashduty 中产生一条独立的 Warning 告警，且不会自动恢复，请手动关闭。
+
+## 其他工具
+---
+
+任何能修改 Opsgenie API 地址、并通过 alias 关闭告警的工具都可以使用此集成：把 API 地址替换为推送地址（按工具的拼接方式决定是否带 `v2/alerts`），Close 请求带上 `identifierType=alias`。
+
+以下用法不支持：
+
+- **按 id 或 tiny id 关闭告警**：Flashduty 不生成 Opsgenie 告警 ID，`identifierType` 为 `id`、`tiny` 或缺省时返回 422
+- **查询接口**：不支持 `GET` 请求（如 `v2/alerts/requests/<requestId>`）。Zabbix 自带的 Opsgenie 媒介类型会轮询该接口，请改用 [Zabbix 集成](/zh/on-call/integration/alert-integration/alert-sources/zabbix)
+- **包含 `/` 的 alias**：alias 出现在 URL 路径中，含 `/` 时无法匹配接口
+
+## Alert Key
+---
+
+使用请求中的 `alias` 作为 Alert Key。Opsgenie 官方将 alias 定义为「客户端定义的告警标识，也是告警去重的关键字段」（[Alert API](https://docs.opsgenie.com/docs/alert-api#create-alert)）。同一个 alias 的多次 Create 请求合并为同一条告警，Close 请求按 alias 恢复这条告警。Alertmanager 和 Grafana 都以告警分组的哈希作为 alias，同一分组在触发与恢复时保持不变。
+
+请求中没有 `alias` 时，每次 Create 都会产生一条新告警，且无法通过 Close 恢复。
+
+## 字段映射
+---
+
+| Opsgenie 字段 | 在 Flashduty 中 |
+| :--- | :--- |
+| `message`（必填） | 告警标题，标签 `check` |
+| `description` | 告警描述 |
+| `alias` | Alert Key，标签 `alias` |
+| `priority` | 告警等级，标签 `priority` |
+| `entity` | 标签 `entity`、`resource` |
+| `source` | 标签 `source` |
+| `details` | 每个键值对保存为一个标签 |
+| `tags` | `key:value` 形式的标签还原为同名标签，其余合并到标签 `tags`，以逗号分隔 |
+
+`responders`、`visibleTo`、`actions`、`user`、`note` 不做处理，分派与通知按 Flashduty 协作空间的配置执行。
+
+## 告警等级
+---
+
+| Opsgenie `priority` | Flashduty 告警等级 |
+| :--- | :--- |
+| `P1`、`P2` | Critical |
+| `P3`、空值 | Warning |
+| `P4`、`P5` | Info |
+
+其他取值返回 422。恢复由 Close 请求触发，与 `priority` 无关。
+
+## 排查问题
+---
+
+- **返回 404**：Alertmanager 的 `api_url` 缺少结尾的 `/`，或 Grafana 的 Alert API URL 缺少 `/v2/alerts`
+- **返回 401**：推送地址中的 `integration_key` 错误，或集成已被禁用
+- **返回 422**：`message` 为空、`priority` 不在 `P1` 到 `P5` 之间，或 Close 请求没有使用 `identifierType=alias`；推送地址中的 `integration_key` 属于其他类型的集成时也会返回 422
+- **告警没有恢复**：确认 Alertmanager 设置了 `send_resolved: true`，Grafana 勾选了 **Auto close incidents**

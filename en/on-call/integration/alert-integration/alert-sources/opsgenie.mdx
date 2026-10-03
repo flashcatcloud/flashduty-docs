@@ -1,0 +1,165 @@
+---
+title: "Opsgenie Compatible Alert Integration"
+description: "Push alerts to Flashduty On-call with the Opsgenie Alert API protocol. Tools that already send to Opsgenie only need a new API URL."
+keywords: ["alert integration", "Opsgenie", "Alert API", "Alertmanager", "Grafana", "migration"]
+---
+
+Flashduty implements alert creation and closing from the Opsgenie Alert API, with the same request and response formats as Opsgenie. Tools that already send alerts to Opsgenie (such as Prometheus Alertmanager and Grafana Alerting) push alerts to Flashduty On-call once you replace the Opsgenie API URL with the Flashduty push URL.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of two ways.
+
+### Dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated Integrations**, then click **Add an Integration**
+3. Select **Opsgenie Compatible** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Opsgenie Compatible** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** after creating it
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Push URL
+---
+
+The push URL has this format, with `integration_key` as part of the path:
+
+```
+{api_host}/event/push/alert/opsgenie/<integration_key>/
+```
+
+Opsgenie clients append paths such as `v2/alerts` and `v2/alerts/<alias>/close` to the API URL, which can drop an `integration_key` query parameter or put it in the wrong place, so Flashduty reads `integration_key` from the path. The `Authorization: GenieKey <key>` header is not used for authentication; if the client requires it, enter any non-empty value.
+
+Supported endpoints:
+
+| Opsgenie endpoint | Request | Flashduty handling |
+| :--- | :--- | :--- |
+| Create Alert | `POST v2/alerts` | Creates or updates an alert |
+| Close Alert | `POST v2/alerts/<alias>/close?identifierType=alias` | Recovers the alert |
+| Acknowledge, Add Note, Update Message, Update Description and others | `POST` or `PUT v2/alerts/<alias>/<action>` | Returns 202, no action taken |
+
+A successful request returns HTTP 202 and `{"result": "Request will be processed", "took": 0, "requestId": "..."}`, the same as Opsgenie.
+
+## Configure in Prometheus Alertmanager
+---
+
+Add `opsgenie_configs` to a receiver in `alertmanager.yml` and set `api_url` to the push URL:
+
+```yaml
+receivers:
+  - name: flashduty
+    opsgenie_configs:
+      - api_key: any-non-empty-value
+        api_url: https://api.flashcat.cloud/event/push/alert/opsgenie/<integration_key>/
+        send_resolved: true
+        priority: '{{ if eq .CommonLabels.severity "critical" }}P1{{ else }}P3{{ end }}'
+```
+
+<Warning>
+`api_url` must end with `/`. Alertmanager appends `v2/alerts` directly to the URL, so without the trailing `/` the path is wrong and the request returns 404.
+</Warning>
+
+- Only with `send_resolved: true` does Alertmanager send a Close request when the alert resolves
+- Alertmanager puts the common labels of the group in `details` by default, and Flashduty keeps them as alert labels
+- Without `priority`, Opsgenie's default `P3` applies, which is Warning
+- The Update Message and Update Description requests sent with `update_alerts: true` are accepted and ignored; the title and description update with the next Create request
+
+## Configure in Grafana
+---
+
+<Steps>
+<Step title="Create an OpsGenie contact point">
+
+1. Go to **Alerting → Contact points** and click **+ Add contact point**
+2. Set **Integration** to **OpsGenie**
+3. Enter any non-empty value in **API Key**
+4. Set **Alert API URL** to the push URL followed by `v2/alerts`:
+
+   ```
+   https://api.flashcat.cloud/event/push/alert/opsgenie/<integration_key>/v2/alerts
+   ```
+
+5. Select **Auto close incidents**; otherwise Grafana sends no Close request when the alert resolves
+6. Keep **Send notification tags as** at the default **Tags**, or choose **Tags & Extra Properties**
+
+</Step>
+
+<Step title="Route alerts to it">
+
+In **Notification policies**, route the alerts you want to push to this contact point.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Let an alert rule go to Firing and confirm Flashduty receives the alert; then let the rule return to Normal and confirm the same alert recovers.
+
+</Step>
+</Steps>
+
+Grafana sends alert labels in `tags` as `key:value`, and Flashduty turns them back into labels of the same name. Grafana sends no `priority` by default, so `P3` (Warning) applies. To set the severity per rule, turn on **Override priority** in the contact point and add the annotation `og_priority` with a value from `P1` to `P5` to the alert rule.
+
+The contact point's **Test** button uses a new alias on every press, so each press opens a separate Warning alert in Flashduty that never recovers on its own. Close it by hand.
+
+## Other tools
+---
+
+Any tool that lets you change the Opsgenie API URL and closes alerts by alias works with this integration: replace the API URL with the push URL (with or without `v2/alerts`, depending on how the tool appends paths), and send Close requests with `identifierType=alias`.
+
+Not supported:
+
+- **Closing by id or tiny id**: Flashduty does not issue Opsgenie alert IDs, so `identifierType` set to `id`, `tiny` or left empty returns 422
+- **Read endpoints**: `GET` requests (such as `v2/alerts/requests/<requestId>`) are not supported. Zabbix's built-in Opsgenie media type polls that endpoint; use the [Zabbix integration](/en/on-call/integration/alert-integration/alert-sources/zabbix) instead
+- **Aliases that contain `/`**: the alias is part of the URL path, so such requests match no endpoint
+
+## Alert Key
+---
+
+The request's `alias` is the Alert Key. Opsgenie defines alias as the "client-defined identifier of the alert, that is also the key element of Alert De-Duplication" ([Alert API](https://docs.opsgenie.com/docs/alert-api#create-alert)). Create requests with the same alias merge into one alert, and a Close request recovers that alert by alias. Alertmanager and Grafana both use a hash of the alert group as the alias, which stays the same from trigger to recovery.
+
+Without `alias`, every Create request opens a new alert that no Close request can recover.
+
+## Field mapping
+---
+
+| Opsgenie field | In Flashduty |
+| :--- | :--- |
+| `message` (required) | Alert title, label `check` |
+| `description` | Alert description |
+| `alias` | Alert Key, label `alias` |
+| `priority` | Severity, label `priority` |
+| `entity` | Labels `entity` and `resource` |
+| `source` | Label `source` |
+| `details` | One label per key-value pair |
+| `tags` | `key:value` tags become labels of the same name; other tags are joined with commas in the label `tags` |
+
+`responders`, `visibleTo`, `actions`, `user` and `note` are ignored; assignment and notifications follow the Flashduty channel's settings.
+
+## Severity
+---
+
+| Opsgenie `priority` | Flashduty severity |
+| :--- | :--- |
+| `P1`, `P2` | Critical |
+| `P3`, empty | Warning |
+| `P4`, `P5` | Info |
+
+Any other value returns 422. Recovery comes from the Close request, not from `priority`.
+
+## Troubleshooting
+---
+
+- **404**: the Alertmanager `api_url` is missing the trailing `/`, or the Grafana Alert API URL is missing `/v2/alerts`
+- **401**: the `integration_key` in the push URL is wrong, or the integration is disabled
+- **422**: `message` is empty, `priority` is not between `P1` and `P5`, or the Close request does not use `identifierType=alias`; it is also returned when the `integration_key` in the push URL belongs to an integration of another type
+- **The alert does not recover**: make sure Alertmanager has `send_resolved: true` and Grafana has **Auto close incidents** selected
