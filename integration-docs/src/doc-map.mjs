@@ -90,6 +90,7 @@ export const docMap = {
   Dolphinscheduler: `${alertBase}/dolphinscheduler.mdx`,
   AlertSite: `${alertBase}/alertsite.mdx`,
   Pulseway: `${alertBase}/pulseway.mdx`,
+  Securityscorecard: `${alertBase}/securityscorecard.mdx`,
   Lacework: `${alertBase}/lacework.mdx`,
   PgDash: `${alertBase}/pgdash.mdx`,
   Infisical: `${alertBase}/infisical.mdx`,
