@@ -102,6 +102,7 @@ export const docMap = {
   AlertSite: `${alertBase}/alertsite.mdx`,
   Robusta: `${alertBase}/robusta.mdx`,
   Pulseway: `${alertBase}/pulseway.mdx`,
+  JfrogXray: `${alertBase}/jfrog-xray.mdx`,
   Lacework: `${alertBase}/lacework.mdx`,
   PgDash: `${alertBase}/pgdash.mdx`,
   Securityscorecard: `${alertBase}/securityscorecard.mdx`,
