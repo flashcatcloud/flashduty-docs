@@ -90,6 +90,7 @@ export const docMap = {
   AlertSite: `${alertBase}/alertsite.mdx`,
   Pulseway: `${alertBase}/pulseway.mdx`,
   Lacework: `${alertBase}/lacework.mdx`,
+  PgDash: `${alertBase}/pgdash.mdx`,
   Infisical: `${alertBase}/infisical.mdx`,
   Fivetran: `${alertBase}/fivetran.mdx`,
   Cato: `${alertBase}/cato.mdx`,
