@@ -105,6 +105,7 @@ export const docMap = {
   JfrogXray: `${alertBase}/jfrog-xray.mdx`,
   Lacework: `${alertBase}/lacework.mdx`,
   PgDash: `${alertBase}/pgdash.mdx`,
+  Moesif: `${alertBase}/moesif.mdx`,
   Securityscorecard: `${alertBase}/securityscorecard.mdx`,
   Fivetran: `${alertBase}/fivetran.mdx`,
   Cato: `${alertBase}/cato.mdx`,
