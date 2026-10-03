@@ -1,0 +1,124 @@
+---
+title: "JFrog Xray 告警集成"
+description: "通过 Xray Webhook 将 JFrog Xray 监视（Watch）扫描出的安全、许可证和运营风险违规同步到 Flashduty On-call。"
+keywords: ["告警集成", "JFrog", "Xray", "Webhook", "漏洞", "许可证", "策略违规", "软件供应链"]
+---
+
+JFrog Xray 的监视（Watch）扫描仓库、构建或发布包时，如果发现违反策略（Policy）规则的问题，可以通过规则上的 **Trigger webhook** 动作把违规以 JSON 发送到指定地址。把 Webhook 指向 Flashduty 的推送地址后，每次 Webhook 推送会在 Flashduty 中产生一条告警。
+
+Xray 只在扫描发现违规时推送，问题修复后不会发恢复通知，Flashduty 中的告警不会自动恢复。请按 [告警恢复和自动关闭](#告警恢复和自动关闭) 开启超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **JFrog Xray**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **JFrog Xray**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 JFrog Xray 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+1. 使用管理员账号登录 JFrog Platform，进入 **Administration → Xray Settings → Webhooks**，点击 **New Webhook**
+2. **Webhook Name** 填写名称，例如 `flashduty`；策略规则按这个名称引用 Webhook
+3. **URL** 填 Flashduty 集成的完整推送地址（以 `https://` 开头，包含 `integration_key`）
+4. **Use Proxy**、**Basic Auth** 和 **Custom Headers** 保持为空，点击 **Save**
+
+</Step>
+
+<Step title="在策略规则中触发 Webhook">
+
+1. 进入 **Platform → Xray → Watches & Policies → Policies**，打开已有策略，或点击 **New Policy** 新建策略（类型可以是 Security、License 或 Operational Risk）
+2. 编辑或新建规则，在 **Then → Do the following actions** 中勾选 **Trigger webhook**，选择上一步创建的 Webhook，点击 **Save Rule**
+3. 点击 **Save Policy**。每个需要推送到 Flashduty 的规则都要单独选择 Webhook
+
+</Step>
+
+<Step title="把策略分配给监视">
+
+1. 进入 **Platform → Xray → Watches & Policies → Watches**，打开已有监视，或点击 **New Watch** 新建监视
+2. 在资源中添加要扫描的仓库、构建或发布包，在策略中加入上一步的策略，保存
+
+</Step>
+
+<Step title="验证">
+
+Xray 的 Webhook 页面没有测试按钮。向被监视的仓库上传一个带已知漏洞的组件（例如 `log4j-core` 2.14.1），或在监视列表中手动运行一次监视，几分钟内 Flashduty 会出现一条告警，标题形如 `JFrog Xray: 7 violations in watch <监视名称> (<策略名称>)`。
+
+</Step>
+</Steps>
+
+## 告警恢复和自动关闭
+---
+
+Xray 的违规 Webhook 只在扫描发现违规时发送，请求体中没有表示违规已修复或已忽略的字段，所以 Flashduty 中的告警不会自动恢复。
+
+每次推送对应一条独立的 Flashduty 告警，需要手动关闭，或在接收该集成的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，时长按团队处理漏洞的时效设定，例如 7 天。
+
+## Alert Key
+---
+
+Xray 每次扫描监视时生成一个 `alert_id`。一次扫描命中多个策略规则时（例如同一个监视上的安全策略和许可证策略），Xray 为每个规则各发一次 Webhook，它们的 `alert_id` 相同。因此 Flashduty 用 `alert_id`、监视名称 `watch_name`、策略名称 `policy_name` 和规则名称 `policy_rule` 组合出 Alert Key（各部分之间用不可见分隔符连接后取 MD5）：
+
+- 同一次 Webhook 重复投递会合并到同一条告警
+- 同一次扫描的不同规则、以及下一次扫描（即使发现的是同样的问题）都是不同的告警
+- 较早版本的 Xray 请求体中没有 `alert_id`，此时 Flashduty 生成随机 Alert Key，每次推送各自成为一条告警
+- 请求体缺少 `watch_name` 时，Flashduty 返回 400 并指出缺少的字段
+
+## 状态和告警等级
+---
+
+告警的状态等于告警等级，不会恢复。等级取请求体中的最高严重程度 `top_severity`；它缺失或不是下表中的值时，取各问题中最严重的一个。
+
+| Xray 严重程度 | Flashduty 等级 |
+| :--- | :--- |
+| `Critical`、`High` | Critical |
+| `Medium` | Warning |
+| `Low`、`Information`、`Unknown`、缺失或其他值 | Info |
+
+## 告警内容
+---
+
+一次 Webhook 包含该次扫描在这个规则下的全部问题（`issues`）。
+
+- **标题**：`JFrog Xray: <问题数> violations in watch <监视名称> (<策略名称>)`；只有一个问题时为 `JFrog Xray: <CVE 编号或许可证名称> in <受影响组件> (watch <监视名称>)`
+- **描述**：监视名称、问题数、策略和规则，以及按严重程度排序的前 10 个问题（严重程度、CVE、Xray 编号、问题类型、受影响组件和摘要），其余问题只计数
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `jfrog_xray` |
+| `alert_id` | 本次扫描的 `alert_id` |
+| `watch_name` / `policy_name` / `policy_rule` | 监视、策略和规则名称 |
+| `top_severity` | 本次推送的最高严重程度 |
+| `issue_count` | 问题数 |
+| `issue_types` | 问题类型，例如 `security`、`License` |
+| `cves` | 涉及的 CVE 编号，按严重程度排序，最多 20 个 |
+| `artifacts` | 受影响的组件，按严重程度排序，最多 20 个 |
+
+## 排查问题
+---
+
+- **Flashduty 没有收到推送**：确认策略规则的 **Then** 中勾选了 **Trigger webhook** 并选择了该 Webhook，且策略已分配给监视、监视处于启用状态。Xray 只为新发现的违规推送，已经产生过的违规不会因为保存规则而重新推送，可以在监视列表中手动运行监视
+- **Flashduty 返回参数错误**：请求体不是 JSON，或缺少 `watch_name`。请直接使用 Xray 的违规 Webhook，不要经过会改写请求体的中转
+- **一次扫描出现了多条告警**：监视上每个命中的策略规则各推送一次，各自成为一条告警
+- **告警一直不关闭**：Xray 不发送恢复通知。请在协作空间中开启超时自动关闭，或手动关闭
+
+更多说明请参阅 JFrog 官方文档 [Xray Webhooks](https://docs.jfrog.com/security/docs/webhooks)。
