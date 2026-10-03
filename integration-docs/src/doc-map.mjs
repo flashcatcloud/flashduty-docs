@@ -89,6 +89,7 @@ export const docMap = {
   Powerjob: `${alertBase}/powerjob.mdx`,
   Dolphinscheduler: `${alertBase}/dolphinscheduler.mdx`,
   AlertSite: `${alertBase}/alertsite.mdx`,
+  Robusta: `${alertBase}/robusta.mdx`,
   Pulseway: `${alertBase}/pulseway.mdx`,
   Securityscorecard: `${alertBase}/securityscorecard.mdx`,
   Lacework: `${alertBase}/lacework.mdx`,
