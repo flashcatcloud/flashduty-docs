@@ -87,6 +87,7 @@ export const docMap = {
   Robotalp: `${alertBase}/robotalp.mdx`,
   Powerjob: `${alertBase}/powerjob.mdx`,
   Dolphinscheduler: `${alertBase}/dolphinscheduler.mdx`,
+  AlertSite: `${alertBase}/alertsite.mdx`,
   Infisical: `${alertBase}/infisical.mdx`,
   Fivetran: `${alertBase}/fivetran.mdx`,
   Cato: `${alertBase}/cato.mdx`,
