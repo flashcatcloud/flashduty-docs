@@ -1,0 +1,144 @@
+---
+title: "Pulseway 告警集成"
+description: "通过 Pulseway 通知 Webhook 将 RMM 设备通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Pulseway", "RMM", "远程监控", "通知 Webhook", "Webhook"]
+---
+
+Pulseway 是面向 IT 团队和 MSP 的远程监控与管理（RMM）平台。设备出现磁盘空间不足、服务停止、离线等情况时，Pulseway 会生成一条通知。本集成使用 Pulseway 的通知 Webhook，把每条通知转成一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Pulseway**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Pulseway**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Pulseway 中配置
+---
+
+Pulseway 的通知 Webhook 通过 REST API 创建，一个 Webhook 覆盖所选组织下的全部设备，无需在设备上安装任何组件。
+
+<Steps>
+<Step title="准备 API 令牌">
+
+在 Pulseway Web 控制台中创建一个 REST API 令牌，记下令牌 ID 和令牌密钥。REST API 使用 HTTP Basic 认证，用户名为令牌 ID，密码为令牌密钥。令牌只在创建 Webhook 时使用，Flashduty 不需要它。
+
+</Step>
+
+<Step title="创建通知 Webhook">
+
+调用 `POST /v3/notifications/webhooks`，`Url` 填写 Flashduty 集成的完整推送地址：
+
+```bash
+curl -X POST https://api.pulseway.com/v3/notifications/webhooks \
+  -u "<TOKEN_ID>:<TOKEN_SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Name": "Flashduty",
+    "Url": "https://api.flashcat.cloud/event/push/alert/pulseway?integration_key=<your_integration_key>",
+    "Priorities": ["Critical", "Elevated"],
+    "Language": "en"
+  }'
+```
+
+| 字段 | 说明 |
+| :--- | :--- |
+| `Name` | Webhook 名称，便于在列表中识别 |
+| `Url` | Flashduty 集成的推送地址，包含 `integration_key` |
+| `Priorities` | 要推送的通知优先级，可选 `Low`、`Normal`、`Elevated`、`Critical`。未列出的优先级不会推送 |
+| `OrganizationIds` | 可选。限定推送哪些组织的通知；不填则推送全部组织 |
+| `Language` | 可选。通知标题和内容的语言，`en` 或 `de`，默认 `en` |
+
+自建 Pulseway Enterprise Server 时，把 `https://api.pulseway.com/v3/` 换成 `https://<your-server-name>/api/v3/`。
+
+响应中的 `Id` 是 Webhook ID，之后可用 `GET`、`PATCH`、`DELETE /v3/notifications/webhooks/<Id>` 查看、修改或删除该 Webhook。响应中的 `SecretKey` 用于 Pulseway 计算 `x-hmac-signature` 请求头，Flashduty 通过推送地址中的 `integration_key` 识别集成，不校验该请求头，因此无需保存。请像保管密钥一样保管推送地址。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Pulseway 通知是一次性事件：问题消除后 Pulseway 不会推送恢复通知。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭。
+
+</Step>
+
+<Step title="验证">
+
+在一台受监控的测试设备上触发一条所选优先级的通知，例如停止一个已被监控的服务。Flashduty 中会出现对应的告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用通知的 `Id` 作为 Alert Key，每条通知各自产生一条告警。同一问题持续存在时，Pulseway 会再次发出通知，新的通知有新的 `Id`，因此会产生新的告警；这些告警可以在协作空间中按规则聚合到同一个故障。设备恢复在线等情况在 Pulseway 中是另一条通知，不会关闭之前的告警。
+
+## 告警等级
+---
+
+| Pulseway `Priority` | Flashduty 告警等级 |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Elevated` | Warning |
+| `Normal` | Info |
+| `Low` | Info |
+| 其他或为空 | Warning |
+
+优先级不区分大小写。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 通知标题 `Title` |
+| `resource` / `device_id` | 设备 ID `DeviceIdentifier` |
+| `organization_id` | 组织 ID `OrganizationId` |
+| `priority` | 通知优先级 `Priority` |
+| `notification_id` | 通知 ID `Id`，即 Alert Key 的来源 |
+| `notified_at` | 通知时间 `DateTime` |
+
+告警标题为通知的 `Title`，描述为通知的 `Message`。
+
+## 常见问题
+---
+
+<AccordionGroup>
+
+<Accordion title="创建 Webhook 后 Flashduty 没有告警？">
+
+用 `GET /v3/notifications/webhooks` 确认 `Url` 是完整的推送地址，并且 `Priorities` 包含实际发生的通知优先级。只选 `Critical` 时，没有严重问题的环境不会产生任何推送。
+
+</Accordion>
+
+<Accordion title="需要配置签名校验吗？">
+
+不需要。Flashduty 只通过 `integration_key` 识别集成，不校验 `x-hmac-signature`。
+
+</Accordion>
+
+<Accordion title="告警为什么一直不关闭？">
+
+Pulseway 没有恢复通知。请开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭告警。
+
+</Accordion>
+
+</AccordionGroup>
+
+更多字段说明请参阅 [Pulseway REST API：Notification Webhooks](https://api.pulseway.com/)。
