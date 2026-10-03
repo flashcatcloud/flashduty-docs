@@ -1,0 +1,101 @@
+---
+title: "pgDash alert integration"
+description: "Send pgDash PostgreSQL monitoring alerts to Flashduty On-call through webhooks."
+keywords: ["alert integration", "pgDash", "PostgreSQL", "database monitoring", "webhook"]
+---
+
+Use pgDash webhook notifications to send PostgreSQL monitoring alerts to Flashduty On-call. Each pgDash server maps to one Flashduty alert: it triggers or updates when alert rules fire on the server, and recovers automatically when all of its alerts clear.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **pgDash** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **pgDash** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure pgDash
+---
+
+The setup is the same for pgDash SaaS and self-hosted pgDash. Webhooks require pgDash 2.4.11 or later.
+
+<Steps>
+<Step title="Set alert rules">
+
+1. Sign in to pgDash and select the server to connect from the server list
+2. Select **Alerts** in the left menu and add server, database, table, or tablespace level rules as needed. Each rule can be a warning or a critical alert
+
+Alert rules are evaluated each time pgDash receives a pgmetrics report for the server.
+
+</Step>
+
+<Step title="Enter the webhook URL">
+
+1. On the server's **Alerts** page, find the webhook URL field under **Notification Settings**
+2. Enter the full Flashduty push URL (including `integration_key`). An `https` URL must have a valid certificate
+3. Click **Update** to save
+
+Webhooks are set per server. To connect more servers, repeat this step for each server. They can share the same push URL.
+
+</Step>
+</Steps>
+
+<Warning>
+Enter this push URL only on the **Alerts** page. Notifications from the **Change Alerts** page carry no alert state; when they reach this integration, Flashduty returns success and creates no alert.
+</Warning>
+
+## Alert lifecycle
+---
+
+pgDash webhooks are edge-triggered: a notification is sent only when the alert status of a server changes, and each notification carries every current alert item of that server (the `alerts` array). When all alerts clear, pgDash sends one notification with an empty `alerts` array.
+
+Flashduty therefore computes the Alert Key from the server name `server`, so every notification for the same server lands on the same alert:
+
+- A notification with alert items triggers or updates the alert. The title and description are replaced with the latest alert items
+- A notification with an empty `alerts` array recovers the alert
+
+When a single alert item clears while the server still has other alerts, pgDash sends no separate recovery for that item. The Flashduty alert stays triggered and its description lists only the items still firing. Flashduty rejects requests that lack the `server` or `alerts` field.
+
+<Tip>
+Renaming a server in pgDash produces a new Alert Key. Close alerts under the old name manually.
+</Tip>
+
+## Severity
+---
+
+| pgDash alert items | Flashduty severity |
+| :--- | :--- |
+| Any item has `type` `crit` | Critical |
+| Otherwise (`warn`) | Warning |
+| `alerts` is empty | Recovered |
+
+## Alert content
+---
+
+- **Title**: `server name: rule description`, taken from the first `crit` item (or the first item if none is critical). `(+N more)` is appended when there are several items
+- **Description**: the pgmetrics report time (UTC) and, for each alert item, its type, rule description, current value, object name, and link. Query-level alerts include the SQL text (truncated to 500 characters). Up to 50 items are listed
+- **Labels**: `server`, `check` (rule description of the item used in the title), `resource` (that item's object name), `link` (that item's pgDash link), `alert_count` (number of current alert items), `source` (always `pgdash`)
+
+## Troubleshooting
+---
+
+- **pgDash sends nothing**: pgDash notifies only when the alert status changes and does not repeat an unchanged state. Check that an alert rule has fired and that the webhook is set on the **Alerts** page, not the **Change Alerts** page
+- **Delivery times out**: pgDash expects a response within 3 seconds and retries at most 3 times on timeout. For self-hosted pgDash, make sure the pgDash server can reach the push URL
+- **The alert does not recover**: it recovers only when all alerts of the server clear. While any other item is still firing, the alert stays open
+
+For field details, see [pgDash Webhooks](https://docs.pgdash.io/webhooks/).
