@@ -1,0 +1,136 @@
+---
+title: "ThousandEyes 告警集成"
+description: "通过 Classic Webhook 将 Cisco ThousandEyes 告警同步到 Flashduty On-call，告警清除时自动恢复。"
+keywords: ["告警集成", "ThousandEyes", "Cisco ThousandEyes", "Webhook", "Classic Webhook"]
+---
+
+通过 Cisco ThousandEyes 的 Classic Webhook（在告警规则里配置的 Webhook），将告警事件同步到 Flashduty On-call。ThousandEyes 每生成一个告警，对应一条 Flashduty 告警：告警触发时推送 `ALERT_NOTIFICATION_TRIGGER`，告警清除时推送 `ALERT_NOTIFICATION_CLEAR` 并恢复该告警。测试告警（Cloud Agent、Enterprise Agent 测试）和代理通知（Agent 离线、时钟偏差等）都支持。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **ThousandEyes**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **ThousandEyes**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 ThousandEyes 中配置
+---
+
+编辑告警规则和 Webhook 需要 ThousandEyes 中管理告警规则的权限。ThousandEyes for Government 实例不支持 Webhook 告警通知。
+
+<Steps>
+<Step title="添加 Webhook">
+
+1. 登录 ThousandEyes，进入 **Manage** → **Alert Rules**
+2. 展开一条告警规则，切换到 **Notifications** 标签页
+3. 在 **Webhooks** 区域点击 **Configure Webhooks**（已有 Webhook 时为 **Edit webhooks**），然后点击 **Add New Webhook**
+4. 按下表填写：
+
+| 配置项 | 填写内容 |
+| :--- | :--- |
+| **Name** | 便于识别的名称，如 `Flashduty` |
+| **URL** | Flashduty 集成的完整推送地址，需包含 `integration_key`。请粘贴未经 URL 编码的原始地址。ThousandEyes 不跟随 HTTP 重定向，请使用复制得到的最终地址 |
+| **Auth Type** | 选择 **None**，Flashduty 通过地址中的 `integration_key` 认证 |
+
+5. 点击 **Test**，看到 **Webhook test completed successfully** 即表示地址可达
+6. 保存该 Webhook
+
+<Note>
+请使用告警规则里的这种 Webhook（ThousandEyes 称为 Classic Webhook），不要使用 **Manage** → **Integrations** → **Integrations 2.0** 中的 Custom Webhook 操作。Flashduty 解析的是 Classic Webhook 的固定格式。
+</Note>
+
+</Step>
+
+<Step title="在告警规则中选择该 Webhook">
+
+1. 回到告警规则的 **Notifications** 标签页，在 **Webhooks** 中选择上一步创建的 Webhook
+2. **Add Custom Payload** 无需填写，Flashduty 不读取自定义键值
+3. 保存告警规则。需要推送的每条告警规则都要选择该 Webhook，代理通知（Agent Notifications）的规则也一样
+
+</Step>
+
+<Step title="验证">
+
+1. 点击 **Test** 时 ThousandEyes 会发送 `WEBHOOK_TEST` 事件，Flashduty 返回成功，但不会创建告警
+2. 让一条选择了该 Webhook 的告警规则触发（例如临时把阈值调低），确认 Flashduty 收到活动告警
+3. 等待告警清除（或把阈值改回），确认原告警变为已恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 ThousandEyes 的告警 ID（`alert.alertId`）作为 Alert Key。ThousandEyes 为每个生成的告警分配唯一的 `alertId`，同一个告警的触发通知和清除通知携带相同的 `alertId`，因此清除通知会恢复对应的 Flashduty 告警。
+
+- **再次触发**：告警清除后再次触发时，ThousandEyes 生成新的告警和新的 `alertId`，Flashduty 会创建一条新告警
+- **多个代理**：一个告警涉及多个代理（Agent）时仍然只是一个 `alertId`，在 Flashduty 中是一条告警，各代理的指标写在告警描述里
+- 每次推送的 `eventId` 都不同，不参与 Alert Key。规则名称、严重程度、指标值和时间的变化也不会改变 Alert Key。缺少 `alert.alertId` 的请求会被拒绝
+
+## 状态和告警等级
+---
+
+状态由 `eventType` 决定：
+
+| ThousandEyes `eventType` | 状态 |
+| :--- | :--- |
+| `ALERT_NOTIFICATION_TRIGGER` | 触发 |
+| `ALERT_NOTIFICATION_CLEAR`（告警清除，或告警规则被删除、被从测试中移除） | 恢复 |
+| `WEBHOOK_TEST` | 不创建告警 |
+
+告警等级由告警规则的严重程度（`alert.severity`）决定：
+
+| ThousandEyes 严重程度 | Flashduty 等级 |
+| :--- | :--- |
+| Critical | Critical |
+| Major | Critical |
+| Minor | Warning |
+| Info | Info |
+| 为空（代理通知没有严重程度）或其他 | Warning |
+
+在 ThousandEyes 中用 **Add New Alert Rule** 新建的告警规则默认严重程度是 **Info**，这类告警在 Flashduty 中是 Info 等级；内置的默认告警规则（Default Alert Rules）默认是 **Minor**。需要更高等级时，请在 ThousandEyes 中修改告警规则的 **Severity**。告警恢复时保留触发时的等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警规则名称 |
+| `resource` | 测试目标（`testTargetsDescription`）；代理通知为代理主机名 |
+| `alert_id` | ThousandEyes 告警 ID，即 Alert Key |
+| `rule_id` | 告警规则 ID |
+| `rule_expression` | 告警条件，如 `Response Time ≥ 500 ms` |
+| `severity` | ThousandEyes 原始严重程度 |
+| `alert_type` | 告警类型，如 `HTTP Server`、`Agent` |
+| `alert_url` | ThousandEyes 中该告警的链接 |
+| `test_id` / `test_name` | 测试 ID 和名称（测试告警） |
+| `agents` | 触发告警的代理名称，逗号分隔（测试告警） |
+| `agent_id` / `agent_name` / `host` / `ip_address` | 代理 ID、名称、主机名和 IP（代理通知） |
+
+告警标题为「告警规则名称: 测试名称」，代理通知为「告警规则名称: 代理名称」。告警描述包含告警条件和各代理触发时的指标。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整、未经编码且包含 `integration_key`，并且使用的是告警规则里的 Classic Webhook，而不是 Custom Webhook
+- **点击 Test 后没有告警**：这是预期行为，测试事件不会创建告警；请用真实告警验证
+- **告警没有恢复**：确认告警在 ThousandEyes 中已经清除。全局告警要等所有代理都不再满足条件才会清除，只要还有一个代理处于告警状态，就不会推送清除通知
+- **某条告警规则没有推送**：Webhook 是按告警规则选择的，确认该规则的 **Notifications** 里选择了 Flashduty 的 Webhook
+
+更多字段含义请参阅 [ThousandEyes Classic Webhooks for Alert Notifications](https://docs.thousandeyes.com/product-documentation/alerts/standard-notification-methods/classic-webhooks-for-alert-notifs)。

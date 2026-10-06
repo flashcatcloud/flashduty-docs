@@ -1,0 +1,144 @@
+---
+title: "AWX / Ansible Automation Platform 变更集成"
+description: "通过 AWX 或 Ansible Automation Platform 的 Webhook 通知，将作业模板和工作流作业的每次运行同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "AWX", "Ansible", "Ansible Automation Platform", "Webhook 通知", "作业模板", "运维自动化"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 AWX 或 Ansible Automation Platform（AAP）的 [Webhook 通知模板](https://docs.ansible.com/automation-controller/latest/html/userguide/notifications.html)，将作业模板（Job Template）和工作流作业模板（Workflow Job Template）的运行同步到 Flashduty On-call。每一次运行对应一条 Flashduty 变更；运行开始和结束时，都会更新同一条变更。
+
+AWX 无法区分一个作业模板是否会改变线上环境，因此只需在**执行发布、变更类操作的模板**上启用通知，不要在只读的巡检类模板上启用。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **AWX / Ansible Automation Platform**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`inventory`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 AWX 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 通知模板">
+
+进入 **Administration → Notifications**（AAP 2.5 及以上为 **Automation Execution → Administration → Notifiers**），点击 **Add**：
+
+1. **Type**：选择 `Webhook`
+2. **Target URL**：填写 Flashduty 集成的完整推送地址
+3. **HTTP Method**：选择 `POST`
+4. **Customize messages** 保持默认。默认的消息体是 `{{ job_metadata }}`，即运行的 JSON 描述，Flashduty 按这个格式解析
+
+推送地址已包含集成密钥，无需再配置用户名、密码或请求头。
+
+</Step>
+
+<Step title="在作业模板上启用通知">
+
+打开要同步的作业模板或工作流作业模板，切换到 **Notifications** 页签，在刚创建的通知模板上打开 **Start**、**Success** 和 **Failure** 三个开关。三个开关都需要打开：Start 让变更在运行开始时出现，Success 和 Failure 给出结束状态，缺少它们变更会一直停在 Processing。
+
+也可以在组织（Organization）上启用通知，此时组织内所有模板都会发送；其中项目同步、库存同步和管理作业的通知会被 Flashduty 忽略。
+
+</Step>
+
+<Step title="运行一次作业">
+
+保存后启动一次作业模板，在 Flashduty 的变更列表中即可看到对应的变更。通知模板页的 **Test** 按钮发送的是测试消息，Flashduty 返回成功但不记录变更，可用于确认推送地址可达。AWX 在通知的发送记录中显示每次推送的结果。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+每一次作业模板或工作流作业的运行是一条变更，变更标识（change_key）为 AWX 的作业 ID（`id`），例如 `4711`。
+
+- 同一次运行的开始、结束通知更新同一条变更
+- 同一模板的两次运行是两条变更；重新启动（Relaunch）也是一次新的运行
+- 作业和工作流作业共用同一个 ID 序列，工作流启动的每个作业模板运行各是一条独立的变更
+- 作业 ID 在一个 AWX 实例内唯一。多个 AWX 实例请分别创建集成，否则不同实例上相同的作业 ID 会被合并为一条变更
+
+## 状态映射
+---
+
+| 通知 | 作业状态（status） | Flashduty 变更状态 |
+|---|---|---|
+| Start | running | Processing |
+| Success | successful | Done |
+| Failure | failed | Failed |
+| Failure | error（无法运行） | Failed |
+| Failure | canceled（被取消） | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
+
+自定义消息体时，`new` 映射为 Planned，`pending` 和 `waiting` 映射为 Ready；默认消息体不会发送这三个状态。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `run <模板名称> on <库存>`，例如 `run deploy-app on production`；工作流作业没有库存时为 `run <名称>` |
+| 描述 | 空 |
+| 链接 | AWX 中该次运行的页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `job_id` | 作业 ID |
+| `job` | 模板名称 |
+| `job_type` | 运行类型：`playbook`（作业模板）或 `workflow`（工作流） |
+| `project` | 项目名称（仅作业模板） |
+| `playbook` | Playbook 文件（仅作业模板） |
+| `inventory` | 库存名称 |
+| `actor` | 启动运行的用户；由计划任务启动时没有该标签 |
+| `awx_state` | 最新的作业状态 |
+
+额外变量（extra_vars）、凭据和各主机的执行结果可能包含敏感信息，不会被记录。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 确认作业模板的 **Notifications** 页签中，Start、Success、Failure 都已打开
+- 确认通知模板的 **Customize messages** 没有改动消息体；消息体不是 JSON 时，AWX 会推送空对象 `{}`，Flashduty 会拒绝
+- 在 AWX 的 **Administration → Notifications** 中查看通知模板的发送记录，确认推送是否成功以及返回的错误
+
+</Accordion>
+
+<Accordion title="变更为什么一直是 Processing？">
+
+结束通知没有送达。请确认模板启用了 Success 和 Failure 通知，以及 AWX 到 Flashduty 的网络通畅。AWX 对失败的推送不会自动重发。
+
+</Accordion>
+
+<Accordion title="为什么项目同步没有出现在变更里？">
+
+项目同步、库存同步和管理作业（例如清理作业）不改变线上环境，Flashduty 收到后返回成功但不记录。工作流审批节点的通知也一样。
+
+</Accordion>
+
+<Accordion title="Flashduty 会拒绝哪些推送？">
+
+Flashduty 在以下情况拒绝推送：
+
+- `unsupported status`：推送内容的 `status` 缺失或不是 AWX 的作业状态；消息体不是 JSON 时也会出现，因为 AWX 此时推送的是 `{}`
+- `id is missing`：自定义消息体中没有作业 ID，请在消息体中保留 `id` 字段
+
+</Accordion>
+
+<Accordion title="变更链接打开后是 https://towerhost 页面怎么办？">
+
+变更链接由 AWX 的 **Base URL of the service** 设置生成，默认值是 `https://towerhost`。请在 **Settings → System** 中将它改为 AWX 实际的访问地址（例如 `https://awx.example.com`），之后新的运行才会带上可访问的链接；已经记录的变更链接不会更新。
+
+</Accordion>
+</AccordionGroup>

@@ -1,0 +1,85 @@
+---
+title: "WhatsUp Gold alert integration"
+description: "WhatsUp Gold sends device down and up notifications through its e-mail action; use a Flashduty email integration with rules to trigger and close WhatsUp Gold alerts."
+keywords: ["alert integration", "WhatsUp Gold", "Progress", "WUG", "email", "network monitoring"]
+---
+
+WhatsUp Gold sends device state notifications through the E-mail action in an action policy, and you write the email subject and body yourself with percent variables. The Flashduty [email integration](/en/on-call/integration/alert-integration/alert-sources/email) receives these emails and uses rules on the email title to decide whether each one triggers or resolves an alert, so no separate WhatsUp Gold integration is needed: create an email integration in Flashduty, put its email address in the receiver of the WhatsUp Gold E-mail action, then set the subject format and push rules below.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the integration email address in either of the two ways below. **In both cases choose the Email integration type**, not WhatsUp Gold.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Email** and click **Save**
+4. Open the new integration card, copy the **email address**, then configure the push rules below
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert events**
+2. Select **Email**, enter an integration name and copy the **email address**
+3. Configure the push rules below
+4. Set a default route, select a channel and click **Save**
+
+</div>
+
+## Configure WhatsUp Gold
+---
+
+WhatsUp Gold emails carry no alert ID, so the subject below includes the device display name and Flashduty extracts it as the Alert Key. The down and up emails differ only in the prefix, so both yield the same key and the up email closes the matching alert.
+
+The paths below are for WhatsUp Gold 2023.0.
+
+1. Go to **SETTINGS** → **Action & Alerts** → **Actions and Policies**, click **Add** on the **Actions** tab, select **E-mail**, and create the down action:
+   - **Receiver**: the address of the Flashduty email integration
+   - **Sender**, **SMTP Server**, **Port**, encryption and authentication: fill in for your mail server
+   - Under **Active and Passive Monitors**, set **Subject** to `[WhatsUp Gold] DOWN %Device.DisplayName`
+   - Set **Message body** to Plain Text with `%Device.DisplayName (%Device.Address) %Device.State`
+2. Create a second E-mail action for recovery with the same receiver and mail server settings, **Subject** `[WhatsUp Gold] UP %Device.DisplayName`, and the same **Message body**
+3. On the **Action Policies** tab click **Add** to open the **Action Policy Builder** and add two rules (**Edit Policy Rule**):
+   - Rule 1: **Select an action from the Action Library** = the down action, **Execute the action on the following state change** = **Down**
+   - Rule 2: the up action, **Execute the action on the following state change** = **Up**
+4. Save the action policy and apply it to the devices you want notifications for
+
+Percent variables are case sensitive and must not contain spaces. `%Device.DisplayName` is the display name from the device's General properties, `%Device.Address` is the device IP address, and `%Device.State` is the current state description, for example `Down at least 2 min`.
+
+To get one alert per monitor instead of per device, bind the action policy to a specific active monitor and append `- %ActiveMonitor.Name` to the subject of both actions. `%ActiveMonitor.Name` only has a value when the action is associated directly with an active monitor; it cannot be used in a device-level action policy.
+
+## Configure push rules in Flashduty
+---
+
+1. Set **Push mode** to **Trigger or close alert based on rules**
+2. Add the two rules below in this order. Each rule's condition is **Email title** **Match** the given regex, and the Alert Key is extracted from the **Email title**
+3. Under **Default rules**, choose: if none of the above rules match, **discard email**
+
+Rule 1: close the alert
+
+```
+Condition: Email title  Match  /^\[WhatsUp Gold\] UP /
+Regex: /^\[WhatsUp Gold\] UP (.+)$/
+```
+
+Rule 2: trigger an alert
+
+```
+Condition: Email title  Match  /^\[WhatsUp Gold\] DOWN /
+Regex: /^\[WhatsUp Gold\] DOWN (.+)$/
+```
+
+The close rule comes before the trigger rule. Both regexes extract what follows the subject prefix, which is the device display name (plus the monitor name when you alert per monitor), so the down email, repeated notifications and the up email of one device land on the same alert.
+
+The default rule discards unmatched mail so that other WhatsUp Gold emails, such as ones from other E-mail actions you created, don't create alerts that can never close on their own.
+
+## Limitations
+---
+
+- **Recovery needs an up action**: Flashduty receives recovery emails only if the action policy has an action on the Up state change. Without one, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit) in the channel that receives this integration; 24 hours is a reasonable start.
+- **Repeated notifications**: with **Repeat action** checked in the policy, the down email is resent at the interval. The titles are identical, so they merge into one alert.
+- **Severity**: in Flashduty these alerts show the Email integration type, and their severity is always Warning. You can adjust it with [alert pipelines](/en/on-call/integration/alert-integration/alert-pipelines).
+- **Rules depend on the subject**: if you change the subject templates, update the regexes in the rules to match.

@@ -1,0 +1,141 @@
+---
+title: "Cronitor 告警集成"
+description: "通过 Webhook 将 Cronitor 监控的告警和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Cronitor", "Cron", "心跳监控", "Webhook"]
+---
+
+通过 Cronitor 的 Webhooks 集成，把监控（Monitor）的告警（`Alert`）和恢复（`Recovery`）通知同步到 Flashduty On-call。Cron 任务、心跳、网站和 API 检查都适用：监控失败时触发一条 Flashduty 告警，监控恢复健康时关闭这条告警。
+
+根据 Cronitor 价格页，免费的 Hacker 计划和付费计划都包含 Webhook 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Cronitor**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Cronitor**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Cronitor 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 集成">
+
+1. 登录 Cronitor，进入 **Settings → Integrations**，点击 **Create Integration**，选择 **Webhooks**
+2. 填写名称（在 Cronitor 界面中显示，例如 `Flashduty`）和唯一标识（在 Cronitor API 中引用）
+3. 把 Flashduty 集成的完整推送地址粘贴到 URL 字段，点击 **Create Integration**
+
+</Step>
+
+<Step title="加入通知列表">
+
+创建完成后，Cronitor 会提示把这个集成加入一个或多个通知列表（Notification List）。也可以稍后在 **Settings → Alerts** 中编辑通知列表，在集成中选中这个 Webhook。
+
+通知列表可以限定生效的环境（Environment）。只有列表生效环境中的告警才会推送到 Flashduty。
+
+</Step>
+
+<Step title="关联监控">
+
+在监控的编辑页中，为监控选择包含该 Webhook 的通知列表。未指定通知列表的监控使用账户的 **default** 列表；如果希望所有监控都推送到 Flashduty，可以把 Webhook 加入 default 列表。
+
+</Step>
+
+<Step title="验证">
+
+Cronitor 推荐用一个心跳监控测试告警：
+
+1. 新建一个心跳监控（Heartbeat），关联包含该 Webhook 的通知列表
+2. 在浏览器中打开监控的遥测 URL，发送一次正常 ping
+3. 在遥测 URL 末尾加上 `?state=fail` 再打开一次，Cronitor 发送告警通知，Flashduty 中出现一条活动告警
+4. 去掉 `?state=fail` 再打开一次，Cronitor 发送恢复通知，Flashduty 中的原告警恢复
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Cronitor 以 JSON 格式推送以下字段：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `id` | 监控的唯一 key | Alert Key，标签 `monitor_key` |
+| `issue` | Cronitor 问题名称：监控名称加失败类型，例如 `Nightly backup · Heartbeat Failed` | 告警标题 |
+| `monitor` | 监控名称 | 标签 `monitor` |
+| `description` | 告警说明 | 告警描述，超过 8 KB 时截断 |
+| `type` | `Alert` 或 `Recovery` | 告警状态 |
+| `rule` | 触发告警的断言或规则 | 标签 `rule` |
+| `environment` | 告警所属环境的名称，例如 `Production` | Alert Key，标签 `env` |
+| `group` | 监控所属分组，未分组时为 `null` | 标签 `group` |
+| `issue_url` | Cronitor 问题（Issue）详情链接 | 标签 `issue_url` |
+| `monitor_url` | 监控详情链接 | 标签 `monitor_url` |
+
+告警标题使用问题名称；为空时依次使用监控名称、监控 key。每条告警还带有标签 `source=cronitor`。
+
+## Alert Key
+---
+
+Flashduty 使用监控 key（`id`）和环境（`environment`）一起生成 Alert Key：
+
+- 同一监控在同一环境中的告警、持续告警和恢复通知落在同一条告警上
+- 同一监控在不同环境（例如 `Production` 和 `staging`）中分别生成告警，一个环境恢复不会关闭另一个环境的告警
+- 修改监控名称、分组或断言不会改变 Alert Key
+
+监控 key 在每次故障中都相同。上一条告警恢复后，同一监控再次失败会生成一条新告警，不会重新打开已恢复的告警。
+
+修改监控 key，或删除后重新创建监控，会得到新的 Alert Key，与旧告警不再关联。
+
+## 状态和告警等级
+---
+
+Cronitor 的 Webhook 不携带严重程度，Flashduty 按下表映射：
+
+| Cronitor `type` | 含义 | Flashduty 状态或等级 |
+| :--- | :--- | :--- |
+| `Alert` | 监控失败或断言不满足 | Critical |
+| `Recovery` | 监控恢复健康 | 恢复，原等级为 Critical |
+
+`type` 不区分大小写。缺少 `id`、`type` 为空或为其他值的请求会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="监控持续失败时会重复推送吗？">
+
+不会。Cronitor 问题（Issue）未关闭期间，后续失败不再发送通知；Cronitor 只按监控的 **Reminder Alerts** 设置定期发送提醒（默认每 8 小时一次）。提醒的 `Alert` 通知会合并到同一条活动告警中，不会生成新告警。
+
+</Accordion>
+
+<Accordion title="为什么只收到告警，没有收到恢复？">
+
+请确认监控仍关联着包含该 Webhook 的通知列表，并且通知列表在该环境中生效。如果恢复通知丢失，对应告警需要在 Flashduty 中手动关闭。
+
+在 Cronitor 中手动解决（Resolve）问题不会发送恢复通知。监控恢复后很快再次失败时，Cronitor 可能重新打开同一个问题：重新打开的问题会发送告警通知（Flashduty 生成一条 Alert Key 相同的新告警），但测试中监控再次恢复健康后没有发送恢复通知。这类告警需要在 Flashduty 中手动关闭。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认推送地址完整（包含 `integration_key`），请求体中有 `id` 和 `type` 字段
+- **收不到任何通知**：确认监控关联的通知列表中选中了该 Webhook，且通知列表的生效环境包含告警所在环境
+- **同一监控的告警没有恢复**：确认告警和恢复通知来自同一环境；不同环境生成的是不同告警

@@ -1,0 +1,168 @@
+---
+title: "FortiMonitor alert integration"
+description: "Send FortiMonitor incident and clear notifications to Flashduty On-call through a webhook."
+keywords: ["alert integration", "FortiMonitor", "Panopta", "Fortinet", "webhook", "Alert Timeline", "outage_id"]
+---
+
+Use the FortiMonitor (formerly Panopta) webhook integration to send incident and recovery notifications to Flashduty On-call. Each FortiMonitor incident maps to one Flashduty alert: the alert triggers when the incident starts, escalation notifications from the Alert Timeline merge into the same alert, and the alert recovers when the incident clears.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **FortiMonitor** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **FortiMonitor** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure FortiMonitor
+---
+
+<Steps>
+<Step title="Create a webhook integration">
+
+1. Sign in to FortiMonitor, go to **Teams & Activity → Integrations**, find the **Webhook** card, and click **Configure**
+2. Enter `Flashduty` as the **Title**. You select the webhook by this name in Alert Timelines
+3. For **Trigger Event**, select the outage event
+4. Set **Request Method** to **POST**
+5. Paste the complete Flashduty push URL into **Postback URL**
+6. Set **Authentication Method** to **None**
+7. Set **Payload Type** to **Form Variables** and add the variables below, one per row. Variable names are case-sensitive; the values are FortiMonitor macros:
+
+| Variable name | Value |
+| :--- | :--- |
+| `trigger` | `$trigger` |
+| `outage_id` | `$outage_id` |
+| `severity` | `$severity` |
+| `name` | `$name` |
+| `fqdn` | `$fqdn` |
+| `server_id` | `$server_id` |
+| `items` | `$items` |
+| `reasons` | `$reasons` |
+| `duration` | `$duration` |
+| `tags` | `$tags` |
+
+8. Click **Save**
+
+</Step>
+
+<Step title="Add the clear event">
+
+In the same webhook, click **Add Event**, select the clear event for **Trigger Event**, keep every other field and variable identical to the previous step, and click **Save**.
+
+Without this step, Flashduty only receives incident notifications and alerts never recover automatically.
+
+</Step>
+
+<Step title="Use the webhook in an Alert Timeline">
+
+1. Open the Alert Timeline you want to connect, or create one with **Add → Alert Timeline**
+2. Click **Add New Alert Event**, set how long after an incident starts to notify, and select the `Flashduty` webhook under integrations
+3. Make sure the instances or instance groups you want to connect use this Alert Timeline
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Push a monitored metric past its threshold (for example, lower the threshold temporarily) and wait for the Alert Timeline's notification time. Confirm that Flashduty receives an active alert, then restore the threshold and confirm that the alert recovers.
+
+</Step>
+</Steps>
+
+<Note>
+FortiMonitor sends webhook requests from fixed IP addresses: `104.197.35.194/32` and `35.185.29.9/32`. If the network in front of the push URL restricts inbound traffic, allow these two addresses.
+</Note>
+
+<Warning>
+**Payload Type** must be **Form Variables**, with variable names exactly as listed above. The default Raw Payload is a Google Chat card that lacks the fields Flashduty needs, so those requests are rejected.
+</Warning>
+
+## Payload
+---
+
+FortiMonitor POSTs the following form fields, one request per incident and event:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `trigger` | Event type: `outage`, `clear`, `ack`, or `broadcast` | Trigger, recover, or ignore; label `trigger` |
+| `outage_id` | Incident ID, may be negative | Alert Key; label `outage_id` |
+| `severity` | `critical` or `warning` | Alert severity; label `severity` |
+| `name` | Instance name | Alert title; label `host` |
+| `fqdn` | Fully qualified domain name of the instance | Label `resource` |
+| `server_id` | Instance ID | Label `server_id` |
+| `items` | Services or metrics in the incident | Alert title; label `check` |
+| `reasons` | Incident reason | Alert description |
+| `duration` | Incident duration, filled in on clear | Label `duration` |
+| `tags` | Instance tags | Label `tags` |
+
+The alert title is `<instance name>: <affected metrics>`. If the instance name is empty, the FQDN is used; if both are empty, the title is `FortiMonitor incident <outage_id>`.
+
+## Alert Key
+---
+
+Flashduty uses `outage_id` (the FortiMonitor incident ID) as the Alert Key. The incident, escalation, and clear notifications of one incident carry the same `outage_id`, so they land on the same alert. When the same metric on the same instance fails again after recovering, FortiMonitor opens a new incident ID and Flashduty opens a new alert. Changing the instance name, reason, or severity does not change the Alert Key.
+
+If a request has no `outage_id`, or still contains the unexpanded `$outage_id`, Flashduty returns a parameter error, because the clear notification could not be linked to the original alert.
+
+## Status and severity
+---
+
+| FortiMonitor `trigger` | Flashduty behavior |
+| :--- | :--- |
+| `outage` | Triggers or updates the alert |
+| `clear` | Recovers the alert and keeps its severity |
+| `ack`, `broadcast` | Returns success without creating or changing an alert |
+
+| FortiMonitor `severity` | Flashduty severity |
+| :--- | :--- |
+| `critical` | Critical |
+| `warning` | Warning |
+| Empty or any other value | Critical |
+
+Requests with an empty or unknown `trigger` are rejected.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does an Alert Timeline with several events create several alerts?">
+
+No. Each escalation event on the Alert Timeline sends another `outage` notification for the same incident with the same `outage_id`, and it merges into the same alert.
+
+</Accordion>
+
+<Accordion title="Does acknowledging an incident in FortiMonitor acknowledge the Flashduty alert?">
+
+No. Acknowledgements and broadcast messages do not change the incident state; Flashduty returns success and leaves the alert unchanged. Acknowledge the incident in Flashduty.
+
+</Accordion>
+
+<Accordion title="An incident cleared quickly and Flashduty received nothing. Why?">
+
+The Alert Timeline sends a notification only after the incident has lasted until the configured notification time. If the incident clears before that, FortiMonitor sends no incident notification and Flashduty creates no alert.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Delivery fails**: make sure the Postback URL is the complete push URL and includes `integration_key`. If inbound traffic is restricted, allow the FortiMonitor webhook IP addresses
+- **Flashduty returns a parameter error**: make sure Payload Type is Form Variables, the variable names match the table above, and `trigger` and `outage_id` are set to `$trigger` and `$outage_id`
+- **The alert does not recover**: make sure the webhook has a clear event with the same variables as the outage event
+
+For macro details, see the official FortiMonitor documentation: [Webhooks](https://docs.fortinet.com/document/fortimonitor/26.3.0/user-guide/826350/webhooks).

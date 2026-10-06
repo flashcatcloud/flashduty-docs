@@ -1,0 +1,184 @@
+---
+title: "BigPanda 告警集成"
+description: "通过 BigPanda 的 Notifications Webhook v2 集成，将 BigPanda 事件关联后生成的 Incident 同步到 Flashduty On-call。"
+keywords: ["告警集成", "BigPanda", "AIOps", "Notifications Webhook v2", "AutoShare", "incident.id"]
+---
+
+BigPanda 是一个事件关联（Event Correlation）平台：接入各类监控和日志工具的告警后，BigPanda 把相关告警合并成一个 Incident，再由 Incident 的状态变化驱动通知。Flashduty 通过 BigPanda 的 **Notifications Webhook v2** 集成接收这些 Incident：Incident 新建、更新、关闭都推送同一个 `incident.id`，Flashduty 据此合并为一条告警，Incident 关闭时告警自动恢复。
+
+Notifications Webhook v2 目前只能通过 BigPanda 的 REST API 创建和修改，控制台里没有对应的表单；本页给出可以直接复制使用的请求体。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+当您不需要将告警路由到不同的协作空间时，优先选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+  2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+  3. 选择 **BigPanda**，点击 **保存**
+  4. 打开生成的集成卡片，复制 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+### 使用共享集成
+
+当您需要根据 Payload 将告警路由到不同的协作空间时，选择此方式。
+
+<AccordionGroup>
+  <Accordion title="展开">
+
+  1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+  2. 选择 **BigPanda**，填写集成名称
+  3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+  4. 点击 **保存**，复制生成的 **推送地址**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## 前提条件
+---
+
+- **权限**：调用 Notifications Webhook v2 API 需要账号拥有 **Integrations** 权限；创建 AutoShare 规则需要 **Notifications**（查看、新增、编辑、删除 AutoShare 规则）权限。
+- **认证方式**：Notifications Webhook v2 API 目前只接受 **User Account** 的认证信息，Service Account 无法调用。
+- 本集成不解析 BigPanda 的固定字段，而是解析下面第二步中您粘贴进请求体的 JSON 模板；请不要修改模板里的字段名。
+
+## 在 BigPanda 中配置
+---
+
+<Steps>
+<Step title="创建 Notifications Webhook v2 集成">
+
+调用 BigPanda 的集成创建接口，`base_url` 换成 Flashduty 集成的完整推送地址（包含 `integration_key` 参数），`Authorization` 换成您的 User Account 访问令牌：
+
+```bash
+curl https://api.bigpanda.io/resources/v2.1/integrations \
+  --request POST \
+  --header 'Authorization: Bearer <User Account 访问令牌>' \
+  --header 'Content-Type: application/json' \
+  --data '{
+    "name": "flashduty",
+    "parent_system_id": "webhook_v2",
+    "workflow_config": {
+      "events": {
+        "default": {
+          "enabled": true,
+          "body": {
+            "incident_id": "{{incident.id}}",
+            "status": "{{incident.status}}",
+            "environment": "{{metadata.environment_name}}",
+            "host": "{{primaryAlert.tags.host}}",
+            "check": "{{primaryAlert.tags.check}}",
+            "description": "{{primaryAlert.description}}",
+            "url": "{{links.console}}"
+          }
+        }
+      },
+      "config": {
+        "base_url": "https://api.flashcat.cloud/event/push/alert/bigpanda?integration_key=<集成密钥>"
+      }
+    }
+  }'
+```
+
+<Warning>
+请原样保留请求体中的字段名（`incident_id`、`status`、`environment`、`host`、`check`、`description`、`url`）和花括号变量。`default` 事件的配置会用于所有未单独配置的触发条件，Incident 新建、更新、关闭都会复用这份模板，不需要为每种事件单独配置。
+</Warning>
+
+</Step>
+
+<Step title="创建 AutoShare 规则">
+
+Webhook v2 集成创建后本身不会收到任何数据，需要一条 AutoShare 规则决定哪些 Incident 分享给它：
+
+1. 在 BigPanda 中进入 **Settings → AutoShare**
+2. 点击 **Create AutoShare**
+3. 在 **Environment** 中选择需要接入 Flashduty 的环境
+4. 在 **Share Via** 中选择上一步创建的 Webhook v2 集成
+5. 点击 **Create AutoShare**
+
+规则生效后，该环境下 Incident 新建、状态变化、关闭都会按规则中的延迟设置自动分享，不需要额外勾选事件类型。
+
+</Step>
+
+<Step title="验证生命周期">
+
+在该环境下触发一次真实告警（或等待下一次真实故障），确认 Flashduty 收到活跃告警；再让所有关联的告警恢复，确认 Incident 状态变为 `ok` 后 Flashduty 上的告警自动恢复。BigPanda 官方文档未提供该集成的测试通知功能，无法仅通过一次点击验证。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 直接使用请求体中的 `incident_id`（来自 BigPanda 模板变量 `{{incident.id}}`）作为 Alert Key。BigPanda 官方文档将 `incident.id` 定义为 Incident 的系统生成唯一标识；同一个 Incident 的新建、更新、关闭共享同一个 `incident.id`。
+
+`status`、`environment`、`host`、`check`、`description`、`url` 的变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+| BigPanda `incident.status` | Flashduty 状态 | Flashduty 告警等级 |
+| :--- | :--- | :--- |
+| `critical` | 触发 | Critical |
+| `warning` | 触发 | Warning |
+| `unknown` | 触发 | Warning |
+| `ok` | 恢复 | — |
+
+`incident.status` 取 Incident 内所有关联告警中最严重的状态；`unknown` 表示 BigPanda 无法从关联告警判断健康状况，Incident 仍处于未恢复状态，因此按 Warning 处理。空值或未识别的 `status` 会被 Flashduty 拒绝。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check`、`resource`、`host` | 模板变量 `{{primaryAlert.tags.check}}`、`{{primaryAlert.tags.host}}` |
+| `incident_id` | `incident_id` |
+| `status` | `status` |
+| `env` | `environment`（`{{metadata.environment_name}}`） |
+| `url` | `url`（`{{links.console}}`，需要 BigPanda 登录才能打开） |
+| `source` | 固定为 `bigpanda` |
+
+告警标题优先使用 `check`；模板中的 `{{primaryAlert.tags.check}}` 为空时，退回使用 `description`。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="创建集成后一直没有收到任何请求？">
+
+Webhook v2 集成创建后不会自动接收数据，必须再创建一条指向它的 AutoShare 规则（见上方步骤二），并确认该规则覆盖了正确的 Environment。
+
+</Accordion>
+
+<Accordion title="Flashduty 返回参数错误？">
+
+确认请求体中的 `incident_id` 和 `status` 字段名与本页模板完全一致，且 `status` 取值为 `critical`、`warning`、`unknown`、`ok` 之一。BigPanda 会把模板变量自动转换为对应的 JSON 类型，如果手动修改过模板，请保持每个字段都是形如 `"字段名": "{{变量}}"` 的写法。
+
+</Accordion>
+
+<Accordion title="告警没有恢复？">
+
+确认 AutoShare 规则覆盖的 Environment 和产生告警时一致；BigPanda 只在 Incident 内所有关联告警都恢复后才会把 `incident.status` 置为 `ok`，如果只有部分告警恢复，Incident 会保持在 `warning`。
+
+</Accordion>
+
+<Accordion title="能否只创建一次集成，给多个 AutoShare 规则复用？">
+
+可以。Webhook v2 集成和 AutoShare 规则是分开的，同一个集成可以被多条 AutoShare 规则共用；如果需要按环境路由到 Flashduty 的不同协作空间，请为每个环境创建独立的 Flashduty 集成和对应的 AutoShare 规则。
+
+</Accordion>
+</AccordionGroup>
+
+更多字段说明请参阅 BigPanda 官方文档 [Notifications Webhook v2](https://docs.bigpanda.io/en/notifications-webhook-v2.html) 和 [AutoShare](https://docs.bigpanda.io/en/autoshare--adr-.html)。

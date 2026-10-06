@@ -1,0 +1,130 @@
+---
+title: "HetrixTools 告警集成"
+description: "通过联系人列表的 Webhook 将 HetrixTools 可用性监控、服务器资源告警和黑名单监控通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "HetrixTools", "Webhook", "可用性监控", "黑名单监控"]
+---
+
+通过 HetrixTools 联系人列表（Contact List）的 Webhook 将监控通知同步到 Flashduty On-call。同一个推送地址接收三类通知：
+
+- **可用性监控（Uptime Monitoring）**：每个监控对应一条 Flashduty 告警，监控离线时触发，恢复在线时自动恢复
+- **服务器资源告警（Server Monitoring Resource Usage）**：每次通知生成一条告警，需要手动关闭
+- **黑名单监控（Blacklist Monitoring）**：每个 IP 或域名的变化生成一条告警，需要手动关闭
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **HetrixTools**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **HetrixTools**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 HetrixTools 中配置
+---
+
+<Steps>
+<Step title="创建联系人列表">
+
+1. 登录 HetrixTools，在左侧菜单选择 **Contact Lists**
+2. 点击 **Add New Contact List**，**Contact List Name** 可填写 `Flashduty`
+3. 展开 **Webhook** 区域，在 **Webhook URL** 中粘贴 Flashduty 集成的完整推送地址。可选的认证 Token 不需要填写，Flashduty 通过推送地址中的 `integration_key` 识别集成
+4. 打开 Webhook 区域标题栏上的 **Send test notification**，可选 **Blacklist Monitoring**、**Uptime Monitoring** 和 **Server Resource Usage** 三种测试通知，Flashduty 对每一种都返回成功，不会生成告警
+5. 点击 **Add Contact List** 保存
+
+</Step>
+
+<Step title="将联系人列表分配给监控">
+
+HetrixTools 按联系人列表投递通知：只有分配了该联系人列表的监控才会推送到 Flashduty。
+
+- **可用性监控**：编辑需要告警的 Uptime Monitor，在联系人列表中选择 `Flashduty` 并保存
+- **服务器资源告警**：把 Server Monitor 关联到上面的 Uptime Monitor，安装服务器 Agent 并配置资源使用告警（Resource Usage Warnings），资源告警通过该 Uptime Monitor 的联系人列表发出
+- **黑名单监控**：编辑 Blacklist Monitor，在联系人列表中选择 `Flashduty` 并保存
+
+</Step>
+
+<Step title="验证生命周期">
+
+1. 让一个已分配联系人列表的可用性监控真正失败（例如把网站监控的地址暂时改成不可访问的地址），确认 Flashduty 收到活动告警
+2. 改回监控配置，等待监控恢复在线，确认原告警恢复
+
+</Step>
+</Steps>
+
+<Tip>
+黑名单监控通知不是实时发送的：HetrixTools 会按账号设置把一段时间内的变化合并发送（最短每 1 小时一次），并遵守联系人列表的免打扰时段。一次请求最多包含 100 个 IP 或域名。
+</Tip>
+
+## Alert Key
+---
+
+**可用性监控**：Flashduty 用 `monitor_id`（HetrixTools 监控 ID）计算 Alert Key。同一个监控的离线（`offline`）和在线（`online`）通知携带相同的 `monitor_id`，因此会落在同一条告警上；持续离线期间的重复通知也会合并到这条告警。监控名称、地址、分类、时间和失败位置的变化都不会改变 Alert Key。请求缺少 `monitor_id` 时 Flashduty 会拒绝，因为无法关联后续恢复。
+
+**服务器资源告警和黑名单监控**：HetrixTools 不会为这两类通知发送恢复消息，Flashduty 为每次通知（黑名单通知中的每个 IP 或域名）生成一条独立告警，处理后请手动关闭。
+
+## 状态和告警等级
+---
+
+可用性监控按 `monitor_status` 处理：
+
+| HetrixTools `monitor_status` | Flashduty 处理 |
+| :--- | :--- |
+| `offline` | 触发或更新告警，等级为 Critical |
+| `online` | 恢复告警 |
+
+空值或其他 `monitor_status` 会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+服务器资源告警按 `resource_usage.resource_type` 定级：
+
+| HetrixTools `resource_type` | Flashduty 等级 |
+| :--- | :--- |
+| `cpu`、`ram`、`disk`、`network_inbound`、`network_outbound` | Warning |
+| `agent`（Agent 未上报数据）、`drive health`、`raid`、`service`（服务停止） | Critical |
+| 其他值 | Critical |
+
+黑名单监控按 `blacklisted_now` 定级：大于 0（仍在黑名单中）为 Warning，等于 0（已从所有黑名单移除）为 Info。
+
+## 告警内容
+---
+
+**可用性监控**
+
+- **标题**：`<监控名称> is offline` 或 `<监控名称> is online`
+- **描述**：各探测位置的错误（`monitor_errors`），每行一个位置
+- **标签**：`check`（监控名称）、`resource`（监控地址 `monitor_target`）、`source`（固定为 `hetrixtools`）、`notification`（固定为 `uptime`）、`monitor_id`、`monitor_type`、`monitor_category`、`monitor_status`
+
+**服务器资源告警**
+
+- **标题**：`<监控名称>: <resource_type> usage warning`；没有使用率数据的通知为 `<监控名称>: <resource_type> warning`
+- **描述**：当前使用率和平均使用率，或 `error` 中的错误
+- **标签**：`check`、`source`、`notification`（固定为 `resource_usage`）、`monitor_id`、`resource_type`、`current_usage`、`average_usage`、`average_minutes`、`error`
+
+**黑名单监控**
+
+- **标题**：`<IP 或域名> (<标签>) is listed on <数量> blacklists` 或 `<IP 或域名> (<标签>) is no longer blacklisted`
+- **描述**：命中的黑名单和对应的移除（delist）链接，每行一个
+- **标签**：`check`（监控标签）、`resource`（IP 或域名）、`source`、`notification`（固定为 `blacklist`）、`blacklisted_before`、`blacklisted_now`、`blacklisted_on`（逗号分隔）、`report_link`
+
+## 排查问题
+---
+
+- **HetrixTools 投递失败**：确认 Webhook 填写的是完整推送地址且包含 `integration_key`
+- **Flashduty 返回参数错误**：可用性和资源告警通知需要 `monitor_id`，可用性通知的 `monitor_status` 需为 `offline` 或 `online`；黑名单通知中每一项需要 `monitor`
+- **没有收到告警**：确认监控已分配包含 Flashduty Webhook 的联系人列表；资源告警需要所关联的 Uptime Monitor 分配该联系人列表
+- **告警没有恢复**：只有可用性监控会自动恢复；确认监控已真正恢复在线，且恢复时仍分配了该联系人列表
+
+字段含义请参阅 HetrixTools 文档：[Uptime Monitoring Webhook Notifications](https://docs.hetrixtools.com/uptime-monitoring-webhook-notifications/)、[Server Monitoring Resource Usage Webhook Notifications](https://docs.hetrixtools.com/server-monitoring-resource-usage-webhook-notifications/)、[Blacklist Monitoring Webhook Notifications](https://docs.hetrixtools.com/blacklist-monitoring-webhook-notifications/)。

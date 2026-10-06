@@ -1,0 +1,136 @@
+---
+title: "StatusCake 告警集成"
+description: "通过通知组 Webhook 将 StatusCake Uptime 测试的宕机和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "StatusCake", "Uptime", "Notification Group", "Contact Group", "Webhook", "TestID"]
+---
+
+通过 StatusCake 通知组（Notification Group，旧版界面称 Contact Group）的 Webhook，把 Uptime 测试的宕机（`Down`）和恢复（`Up`）通知同步到 Flashduty On-call。每个 StatusCake 测试对应一条 Flashduty 告警：测试宕机时触发，重复宕机通知合并到同一条告警，测试恢复时关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **StatusCake**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **StatusCake**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 StatusCake 中配置
+---
+
+<Steps>
+<Step title="创建通知组">
+
+1. 登录 StatusCake，进入 **Alerting → Notification Groups**，点击 **New Notification Group**（通知组即旧版界面中的 Contact Group）
+2. **Group Name** 可填写 `Flashduty`
+3. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
+4. **Webhook Method** 保持 **POST**（默认值）
+5. 可点击 **Webhook URL** 旁的 **Test** 验证地址：Flashduty 返回成功，不会创建告警
+6. 点击保存
+
+<Note>
+StatusCake 免费版只向账号邮箱发送告警，通过 Webhook 推送需要付费套餐（Superior 及以上，可先开通免费试用）。
+</Note>
+
+</Step>
+
+<Step title="关联 Uptime 测试">
+
+编辑需要接入的 Uptime 测试，在 **Who to Alert (Contact Groups)** 中选择刚创建的 `Flashduty` 通知组并保存。一个通知组可以关联多个测试。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个测试真正宕机（例如临时指向一个不可访问的地址），确认 Flashduty 收到活动告警；再恢复测试目标，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+Webhook Method 必须选择 **POST**。选择 GET 时 StatusCake 只会请求 URL，不带请求体，Flashduty 无法获得测试 ID 和状态。
+</Warning>
+
+## 推送内容
+---
+
+StatusCake 以 `application/x-www-form-urlencoded` 表单格式 POST 以下字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `TestID` | 测试 ID | Alert Key，标签 `test_id` |
+| `Name` | 测试名称 | 告警标题，标签 `check` |
+| `Status` | `Down` 或 `Up` | 触发或恢复，标签 `status` |
+| `StatusCode` | 返回的 HTTP 状态码，超时为 `0` | 标签 `status_code` |
+| `URL` | 被测地址 | 标签 `url`、`resource` |
+| `IP` | 被测 IP | 标签 `ip` |
+| `Tags` | 测试标签，逗号分隔 | 标签 `tags` |
+| `Checkrate` | 检查间隔（秒） | 标签 `check_rate` |
+| `Token` | 用户名和 API Key 的 MD5 | 不保存 |
+
+告警标题使用测试名称；测试名称为空时依次使用被测地址、`StatusCake test <TestID>`。
+
+## Alert Key
+---
+
+Flashduty 使用 `TestID` 作为 Alert Key。同一个测试的宕机、重复宕机和恢复通知携带相同的 `TestID`，因此会落在同一条告警上；不同测试即使名称和被测地址相同，也会生成不同的告警。修改测试名称、状态码或标签不会改变 Alert Key。
+
+请求中缺少 `TestID` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+StatusCake 的通知不区分告警等级，Flashduty 统一按 Critical 处理。
+
+| StatusCake `Status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `Down` | Critical |
+| `Up` | 恢复，原等级为 Critical |
+
+`Status` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="重复告警会产生多条 Flashduty 告警吗？">
+
+不会。通知组开启了重复提醒（Repeat Alerts）时，测试持续宕机期间的每次通知都带相同的 `TestID`，会合并到同一条告警中。
+
+</Accordion>
+
+<Accordion title="SSL、PageSpeed、域名等其他类型的检查可以接入吗？">
+
+本集成按 Uptime 测试（含 Heartbeat）的 `Down` / `Up` 通知设计。其他类型的检查如果也通过通知组推送，只有请求中带 `TestID`，且 `Status` 为 `Down` 或 `Up` 时才会被接收，否则 Flashduty 返回参数错误。
+
+</Accordion>
+
+<Accordion title="通知组测试成功，但真实告警没收到？">
+
+通知组的测试只验证地址可达。请确认测试已关联该通知组、测试没有暂停，并且宕机持续时间达到了测试的确认次数（Confirmation）。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **StatusCake 推送失败**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认 Webhook Method 为 POST，且请求中的 `TestID`、`Status` 非空
+- **告警没有恢复**：确认测试恢复时仍关联同一个通知组；恢复通知与宕机通知的 `TestID` 必须相同
+
+字段说明请参阅 StatusCake 官方文档 [How To Use The Web Hook URL](https://www.statuscake.com/kb/knowledge-base/how-to-use-the-web-hook-url/)。

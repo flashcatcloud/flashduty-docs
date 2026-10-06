@@ -1,0 +1,117 @@
+---
+title: "Logpoint 告警集成"
+description: "通过 Logpoint（Guardsix）告警规则的 HTTP Notification 将触发的告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Logpoint", "Guardsix", "SIEM", "HTTP Notification", "alertrule_id"]
+---
+
+通过 Logpoint（Guardsix）告警规则的 HTTP Notification 将规则触发同步到 Flashduty On-call。每条告警规则对应一条 Flashduty 告警。
+
+Logpoint 只在规则触发时发送通知，没有对应的恢复通知，因此告警不会自动恢复。请在协作空间中开启超时自动关闭，见下文 [告警不会恢复](#告警不会恢复)。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Logpoint**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Logpoint**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Logpoint 中配置
+---
+
+Logpoint 的 HTTP Notification 没有固定报文，Body 由您填写的 Jinja 模板决定。Flashduty 只解析下面的模板。
+
+<Steps>
+<Step title="打开告警规则的通知设置">
+
+在 Logpoint 中进入 **Settings** → **Knowledge Base** → **Alert Rules**，找到需要通知的告警规则，点击操作列的 **Setup Notification** 图标。也可以勾选多条规则，在 **MORE** 下拉菜单中选择 **Setup Notifications of Selected Alert Rules**。
+
+</Step>
+
+<Step title="配置 HTTP Notification">
+
+1. 点击 **HTTP Notification**，选择 **Notify via HTTP**
+2. **Notification Trigger** 选择 **Automatic**（每次规则触发都发送）
+3. **Protocol** 选择 **HTTPS**，**Base URL** 填写推送地址中的域名部分，**Request Type** 选择 **POST**
+4. **Query String** 填写推送地址中 `?` 之后的部分（包含 `integration_key`）
+5. 在 **Body** 中粘贴下面的模板
+6. 设置 **Threshold**，点击 **Finish**
+
+```json
+{
+  "alertrule_id": "{{alertrule_id}}",
+  "alert_name": "{{alert_name}}",
+  "risk_level": "{{risk_level}}",
+  "incident_id": "{{incident_id}}",
+  "attack_category": "{{attack_category}}",
+  "attack_tag": "{{attack_tag}}",
+  "logpoint_name": "{{logpoint_name}}",
+  "log_source": "{{log_source}}",
+  "user_id": "{{user_id}}",
+  "rows_count": "{{rows_count}}",
+  "search_link": "{{search_link}}",
+  "detection_timestamp": "{{detection_timestamp}}"
+}
+```
+
+<Warning>
+`alertrule_id` 必须保留，缺少时 Flashduty 会拒绝请求。Logpoint 直接替换占位符文本，规则名称或其他值中含双引号会破坏 JSON，可删除对应字段或避免在规则名称中使用双引号。
+</Warning>
+
+</Step>
+
+<Step title="验证">
+
+触发该告警规则（或等待其命中），确认 Flashduty 收到一条告警，标题为规则名称。Logpoint 的 HTTP Notification 没有测试按钮。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `alertrule_id`（`{{alertrule_id}}`）作为 Alert Key。Logpoint 文档将其定义为“告警的 ID”。同一条规则再次触发会合并到仍未关闭的同一条告警；`incident_id` 每次触发都会变化，只作为标签。规则名称、风险等级和命中数量的变化不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+Flashduty 按 `risk_level`（`{{risk_level}}`）映射等级：
+
+| `risk_level` | Flashduty 等级 |
+| :--- | :--- |
+| `critical`、`high` | Critical |
+| `medium` | Warning |
+| `low` | Info |
+| 为空或其他值 | Warning |
+
+Logpoint 文档未列出 `risk_level` 的完整取值，其示例使用 `medium` 和 `high`，`critical` 与 `low` 按规则编辑页的风险选项推断。
+
+## 告警不会恢复
+---
+
+Logpoint 触发后不会发送恢复通知。请在接收该集成的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时，并按团队处理告警的时效调整。
+
+## 排查问题
+---
+
+- **Logpoint 没有发出请求**：确认通知的 Notification Trigger 为 **Automatic**，且规则已启用并真正命中
+- **Flashduty 返回参数错误**：确认 Body 是有效 JSON 且保留了 `alertrule_id`；日志源或规则名称含双引号时会破坏 JSON
+- **告警标题是 `Logpoint alert <id>`**：`alert_name` 为空或未被渲染，检查模板中的占位符拼写
+- **告警一直不关闭**：属于预期，请开启超时自动关闭
+
+更多占位符请参阅 [Logpoint Reserved Jinja Placeholders](https://archive-docs.guardsix.com/docs/alerts-and-incident/en/release-7.8.0/Logpoint%20Reserved%20Jinja%20Placeholders.html) 和 [Alert Notifications](https://archive-docs.guardsix.com/docs/alerts-and-incident/en/release-7.8.0/Alert/Setting%20Up%20Alert%20Notifications.html)。

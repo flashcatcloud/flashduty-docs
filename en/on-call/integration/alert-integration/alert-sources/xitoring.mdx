@@ -1,0 +1,135 @@
+---
+title: "Xitoring alert integration"
+description: "Send Xitoring down and up notifications to Flashduty On-call through a notification role webhook."
+keywords: ["alert integration", "Xitoring", "Notification Role", "webhook", "Uptime", "server monitoring"]
+---
+
+Use a Xitoring notification role webhook to send check and server metric down and up notifications to Flashduty On-call. The down and up notifications of one check or metric trigger map to one Flashduty alert: the alert triggers when it goes down, repeated notifications merge into it, and it recovers when the check is up again.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, choose **Channels** and open a channel
+2. Choose **Settings** → **Integrations** → **Dedicated integrations**, and click **Add an integration**
+3. Select **Xitoring** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, choose **Integration Center → Alert Events**
+2. Select **Xitoring** and enter an integration name
+3. Configure the default route and pick a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Xitoring
+---
+
+<Steps>
+<Step title="Create a notification role">
+
+1. Sign in to Xitoring, open the **Notification Roles** page, and create a new notification role or edit an existing one
+2. Open the role's **Automation & webhooks** tab, turn on **Webhook**, and paste the full push URL of the Flashduty integration into **Webhook URL**
+3. Click **Save changes**, then click **Send test** and confirm the dialog to verify the URL: Flashduty returns success and creates no alert. Send test notifies every channel of every role, so use a role that only you receive
+
+<Note>
+The trial plan allows one notification role (`default`); edit it instead of creating a new one.
+</Note>
+
+</Step>
+
+<Step title="Attach the role to triggers">
+
+Edit the check or server metric trigger you want to connect and select the role in its notification roles. A trigger can use several roles, and a role can be used by several triggers.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a check actually go down (for example, point it at an unreachable address) and confirm Flashduty receives an active alert. Then restore the target and confirm the alert recovers.
+
+</Step>
+</Steps>
+
+## Payload fields
+---
+
+Xitoring POSTs these fields as `application/x-www-form-urlencoded`. Flashduty parses them directly, with no template to configure:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `id` | Incident ID | Label `incident_id`; not part of the Alert Key |
+| `group` / `sub_group` | Group and sub-group of the check or server | Labels `group`, `sub_group` |
+| `server_id` | Server ID | Alert Key, label `server_id` |
+| `check_id` | Check ID | Alert Key, label `check_id` |
+| `label` | Server or check name | Alert title, labels `check`, `resource` |
+| `name` | Trigger name, such as `total` or `used` | Alert Key, label `trigger` |
+| `type` | Numeric type code, such as `20` for Ping | Alert Key; decides severity |
+| `type_human_readable` | Type name, such as `ping` | Alert title, label `type` |
+| `unit` / `value` | Metric unit and value at trigger time | Labels `unit`, `value` |
+| `status` | `0` down, `1` up | Trigger or recovery |
+| `message` | Notification body | Alert description |
+| `incident_time` | Incident time | Not stored |
+
+## Alert Key
+---
+
+Xitoring documents `id` as the incident ID but does not say whether the recovery notification reuses it. So Flashduty does not use `id`. It joins the resource fields that every notification carries (`server_id`, `check_id`, `type`, `name`) with a delimiter and takes the MD5 as the Alert Key. The down, repeated down, and recovery notifications of one check or metric trigger get the same Alert Key and land on one alert; different checks, servers, or triggers get different alerts. Changing the name, group, metric value, `id`, or time does not change the Alert Key.
+
+When both `server_id` and `check_id` are empty, or `type` is empty, Flashduty returns a parameter error because the recovery could not be matched to its alert reliably.
+
+## Status and severity
+---
+
+Xitoring notifications carry no severity, so Flashduty decides by check type:
+
+| Xitoring `type` | Flashduty severity | Why |
+| :--- | :--- | :--- |
+| `20`-`30` (Ping, HTTP(s), DNS, FTP, SMTP, POP3, IMAP, SSL, TCP, UDP, Heartbeat) | Critical | A down availability check means the service is unreachable |
+| Others (server metrics such as CPU, memory, disk; service checks such as Nginx, MySQL, Redis) | Warning | A metric crossed its limit; the service is not necessarily interrupted |
+
+| Xitoring `status` | Flashduty status |
+| :--- | :--- |
+| `0` | Triggered, with the severity above |
+| `1` | Recovered; the severity stays at the level it triggered with |
+
+Requests whose `status` is empty or any other value are rejected, so a request that cannot be classified never lands in the wrong alert lifecycle.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does the test notification create an alert?">
+
+No. Xitoring's test notification uses incident ID `0`. Flashduty recognizes it and returns success without creating an alert.
+
+</Accordion>
+
+<Accordion title="Do repeated notifications create more Flashduty alerts?">
+
+No. Xitoring re-sends notifications for an incident that is still open (the message carries a `[REPEATED]` marker). Their resource fields are the same, so they merge into one alert.
+
+</Accordion>
+
+<Accordion title="Is a second outage of the same check a new alert?">
+
+Two outages of the same check or trigger use the same Alert Key. After the earlier alert has recovered, a new outage creates a new alert under Flashduty's grouping rules; inside the grouping window it merges into the existing alert.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Xitoring fails to deliver**: confirm the webhook URL is the full push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: confirm `status` is `0` or `1`, `type` is not empty, and at least one of `server_id` and `check_id` is not empty
+- **The alert does not recover**: confirm the recovery notification goes to the same notification role and that its `server_id`, `check_id`, `type`, and `name` match the down notification
+
+For field details, see the Xitoring documentation [Webhook](https://xitoring.com/docs/notifications/notification-roles/webhook/).

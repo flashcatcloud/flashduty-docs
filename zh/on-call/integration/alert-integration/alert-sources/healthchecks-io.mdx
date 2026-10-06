@@ -1,0 +1,163 @@
+---
+title: "Healthchecks.io 告警集成"
+description: "通过 Webhook 将 Healthchecks.io 检查的宕机和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Healthchecks.io", "Cron", "心跳监控", "Webhook"]
+---
+
+通过 Healthchecks.io 的 Webhook 集成，把检查（Check）的宕机（`down`）和恢复（`up`）通知同步到 Flashduty On-call。每个检查对应一条 Flashduty 告警：检查超时未收到 ping 或收到失败信号时触发，检查重新收到 ping 时关闭这条告警。
+
+自建的 Healthchecks 需要 v3.5 或更高版本，因为下面的模板用到了 `$NAME_JSON`、`$BODY_JSON` 和 `$SLUG` 占位符。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Healthchecks.io**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Healthchecks.io**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Healthchecks.io 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 登录 Healthchecks.io，打开要接入的项目，切换到 **Integrations** 页签
+2. 找到 **Webhook**，点击 **Add Integration**
+3. 在 **Name** 中填写一个便于识别的名称，例如 `Flashduty`
+
+</Step>
+
+<Step title="配置宕机通知">
+
+在 **Execute when a check goes down** 区域：
+
+1. 方法选择 **POST**，把 Flashduty 集成的完整推送地址粘贴到 **URL**
+2. 把下面的 JSON 原样粘贴到 **Request Body**
+3. **Request Headers** 可以留空
+
+```json
+{
+  "code": "$CODE",
+  "status": "$STATUS",
+  "name": $NAME_JSON,
+  "slug": "$SLUG",
+  "tags": "$TAGS",
+  "now": "$NOW",
+  "exit_status": "$EXITSTATUS",
+  "last_ping_body": $BODY_JSON
+}
+```
+
+<Warning>
+`$NAME_JSON` 和 `$BODY_JSON` 两侧不要加引号，Healthchecks 渲染时会自己输出带引号的 JSON 字符串。请保留 `code` 和 `status`：缺少 `code` 或 `status` 不是 `down`、`up` 时，Flashduty 会拒绝请求，因为无法判断事件状态，也无法把恢复通知关联到原告警。
+</Warning>
+
+</Step>
+
+<Step title="配置恢复通知">
+
+在 **Execute when a check goes up** 区域重复上一步：方法选择 **POST**，填写同一个推送地址，粘贴同一段 JSON。模板中的 `$STATUS` 会渲染为 `up`，Flashduty 据此关闭告警。只配置宕机通知时，Flashduty 告警不会自动恢复。
+
+点击 **Save Integration** 保存。
+
+</Step>
+
+<Step title="关联检查">
+
+新建的集成会自动关联项目中已有的检查，在控制台新建的检查也会自动关联项目中的所有集成。如果某个检查没有关联（例如之前手动关闭过，或通过 API 创建时没有指定 `channels`），在检查详情页的 **Notification Methods** 中打开这个 Webhook 集成。
+
+</Step>
+
+<Step title="验证">
+
+在 **Integrations** 页签点击该集成的 **Test!**，Healthchecks 会用一个名为 `TEST` 的模拟检查发送一次宕机通知。Flashduty 返回成功，但不会创建告警，因此可用来确认推送地址和请求体配置正确。
+
+要验证完整流程，可以让一个检查真正宕机（例如调用 `https://hc-ping.com/<uuid>/fail`），确认 Flashduty 收到活动告警；再调用 `https://hc-ping.com/<uuid>` 发送一次成功 ping，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+| 字段 | 占位符 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- | :--- |
+| `code` | `$CODE` | 检查的 UUID | Alert Key，标签 `check_code` |
+| `status` | `$STATUS` | 检查的新状态，`down` 或 `up` | 告警状态，标签 `status` |
+| `name` | `$NAME_JSON` | 检查名称 | 告警标题，标签 `check` |
+| `slug` | `$SLUG` | 检查的 slug | 标签 `check_slug` |
+| `tags` | `$TAGS` | 检查标签，空格分隔 | 标签 `check_tags` |
+| `now` | `$NOW` | 状态变化时间（UTC，ISO 8601） | 标签 `flipped_at` |
+| `exit_status` | `$EXITSTATUS` | 最近一次 ping 上报的退出码，未上报时为 `-1` | 标签 `exit_status` |
+| `last_ping_body` | `$BODY_JSON` | 最近一次 ping 的请求体，例如任务输出 | 告警描述，超过 8 KB 时截断 |
+
+告警标题使用检查名称；名称为空时依次使用 slug、`Healthchecks.io check <code>`。每条告警还带有标签 `source=healthchecks-io`。
+
+## Alert Key
+---
+
+Flashduty 使用 `$CODE`（即 `code`，检查的 UUID）作为 Alert Key。同一个检查的宕机和恢复通知携带相同的 UUID，因此会落在同一条告警上；不同检查即使名称相同，也会生成不同的告警。修改检查名称、slug 或标签不会改变 Alert Key。
+
+删除后重新创建的检查会得到新的 UUID，与旧告警不再关联。
+
+## 状态和告警等级
+---
+
+Healthchecks.io 的通知不区分严重程度，Flashduty 按下表映射：
+
+| Healthchecks `$STATUS` | 含义 | Flashduty 状态或等级 |
+| :--- | :--- | :--- |
+| `down` | 检查超时未收到 ping，或收到失败信号 | Critical |
+| `up` | 检查重新收到成功 ping | 恢复，原等级为 Critical |
+
+空值或其他 `status` 会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="检查持续宕机时会重复推送吗？">
+
+不会。Healthchecks.io 只在检查状态变化时发送一次通知：进入 `down` 时一次，回到 `up` 时一次。
+
+</Accordion>
+
+<Accordion title="Test! 按钮为什么没有产生告警？">
+
+测试通知来自一个名称为 `TEST`、slug 为空、UUID 每次随机生成的模拟检查。这样的告警永远不会收到恢复通知，所以 Flashduty 只返回成功，不创建告警。如果您确实有一个名为 `TEST` 的检查，请保留它的 slug（Healthchecks 默认会根据名称生成），否则它的通知也会被当作测试忽略。
+
+</Accordion>
+
+<Accordion title="推送失败时会重试吗？">
+
+会。Healthchecks.io 单次请求超时为 30 秒；返回 200、201、202、204 以外的状态码或连接失败时，最多共尝试 3 次。3 次都失败时通知丢失，如果丢的是恢复通知，对应告警需要手动关闭。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认方法为 POST，请求体是上面的 JSON，`code` 和 `status` 保留原样
+- **JSON 解析失败**：检查标签中是否包含双引号或反斜杠。`$TAGS` 会原样插入，这类字符会让请求体不再是合法 JSON；请修改标签，或从模板中删除 `tags` 一行
+- **自建 Healthchecks 请求体里出现 `$NAME_JSON` 或 `$SLUG` 原文**：版本过低，不支持这些占位符，请升级到 v3.5 或更高版本
+- **告警没有恢复**：确认 **Execute when a check goes up** 区域也填写了推送地址和请求体
+- **收不到任何通知**：确认检查的 **Notification Methods** 中已打开该集成；自建 Healthchecks 还需确认 `WEBHOOKS_ENABLED` 未被关闭
+
+更多占位符说明请参阅 Healthchecks.io 添加 Webhook 集成页面中的 **Supported Placeholders**。

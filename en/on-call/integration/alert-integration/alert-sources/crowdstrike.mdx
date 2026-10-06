@@ -1,0 +1,127 @@
+---
+title: "CrowdStrike Falcon alert integration"
+description: "Send EPP and NG-SIEM detections to Flashduty On-call through the Cloud HTTP Request action of a CrowdStrike Falcon Fusion SOAR workflow."
+keywords: ["alert integration", "CrowdStrike", "Falcon", "Fusion SOAR", "EDR", "NG-SIEM", "webhook"]
+---
+
+CrowdStrike Falcon has no built-in generic alert webhook: detection notifications go out through a **Falcon Fusion SOAR** workflow, and the request body is entirely user-authored inside that workflow. This integration provides two ready-to-paste workflow request body templates (NG-SIEM detection, EPP detection) built from the trigger fields CrowdStrike's own Fusion documentation marks "release-verified" (checked to exist when the workflow is released).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **CrowdStrike** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **CrowdStrike** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure CrowdStrike Falcon
+---
+
+The steps below need permission to create and release (publish) Fusion SOAR workflows in the Falcon console. The NG-SIEM Detection trigger needs the Next-Gen SIEM module; the EPP Detection trigger needs Falcon Insight/Prevent endpoint detection. The Falcon cloud must be able to reach the domain of the push URL.
+
+<Steps>
+<Step title="Create the NG-SIEM detection workflow">
+
+1. Sign in to the Falcon console, go to **Fusion SOAR → Workflows** (some tenants show this as **NEXT-GEN SIEM → Automated workflows**), and click **Create workflow**
+2. Set the trigger to **Detection → NG-SIEM Detection**
+3. Add a **Cloud HTTP Request** action:
+   - Method: `POST`
+   - URL: the push URL you copied above (including `?integration_key=...`)
+   - Headers: add `Content-Type: application/json`
+   - Body (content type JSON):
+
+     ```json
+     {
+       "detection_id": "${data['Trigger.Detection.DetectionID']}",
+       "name": "${data['Trigger.Detection.Name']}",
+       "severity": "${data['Trigger.Detection.SeverityDisplayName']}",
+       "product": "NGSIEM",
+       "source_url": "${data['Trigger.SourceEventURL']}"
+     }
+     ```
+
+4. Save and **Release** the workflow — a workflow left as a draft never runs
+
+Do not rename the fields; `detection_id` must stay in the body.
+
+Fusion inserts `${...}` values verbatim into the JSON string, and no JSON-escape function is documented. If a free-text field such as the detection name contains a double quote `"` or a backslash `\`, the body is no longer valid JSON and that push is rejected with 400. Only `detection_id` and `severity` are required; `name` is optional (when omitted the alert title is `CrowdStrike detection`), so if detection names may contain such characters, remove the `name` line from the body.
+
+</Step>
+
+<Step title="(Optional) Create the EPP detection workflow">
+
+To also ingest endpoint protection (EPP) detections, repeat the previous step for a second workflow, this time with the trigger **Detection → EPP Detection**, and this body:
+
+```json
+{
+  "detection_id": "${data['Trigger.Detection.DetectionID']}",
+  "name": "${data['Trigger.Detection.Name']}",
+  "severity": "${data['Trigger.Detection.SeverityDisplayName']}",
+  "product": "EPP",
+  "hostname": "${data['Trigger.Detection.EPP.Sensor.Hostname']}",
+  "process_sha256": "${data['Trigger.Detection.EPP.Process.SHA256']}",
+  "ioc_value": "${data['Trigger.Detection.EPP.Behavior.IOCValue']}",
+  "ioc_type": "${data['Trigger.Detection.EPP.Behavior.IOCType']}"
+}
+```
+
+</Step>
+
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the `detection_id` field of the request body as the Alert Key. It maps to the Falcon Fusion trigger variable `${data['Trigger.Detection.DetectionID']}` — CrowdStrike's own Fusion workflow authoring reference calls this path "release-verified" (checked to exist at release time), and both the NG-SIEM and EPP detection triggers return it in the same composite-ID format for the same detection.
+
+- Repeated deliveries for the same detection (for example, a severity escalation from High to Critical) land on the same alert
+- Different detections (different `detection_id`) never merge
+
+Flashduty rejects a request that is missing `detection_id`, or whose `severity` is not one of Critical/High/Medium/Low/Informational.
+
+Falcon Fusion has no "detection closed" trigger that carries the detection ID, so this integration is one-shot: Flashduty does not close an alert when the detection is closed in Falcon. **Turn on [auto-close](/en/on-call/channel/create-edit) for the channel (24 hours is a reasonable default for security detections).** A repeat of the same detection inside that window refreshes the same alert.
+
+## Severity mapping
+---
+
+| CrowdStrike `severity` (SeverityDisplayName) | Flashduty level |
+| :--- | :--- |
+| `Critical` | **Critical** |
+| `High` | **Critical** |
+| `Medium` | **Warning** |
+| `Low` | **Info** |
+| `Informational` | **Info** |
+| (empty) | **Warning** |
+
+## Alert content
+---
+
+- **Title**: `name` (the detection name), falling back to `CrowdStrike detection` when empty
+- **Labels**: `detection_id`, `product` (`NGSIEM` or `EPP`), `severity_raw` (the raw `severity` value); the NG-SIEM template also sends `source_url`; the EPP template also sends `resource`/`host` (`hostname`), `process_sha256`, `ioc_value`, `ioc_type`
+
+Empty fields are not written as labels.
+
+## Troubleshooting
+---
+
+- **The workflow shows no error, but Flashduty never receives an alert**: confirm the workflow was **Released**, not just saved as a draft — a draft workflow never runs
+- **The HTTP Action fails with a 400 in the logs**: check that the body field names match the templates above exactly; the response names the missing or unsupported field (for example `detection_id is required`)
+- **The HTTP Action reports "unknown variable" or "property ... contains unknown variable"**: that variable path isn't available for your detection type or trigger; use the Falcon console's variable picker to find the field your trigger actually exposes and substitute it
+- **The alert never closes**: this integration never receives a close event; turn on the channel's auto-close as described under Alert Key
+
+See CrowdStrike's own resources: [Build API integrations with Falcon Fusion SOAR HTTP Actions](https://www.crowdstrike.com/tech-hub/ng-siem/build-api-integrations-with-falcon-fusion-soar-http-actions/) and the official GitHub repository [fusion-skills](https://github.com/CrowdStrike/fusion-skills) (trigger and HTTP Action field reference).

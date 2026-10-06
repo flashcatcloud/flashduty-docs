@@ -1,0 +1,134 @@
+---
+title: "Kener alert integration"
+description: "Send Kener monitor alerts for downtime, latency, and uptime to Flashduty On-call through a webhook trigger."
+keywords: ["alert integration", "Kener", "webhook", "status page", "monitoring", "self-hosted"]
+---
+
+Kener is an open-source status page and monitoring system. Use a Kener webhook trigger to send the alerts raised by its alert configurations to Flashduty On-call: when a monitor reaches the failure threshold, Flashduty triggers an alert, and when it reaches the success threshold, the alert recovers automatically.
+
+Kener's webhook body is a template you write in the trigger. This page provides a template you can use as-is, and Flashduty parses the fields of that template.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Kener**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Kener** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Kener
+---
+
+You need Kener 4.x and an account that can manage triggers and alert configurations in the admin console. The Kener server must be able to reach the Flashduty push URL.
+
+<Steps>
+<Step title="Create a webhook trigger">
+
+1. In the Kener admin console, open **Triggers** and create a trigger with **Trigger Type** set to **Webhook**
+2. Enter a **Trigger Name** and paste the complete Flashduty push URL into **URL**. The URL must include `integration_key`
+3. Leave **Headers** empty. Flashduty authenticates with the `integration_key` in the URL
+4. Replace **Webhook Body** with the following template:
+
+```json
+{
+  "alert_id": {{alert_id}},
+  "alert_name": "{{alert_name}}",
+  "alert_for": "{{alert_for}}",
+  "alert_value": "{{alert_value}}",
+  "alert_status": "{{alert_status}}",
+  "alert_severity": "{{alert_severity}}",
+  "alert_cta_url": "{{alert_cta_url}}",
+  "alert_incident_id": {{#alert_incident_id}}{{alert_incident_id}}{{/alert_incident_id}}{{^alert_incident_id}}null{{/alert_incident_id}},
+  "alert_failure_threshold": {{alert_failure_threshold}},
+  "alert_success_threshold": {{alert_success_threshold}},
+  "is_resolved": {{is_resolved}},
+  "is_triggered": {{is_triggered}}
+}
+```
+
+5. Save the trigger
+
+Kener renders the template without JSON escaping. The built-in default template includes `alert_message` (the Details text of the alert configuration) and the site name. A double quote or a line break in either one makes the body invalid JSON, and Flashduty rejects the request, so both the alert and its recovery are lost. Use the template above, which leaves those fields out.
+
+</Step>
+
+<Step title="Create an alert configuration and attach the trigger">
+
+1. Open **Alerts** and create an alert configuration. Select the **Monitors** to watch
+2. Select the **Alert Type** (`STATUS`, `LATENCY`, or `UPTIME`) and enter the matching value
+3. Set the **Failure Threshold** (consecutive failures before the alert triggers) and the **Success Threshold** (consecutive successes before it recovers)
+4. Select the **Severity** (`CRITICAL` or `WARNING`)
+5. Select the trigger you just created and save
+
+</Step>
+
+<Step title="Verify">
+
+1. Use the test button on the trigger page and confirm that Kener reports the request as sent. The test request is a fixed body built into Kener (alert ID `1`, severity `WARNING`, status randomly `TRIGGERED` or `RESOLVED`), and Flashduty handles it like any other alert: `TRIGGERED` creates or updates a Warning alert with Alert Key `1`, and `RESOLVED` recovers that alert, or creates nothing when no such alert is open. If the alert is still open after verifying, close it manually in Flashduty
+2. Make a monitored service fail and confirm that an active alert appears in Flashduty once the failure threshold is reached
+3. Restore the service and confirm that the alert recovers once the success threshold is reached
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the Kener `alert_id` as the Alert Key. Kener creates an alert record when a monitor reaches the failure threshold and updates the same record when it recovers, so the trigger and the recovery carry the same `alert_id`. If the same monitor goes down again, Kener creates a new `alert_id`, which is a new alert in Flashduty.
+
+Changes to the monitor name, severity, status, or value do not change the Alert Key. A request without `alert_id` is rejected. `alert_id` is unique only within one Kener instance, so connect only one Kener instance to each Flashduty integration.
+
+## Status and severity
+---
+
+| `alert_status` | Flashduty status |
+| :--- | :--- |
+| `TRIGGERED` | Triggered |
+| `RESOLVED` | Recovered |
+
+| `alert_severity` | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `WARNING` | Warning |
+| Anything else or empty | Warning |
+
+The alert title combines the monitor identifier, the alert type, and the value, for example `my-api STATUS: DOWN`.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` / `resource` | `alert_name`, the monitor tag |
+| `source` | Always `kener` |
+| `alert_id` | Kener alert record ID |
+| `alert_type` | `alert_for`: `STATUS`, `LATENCY`, or `UPTIME` |
+| `alert_value` | `alert_value`: `DOWN` or `DEGRADED` for status, the threshold in milliseconds for latency, the threshold percentage for uptime |
+| `alert_severity` / `alert_status` | The original Kener severity and status |
+| `incident_id` | The Kener incident linked to the alert, present only when the alert configuration creates incidents |
+| `alert_url` | Link to the monitor page in Kener |
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid-parameter error**: Confirm the URL is complete and includes `integration_key`, and that the trigger uses the template on this page. The response names the missing field
+- **The Kener trigger test fails**: The test result shows the HTTP status code or network error. Confirm the Kener server can reach the Flashduty push URL
+- **An alert does not recover**: Confirm the Success Threshold of the alert configuration has been met and the trigger is not disabled. Kener sends no recovery before the success threshold is reached
+- **No alert arrives**: Confirm the alert configuration is active and has this trigger attached
+
+For more on the variables, see [Kener alert templates](https://kener.ing/docs/v4/alerting/templates) and [Kener triggers](https://kener.ing/docs/v4/alerting/triggers).

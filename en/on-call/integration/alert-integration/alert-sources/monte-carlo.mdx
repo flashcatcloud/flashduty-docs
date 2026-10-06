@@ -1,0 +1,110 @@
+---
+title: "Monte Carlo alert integration"
+description: "Send anomaly events from the Monte Carlo data observability platform to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Monte Carlo", "data observability", "webhook", "incident_id"]
+---
+
+Use Monte Carlo's Webhook notification channel to send custom-rule breaches and system-detected data anomalies to Flashduty On-call. Each Monte Carlo incident maps to one Flashduty alert: it triggers when the incident is created, and recovers when its status is updated to fixed, expected, no action needed, or false positive.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Monte Carlo**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Monte Carlo** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Monte Carlo
+---
+
+<Steps>
+<Step title="Create a webhook audience">
+
+1. Open the [Notification Settings](https://getmontecarlo.com/settings/notifications) page in the Monte Carlo console
+2. Click **Create audience** and select **Webhook** as the channel
+3. Paste the Flashduty integration's full push URL into the webhook's URL field
+4. Secret is optional — Monte Carlo uses it to sign requests with HMAC SHA-512. Flashduty does not verify this signature, so you can leave it blank
+
+</Step>
+
+<Step title="Route alerts to the audience">
+
+A new audience receives nothing until you route alerts to it:
+
+- Add the audience to the **Audiences** or **Failure audiences** property of every monitor you want to connect (custom rules and system anomaly detectors alike), or select it directly in the **Send Notifications** step when creating a monitor
+- Each audience can be toggled per importance level: **High / Medium / Low / Not triaged**. Uncheck Low and Not triaged if you only want high-priority anomalies. Note: at least one audience must cover **Not triaged**, or untriaged anomalies reach nobody
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Let a monitor actually breach once and confirm Flashduty receives an active alert. Then, in Monte Carlo, change that alert's status to **Fixed** (or Expected / No action needed / False positive) and confirm the original alert recovers.
+
+Monte Carlo's official docs don't publish a webhook connectivity test button, and they don't show a full example payload for the recovery event above either — only the field names and possible values that change. Flashduty parses this event at the field position the docs' page layout implies. During initial setup, we recommend also enabling [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel as a safety net, and disabling it once you've confirmed recovery closes the alert correctly.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `payload.incident_id` as the Alert Key. Both example payloads in Monte Carlo's official docs (custom rule breach, volume anomaly) carry this field, and `payload.url` in the same payload is always `https://getmontecarlo.com/incidents/<incident_id>` — the address Monte Carlo's own console uses to locate that incident — which is how the docs imply this field stays the same throughout the incident's lifecycle. A request missing `incident_id` is rejected.
+
+## Status and severity
+---
+
+Alert status is decided by `payload.alert_feedback`: it recovers when the value is `fixed`, `expected`, `no_action_needed`, or `false_positive`, and stays active for every other value (`investigating`, `no_status`, `work_in_progress`, and so on).
+
+Alert severity is decided by `payload.declared_alert_severity`, which only appears once an alert has been manually marked as an incident with a severity level — most Monte Carlo alerts never go through that step:
+
+| Monte Carlo `declared_alert_severity` | Flashduty severity |
+| :--- | :--- |
+| `SEV-1` | Critical |
+| `SEV-2` | Critical |
+| `SEV-3` | Warning |
+| `SEV-4` | Info |
+| Empty or never declared (the default) | Warning |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `incident_id` | Incident ID, i.e. the Alert Key |
+| `incident_url` | Link to this incident in Monte Carlo |
+| `account_id` | Monte Carlo account ID |
+| `group_id` | Monte Carlo grouping ID (present for some anomaly types) |
+| `type` | The anomaly type that triggered this webhook, e.g. `open_custom_rule_anomaly_incident` |
+| `alert_feedback` | The status value carried by this delivery |
+| `declared_alert_severity` | The severity value carried by this delivery |
+| `table_name` | The related table name |
+| `metric_display_name` | The metric name for a custom-rule monitor |
+| `rule_type` | The rule type, e.g. `custom_sql` |
+| `event_details` | The description text from system anomaly detection |
+
+Monte Carlo's official docs describe the audience owner field as an email address; Flashduty does not write email addresses into labels, for privacy.
+
+## Troubleshooting
+---
+
+- **Monte Carlo reports the webhook call failed**: confirm the push URL is complete and includes `integration_key`
+- **Flashduty returns a parameter error**: confirm the audience is configured as a Webhook channel, and that Monte Carlo isn't sending a custom payload — Flashduty only parses the official fixed format
+- **Alert doesn't recover**: confirm the alert's status was actually changed to one of Fixed / Expected / No action needed / False positive. If recovery still doesn't fire, fall back to [auto-resolve timeout](/en/on-call/channel/create-edit) and contact Flashduty support with the delivery in question
+- **No alerts arrive at all**: check whether this audience was added to the target monitor's Audiences or Failure audiences, and whether its importance toggles cover the anomaly's actual level
+
+For more on field meanings, see [Monte Carlo Webhooks](https://docs.getmontecarlo.com/docs/webhooks) and [Creating and Routing Notification Audiences](https://docs.getmontecarlo.com/docs/notifications-v2).

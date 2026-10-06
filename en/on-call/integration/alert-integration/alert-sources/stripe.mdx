@@ -1,0 +1,180 @@
+---
+title: "Stripe alert integration"
+description: "Send Stripe dispute, failed payout, and early fraud warning events to Flashduty On-call through a webhook, and recover dispute alerts when Stripe closes the dispute."
+keywords: ["alert integration", "Stripe", "dispute", "chargeback", "failed payout", "early fraud warning", "Radar", "webhook"]
+---
+
+Use a Stripe webhook endpoint to send the payment events someone has to act on to Flashduty On-call:
+
+- **Disputes and inquiries** (`charge.dispute.*`): an alert opens when a cardholder disputes a charge or the issuer sends an inquiry, and recovers when Stripe closes the case (won, lost, or inquiry closed)
+- **Failed payouts** (`payout.failed`): an alert opens when a payout to a bank account or debit card fails
+- **Early fraud warnings** (`radar.early_fraud_warning.*`): an alert opens when a card issuer reports a payment as possibly fraudulent, and recovers once the payment is disputed or fully refunded
+
+Every Stripe account can create webhook endpoints, up to 16 per account.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Stripe** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Stripe** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Stripe
+---
+
+<Steps>
+<Step title="Create an event destination">
+
+You need a Stripe role that can manage webhooks, such as Administrator or Developer.
+
+1. Sign in to the Stripe Dashboard, open the [Webhooks](https://dashboard.stripe.com/webhooks) tab in Workbench, and click **Add destination**
+2. For **Events from**, select **Your account**. If you run a Connect platform and want events from connected accounts, select **Connected accounts** (create one destination for each scope if you need both)
+3. Keep the default **API version**. If you are asked to choose an event payload style, choose **Snapshot**: thin events do not contain the object, so Flashduty cannot parse them
+
+</Step>
+
+<Step title="Select events">
+
+Select the following events:
+
+| Event | Effect |
+| :--- | :--- |
+| `charge.dispute.created` | A dispute or inquiry is opened; opens an alert |
+| `charge.dispute.updated` | The dispute status changes (for example, it goes under review after you submit evidence); updates the alert |
+| `charge.dispute.funds_withdrawn` | The disputed amount is withdrawn from your balance; updates the alert |
+| `charge.dispute.closed` | The dispute is closed; recovers the alert |
+| `payout.failed` | A payout failed; opens an alert |
+| `radar.early_fraud_warning.created` | An early fraud warning is received; opens an alert |
+| `radar.early_fraud_warning.updated` | Recovers the alert when the warning is no longer actionable (the payment was disputed or fully refunded) |
+
+If the destination subscribes to other event types (for example `charge.succeeded`), Flashduty returns success and creates no alert. We recommend subscribing only to the events above.
+
+</Step>
+
+<Step title="Enter the push URL">
+
+1. Click **Continue** and select **Webhook endpoint** as the destination type
+2. For **Endpoint URL**, enter the full Flashduty push URL
+3. Optionally enter a **Destination name**, then click **Create destination**. Flashduty does not use the signing secret (starting with `whsec_`) shown on the endpoint page, so you do not need to copy it
+
+Webhook endpoints in test environments (sandbox or test mode) and in live mode are separate. To connect both, create an endpoint in each environment; they can use the same push URL.
+
+</Step>
+
+<Step title="Test">
+
+The **Send test events** button on the destination page only shows Stripe CLI instructions and sends nothing. Create real test events in a test environment in any of these ways:
+
+- Run `stripe trigger charge.dispute.created` with the [Stripe CLI](https://docs.stripe.com/cli)
+- Pay with test card `4000000000000259`: the payment succeeds and is then disputed as fraudulent. Pay with `4000000000005423` to receive an early fraud warning
+- Submit `winning_evidence` (or `losing_evidence`) as the dispute evidence: the dispute closes as won (or lost) and Flashduty recovers the alert. Fully refund the early-fraud-warning payment: Stripe sends `radar.early_fraud_warning.updated` with `actionable` set to `false` and Flashduty recovers the alert
+- `payout.failed` needs a failed payout. A sandbox does not accept test bank accounts in its own payout settings; on a Connect platform, pay out from a test connected account whose bank account uses account number `000111111116`, with a destination that receives **Connected accounts** events
+
+Test events have `livemode` set to `false`. Flashduty creates alerts for them as usual and adds the label `livemode=false`.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+Failed payouts have no recovery event, and an early fraud warning that is never disputed or refunded is not followed by another event. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest a timeout of **72 hours**, counted from **Incident trigger**. Closing the incident also closes its alerts.
+
+A dispute usually takes 2 to 3 months from creation to closure, and the auto-resolve timeout also closes incidents for disputes that are still open. To keep dispute alerts open until Stripe closes the dispute, use a shared integration and route alerts whose `object` label is `dispute` to a channel without the auto-resolve timeout.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Stripe sends one event (an Event object) per request, with the affected object in `data.object`:
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `type` | Event type | Alert status and severity, label `event_type` |
+| `livemode` | Whether the event is from live mode | Label `livemode` |
+| `account` | Connected account ID (Connect events only) | Label `account` |
+| `data.object.id` | ID of the dispute, payout, or warning | Alert Key, label `object_id` |
+| `data.object.object` | Object type: `dispute`, `payout`, or `radar.early_fraud_warning` | Label `object` |
+| `data.object.status` | Dispute or payout status | Alert status and severity, label `status` |
+| `data.object.reason` | Dispute reason | Alert title, label `reason` |
+| `data.object.amount`, `currency` | Amount (in the smallest currency unit, such as cents) and currency | Labels `amount`, `currency` |
+| `data.object.charge`, `payment_intent` | The related payment | Labels `charge`, `payment_intent` |
+| `data.object.evidence_details.due_by` | Deadline for submitting dispute evidence | Label `evidence_due_by` (UTC) |
+| `data.object.failure_code`, `failure_message` | Why the payout failed | Alert title and description, labels `failure_code`, `failure_message` |
+| `data.object.method`, `destination` | Payout method and destination account ID | Labels `method`, `destination` |
+| `data.object.fraud_type` | Fraud type | Alert title, label `fraud_type` |
+| `data.object.actionable` | Whether the warning still needs action | Alert status, label `actionable` |
+
+Every alert also carries the label `source=stripe`. Example titles: `Stripe dispute needs response: fraudulent`, `Stripe inquiry under review: general`, `Stripe payout failed: account_closed`, `Stripe early fraud warning: made_with_stolen_card`.
+
+## Alert Key
+---
+
+Flashduty uses `data.object.id` (the ID of the dispute, payout, or warning itself) as the Alert Key, not the event ID:
+
+- The created, funds_withdrawn, updated, and closed events for one dispute land on the same alert, which recovers when the dispute closes
+- The created and updated events for one early fraud warning land on the same alert
+- A dispute and an early fraud warning on the same payment are two alerts
+- Stripe retries failed deliveries (for up to 3 days in live mode) and occasionally sends two events for one change; these events merge into the original alert instead of creating duplicates
+
+## Status and severity
+---
+
+| Stripe event or status | Flashduty status or severity |
+| :--- | :--- |
+| Dispute status `needs_response`, inquiry status `warning_needs_response` | Critical |
+| Dispute status `under_review`, inquiry status `warning_under_review` | Warning |
+| `charge.dispute.closed`, or dispute status `won`, `lost`, `warning_closed`, or `prevented` | Recovered |
+| `payout.failed` | Critical |
+| Early fraud warning with `actionable` set to `true` | Warning |
+| Early fraud warning with `actionable` set to `false` | Recovered |
+| Other event types | No alert |
+
+A request is rejected if an event that creates an alert has no `data.object.id`.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why did a dispute not create an alert?">
+
+Some disputes cannot be challenged (for example, disputes on the Cartes Bancaires network), and Stripe closes them as `lost` at the time it notifies you. There is nothing to act on, so Flashduty treats the event as a recovery and does not open an alert. These disputes still appear in the disputes list in the Stripe Dashboard.
+
+</Accordion>
+
+<Accordion title="How do I receive only live-mode events?">
+
+Create the endpoint in live mode only. According to the Stripe documentation, a Connect platform's live-mode endpoint for **Connected accounts** also receives test events from connected accounts. Those alerts carry the label `livemode=false`, and you can route them to another channel by that label in a shared integration.
+
+</Accordion>
+
+<Accordion title="Do I need to configure the signing secret?">
+
+No. Flashduty identifies the integration by the `integration_key` in the push URL and does not verify the `Stripe-Signature` header. Keep the push URL as secret as a key.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Stripe shows failed deliveries (4xx)**: make sure the push URL is complete (it includes `integration_key`) and the event payload style is Snapshot
+- **Deliveries succeed but no alert appears**: make sure the event type is in the table above; other event types create no alert
+- **The alert does not recover after the dispute closes**: make sure the endpoint subscribes to `charge.dispute.closed`
+- **Check delivery history**: in Workbench, select the endpoint under **Webhooks** and open the **Event deliveries** tab to see each delivery's status code and resend events

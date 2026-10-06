@@ -26,7 +26,9 @@ AI SRE provides two types of Environments:
   </Card>
 </CardGroup>
 
-The default selection logic is: **AI SRE uses an online BYOC Runner that the current member can use first; otherwise it uses the cloud Sandbox.** Usable Runners include Shared-scope (account-level) Runners and team-scoped Runners that belong to one of the current member's teams. You can also pin a session to the cloud Sandbox, or to a specific Runner, from the environment selector in the chat input.
+When you don't specify an environment manually, the system picks one for each new session in this order: it first uses an online BYOC Runner under the team bound to the session; if no such Runner is available online, it falls back to an online Shared-scope (account-level) Runner; if neither is available, it uses the cloud Sandbox.
+
+You can also pin the session manually from the environment selector in the chat input: force the cloud Sandbox, or pin a specific Runner.
 
 <Note>
 The console record is called an **Environment**. The process running on your machine is called a **Runner**. One BYOC Environment maps to one Runner process; cloud Sandbox instances are managed by the system per session.
@@ -57,7 +59,7 @@ For lifecycle, egress boundaries, and session-selection details, see [Sandbox](/
 
 A cloud environment template is a reusable, predefined configuration for the Flashduty-managed cloud Sandbox: egress policy, environment variables, and a setup script. If a session's cloud Sandbox has no template bound, it starts with the system default configuration; once a template is bound, new Sandboxes start with that template's configuration.
 
-Go to **Environments** in the AI SRE sidebar and switch to the **Cloud** tab at the top to view, create, edit, or delete cloud environment templates.
+Go to **AI SRE → Customize → Environments → Cloud** to view, create, edit, or delete cloud environment templates.
 
 ### Create a cloud environment template
 
@@ -66,22 +68,24 @@ Go to **Environments** in the AI SRE sidebar and switch to the **Cloud** tab at 
 | Name | Yes | Must be unique within the account, up to 128 characters. |
 | Scope | Yes | Shared-scope templates are visible to the whole account. Team-scoped templates are visible and editable only by that team. |
 | Network access | No, defaults to "Allow all" | The dropdown shows three options — "Default allowlist," "Custom (your domain list)," and "Allow all" — but currently only **"Allow all"** can be selected. "Default allowlist" and "Custom" are shown in the UI but disabled; this is a known limitation, not yet available. In other words, creating or editing a cloud environment template today always leaves the Sandbox it's bound to with fully open egress. |
-| Environment variables | No | `.env` format (`KEY=value`, one per line, multi-line quoted values supported), up to 32 KB, with a live byte counter in the UI. Platform-reserved keys cannot be set here — see below. |
+| Environment variables | No | `.env` format (`KEY=value`, one per line, multi-line quoted values supported), up to 32 KB, with a live byte counter in the UI. |
 | Setup script | No | A Bash script, up to 64 KB, with a live byte counter in the UI. |
 
 <Warning>
 Environment variables are visible in plaintext to everyone who uses this cloud environment template — do not put secrets or credentials here.
 </Warning>
 
-<Note>
-**Platform-reserved keys cannot be set here.** These names are injected by the platform, and a template that sets one is rejected on save.
+**Platform-reserved environment variable names.** Some names are injected by the platform itself into the session's runtime environment, and a template may not set them — a template that does is **rejected at save time** (the server is the single source of truth for this list; a hint list in the UI can lag behind it):
 
-- Exact matches: `FLASHDUTY_APP_KEY`, `FLASHDUTY_BASE_URL`, `FLASHDUTY_DOCS_URL`, `GH_TOKEN`, `GH_PROMPT_DISABLED`, `PATH`, `HOME`;
-- The auth / host / TLS settings the GitLab CLI (`glab`) reads: `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, `GITLAB_HOST`, `GL_HOST`, `GITLAB_URI`, `GITLAB_API_HOST`, `GITLAB_SSH_HOST`, `GITLAB_SUBFOLDER`, `CA_CERT`, `SKIP_TLS_VERIFY`;
-- Prefix matches: `GIT_CONFIG_`, `GLAB_`, and `GH_TOKEN_` (the last covering extra-installation GitHub tokens such as `GH_TOKEN_1`, `GH_TOKEN_2`).
+| Reserved name | Notes |
+|---|---|
+| `FLASHDUTY_APP_KEY` / `FLASHDUTY_BASE_URL` | The Flashduty API credential and endpoint, used by the built-in `flashduty` skill and by the runtime. |
+| `FLASHDUTY_DOCS_URL` | The static address of the official docs bundle; the built-in `flashduty-docs` skill downloads its copy of the docs from here. |
+| `GH_TOKEN`, the `GH_TOKEN_` prefix, `GH_PROMPT_DISABLED`, the `GIT_CONFIG_` prefix | The GitHub-side token and git configuration the platform injects (an account can have more than one GitHub App installation, so names such as `GH_TOKEN_1` and `GH_TOKEN_2` are reserved too). |
+| `PATH` / `HOME` | The runtime environment's base variables. |
+| `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `OAUTH_TOKEN`, `GITLAB_HOST`, `GL_HOST`, `GITLAB_URI`, `GITLAB_API_HOST`, `GITLAB_SSH_HOST`, `GITLAB_SUBFOLDER`, `CA_CERT`, `SKIP_TLS_VERIFY`, the `GLAB_` prefix | GitLab / `glab` authentication, host and TLS configuration; letting a template override any one of these is the same as letting a session bypass the bot identity the platform injects and redirect `glab`'s transport. |
 
-The server's own error is the authority on the list. One of these, `FLASHDUTY_DOCS_URL`, is injected into **every bash execution** and points at the product-docs tarball, so the built-in `flashduty-docs` skill can download the docs on demand — a template neither supplies nor overrides it.
-</Note>
+The platform injects these names **before every command**; a same-named entry in the template is discarded and the platform's value wins (this holds identically on the cloud Sandbox and on a BYOC Runner). So use the template's environment variables for business-related, non-sensitive configuration only — when a secret is needed, use MCP member authorization or the relevant App integration.
 
 The setup script runs inside a **fresh sandbox (Ubuntu 24.04, running as root)**, **before the agent starts** — typically used to `apt install` packages the agent needs.
 
@@ -114,12 +118,12 @@ The value of BYOC Runner comes from where execution happens:
 </AccordionGroup>
 
 <Tip>
-BYOC Runner egress is governed by your machine and firewall. The per-domain egress allowlist used by the cloud Sandbox does not apply to BYOC, so the self-hosted Environment form does not provide network-access configuration.
+BYOC Runner egress is governed by your machine and firewall. The per-domain egress allowlist used by the cloud Sandbox does not apply to BYOC, so the self-hosted environment form does not provide network-access configuration.
 </Tip>
 
 ### Create and connect
 
-Go to **Environments** in the AI SRE sidebar and create a self-hosted Environment. The form asks for:
+Go to **AI SRE → Customize → Environments → Self-hosted** and create a self-hosted environment. The form asks for:
 
 | Field | Required | Description |
 |---|---|---|
@@ -289,17 +293,6 @@ Uninstall commands are also in the setup guide, and differ by installation metho
 - **Linux (systemd) / manual install**: the install script's `--uninstall` flag (removes the service while preserving config) and `--purge` flag (removes config and data).
 - **Docker install**: uninstalling is a container command, unrelated to the install script's flags — `docker rm -f flashduty-runner` (removes the container, keeps the `/var/flashduty/workspace` data) and `docker rm -f flashduty-runner && rm -rf /var/flashduty/workspace` (full removal, including the workspace data).
 
-### Runner tool management
-
-A Runner can install the command-line tools it uses itself — you do not have to prepare them on the host:
-
-- **Manual install**: `flashduty-runner tool ensure gh`, `glab`, `uv`, or `node`. If a binary of the same name is already on `PATH`, the Runner reuses it and installs nothing; otherwise it downloads the pinned upstream archive, verifies the embedded SHA-256, and installs it atomically into the runner-owned tools directory.
-- **Automatic install**: before it launches a stdio MCP connector, the Runner installs the runtime that connector needs — `uv` (which provides `uvx`) or `node` (which provides `npx`) — so a host without either runtime can still run those connectors.
-
-Both paths need the Runner host to have **outbound network access** to fetch the archives. For intranet or air-gapped hosts, set `FLASHDUTY_RUNNER_TOOL_MIRROR_URL` to a private mirror with the same `<name>/<version>/<asset>` layout; this explicit override never falls back to the official source.
-
-Tools installed this way lead the `PATH`, so a name that exists both in the tools directory and on the host resolves to the Runner-installed version, while every other host command stays available.
-
 ## Permission Configuration
 
 ---
@@ -424,9 +417,9 @@ The environment selector at the bottom of the chat input decides where a new ses
 
 | Option | Meaning |
 |---|---|
-| **Auto** | The default for new sessions. Uses an online Runner the current member can use; otherwise falls back to the cloud Sandbox. |
+| **Auto** | The default for new sessions. Tries an online BYOC Runner under the session's bound team, then an online Shared-scope (account-level) Runner, and falls back to the cloud Sandbox when neither is available. |
 | **Cloud Sandbox · Default** | Forces the system-managed cloud Sandbox and ignores self-hosted Runners. |
-| **Self-hosted Environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected; Runners in **Degraded** status **remain selectable**, and selecting one shows a "Degraded — you can continue, but responses may be slower" notice. |
+| **Self-hosted environment** | Lists Runners the current member can use. Offline, never-connected, or team-mismatched Runners cannot be selected; Runners in **Degraded** status **remain selectable**, and selecting one shows a "Degraded — you can continue, but responses may be slower" notice. |
 
 <Warning>
 Environment selection is locked once per session: the Environment determined when the session sends its first message is recorded and reused for all later turns. Changing the selector afterward does not change that session. To switch environments, start a new session.
@@ -434,18 +427,14 @@ Environment selection is locked once per session: the Environment determined whe
 
 When you open a historical session, the selector shows the Environment that session originally locked to, along with its current status, in read-only mode. If the bound Runner is offline or deleted, the session cannot continue sending messages; reconnect that Runner or start a new session and use the cloud Sandbox.
 
-<Note>
-These are **two different layers** — don't conflate them:
+### A child session's environment
 
-1. **A session binding never falls back** (the two paragraphs above describe this layer): the Environment a session locked to on its first send does not change. If that Runner later goes offline or is deleted, AI SRE never silently moves the session to another environment — it says so and refuses the send.
-2. **A selection-level fallback announces itself**: if you arrive via an entry that pins a **one-off Runner** — "Let AI SRE install it on the Runner", for example — and that Runner is no longer usable before the first send (deleted, or outside the set you can pick), belongs to a team you are not in, or its team cannot be confirmed, the composer's environment selector **explicitly switches back to Auto** and shows a warning — it does not silently land you on an environment you never picked. The three messages are:
+A dispatched subagent brings its own **child session**, whose execution-environment rules differ from the root session's:
 
-   - "This Runner is no longer available - switched to Auto."
-   - "This Runner belongs to team 〈team〉, which you're not a member of - switched to Auto."
-   - "Couldn't confirm which team this Runner belongs to - switched to Auto."
-
-   Along the same lines, a remembered composer selection that does not match the session's team is simply left off the first send, and the server resolves it as Auto.
-</Note>
+- **It inherits the parent by default**: when `agent_dispatch` carries no `environment`, the child session **shares the parent's sandbox / workspace**, so it can read the parent's files directly — and the environment shown on the child session panel is therefore the same as the parent's.
+- **Only a cross-environment dispatch gets its own environment**: when the subtask is sent to another environment (via `agent_dispatch`'s `environment` argument — another BYOC Runner or the cloud environment, see [Agent](/en/ai-sre/agents)), the child session gets **its own** sandbox or Runner scratch directory and cannot read the parent's files.
+- **The child session panel offers no environment selector**: it only shows that child session's bound environment and its current status, in **read-only** form — the cloud environment, or the self-hosted Runner's name — reusing the same status vocabulary as the root session's read-only display (no extra marking while it is healthy; a short label and a hover explanation for offline / degraded / never connected / deleted).
+- **An A2A child session shows no runtime environment**: the remote agent executes in its own environment, and the platform does not choose that location.
 
 ## Scope
 
@@ -472,7 +461,7 @@ The account remains the runtime security boundary, but team scope also participa
 
 ---
 
-When troubleshooting Runner issues, start with the **Status** and **Last heartbeat** columns in the Environments list.
+When troubleshooting Runner issues, start with the **Status** and **Last heartbeat** columns in the self-hosted environment list.
 
 <AccordionGroup>
 <Accordion title="Runner shows Offline" icon="bug">
@@ -485,7 +474,7 @@ When troubleshooting Runner issues, start with the **Status** and **Last heartbe
   The private endpoint's certificate is not trusted by Runner. Prefer adding the CA that issued the certificate to the trust store of the Runner host or container. If the endpoint uses a self-signed certificate inside a trusted private network, you can instead explicitly enable `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY` as described above. Restart the service for a systemd deployment, recreate the container with the new environment variable for Docker, or restart the process for a manual deployment.
 </Accordion>
 <Accordion title="Session times out or does not respond" icon="server">
-  If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment — that rule covers sessions **already locked** to an Environment; for the selection-level fallback before the first send, see [Selecting an environment in a session](#selecting-an-environment-in-a-session). Restore that Runner, or start a new session and choose Auto or cloud Sandbox. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.
+  If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment. Restore that Runner, or start a new session and choose Auto or cloud Sandbox. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.
 </Accordion>
 </AccordionGroup>
 

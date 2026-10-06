@@ -1,0 +1,141 @@
+---
+title: "GitLab alert integration"
+description: "Sync failed GitLab pipelines, failed deployments and security vulnerabilities to Flashduty On-call through a webhook, and recover them once fixed."
+keywords: ["alert integration", "GitLab", "webhook", "CI/CD", "pipeline", "deployment", "vulnerability"]
+---
+
+Use a GitLab project or group webhook to sync failed pipelines, failed deployments and security vulnerabilities to Flashduty On-call. Each branch or tag, each environment and each vulnerability maps to one Flashduty alert: a branch's alert triggers when its pipeline fails and recovers when a later pipeline on that branch succeeds; an environment's alert triggers when a deployment fails and recovers when a later deployment succeeds; a vulnerability's alert triggers when it is detected and recovers when it is resolved or dismissed.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **GitLab**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **GitLab** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure GitLab
+---
+
+GitLab.com, GitLab Self-Managed and GitLab Dedicated all support webhooks. Project webhooks are available on every tier and require the Maintainer or Owner role on the project. Group webhooks require Premium or Ultimate and the Owner role on the group, and send events from every project in the group and its subgroups.
+
+<Steps>
+<Step title="Add a webhook">
+
+1. In GitLab, open the project (or group) to connect, then select **Settings → Webhooks** in the left sidebar
+2. Click **Add new webhook**
+3. Paste the full Flashduty push URL into **URL**. The URL must include `integration_key`
+4. Leave **Signing token** and **Secret token** empty. Flashduty authenticates the request with the `integration_key` in the URL
+5. Leave **Custom webhook template** empty. Flashduty parses GitLab's default request body
+
+</Step>
+
+<Step title="Select the events">
+
+Under **Trigger**, select the following events. Other events are not needed; if selected, Flashduty acknowledges them and creates no alert:
+
+| GitLab event | Effect in Flashduty |
+| :--- | :--- |
+| **Pipeline events** | A pipeline with status `failed` triggers the alert of its branch (or tag); status `success` recovers it. Statuses such as `pending`, `running` and `canceled` are ignored |
+| **Deployment events** | A deployment with status `failed` triggers the alert of its environment; status `success` recovers it. `running`, `canceled`, `blocked`, and approval (`approved`) or rejection (`rejected`) events are ignored |
+| **Vulnerability events** | A vulnerability in state `detected` (needs triage) or `confirmed` triggers its alert; state `resolved` or `dismissed` recovers it |
+
+Vulnerability events require GitLab 17.11 or later (on 17.7 to 17.10, an administrator must turn on the `vulnerabilities_as_webhook_events` feature flag). Vulnerability records in a project require GitLab Ultimate.
+
+</Step>
+
+<Step title="Save and verify">
+
+1. Keep **Enable SSL verification** selected and click **Add webhook**
+2. In the webhook list, click **Test** and select **Pipeline events**. GitLab sends the real data of the project's latest pipeline: if that pipeline failed, Flashduty creates an alert for its branch; if it succeeded, no new alert appears
+3. Make a pipeline fail on a branch (for example, commit a failing test) and confirm that Flashduty receives an active alert. After fixing it, run a successful pipeline on the same branch and confirm that the alert recovers
+
+For **Push events** (the default **Test** option) and other events unrelated to this integration, Flashduty returns success and creates no alert. GitLab cannot send a deployment event from **Test**. Testing **Vulnerability events** sends a real vulnerability from the project; if it needs triage or is confirmed, Flashduty creates its alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the business object, so the trigger and recovery events of one object share one Alert Key:
+
+| Object | Fields used | Notes |
+| :--- | :--- | :--- |
+| Pipelines of a branch or tag | `project.id`, `object_attributes.tag`, `object_attributes.ref` | Later pipelines on the same branch (retries included) merge into this alert, and any successful one recovers it |
+| Deployments to an environment | `project.id`, `environment` | Later deployments to the same environment merge into this alert, and any successful one recovers it |
+| Vulnerability | The vulnerability ID at the end of `object_attributes.url` | Changes to the title, severity or linked issues keep the Alert Key |
+
+The Alert Key combines the object type with the fields above, so a branch never merges with a tag or an environment of the same name. Renaming or moving the project does not change the Alert Key. A failed or successful event missing these fields is rejected.
+
+## Status and severity
+---
+
+| Event | Status | Flashduty severity |
+| :--- | :--- | :--- |
+| Pipeline `failed` | Trigger | Warning |
+| Deployment `failed`, environment tier (`environment_tier`) `production` | Trigger | Critical |
+| Deployment `failed`, other environments | Trigger | Warning |
+| Vulnerability `detected` / `confirmed`, severity `critical` or `high` | Trigger | Critical |
+| Vulnerability `detected` / `confirmed`, severity `medium` | Trigger | Warning |
+| Vulnerability `detected` / `confirmed`, severity `low`, `info` or `unknown` | Trigger | Info |
+| Pipeline `success`, deployment `success`, vulnerability `resolved` / `dismissed` | Recover | - |
+
+## When alerts do not recover automatically
+---
+
+These objects never receive a later successful event, so their alerts do not recover automatically:
+
+- The branch is deleted or merged after its pipeline failed, or the failed pipeline ran for a tag
+- The failed deployment targeted a temporary environment (such as a Review App `review/*` environment) that was stopped afterwards
+- An older pipeline on a branch finishes and fails after a newer pipeline on the same branch has succeeded
+
+Turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit), set **Window timing start** to **Incident trigger**, and set the timeout to 24 hours. Pipeline and deployment failures are usually fixed within a working day. Vulnerability alerts recover when the vulnerability is resolved or dismissed, so a channel that only receives vulnerability alerts can leave the timeout off.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `event` | Event type: `pipeline`, `deployment` or `vulnerability` |
+| `project` / `project_id` | Project path (such as `group/project`) and ID; vulnerability events carry only `project_id` |
+| `ref` / `ref_type` | Branch or tag of the pipeline or deployment; `ref_type` is `branch` or `tag` |
+| `pipeline_id` / `pipeline_status` / `pipeline_source` | Pipeline ID, status and source (such as `push`, `schedule` or `merge_request_event`) |
+| `failed_jobs` | Names of the failed jobs, comma-separated, excluding jobs with `allow_failure` |
+| `sha` / `commit_title` | Commit SHA and commit title |
+| `user` | Username of the user who ran the pipeline or deployment |
+| `env` / `environment_tier` / `environment_url` | Environment name, tier and external URL of the deployment |
+| `deployment_id` / `deployment_status` | Deployment ID and status |
+| `vulnerability_id` / `state` / `severity` | Vulnerability ID, state and severity in GitLab |
+| `report_type` / `scanner` | Scan type that found the vulnerability (such as `sast` or `dependency_scanning`) and the scanner |
+| `identifiers` | Vulnerability identifiers such as CVE IDs, comma-separated |
+| `file` / `image` / `package` / `package_version` | File, container image, dependency package and version of the vulnerability |
+| `url` | Link to the pipeline, deployment job or vulnerability page in GitLab |
+
+Pipeline variables (`variables`) and user emails never become labels.
+
+## Troubleshooting
+---
+
+- **The webhook shows Temporarily disabled or Disabled**: GitLab temporarily disables a webhook after 4 consecutive failed deliveries and permanently disables it after 40. Check that the push URL is complete and includes `integration_key`, then click **Test** to send a test request and re-enable the webhook
+- **A rejected deployment raised an alert**: when a deployment to a protected environment is rejected, GitLab sends `rejected` and then, after dropping the deployment job, `failed` for the same deployment. Flashduty treats it as a failed deployment; close the alert by hand or let the next successful deployment recover it
+- **Merge request pipelines merge into the branch alert**: the `ref` of a merge request pipeline is its source branch, so it shares the Alert Key of that branch's other pipelines
+- **No vulnerability events arrive**: check that the GitLab version and the Ultimate subscription meet the requirements and that security scanning is enabled for the project
+- **Inspect deliveries**: the **Recent events** tab on the webhook edit page shows the request body of each delivery and the response from Flashduty
+
+For field details, see [GitLab webhook events](https://docs.gitlab.com/user/project/integrations/webhook_events/).

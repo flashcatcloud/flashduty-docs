@@ -1,0 +1,121 @@
+---
+title: "Calibre 告警集成"
+description: "通过 Calibre 站点 Webhook 将性能预算（Budget）的风险、超标和达标通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Calibre", "性能预算", "Performance Budget", "Webhook", "Core Web Vitals"]
+---
+
+通过 Calibre 站点的 Webhook，把性能预算（Performance Budget）的状态变化同步到 Flashduty On-call。每个预算对应一条 Flashduty 告警：预算进入 `At risk`（有风险）或 `Exceeded`（超标）时触发，状态回到 `Met`（达标）时关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Calibre**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Calibre**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Calibre 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook">
+
+1. 登录 Calibre，进入需要接入的站点，选择 **Synthetic → Settings → Integrations → Add a webhook**
+2. 将 Flashduty 集成的完整推送地址粘贴到 Payload URL（Calibre 以 `application/json` 格式 POST）
+3. 通知类型勾选 **Budget notifications**。Snapshot notifications 不是告警，可以不勾选；勾选后 Flashduty 会返回成功但不创建告警
+4. 点击 **Save**
+
+</Step>
+
+<Step title="确认已创建性能预算">
+
+进入 **Site → Synthetic → Budgets**，为需要监控的指标（如 LCP）创建预算。没有预算就不会有预算通知。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让某个预算的指标超过预算值，确认 Flashduty 收到活动告警；指标回到预算以内后，确认原告警恢复。预算通知在整体状态发生持续变化时发送，需要等待下一次测试完成。
+
+</Step>
+</Steps>
+
+<Note>
+Calibre 的 Webhook 没有测试按钮，也可以在 **Synthetic → Settings → Integrations** 中为 Webhook 设置共享密钥（Calibre 通过 `Calibre-HMAC-SHA256-Signature` 请求头签名）。Flashduty 不校验该签名，推送地址中的 `integration_key` 即是凭据，请勿公开。
+</Note>
+
+## 推送内容
+---
+
+预算通知的主要字段如下，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `id` | 预算 ID | Alert Key 的一部分，标签 `budget_id` |
+| `site_id` | 站点标识 | Alert Key 的一部分，标签 `site_id`、`resource` |
+| `name` | 预算名称 | 告警标题，标签 `check`、`budget_name` |
+| `abbreviated_name` | 指标缩写，如 `LCP` | 标签 `metric` |
+| `status` | `At risk`、`Exceeded` 或 `Met` | 告警等级或恢复，标签 `budget_state` |
+| `threshold` | 阈值方向，如 `GreaterThan` | 标签 `threshold` |
+| `value` | 预算值 | 标签 `budget_value` |
+| `url` | 预算页面链接 | 标签 `budget_url` |
+| `budgets` | 各测试配置（Profile）和页面的状态与测量值 | 写入告警描述 |
+
+## Alert Key
+---
+
+Flashduty 使用站点标识 `site_id` 和预算 ID `id` 组合出 Alert Key。同一个预算的风险、超标和达标通知使用相同的 Alert Key，落在同一条告警上；不同预算或不同站点生成不同的告警。修改预算名称、状态或测量值不会改变 Alert Key。
+
+请求中缺少 `id` 或 `site_id` 时，Flashduty 会返回参数错误，因为无法可靠地把达标通知关联到原告警。
+
+## 状态和告警等级
+---
+
+| Calibre `status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `At risk`（当前值与预算相差不到 10%） | Warning |
+| `Exceeded`（已超出预算） | Critical |
+| `Met`（达标） | 恢复 |
+
+`status` 为空或为其他值的预算通知会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="没有收到预算通知？">
+
+Calibre 默认不发送预算通知，需要在站点 Webhook 中勾选 Budget notifications。预算通知只在预算的整体状态发生持续变化时发送，状态没有变化就不会再次推送。
+
+</Accordion>
+
+<Accordion title="Snapshot 通知会产生告警吗？">
+
+不会。Snapshot 通知只表示一次测试完成，不是告警，Flashduty 收到后直接返回成功。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Calibre 推送失败**：确认 Payload URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求为预算通知，且 `id`、`site_id`、`status` 非空
+- **告警没有恢复**：确认恢复通知的 `id` 与 `site_id` 和触发通知相同
+
+字段说明请参阅 Calibre 官方文档 [Webhooks](https://calibreapp.com/docs/integrations/webhooks) 和 [Create a Performance Budget](https://calibreapp.com/docs/synthetic/budgets)。

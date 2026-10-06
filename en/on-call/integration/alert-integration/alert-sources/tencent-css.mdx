@@ -1,0 +1,123 @@
+---
+title: "Tencent Cloud Live alert integration"
+description: "Send Tencent Cloud Live (CSS) stream interruptions to Flashduty On-call through live callbacks. Alerts close automatically when the stream is pushed again or the broadcaster stops normally."
+keywords: ["alert integration", "Tencent Cloud Live", "CSS", "live callback", "stream push callback", "stream interruption callback"]
+---
+
+Tencent Cloud Live (CSS) sends an event notification to a callback URL when a stream push starts and when it is interrupted. This integration points that callback URL at Flashduty: each live stream maps to one Flashduty alert, which triggers when the push is interrupted abnormally and closes automatically when the same stream is pushed again. A broadcaster stopping the stream normally creates no alert.
+
+This integration handles only **stream push callbacks** and **stream interruption callbacks**. Other events in the callback template (push exceptions, recording, snapshots, moderation, relay, and so on) are accepted and ignored if they reach Flashduty. They create no alerts.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Tencent Cloud Live** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Tencent Cloud Live** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Tencent Cloud Live
+---
+
+Callbacks are configured in a callback template. The template takes effect only after it is bound to a push domain.
+
+<Steps>
+<Step title="Create a callback template">
+
+1. Sign in to the [CSS console](https://console.cloud.tencent.com/live) and select **功能配置 (Feature Configuration) > 直播回调 (Live Callback)**
+2. Click **创建模板 (Create Template)** and enter a **模板名称 (Template Name)**
+3. You can leave **回调密钥 (Callback Key)** empty or keep an existing value. Flashduty identifies the integration by the `integration_key` in the push URL and does not verify the `sign` field in callbacks
+4. Under **回调类型 (Callback Type)**, enter the Flashduty push URL in both **推流回调 (Stream Push Callback)** and **断流回调 (Stream Interruption Callback)**. Fill in both: with only the interruption callback, alerts do not close when the push resumes
+5. Click **保存 (Save)**
+
+<Note>If the push domain already has a callback template bound (for example, for recording callbacks), you can enter the Flashduty push URL in that template's stream push and stream interruption callbacks instead. If those two fields already point to your own system, have that system forward the callbacks to Flashduty.</Note>
+
+</Step>
+
+<Step title="Bind the template to a push domain">
+
+1. Click **去绑定域名 (Go to Bind Domain)** in the prompt shown after the template is created, or click **绑定域名 (Bind Domain)** in the template list
+2. Select the callback template from the previous step and the push domains you want alerts for
+3. Click **确定 (OK)**
+
+The binding takes effect in about 5 to 10 minutes. You can also open the push domain's **管理 (Manage)** page under **域名管理 (Domain Management)** and view or change its callback template under **模板配置 (Template Configuration)**.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+CSS has no "send test callback" button. Push a test stream to the push domain with a tool such as OBS:
+
+1. Start pushing: Flashduty receives a stream push callback. There is no alert to close, so nothing is created
+2. Disconnect the pushing machine's network while it is pushing: Flashduty receives a stream interruption callback and triggers an alert
+3. Restore the network and push again: the alert closes automatically
+4. Click stop streaming in the pushing tool: this is a normal stop and creates no alert
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the account APPID `appid`, the push domain `app`, the push path `appname`, and the stream name `stream_id`. Stream push and stream interruption callbacks for the same stream carry the same four fields, so they land on the same alert.
+
+Changes to the error code, error message, push node, pusher IP, push duration, or `sequence` do not change the Alert Key. `sequence` identifies one push session and changes when the stream is pushed again, so it is not part of the Alert Key.
+
+If a stream push or stream interruption callback lacks `appid`, `app`, `appname`, or `stream_id`, or a callback has no `event_type`, Flashduty rejects the request with an error, and CSS retries it according to its callback retry rules.
+
+## Alert lifecycle
+---
+
+| CSS callback | Flashduty action |
+| :--- | :--- |
+| Stream interruption callback (`event_type` is `0`) with `errcode` other than `1` | Triggers an alert. Another abnormal interruption of the stream while the alert is open updates the existing alert |
+| Stream interruption callback with `errcode` `1` (the pusher stopped the stream) | Closes the stream's open alert. If there is no open alert, nothing happens and no alert is created |
+| Stream push callback (`event_type` is `1`) | Closes the stream's open alert. If there is no open alert, nothing happens |
+| Other callback types (push exceptions, recording, snapshots, moderation, relay, and so on) | Accepted and ignored |
+
+CSS itself does not distinguish alerts from recoveries. It only reports that a push started or was interrupted. The table above is how Flashduty interprets these two notifications: an abnormal interruption is a failure, and a new push of the same stream is its recovery.
+
+<Warning>
+
+If a stream is interrupted abnormally and never pushed again (for example, the day's broadcast has ended), CSS sends no further callback and the alert stays triggered. Close it manually in Flashduty.
+
+</Warning>
+
+## Alert severity
+---
+
+Callbacks have no severity field. Every alert triggered by an abnormal interruption is **Critical**. `errcode` gives the reason for the interruption and is written to the labels and description. For its meaning, see the error code table in the CSS documentation.
+
+## Alert content
+---
+
+- **Title**: for an abnormal interruption, `Live stream interrupted: <push domain>/<push path>/<stream name>`
+- **Description**: the error message `errmsg`, followed by the error code, push node IP, pusher IP, and push duration (milliseconds)
+- **Labels**: `resource` (`<push domain>/<push path>/<stream name>`), `appid`, `app`, `appname`, `stream_id`, `event_type`, `errcode`, `errmsg`, `node`, `user_ip`, `sequence`, `push_duration`
+
+The callback's `stream_param` (push URL parameters, which may include the push authentication `txSecret`), `sign`, and `t` are not written to labels.
+
+## Troubleshooting
+---
+
+- **Flashduty receives no callbacks**: make sure the callback template is bound to the domain you actually push to, and that 5 to 10 minutes have passed since binding. Make sure the stream push and stream interruption callbacks contain the full push URL, including `integration_key`
+- **An alert was created when the broadcaster stopped**: `errcode` is `1` only when the pusher stops pushing on purpose. When the pusher is ended forcibly (for example, the process exits or the network drops), the interruption callback usually carries an `errcode` other than `1`, and Flashduty triggers an alert for an abnormal interruption. The alert's `errcode` and `errmsg` labels show the reason CSS reported
+- **The alert does not close automatically**: make sure the template has a stream push callback. Make sure the push domain, push path, and stream name are the same before and after the interruption
+- **CSS sends the same callback repeatedly**: when Flashduty does not return HTTP 200, CSS retries every minute, up to 12 times. Check that the push URL is correct and that the integration has not been deleted
+
+For callback fields and error codes, see the Tencent Cloud documents [推流/断流事件通知 (Stream push/interruption event notification)](https://cloud.tencent.com/document/product/267/47025) and, for callback templates, [回调配置 (Callback configuration)](https://cloud.tencent.com/document/product/267/20388).

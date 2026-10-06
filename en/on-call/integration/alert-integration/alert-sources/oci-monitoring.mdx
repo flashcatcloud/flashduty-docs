@@ -1,0 +1,123 @@
+---
+title: "OCI Monitoring alert integration"
+description: "Send Oracle Cloud Infrastructure Monitoring alarm triggers and recoveries to Flashduty On-call through an OCI Notifications HTTPS subscription."
+keywords: ["alert integration", "Oracle Cloud", "OCI", "Monitoring", "Alarm", "Notifications", "dedupeKey"]
+---
+
+Use an HTTPS (Custom URL) subscription on an OCI Notifications topic to send Oracle Cloud Infrastructure (OCI) Monitoring alarms to Flashduty On-call. Each OCI alarm (or, when messages are split per metric stream, each metric stream in an alarm) maps to one Flashduty alert. Trigger, repeat, recovery, and reset messages update that alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **OCI Monitoring**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **OCI Monitoring** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+<Note>
+OCI HTTPS subscription URLs cannot contain query parameters, so this integration's push URL carries the integration key in the path, for example `https://api.flashcat.cloud/event/push/alert/oci-monitoring/<integration_key>`. Paste the complete URL as is; do not rewrite it to the `?integration_key=` form.
+</Note>
+
+## Configure OCI
+---
+
+<Steps>
+<Step title="Create a topic">
+
+1. Sign in to the OCI Console, open the navigation menu, select **Developer Services**, and under **Application Integration** select **Notifications**
+2. Select the compartment of your alarms and click **Create topic**
+3. Name the topic `Flashduty` and click **Create**
+
+</Step>
+
+<Step title="Create an HTTPS subscription">
+
+1. Open the `Flashduty` topic, select **Subscriptions**, and click **Create subscription**
+2. For **Protocol**, select **HTTPS (Custom URL)**
+3. In **URL**, enter the complete Flashduty push URL and click **Create**
+4. OCI sends a subscription confirmation request to the push URL, and Flashduty visits the confirmation link in it automatically. Refresh the subscription list after a few seconds; the subscription is ready when its state changes from **Pending** to **Active**
+
+</Step>
+
+<Step title="Send alarm notifications to the topic">
+
+1. Open the navigation menu, select **Observability & Management** → **Monitoring** → **Alarm Definitions**, and create or edit an alarm
+2. Under **Destination**, set **Destination service** to **Notifications** and **Topic** to `Flashduty`
+3. Choose a **Message grouping**:
+   - **Split notifications per metric stream**: each firing metric stream (usually one resource) gets its own Flashduty alert. Recommended
+   - **Group notifications across metric streams**: the whole alarm maps to one Flashduty alert, which recovers only after every metric stream recovers
+4. Optionally enable **Repeat notification**; repeat messages while the alarm keeps firing merge into the same alert
+5. Save the alarm. **Message format** applies to email subscriptions only and does not need to change
+
+</Step>
+
+<Step title="Verify">
+
+1. From the topic's **Actions** menu, select **Publish message** to check that the push URL is reachable. A message published by hand is not an alarm message, so Flashduty returns success without creating an alert
+2. Make the alarm fire for real (for example, lower its threshold temporarily) and confirm that Flashduty receives an active alert. Then restore the threshold, wait for the alarm to return to OK, and confirm that the alert recovers automatically
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the `dedupeKey` of the alarm message as the Alert Key. OCI defines `dedupeKey` as the unique identifier of the alarm (grouped message) or of the metric stream in the alarm (split message), and says to use it to group messages that belong to the same alarm. The `OK_TO_FIRING`, `REPEAT`, `FIRING_TO_OK`, and `RESET` messages of one alarm carry the same `dedupeKey`, so they update the same Flashduty alert.
+
+Changes to the title, body, severity, time, or metric values do not change the Alert Key. An alarm message without a `dedupeKey` is rejected.
+
+## Status and severity
+---
+
+| OCI `type` | Flashduty status |
+| :--- | :--- |
+| `OK_TO_FIRING` | Triggered |
+| `REPEAT` | Triggered (updates the same alert) |
+| `FIRING_TO_OK` | Recovered |
+| `RESET` | Recovered (the metric stream that fired stopped reporting; check the resource) |
+
+| OCI `severity` | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `ERROR` | Warning |
+| `WARNING` | Warning |
+| `INFO` | Info |
+
+A recovery keeps the alert's severity. An empty or unknown `severity` is treated as Warning; an unknown `type` is rejected.
+
+## Alert labels
+---
+
+Flashduty writes the following fields to alert labels for routing and troubleshooting:
+
+- `check` (alarm title), `dedupe_key`, `type`, `severity`, `notification_type`
+- `alarm_id` (alarm OCID), `alarm_status`, `namespace`, `query`, `alarm_url`, `total_metrics_firing`
+- For split messages, every dimension of the metric stream, such as `resourceId`, `resourceDisplayName`, `region`, and `availabilityDomain`; `resourceDisplayName` is also written to `resource`
+
+The alarm `body` and `alarmSummary` go into the alert description.
+
+## Troubleshooting
+---
+
+- **The subscription stays Pending**: Check that the URL is the complete push URL, with the integration key in the path and no query parameters. Then delete the subscription and create it again with the correct URL. A confirmation link is valid for 3 days; after it expires, recreate the subscription as well
+- **Flashduty returns a ConfirmationURL error**: Flashduty only visits https confirmation links on Oracle Cloud domains such as `oraclecloud.com`. Make sure the request comes from OCI Notifications
+- **No alerts arrive**: Check that the alarm's destination is this topic, the subscription is Active, and the alarm actually entered the FIRING state
+- **The alert does not recover**: With grouped messages, `FIRING_TO_OK` is sent only after every metric stream in the alarm recovers. When a metric stream stops reporting, OCI sends `RESET` after the internal reset period, about 13 minutes
+- **An alarm only produces one Flashduty alert**: The message grouping is set to grouped messages. To get one alert per resource, switch to **Split notifications per metric stream**
+
+For field details, see [Alarm Message Format](https://docs.oracle.com/en-us/iaas/Content/Monitoring/alarm-message-format.htm), [Message Types](https://docs.oracle.com/en-us/iaas/Content/Monitoring/Concepts/monitoringoverview.htm#MessageTypes), and [Creating an HTTPS (Custom URL) Subscription](https://docs.oracle.com/en-us/iaas/Content/Notification/Tasks/create-subscription-https.htm).

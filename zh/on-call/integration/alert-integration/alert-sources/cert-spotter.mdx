@@ -1,0 +1,126 @@
+---
+title: "Cert Spotter 告警集成"
+description: "通过 Webhook 将 Cert Spotter 发现的未知证书同步到 Flashduty On-call。"
+keywords: ["告警集成", "Cert Spotter", "SSLMate", "证书透明度", "未授权证书", "Webhook"]
+---
+
+Cert Spotter 是 SSLMate 的证书监控服务，它持续检查证书透明度（Certificate Transparency）日志。发现为您的监控域名签发、但您事先不知道的证书（未知证书）时，Cert Spotter 可以调用 Webhook。本集成把每张未知证书转成一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Cert Spotter**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Cert Spotter**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Cert Spotter 中配置
+---
+
+Webhook 通知从 Cert Spotter 的 Startup 套餐开始提供，Hobbyist 套餐只能收邮件。
+
+<Steps>
+<Step title="添加 Webhook">
+
+1. 登录 SSLMate，进入 Cert Spotter 的 **Settings** 页面
+2. 在通知设置中添加一个 Webhook，将 Flashduty 集成的完整推送地址粘贴为 Webhook URL，地址中需包含 `integration_key`
+3. 保存设置
+
+推送地址不需要加 HTTP Basic 认证的用户名和密码。Flashduty 通过地址中的 `integration_key` 识别集成，请像保管密钥一样保管推送地址。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+未知证书是一次性事件：证书被吊销、过期或被您确认后，Cert Spotter 不会再发送任何通知。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 **24 小时**，计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭。
+
+</Step>
+
+<Step title="验证">
+
+Cert Spotter 没有发送测试推送的按钮。可以为一个已在监控中的子域名签发一张新证书（例如用 Let's Encrypt），证书进入 CT 日志后，Cert Spotter 会把它作为未知证书推送，Flashduty 中出现一条对应的告警。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+| Cert Spotter 事件 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| Unknown Certificate（发现未知证书） | 触发一条 Warning 告警 |
+| New Endpoint（发现新子域名，测试版，需邮件联系 SSLMate 开通） | 返回成功，不创建告警 |
+
+Cert Spotter 的证书到期提醒和安装问题只通过邮件、Slack 发送，不经过 Webhook，因此不会进入本集成。
+
+## Alert Key
+---
+
+Flashduty 使用证书签发记录的 ID（Webhook 中的 `id`）作为 Alert Key。网络问题可能让同一个请求重复送达，重复的请求带有相同的 `id`，会合并到同一条告警；不同的证书会产生不同的告警。
+
+缺少 `id` 的推送会被拒绝。
+
+## 告警等级
+---
+
+Cert Spotter 不提供严重程度，所有未知证书都以 **Warning** 等级触发。证书是否已被吊销记录在 `revoked` 标签中，不影响等级。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `issuance_id` | 证书签发记录 ID，即 Alert Key |
+| `url` | Cert Spotter 中该证书的详情页 |
+| `endpoints` | 该证书覆盖的、您正在监控的域名 |
+| `monitored_domains` | 匹配这些域名的监控项 |
+| `dns_names` | 证书中的全部 DNS 名称 |
+| `issuer` | 签发机构的名称，如 `Sectigo` |
+| `issuer_name` | 签发机构证书的完整主题 |
+| `not_before` / `not_after` | 证书有效期起止时间 |
+| `revoked` | 证书是否已被吊销 |
+| `cert_sha256` | 证书的 SHA-256 指纹 |
+
+告警标题为 `Unknown certificate for <第一个监控域名>`，覆盖多个域名时追加 `(+N more)`。
+
+## 常见问题
+---
+
+<AccordionGroup>
+
+<Accordion title="为什么自己签发的证书没有产生告警？">
+
+Cert Spotter 只通知未知证书。通过 [Cert Spotter 授权接口](https://sslmate.com/help/reference/certspotter_authorization_api) 登记过的证书被视为已知证书，不会调用 Webhook。
+
+</Accordion>
+
+<Accordion title="推送失败会重试吗？">
+
+Webhook 必须在 15 秒内返回 2xx，且不跟随重定向。失败时 Cert Spotter 不会自动重试，而是发邮件通知您，可按需请 SSLMate 重发。请确认推送地址完整、包含 `integration_key`。
+
+</Accordion>
+
+<Accordion title="告警为什么一直不关闭？">
+
+Cert Spotter 没有恢复事件。请开启协作空间的超时自动关闭，或在 Flashduty 中手动关闭该告警。
+
+</Accordion>
+
+</AccordionGroup>
+
+更多字段含义请参阅 [Cert Spotter Webhooks](https://sslmate.com/help/reference/certspotter_webhook)。

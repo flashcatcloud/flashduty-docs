@@ -1,0 +1,125 @@
+---
+title: "env0 变更集成"
+description: "通过 env0 Webhook 通知目标将环境的部署（Deploy）和销毁（Destroy）同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "env0", "env zero", "Deployment", "Destroy", "Terraform", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 env0 的 Webhook 通知目标，将环境的部署（Deploy）和销毁（Destroy）同步到 Flashduty On-call。env0 的每一次运行（一条 deployment log）对应一条 Flashduty 变更，运行从开始、等待审批、恢复到成功、失败或取消的每个状态，都会更新同一条变更。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **env0**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 env0 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 通知目标">
+
+需要组织管理员权限。进入 **Organization Settings → Notifications**，点击 **Add Notification Target**：
+
+1. **Name**：任意名称，在组织内唯一
+2. **Type**：选择 **Webhook**
+3. **URL**：粘贴 Flashduty 集成的完整推送地址（env0 要求 HTTPS）
+4. **Secret**：留空。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `x-env0-signature`
+
+可点击 **Test endpoint → Send test event** 验证连通：Flashduty 返回成功，但测试事件不会生成变更。
+
+</Step>
+
+<Step title="在项目中选择事件">
+
+需要项目管理员权限。进入 **Project Settings → Notifications**，点击该通知目标右侧的编辑图标，勾选：
+
+- **Deployment started**、**Deployment waiting for user**、**Deployment resumed**、**Deployment cancelled**
+- **Deploy succeeded**、**Deploy failed**
+- 需要记录销毁时，再勾选 **Destroy started**、**Destroy resumed**、**Destroy succeeded**、**Destroy failed**
+
+点击 **Save**。每个项目需要分别配置。其他事件（Drift、Budget、TTL 自动销毁、PR plan 失败）不是变更，勾选后 Flashduty 返回成功但不会生成变更。
+
+</Step>
+</Steps>
+
+env0 的 Webhook 发送失败时不重试，超时时间为 10 秒。
+
+## 一条变更是什么
+---
+
+| env0 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 一次部署或销毁运行（deployment log） | `data.deploymentLog.id` | 同一次运行的所有事件更新同一条变更；同一环境的两次运行是两条变更 |
+
+变更标识不是环境 ID：同一个环境会有多次运行，每次运行对应各自的 deployment log。
+
+## 状态映射
+---
+
+| env0 事件 | Flashduty 变更状态 |
+|---|---|
+| `com.env0.deploy.started` / `com.env0.destroy.started` | Processing |
+| `com.env0.deployment.waiting_for_user`（等待审批） | Planned |
+| `com.env0.deploy.resumed` / `com.env0.destroy.resumed`（审批通过，继续运行） | Processing |
+| `com.env0.deploy.succeeded` / `com.env0.destroy.succeeded` | Done |
+| `com.env0.deploy.failed` / `com.env0.destroy.failed` | Failed |
+| `com.env0.deployment.cancelled` | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
+
+以下推送返回成功但不生成变更：`com.env0.webhook.test`、`com.env0.pr_plan.failed`、`com.env0.environment.*`、`com.env0.drift.*`、`com.env0.budget.exceeded` 以及其他不属于部署或销毁运行的事件类型。
+
+## 变更内容
+---
+
+| 字段 | 说明 |
+|---|---|
+| 标题 | `<项目> / <环境>: deploy` 或 `<项目> / <环境>: destroy`，缺少名称时用环境 ID |
+| 描述 | 运行的备注（`deploymentLog.comment`），没有则为空 |
+| 链接 | env0 中该次运行的页面；缺失时为环境页面，再缺失时为项目页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` / `project_id` | 项目名称 / ID |
+| `environment` / `environment_id` | 环境名称 / ID |
+| `deployment_id` | 本次运行的 deployment log ID |
+| `operation` | `deploy` 或 `destroy` |
+| `state` | 最新的 env0 事件，例如 `deploy.succeeded` |
+| `repo` / `ref` | 模板的代码仓库地址 / 分支或标签 |
+| `actor` | 启动运行的用户名称；定时或自动运行时没有此标签 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="env0 重复推送会重复记录吗？">
+
+不会。Flashduty 使用 env0 事件自带的时间，同一事件、同一时间只记录一次；先后到达的旧状态不会覆盖已结束的变更。
+
+</Accordion>
+
+<Accordion title="没有配置审批的环境为什么没有 Planned 状态？">
+
+Planned 只在 env0 发送 `deployment.waiting_for_user`（运行等待审批）时出现。无需审批的运行从 Processing 直接到 Done、Failed 或 Canceled。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported type`：收到了 Flashduty 尚未支持的部署类事件，请只勾选上文列出的事件，或联系我们
+- `data.deploymentLog.id is missing`：推送内容不完整，请确认推送来自 env0 原生 Webhook 通知目标
+
+env0 的 Webhook 不重试，失败的推送可在 env0 的测试页面查看响应内容。
+
+</Accordion>
+</AccordionGroup>

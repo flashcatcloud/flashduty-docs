@@ -1,0 +1,131 @@
+---
+title: "Alibaba Cloud DevOps AppStack change integration"
+description: "Sync Alibaba Cloud DevOps (Yunxiao) AppStack deployment orders (preparing, running, succeeded, failed, canceled) to Flashduty On-call through a webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Alibaba Cloud DevOps", "Yunxiao", "AppStack", "deployment order", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use an Alibaba Cloud DevOps (云效) AppStack webhook to sync deployment order (ChangeOrder) status updates to Flashduty On-call. Each deployment order becomes one Flashduty change, and its status follows the order from preparing to running to finished. All four order types are recorded: deploy, scale, rollback and destroy.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Alibaba Cloud DevOps AppStack** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `app` or `environment`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure AppStack
+---
+
+<Steps>
+<Step title="Create a webhook">
+
+- Global webhook (applies to every application in the organization): on the AppStack home page, go to **Global Settings → Webhooks** and click **New Webhook**
+- Application webhook (applies to one application): open the application, go to **Settings → Webhooks** and click **New Webhook**
+
+</Step>
+
+<Step title="Enter the URL">
+
+Set **URL** to the full push URL of the Flashduty integration. Leave **Secret Token** empty: Flashduty authenticates with the `integration_key` in the push URL and does not check the token.
+
+</Step>
+
+<Step title="Select trigger events">
+
+Under **Trigger Events**, select **Deployment Orders → Status Update**. The other events (applications, environments, application orchestration, variable groups, changes, release stages) create no change even when selected, so you can leave them out.
+
+</Step>
+</Steps>
+
+The **Test Webhook** button sends a mock "new application" event. Flashduty returns success and records no change, so it only confirms that the URL is reachable. To see a change, run a real deployment.
+
+## What one change is
+---
+
+| AppStack object | Change identifier (change_key) | Notes |
+|---|---|---|
+| Deployment order (ChangeOrder) | The order's `objectAttributes.sn` | All status updates of one order are one change. Deploying again, even the same application to the same environment, creates a new order and therefore a new change |
+
+The top-level `id` in the request body is the ID of each delivery record, not of the order, and is not used in the identifier.
+
+## Status mapping
+---
+
+| AppStack order state (`objectAttributes.state`) | Flashduty change status |
+|---|---|
+| INIT | Ready |
+| PREPARING | Ready |
+| RUNNING | Processing |
+| SUSPENDED | Processing |
+| SUCCESS | Done |
+| FAILED | Failed |
+| CANCELED | Canceled |
+
+These deliveries return success and create no change:
+
+- Events other than deployment orders: applications (App), environments (Env), application orchestration (AppOrchestration), variable groups (VariableGroup), changes (ChangeRequest) and release stages (ReleaseStageExecution). A change is a development workflow on a code branch and a release stage is a pipeline run state; neither is a deployment. A deployment started by a pipeline is recorded through its own deployment order
+
+The seven states above are the order states AppStack documents. Any other state returns `InvalidParameter` with the state value in the message; later updates of that order are not affected.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<app>: <type> <version> on <environment>`, for example `myapp-demo: deploy 20240815144312-310 on test`; the order name when the app or version is missing |
+| Description | The order's description, empty when there is none |
+| Link | The payload carries no usable page URL, so the change has no link |
+| Time | The delivery's `time`, the time of this state update |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `app` | Application name |
+| `environment` | Environment names of the order, comma-separated when there are several |
+| `version` | Order version, for example `20240815144312-310` |
+| `change_order_id` | Order identifier |
+| `change_type` | Order type: Deploy, Scale, Rollback or Destroy |
+| `source_type` | What triggered it: CUSTOMIZE (environment page), FLOW (pipeline) or OPEN_API |
+| `org_id` | Yunxiao organization ID |
+| `yunxiao_state` | AppStack order state, for example `FAILED` |
+
+Environment names are read from the order's jobs.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a repeated delivery create a duplicate record?">
+
+No. A delivery with the same order, state and time is recorded once, and a late earlier state does not reopen an order that has already finished.
+
+</Accordion>
+
+<Accordion title="The push returns an InvalidParameter error?">
+
+- `objectAttributes.sn is required`: the order event has no order identifier; check that the delivery comes from an AppStack deployment order event
+- `unknown objectAttributes.state`: an order state that is not mapped yet appeared; contact us
+- `time is required` / `invalid time`: the delivery has no event time or its format is not recognized
+
+</Accordion>
+
+<Accordion title="Why are pipeline and code changes not recorded?">
+
+Only deployment orders are recorded. Yunxiao pipelines (Flow) and code repositories (Codeup) have their own events, which this integration does not cover. An AppStack deploy step inside a pipeline creates a deployment order, which this integration records.
+
+</Accordion>
+
+<Accordion title="Why does a suspended order stay Processing?">
+
+A suspended order has neither finished nor been withdrawn, so Flashduty keeps it in Processing until it succeeds, fails or is canceled.
+
+</Accordion>
+</AccordionGroup>

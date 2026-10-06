@@ -1,0 +1,149 @@
+---
+title: "Dependency-Track Alert Integration"
+description: "Sync new vulnerabilities, newly vulnerable dependencies and policy violations found by Dependency-Track to Flashduty On-call through an Outbound Webhook."
+keywords: ["alert integration", "Dependency-Track", "Webhook", "SBOM", "vulnerability", "policy violation", "software supply chain"]
+---
+
+Sync the problems found while analyzing your software bills of materials (SBOMs) to Flashduty On-call through a Dependency-Track Outbound Webhook notification rule. This page covers the default Outbound Webhook template of Dependency-Track 4.x and 5.x; the fields follow the 4.13 notification documentation and the 4.x and 5.x sources.
+
+Flashduty handles three notification groups, and each notification becomes one alert:
+
+- **NEW_VULNERABILITY**: a new vulnerability was found on a component
+- **NEW_VULNERABLE_DEPENDENCY**: a project took on a dependency with known vulnerabilities
+- **POLICY_VIOLATION**: a component violates a policy
+
+Dependency-Track notifies once when it finds a problem and sends nothing when the problem is fixed, so these alerts do not recover on their own. In the channel that receives this integration, turn on [auto-close after timeout](/en/on-call/channel/create-edit); see [Alerts do not recover automatically](#alerts-do-not-recover-automatically).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Dependency-Track** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Dependency-Track** and enter an integration name
+3. Configure the default route and pick a channel; add more rules under **Routes** later
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Dependency-Track
+---
+
+<Steps>
+<Step title="Create a notification rule">
+
+1. Log in to Dependency-Track with an account that has the `SYSTEM_CONFIGURATION` permission and go to **Administration → Notifications → Alerts**
+2. Click **Create Alert**, enter a name, set **Scope** to **Portfolio**, **Notification level** to **Informational** and **Publisher** to **Outbound Webhook**, then click **Create**
+
+<Warning>
+**Notification level** must be **Informational**. Dependency-Track sends these three groups at the Informational level, so a rule set to Warning or Error does not receive them.
+</Warning>
+
+</Step>
+
+<Step title="Select the groups and the push URL">
+
+1. Open the new rule and select only **NEW_VULNERABILITY**, **NEW_VULNERABLE_DEPENDENCY** and **POLICY_VIOLATION** in the groups list
+2. Paste the full Flashduty push URL into **Destination**
+3. To cover only some projects, expand **Limit To** and choose projects or tags
+4. Save the rule and keep it enabled
+
+The Outbound Webhook uses the built-in default template and sends JSON with `Content-Type: application/json`. Do not edit the template: Flashduty parses the fields of the default template, and rejects the request when the `uuid` of the project, component or vulnerability is missing.
+
+<Tip>
+Selecting other groups (for example BOM_CONSUMED or PROJECT_AUDIT_CHANGE) does no harm: Flashduty returns success and ignores them without creating an alert.
+</Tip>
+
+</Step>
+
+<Step title="Verify">
+
+1. On the rule page, click the test button. Flashduty returns success and creates one Info test alert for each of the three groups you selected (the title starts with `Dependency-Track test notification`). Close them manually. Every click creates new test alerts
+2. Upload an SBOM (BOM) that contains a component with a known vulnerability, or start an analysis of a project, and confirm that Flashduty receives the matching alert
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the `uuid` values in the notification, joined with an invisible separator and hashed with MD5:
+
+| Group | Alert Key is built from |
+| :--- | :--- |
+| NEW_VULNERABILITY | group, project `uuid`, component `uuid`, vulnerability `uuid` |
+| NEW_VULNERABLE_DEPENDENCY | group, project `uuid`, component `uuid` |
+| POLICY_VIOLATION | group, project `uuid`, component `uuid`, policy violation `uuid` |
+
+- Two different vulnerabilities on one component of one project are two alerts; one vulnerability in two projects is also two alerts
+- A 4.x NEW_VULNERABILITY notification can list several projects in `affectedProjects`; Flashduty creates one alert per project
+- A NEW_VULNERABLE_DEPENDENCY notification may list several vulnerabilities and still becomes one alert; the vulnerability list is not part of the Alert Key
+- Changes to the severity, title, project and component names and versions, the notification `id` and the timestamp never change the Alert Key
+- When the `uuid` of the project, component, vulnerability or policy violation is missing, Flashduty returns 400 and names the missing field
+
+## Status and severity
+---
+
+NEW_VULNERABILITY uses `subject.vulnerability.severity`; NEW_VULNERABLE_DEPENDENCY uses the most severe of its vulnerabilities:
+
+| Dependency-Track severity | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL`, `HIGH` | Critical |
+| `MEDIUM` | Warning |
+| `LOW`, `INFO`, `UNASSIGNED`, empty or any other value | Info |
+
+POLICY_VIOLATION carries no vulnerability, so the policy's violation state decides:
+
+| Policy violation state | Flashduty severity |
+| :--- | :--- |
+| `FAIL` | Critical |
+| `WARN` | Warning |
+| `INFO` or any other value | Info |
+
+## Alerts do not recover automatically
+---
+
+Dependency-Track notifies once per problem and has no "vulnerability fixed" or "violation cleared" notification, so every alert stays open until it is closed. In the channel that receives this integration, turn on [auto-close after timeout](/en/on-call/channel/create-edit) and set it to how quickly your team handles vulnerabilities, for example 7 days.
+
+A repeated notification for the same problem (for example the same vulnerability found again after a re-analysis) merges into the alert that is still open; if that alert was closed, a new alert is created.
+
+## Alert content
+---
+
+- **Title**: `Dependency-Track: <vulnerability ID> in <component> (<project>)` for NEW_VULNERABILITY; `Dependency-Track: vulnerable dependency <component> in <project> (<N> vulnerabilities)` for NEW_VULNERABLE_DEPENDENCY; `Dependency-Track: policy violation <policy name> on <component> (<project>)` for POLICY_VIOLATION
+- **Description**: the notification content, the project and component, and each vulnerability's source, severity, CVSS scores, aliases and recommendation (at most 10 vulnerabilities for a vulnerable dependency, most severe first); for a policy violation, the policy, violation type and condition
+- **Labels**: `source=dependency_track`, `group`, `project_uuid`, `project_name`, `project_version`, `component_uuid`, `component_group`, `component_name`, `component_version`, `component_purl`, `vuln_id`, `vuln_source`, `vuln_uuid`, `vuln_severity`, `vuln_count`, `vuln_ids`, `policy_name`, `violation_type`, `violation_state`, `violation_uuid`
+
+## Troubleshooting
+---
+
+<AccordionGroup>
+<Accordion title="The rule is saved but Flashduty receives no request">
+Confirm that the rule is enabled and that **Notification level** is **Informational**. If **Limit To** restricts the rule to projects or tags, only those projects send notifications. When delivery fails, Dependency-Track logs a WARN or ERROR in the apiserver log; you can also turn on the INFO log for successful deliveries in the rule to check.
+</Accordion>
+
+<Accordion title="Flashduty returns 400">
+The request lacks the `uuid` of the project, component, vulnerability or policy violation, and the response names the field. This usually means the Outbound Webhook default template was edited; restore the default template.
+</Accordion>
+
+<Accordion title="I selected PROJECT_AUDIT_CHANGE but no alert appears">
+Audit changes (analysis state, suppression), BOM upload and processing, new projects, user and system notifications, and the scheduled summaries (NEW_VULNERABILITIES_SUMMARY, NEW_POLICY_VIOLATIONS_SUMMARY) are not single newly found problems, so Flashduty accepts and ignores them. Marking a finding as a false positive or suppressing it in Dependency-Track does not close its alert; use auto-close after timeout or close it manually.
+</Accordion>
+
+<Accordion title="The alert created by the test button never recovers">
+The test notification uses fixed sample project, component and vulnerability objects. Flashduty creates a separate Info alert for each click, which never merges with a real alert and has no recovery notification, so close it manually.
+</Accordion>
+</AccordionGroup>
+
+For the meaning of every field, see the Dependency-Track documentation on [Notifications](https://docs.dependencytrack.org/integrations/notifications/).

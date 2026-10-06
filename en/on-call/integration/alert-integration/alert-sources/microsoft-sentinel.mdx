@@ -1,0 +1,133 @@
+---
+title: "Microsoft Sentinel Alert Integration"
+description: "Run a Logic App from a Microsoft Sentinel automation rule and use its HTTP action to push incidents to Flashduty's standard alert event integration; closing the incident recovers the alert."
+keywords: ["alert integration", "Microsoft Sentinel", "Azure Sentinel", "Logic App", "SIEM", "automation rule", "standard alert event"]
+---
+
+Microsoft Sentinel automation rules cannot send a webhook to an external URL. The action that reaches external systems is **Run playbook**, which runs a Logic App. The Logic App **HTTP** action can POST JSON to any address, so no separate Sentinel integration is needed: create a [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard-alert) integration in Flashduty and let the Logic App push Sentinel incidents to it in the standard alert format.
+
+Sentinel incidents also include alerts from Microsoft security products such as Microsoft Entra ID Protection, Microsoft Defender for Cloud and Microsoft Defender for Endpoint, which Sentinel groups into incidents, so this path covers them as well.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Standard Alert Event integration type** in both, not Microsoft Sentinel.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Standard Alert Event** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Standard Alert Event** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Microsoft Sentinel
+---
+
+There are two parts: create a Logic App that starts with the **Microsoft Sentinel incident** trigger (called a playbook in Sentinel), then create automation rules that run it.
+
+### Create the Logic App
+
+1. Create a Logic App and choose **Microsoft Sentinel incident** as the workflow trigger. Only playbooks that start with an incident trigger can be selected by incident automation rules
+2. After the trigger, add the built-in **HTTP** action and fill in its fields as described in the next section
+3. Save the workflow
+
+### Create the automation rules
+
+In Microsoft Sentinel, go to **Configuration** → **Automation** (in the Defender portal: **Microsoft Sentinel** → **Configuration** → **Automation**), click **Create** → **Automation rule**, and create the two rules below. Both use the **Run playbook** action with the Logic App from the previous step:
+
+| Rule | Trigger | Conditions |
+| :--- | :--- | :--- |
+| Push when an incident is created | **When incident is created** | Limit by analytics rule or severity as needed |
+| Push when status or severity changes | **When incident is updated** | Condition **Status** **Changed**, plus an **OR** condition group with **Severity** **Changed** |
+
+If the playbook appears grayed out in the list, Sentinel has no permission on its resource group: click **Manage playbook permissions**, select the resource group and click **Apply** (this needs the **Owner** role on the resource group).
+
+## HTTP action
+---
+
+Fields of the HTTP action:
+
+| Field | Value |
+| :--- | :--- |
+| **Method** | `POST` |
+| **URI** | The Flashduty push URL, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>` |
+| **Headers** | `Content-Type`: `application/json` |
+| **Body** | See below |
+
+Below is the JSON definition of this HTTP action; in the Logic App **Code view** it goes under `actions`. A string that starts with `@` and is a single expression is a Logic App expression evaluated from the Sentinel incident trigger output; the value is emitted as JSON, so a title containing quotes does not break the body:
+
+```json
+"Send_to_Flashduty": {
+  "type": "Http",
+  "runAfter": {},
+  "inputs": {
+    "method": "POST",
+    "uri": "https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "title_rule": "@triggerBody()?['object']?['properties']?['title']",
+      "event_status": "@if(equals(triggerBody()?['object']?['properties']?['status'], 'Closed'), 'Ok', if(equals(triggerBody()?['object']?['properties']?['severity'], 'High'), 'Critical', if(equals(triggerBody()?['object']?['properties']?['severity'], 'Informational'), 'Info', 'Warning')))",
+      "alert_key": "@concat('sentinel-', triggerBody()?['workspaceInfo']?['WorkspaceName'], '-', string(triggerBody()?['object']?['properties']?['incidentNumber']))",
+      "description": "@triggerBody()?['object']?['properties']?['description']",
+      "labels": {
+        "incident_number": "@string(triggerBody()?['object']?['properties']?['incidentNumber'])",
+        "incident_url": "@triggerBody()?['object']?['properties']?['incidentUrl']",
+        "sentinel_severity": "@triggerBody()?['object']?['properties']?['severity']",
+        "sentinel_status": "@triggerBody()?['object']?['properties']?['status']",
+        "workspace": "@triggerBody()?['workspaceInfo']?['WorkspaceName']",
+        "resource_group": "@triggerBody()?['workspaceInfo']?['ResourceGroupName']"
+      }
+    }
+  }
+}
+```
+
+In the designer, the same values map to these dynamic contents (outputs of the Microsoft Sentinel incident trigger):
+
+| Flashduty field | Dynamic content | Expression path |
+| :--- | :--- | :--- |
+| `title_rule` | Incident Title | `object.properties.title` |
+| `event_status` (severity and status) | Incident Severity, Incident Status | `object.properties.severity`, `object.properties.status` |
+| `alert_key` | Workspace Name, Incident Sentinel ID | `workspaceInfo.WorkspaceName`, `object.properties.incidentNumber` |
+| `description` | Incident Description | `object.properties.description` |
+| Label `incident_url` | Incident URL | `object.properties.incidentUrl` |
+| Labels `workspace`, `resource_group` | Workspace Name, Resource Group Name | `workspaceInfo.WorkspaceName`, `workspaceInfo.ResourceGroupName` |
+
+## Field mapping
+---
+
+| Sentinel field | Flashduty |
+| :--- | :--- |
+| Incident Title | Alert title (`title_rule`, truncated beyond 512 characters) |
+| Incident Severity | `High` → Critical; `Informational` → Info; `Medium` and `Low` → Warning. Also kept in the label `sentinel_severity` |
+| Incident Status | `Closed` → recovery (`Ok`); `New` and `Active` trigger or update the alert with the severity above |
+| Workspace Name + Incident Sentinel ID | Alert Key, in the form `sentinel-<workspace name>-<incident number>`. Every push for the same incident merges into one alert |
+| Incident Description | Alert description (truncated beyond 2048 characters) |
+| Incident URL and others | Labels of the same name; `incident_url` opens the incident from the alert details |
+
+## Recovery and deduplication
+---
+
+- When the incident is closed (**Status** becomes `Closed`), the Logic App sends an event with `event_status` set to `Ok`, and Flashduty closes the alert with the same Alert Key.
+- Sentinel also fires **When incident is updated** when alerts, comments or tags are added. The update rule above runs only on status or severity changes; if you remove those conditions, every update is pushed, and repeated events with the same Alert Key merge into the original alert.
+- `event_status` must be one of `Critical`, `Warning`, `Info`, `Ok` (capitalized); Flashduty rejects other values.
+- An incident that groups several Sentinel alerts is pushed as one Flashduty alert; the title and description come from the incident itself.
+
+## Troubleshooting
+---
+
+- **Flashduty returns `InvalidParameter`**: check that `event_status` is one of the four capitalized values and that `title_rule` is not empty
+- **The HTTP action returns a 4xx about authentication or routing**: the push URL lacks `integration_key`, or it is not the push URL of a Standard Alert Event integration
+- **The automation rule does not run the Logic App**: confirm the playbook starts with the **Microsoft Sentinel incident** trigger and that Sentinel has permission on its resource group
+- **The alert does not recover**: confirm the update rule ran when the status became `Closed`, and that `event_status` was `Ok` in the Logic App run history

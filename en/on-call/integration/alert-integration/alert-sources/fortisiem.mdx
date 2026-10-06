@@ -1,0 +1,108 @@
+---
+title: "FortiSIEM alert integration"
+description: "Send FortiSIEM incident trigger, update, and clear notifications to Flashduty On-call through Incident HTTP Notification."
+keywords: ["alert integration", "FortiSIEM", "Fortinet", "SIEM", "Incident HTTP Notification", "incidentId"]
+---
+
+When a rule triggers an incident, FortiSIEM's Incident HTTP Notification POSTs an XML document over HTTP(S). Flashduty parses that document directly: each FortiSIEM incident maps to one Flashduty alert, and its `New`, `Update`, and `Clear` notifications keep updating and finally recover that alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **FortiSIEM** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **FortiSIEM** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In FortiSIEM
+---
+
+<Steps>
+<Step title="Fill in Incident HTTP Notification">
+
+1. Sign in to FortiSIEM as an administrator and go to **ADMIN → Settings → Analytics → Incident Notification**
+2. In the **Incident HTTP Notification** section, enter the complete Flashduty Push URL (including the `integration_key` parameter) in **HTTP(S) Server URL**
+3. If the form requires a **User Name** and **Password**, enter any placeholder values. Flashduty authenticates with the `integration_key` in the push URL and does not check them
+4. Click **Save**
+
+</Step>
+
+<Step title="Understand what is sent">
+
+Incident HTTP Notification is a global FortiSIEM notification channel: per the official documentation, it sends when a rule triggers an incident. To sync only some incidents, filter by labels such as `rule_type`, `severity`, or `organization` with Flashduty **Routes** or alert processing rules.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Let a rule trigger a real incident and confirm Flashduty receives an active alert. Then clear the incident in FortiSIEM (or wait for it to clear automatically) and confirm the Flashduty alert recovers. The form's **Test** button is documented only as a connection check, and its request body is not published. If it sends a request to the push URL, that request may be handled as an ordinary incident or rejected as invalid, so go by what the console shows.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the `incidentId` attribute of the `incident` element as the Alert Key. The FortiSIEM documentation defines it as "Unique ID of the incident in FortiSIEM", and describes `status` as "New, Update or Clear"; one `incidentId` is expected across the notifications of one incident. The XML schema comes from the FortiSIEM 6.7.0 Integration API guide; check the first real delivery on your 7.x version against the field list below. Changes to the rule name, severity, repeat count, time, or incident details do not change the Alert Key.
+
+Flashduty rejects a request without `incidentId` (HTTP 400), because later updates and recovery could not be matched reliably.
+
+## Status and severity
+---
+
+The `status` attribute:
+
+| FortiSIEM `status` | Flashduty state |
+| :--- | :--- |
+| `New` | Trigger |
+| `Update` | Update (keeps the severity) |
+| `Clear` | Recovery; the severity stays at the last real value |
+| Empty or any other value | Handled as a trigger |
+
+The `severity` attribute accepts `HIGH`, `MEDIUM`, `LOW`, or the matching 0-10 score:
+
+| FortiSIEM severity | Flashduty severity |
+| :--- | :--- |
+| `HIGH` (9-10) | Critical |
+| `MEDIUM` (5-8) | Warning |
+| `LOW` (0-4) | Info |
+| Empty or unrecognized | Warning |
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Rule name (`name`) |
+| `incident_id` / `rule_type` / `organization` / `severity` / `repeat_count` / `status` / `display_time` | Attributes of `incident` and `displayTime` |
+| `affected_biz_srvc` | Affected business services (`affectedBizSrvc`) |
+| `source_*` / `target_*` / `detail_*` | Entries in `incidentSource`, `incidentTarget`, and `incidentDetails`; the label name is the prefix plus the attribute name (for example `source_srcIpAddr`, `target_hostName`) |
+| `host` | `target_hostName`, or `target_hostIpAddr` when absent |
+
+`deviceDetails`, which carries user names and emails, is not written to labels.
+
+## Troubleshooting
+---
+
+- **FortiSIEM reports a failed push**: confirm **HTTP(S) Server URL** starts with `https://`, includes the full `integration_key`, and that the FortiSIEM network can reach `api.flashcat.cloud`
+- **Flashduty returns an invalid-parameter error**: confirm the body is FortiSIEM incident XML (root element `incident`) with an `incidentId` attribute
+- **The alert does not recover**: confirm the incident was cleared in FortiSIEM, and check that the notification Flashduty received has `status` set to `Clear`
+- **Too many incidents arrive**: Incident HTTP Notification applies to every rule, so filter with Flashduty routes or alert processing rules
+- **The test succeeds but real alerts do not arrive**: check that a rule actually triggered an incident and that Incident HTTP Notification is configured in FortiSIEM
+
+For field definitions, see the FortiSIEM documentation: [Incident Notification](https://docs.fortinet.com/document/fortisiem/7.4.0/user-guide/142816/incident-notification) and [Notification via HTTPS](https://docs.fortinet.com/document/fortisiem/6.7.0/integration-api-guide/920026/notification-via-https).
