@@ -199,7 +199,7 @@ Translatable companions (do NOT belong in DNT — translate to Chinese):
 | English | Chinese |
 |---------|---------|
 | Artifact / Artifacts | 产物 |
-| Knowledge | 知识库 — the DUTY.md-rooted file tree an account or team maintains for AI SRE. Formerly "Knowledge Pack"; do not use that name in copy. Running text uses lowercase "knowledge" (e.g., "team knowledge"); API identifiers such as `pack_id` and `knowledge-pack-*` CLI commands stay unchanged |
+| Knowledge | 知识 — the DUTY.md-rooted file tree an account or team maintains for AI SRE. Formerly "Knowledge Pack"; do not use that name in copy. Running text uses lowercase "knowledge" (e.g., "team knowledge"); API identifiers such as `pack_id` and `knowledge-pack-*` CLI commands stay unchanged |
 | Memory | 记忆 |
 | Context | 上下文 — the Customize group holding Knowledge and Memory |
 | Customize | 自定义 — the AI SRE sidebar entry that opens Context, Plugins, and Environments |
