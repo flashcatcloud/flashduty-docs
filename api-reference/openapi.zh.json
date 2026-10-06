@@ -2955,6 +2955,14 @@
               "reopen"
             ],
             "type": "string"
+          },
+          "effective_person_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "服务端解析出的实际被分配人 ID——直接指定的 `person_ids` 加上升级规则当前层成员，去重并排序。由服务端在分派时填充；Jira 等集成读取它来确定通知对象。"
           }
         },
         "type": "object"
@@ -3253,6 +3261,13 @@
             },
             "type": "array"
           },
+          "oncall_incident_merge_similar": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "当 On-call 故障触发器触发且已有相似故障的分析会话在运行时，将新故障并入该会话而不是开启新会话。省略时默认开启；存储值始终显式写入。"
+          },
           "oncall_incident_severities": {
             "description": "监听的故障严重程度，支持 Critical、Warning 和 Info；创建或启用该触发器时至少需要一个值。",
             "items": {
@@ -3378,6 +3393,10 @@
             },
             "type": "array"
           },
+          "oncall_incident_merge_similar": {
+            "type": "boolean",
+            "description": "On-call 故障触发器触发时，是否将新故障并入已在运行的相似故障分析会话而不是开启新会话。此开关出现之前保存的触发器行按默认开启处理；始终返回。"
+          },
           "oncall_incident_severities": {
             "description": "要监听的事故级别。支持的值为 Critical、Warning、Info；创建或启用该触发器至少需要一个值；未配置 On-call 故障触发器时省略。",
             "items": {
@@ -3466,7 +3485,8 @@
           "created_at",
           "updated_at",
           "schedule_next_fire_at_ms",
-          "oncall_incident_trigger_enabled"
+          "oncall_incident_trigger_enabled",
+          "oncall_incident_merge_similar"
         ],
         "type": "object"
       },
@@ -3605,6 +3625,13 @@
             },
             "type": "array"
           },
+          "oncall_incident_merge_similar": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "当 On-call 故障触发器触发且已有相似故障的分析会话在运行时，将新故障并入该会话而不是开启新会话。省略或传 null 表示不修改；此开关出现之前保存的触发器行按默认开启处理。"
+          },
           "oncall_incident_severities": {
             "description": "监听的故障严重程度，支持 Critical、Warning 和 Info；创建或启用该触发器时至少需要一个值。",
             "items": {
@@ -3701,6 +3728,14 @@
           "error_message": {
             "description": "错误信息；运行未失败时为空字符串。",
             "type": "string"
+          },
+          "joined_session_id": {
+            "type": "string",
+            "description": "本次运行并入的分析会话 ID；仅当本次运行为 fan-in skip（`status=skipped`、`error_code=similar_incident_fan_in`，相似故障的分析已在运行，本次运行没有自己的会话）时返回，否则省略。"
+          },
+          "joined_session_name": {
+            "type": "string",
+            "description": "并入的分析会话的显示名称，与 `session_name` 经同一批量查询填充；为空或查询失败时省略。"
           },
           "kind": {
             "description": "运行类型；按规则查询时恒为 `automation_rule`。",
@@ -7459,6 +7494,33 @@
             "description": "最后更新时间，Unix 时间戳（秒）。",
             "format": "int64",
             "type": "integer"
+          },
+          "manage_team_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "description": "允许管理该数据源（更新、删除、查看凭证）的团队 ID。为 null 表示不指定管理团队——任何持有数据源管理 权限的成员都可管理。"
+          },
+          "readonly_team_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "uint64"
+            },
+            "description": "额外允许查询和引用该数据源的团队 ID 列表；管理团队始终隐含查询权限。为空或为 null 表示不限制——任何持有 数据源查看权限的成员都可查询。"
+          },
+          "creator_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "description": "创建该数据源的用户 ID；通过 API（app key）创建时为账户 ID。对于早于该字段上线前创建的数据源为 null。"
           }
         },
         "required": [
@@ -7472,7 +7534,10 @@
           "edge_cluster_name",
           "updated_at",
           "payload",
-          "alerting_enabled"
+          "alerting_enabled",
+          "manage_team_id",
+          "readonly_team_ids",
+          "creator_id"
         ],
         "type": "object"
       },
@@ -7487,9 +7552,9 @@
         "type": "object"
       },
       "DataSourceListResponse": {
-        "description": "数据源列表。本接口不读取 payload 列，因此每项的 `payload` 均为 `null`。",
+        "description": "数据源列表。该接口不读取 `payload` 列，因此每个条目的 `payload` 均为 `null`。每个条目都带有 `my_perm`，即调用方对该数据源的权限级别。",
         "items": {
-          "$ref": "#/components/schemas/DataSourceItem"
+          "$ref": "#/components/schemas/DataSourceListItem"
         },
         "type": "array"
       },
@@ -7535,6 +7600,27 @@
           "type_ident": {
             "description": "数据源类型标识。支持：`prometheus`, `loki`, `mysql`, `oracle`, `postgres`, `clickhouse`, `elasticsearch`, `sls`, `tencent_cls`, `victorialogs`, `redis_node`, `redis_sentinel`, `mongodb_mongod`, `mongodb_mongos`, `kafka`。",
             "type": "string"
+          },
+          "manage_team_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "description": "允许管理该数据源（更新、删除、查看凭证）的团队 ID。创建时省略：不指定管理团队——任何持有数据源管理权限的成员都可管理。更新时省略表示保留当前值；显式 null 表示清除。设置 `readonly_team_ids` 时必须指定管理团队，否则请求返回 `400`。",
+            "x-flashduty-preserve-absence": true
+          },
+          "readonly_team_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "uint64"
+            },
+            "description": "额外允许查询和引用该数据源的团队 ID 列表；管理团队始终隐含查询权限。创建时省略：不限制——任何持有 数据源查看权限的成员都可查询。更新时省略表示保留当前值；显式 null 清除并恢复为不限制。",
+            "x-flashduty-preserve-absence": true
           }
         },
         "required": [
@@ -9149,6 +9235,10 @@
             "format": "int64",
             "type": "integer"
           },
+          "delivery_mode": {
+            "type": "string",
+            "description": "事件上的 IM 投递模式：`reply_only` 表示该轮直接回复而不打开交互式会话卡片；非 IM 事件省略。"
+          },
           "error_code": {
             "description": "当该事件表示失败时的错误码。",
             "type": "string"
@@ -9165,9 +9255,17 @@
             "description": "标识一轮的 ADK 调用 ID。",
             "type": "string"
           },
+          "is_error": {
+            "type": "boolean",
+            "description": "事件包含持久化的助手侧运行时错误证据（已脱敏的运行时错误）时为 true；控制行的载荷诊断不会设置该字段。"
+          },
           "partial": {
             "description": "流式部分分片时为 true。",
             "type": "boolean"
+          },
+          "root_invocation_id": {
+            "type": "string",
+            "description": "根用户可见轮次的 ADK 调用 ID，父调用及其派生的所有 Subagent/A2A 延续调用共享；IM 投递用它保证每个用户问题只更新一张卡片。"
           },
           "session_id": {
             "description": "所属会话 ID。",
@@ -12093,6 +12191,14 @@
                   "reopen"
                 ],
                 "type": "string"
+              },
+              "effective_person_ids": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "description": "服务端解析出的实际被分配人 ID——直接指定的 `person_ids` 加上升级规则当前层成员，去重并排序。由服务端在分派时填充；Jira 等集成读取它来确定通知对象。"
               }
             },
             "type": [
@@ -17426,6 +17532,11 @@
             "description": "创建者的成员 ID。",
             "format": "int64",
             "type": "integer"
+          },
+          "pinned_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "调用者本人的置顶时间，Unix 毫秒时间戳；按人隔离、不共享。调用者未置顶该产物时省略。"
           },
           "public_url": {
             "description": "匿名公开链接 —— 由 CDN 承载的控制台 `/share/artifact/<artifact_id>` 页面。仅在分享开启时返回；任何拿到链接的人无需登录即可查看。",
@@ -23858,6 +23969,10 @@
             ],
             "type": "string"
           },
+          "has_open_tasks": {
+            "type": "boolean",
+            "description": "响应时该会话是否存在阻断结算的未完成任务。仅 `POST /safari/session/get` 填充此字段：字段缺省表示未知，而不是没有未完成任务；`session/list` 不返回此字段。"
+          },
           "has_unread": {
             "description": "当存在调用者尚未查看的助手输出时为 true。",
             "type": "boolean"
@@ -29395,6 +29510,30 @@
             ]
           }
         }
+      },
+      "DataSourceListItem": {
+        "description": "列表接口返回的监控数据源：完整的数据源记录加上调用方对它的权限级别。",
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/DataSourceItem"
+          },
+          {
+            "type": "object",
+            "required": [
+              "my_perm"
+            ],
+            "properties": {
+              "my_perm": {
+                "type": "string",
+                "enum": [
+                  "manage",
+                  "readonly"
+                ],
+                "description": "调用方对该数据源的权限级别：`manage`（可更新、删除、查看凭证、查询）或 `readonly`（仅可查询和引用）。通过 app key 调用的调用方始终为 `manage`。"
+              }
+            }
+          }
+        ]
       }
     },
     "securitySchemes": {
@@ -42813,7 +42952,7 @@
           "Monitors/告警数据源"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **数据源管理**（`monit`） |\n\n## 使用说明\n\n- `type_ident` 必须为以下之一：`prometheus`、`loki`、`mysql`、`oracle`、`postgres`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls`、`victorialogs`、`redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka`。\n- `edge_cluster_name` 指定使用该数据源进行规则评估的 Monitors Edge 集群。\n- 对于 `elasticsearch`，`payload.elasticsearch.deployment` 须设为 `cloud` 或 `self-managed`。\n- 每次调用都会记录到账户审计日志，仅通过凭据字段配置连接凭据。\n\n完整支持类型与凭据行为见请求/响应 Schema。仅诊断类型不能启用告警。创建时省略 enabled 默认为 true，更新时省略保留当前值；enabled 或 alerting_enabled 的显式 null 非法。诊断密码及 Kafka 私钥在响应中省略，环境变量引用除外；更新时省略秘密字段保留原值，空字符串清除。其他数据源凭据可能返回，应作为敏感数据处理。",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **数据源管理**（`monit`） |\n\n## 使用说明\n\n- `manage_team_id` 与 `readonly_team_ids` 控制团队级授权：管理团队可更新、删除、查看凭证；readonly 团队可查询和引用。两者默认省略（不限制）。设置 `readonly_team_ids` 时必须在同一请求中给出 `manage_team_id`，否则调用返回 `400`。\n- `type_ident` 必须为以下之一：`prometheus`、`loki`、`mysql`、`oracle`、`postgres`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls`、`victorialogs`、`redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka`。\n- `edge_cluster_name` 指定使用该数据源进行规则评估的 Monitors Edge 集群。\n- 对于 `elasticsearch`，`payload.elasticsearch.deployment` 须设为 `cloud` 或 `self-managed`。\n- 每次调用都会记录到账户审计日志，仅通过凭据字段配置连接凭据。\n\n完整支持类型与凭据行为见请求/响应 Schema。仅诊断类型不能启用告警。创建时省略 enabled 默认为 true，更新时省略保留当前值；enabled 或 alerting_enabled 的显式 null 非法。诊断密码及 Kafka 私钥在响应中省略，环境变量引用除外；更新时省略秘密字段保留原值，空字符串清除。其他数据源凭据可能返回，应作为敏感数据处理。",
           "href": "/zh/api-reference/monitors/data-sources/monit-datasource-write-create",
           "metadata": {
             "sidebarTitle": "创建数据源"
@@ -43014,7 +43153,8 @@
                       "note": "Production Prometheus",
                       "payload": null,
                       "type_ident": "prometheus",
-                      "updated_at": 1712000000
+                      "updated_at": 1712000000,
+                      "my_perm": "manage"
                     }
                   ],
                   "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4"
@@ -43056,7 +43196,7 @@
           "Monitors/告警数据源"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **数据源查看**（`monit`） |\n\n## 使用说明\n\n- 省略 `type_ident` 可返回所有类型的数据源。\n- 列表响应中不返回敏感凭证字段（密码、密钥）。\n\n完整支持类型与凭据行为见请求/响应 Schema。仅诊断类型不能启用告警。创建时省略 enabled 默认为 true，更新时省略保留当前值；enabled 或 alerting_enabled 的显式 null 非法。诊断密码及 Kafka 私钥在响应中省略，环境变量引用除外；更新时省略秘密字段保留原值，空字符串清除。其他数据源凭据可能返回，应作为敏感数据处理。",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **数据源查看**（`monit`） |\n\n## 使用说明\n\n- 仅返回调用方可查询的数据源，每个条目带有 `my_perm`——调用方的权限级别（`manage` 或 `readonly`）。通过 app key 调用可看到全部数据源，`my_perm` 均为 `manage`。\n- 省略 `type_ident` 可返回所有类型的数据源。\n- 列表响应中不返回敏感凭证字段（密码、密钥）。\n\n完整支持类型与凭据行为见请求/响应 Schema。仅诊断类型不能启用告警。创建时省略 enabled 默认为 true，更新时省略保留当前值；enabled 或 alerting_enabled 的显式 null 非法。诊断密码及 Kafka 私钥在响应中省略，环境变量引用除外；更新时省略秘密字段保留原值，空字符串清除。其他数据源凭据可能返回，应作为敏感数据处理。",
           "href": "/zh/api-reference/monitors/data-sources/monit-datasource-read-list",
           "metadata": {
             "sidebarTitle": "查询数据源列表"
@@ -43531,7 +43671,7 @@
           "Monitors/告警数据源"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **数据源管理**（`monit`） |\n\n## 使用说明\n\n- 每次调用都会记录到账户审计日志，仅通过凭据字段配置连接凭据。\n\n完整支持类型与凭据行为见请求/响应 Schema。仅诊断类型不能启用告警。创建时省略 enabled 默认为 true，更新时省略保留当前值；enabled 或 alerting_enabled 的显式 null 非法。诊断密码及 Kafka 私钥在响应中省略，环境变量引用除外；更新时省略秘密字段保留原值，空字符串清除。其他数据源凭据可能返回，应作为敏感数据处理。",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **数据源管理**（`monit`） |\n\n## 使用说明\n\n- `manage_team_id` 与 `readonly_team_ids` 按是否传入生效：省略表示保留当前值；显式 null 表示清除。设置 `readonly_team_ids` 要求 `manage_team_id` 保持有效——合并后的状态若限制了查询权限却没有管理团队，调用返回 `400`。\n- 每次调用都会记录到账户审计日志，仅通过凭据字段配置连接凭据。\n\n完整支持类型与凭据行为见请求/响应 Schema。仅诊断类型不能启用告警。创建时省略 enabled 默认为 true，更新时省略保留当前值；enabled 或 alerting_enabled 的显式 null 非法。诊断密码及 Kafka 私钥在响应中省略，环境变量引用除外；更新时省略秘密字段保留原值，空字符串清除。其他数据源凭据可能返回，应作为敏感数据处理。",
           "href": "/zh/api-reference/monitors/data-sources/monit-datasource-write-update",
           "metadata": {
             "sidebarTitle": "更新数据源"
@@ -51756,7 +51896,7 @@
           "AI SRE/产物"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个 `app_key` **100 次/分钟**；**10 次/秒** |\n| 权限要求 | 无 —— 持有有效的 `app_key` 即可调用 |\n\n## 使用说明\n\n- 成功响应有两种形式：302 重定向到短期有效的对象存储预签名 URL（存储在 S3 兼容存储中的文件），或 200 二进制流（托管在自托管 runner 上的文件）。请跟随重定向。\n- 响应携带 `Cache-Control: private, no-store` —— 网关不会缓存。\n",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个 `app_key` **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | 无 —— 持有有效的 `app_key` 即可调用 |\n\n## 使用说明\n\n- 成功响应有两种形式：302 重定向到短期有效的对象存储预签名 URL（存储在 S3 兼容存储中的文件），或 200 二进制流（托管在自托管 runner 上的文件）。请跟随重定向。\n- 响应携带 `Cache-Control: private, no-store` —— 网关不会缓存。\n",
           "href": "/zh/api-reference/ai-sre/artifacts/artifact-read-stream",
           "metadata": {
             "sidebarTitle": "下载或预览文件"
@@ -51779,6 +51919,7 @@
                 "oncall_incident_channel_ids": [
                   456
                 ],
+                "oncall_incident_merge_similar": true,
                 "oncall_incident_severities": [
                   "Critical",
                   "Warning"
@@ -51817,6 +51958,7 @@
                     "oncall_incident_channel_ids": [
                       456
                     ],
+                    "oncall_incident_merge_similar": true,
                     "oncall_incident_severities": [
                       "Critical",
                       "Warning"
@@ -52005,6 +52147,7 @@
                     "oncall_incident_channel_ids": [
                       456
                     ],
+                    "oncall_incident_merge_similar": true,
                     "oncall_incident_severities": [
                       "Critical",
                       "Warning"
@@ -52117,6 +52260,7 @@
                         "oncall_incident_channel_ids": [
                           456
                         ],
+                        "oncall_incident_merge_similar": true,
                         "oncall_incident_severities": [
                           "Critical",
                           "Warning"
@@ -52304,6 +52448,7 @@
                 "oncall_incident_channel_ids": [
                   456
                 ],
+                "oncall_incident_merge_similar": false,
                 "oncall_incident_severities": [
                   "Critical",
                   "Warning"
@@ -52340,6 +52485,7 @@
                     "oncall_incident_channel_ids": [
                       456
                     ],
+                    "oncall_incident_merge_similar": true,
                     "oncall_incident_severities": [
                       "Critical",
                       "Warning"
@@ -52460,9 +52606,38 @@
                         "status": "succeeded",
                         "trigger_kind": "schedule",
                         "updated_at": 1780630923456
+                      },
+                      {
+                        "account_id": 10023,
+                        "attempts": 0,
+                        "completed_at": 1780634400000,
+                        "created_at": 1780634400000,
+                        "duration_ms": 0,
+                        "error_code": "similar_incident_fan_in",
+                        "error_message": "joined run trun_5oDvqiG64uur6sBNsTc4u: similar to incident 88231 (score 0.94)",
+                        "joined_session_id": "sess_f8oDvqiG64uur6sBNsTc4u",
+                        "joined_session_name": "Weekly on-call review",
+                        "kind": "automation_rule",
+                        "occurrence_key": "atrig_9cVb2mN7qKs4dEa8T1rY5p:1780634400000",
+                        "result_json": {
+                          "incident_num": "88231",
+                          "incident_title": "node CPU saturation",
+                          "parent_incident_id": "88231",
+                          "parent_run_id": "trun_5oDvqiG64uur6sBNsTc4u",
+                          "parent_session_id": "sess_f8oDvqiG64uur6sBNsTc4u",
+                          "reason": "similar_incident_fan_in",
+                          "score": 0.94
+                        },
+                        "rule_id": "arule_7NnLzY2Qp8xS4kUaV3mR6b",
+                        "run_id": "trun_9kLm3pQw8xz2vBn7yRt5u",
+                        "started_at": 1780634400000,
+                        "stats_json": {},
+                        "status": "skipped",
+                        "trigger_kind": "oncall_incident",
+                        "updated_at": 1780634400000
                       }
                     ],
-                    "total": 1
+                    "total": 2
                   },
                   "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4"
                 },
@@ -54284,6 +54459,7 @@
                       "current_turn_tokens": 0,
                       "current_turn_wait_ms": 0,
                       "entry_kind": "web",
+                      "has_open_tasks": false,
                       "has_unread": true,
                       "incognito": false,
                       "is_mine": false,
