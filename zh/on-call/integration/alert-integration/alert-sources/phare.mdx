@@ -1,0 +1,139 @@
+---
+title: "Phare Uptime 告警集成"
+description: "通过 Phare 的 Outgoing Webhook 将 Uptime 事件（Incident）的创建和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Phare", "Phare Uptime", "Outgoing Webhook", "Incident", "Uptime"]
+---
+
+通过 Phare 的 Outgoing Webhook，把 Uptime 监控产生的事件（Incident）同步到 Flashduty On-call。同一个 Phare 事件的创建、扩散（propagated）、部分恢复和恢复通知落在同一条 Flashduty 告警上：事件创建时触发，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Phare**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Phare**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Phare 中配置
+---
+
+Phare 的 Webhook 请求体由您用占位符编写，因此下面给出需要粘贴的模板，Flashduty 按这份模板解析。
+
+<Steps>
+<Step title="创建 Outgoing Webhook 集成">
+
+1. 登录 Phare 控制台，进入 **Integrations**，新建 **Outgoing webhook**
+2. **Callback URL** 填写 Flashduty 集成的完整推送地址（含 `integration_key`）
+3. 签名密钥（signing secret）可使用自动生成的值，Flashduty 不校验签名
+
+</Step>
+
+<Step title="配置 Payload 模板">
+
+把下面的 JSON 粘贴为 Payload 模板。`event` 填写对应告警规则的事件键，例如 `uptime.incident.created`、`uptime.incident.recovered`：
+
+```json
+{
+  "event": "uptime.incident.created",
+  "incident": {
+    "id": "{{ incident.id }}",
+    "slug": "{{ incident.slug }}",
+    "title": "{{ incident.title }}",
+    "description": "{{ incident.description }}",
+    "state": "{{ incident.state }}",
+    "status": "{{ incident.status }}",
+    "impact": "{{ incident.impact }}"
+  },
+  "project": {
+    "id": "{{ project.id }}",
+    "name": "{{ project.name }}",
+    "slug": "{{ project.slug }}"
+  },
+  "affected_monitors": {
+    "$each": "affected_monitors",
+    "$item": {
+      "id": "{{ item.id }}",
+      "name": "{{ item.name }}"
+    }
+  }
+}
+```
+
+<Warning>
+请保留 `incident.id`。缺少该字段时 Flashduty 会拒绝请求，因为无法关联后续恢复。Phare 每次请求还会带上请求头 `X-Phare-Request-Event`（事件键）；Flashduty 优先读取这个请求头，没有时才使用 `event` 字段。
+</Warning>
+
+</Step>
+
+<Step title="创建告警规则">
+
+在 **Alert rules** 中为同一个 Webhook 集成分别创建规则，事件选择：
+
+- **Incident created**（`uptime.incident.created`）
+- **Incident propagated**（需在 Phare 中开启 smart incident merging）
+- **Incident partially recovered**（需在 Phare 中开启 smart incident merging）
+- **Incident recovered**（`uptime.incident.recovered`）
+
+必须包含 **Incident recovered**，否则 Flashduty 告警不会自动关闭。速率限制（Rate limit）不要设置得过严，避免恢复通知被抑制。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个被监控的目标真正不可用，确认 Flashduty 收到活动告警；再让目标恢复，确认原告警恢复。Phare 文档没有为 Webhook 提供测试按钮，请以真实事件验证。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `incident.id` 作为 Alert Key。Phare 的创建、扩散、部分恢复和恢复事件都暴露同一个事件（Incident）实体，`{{ incident.id }}` 是该事件的编号，因此同一个事件的所有通知得到相同的 Alert Key。标题、描述、状态、影响程度、受影响监控项的变化不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+事件类型由 `X-Phare-Request-Event` 请求头决定：
+
+| Phare 事件 | Flashduty 处理 |
+| :--- | :--- |
+| `uptime.incident.created` | 触发告警 |
+| `uptime.incident.propagated` | 更新告警 |
+| `uptime.incident.partially_recovered` | 更新告警（仍有监控项异常） |
+| `uptime.incident.recovered` | 恢复 |
+| 监控项、证书、评论、公开更新等其他事件 | 返回成功，不创建告警 |
+
+告警等级取自 `incident.impact`：
+
+| `impact` | 等级 |
+| :--- | :--- |
+| `major_outage`、`unknown`、空值或未知值 | Critical |
+| `partial_outage`、`degraded_performance` | Warning |
+| `operational`、`maintenance` | Info |
+
+事件是监控项探测失败产生的，因此无法判断影响程度时按 Critical 处理。恢复事件保留 `impact` 对应的等级，状态变为恢复。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认模板是有效 JSON，`incident.id` 非空，并且请求带有 `X-Phare-Request-Event` 或 `event` 字段
+- **告警没有恢复**：确认创建了 **Incident recovered** 规则，且使用了同一份模板
+- **没有收到通知**：在 Phare 的 Webhook 日志中查看请求和响应；Phare 对非 2xx 响应最多重试 4 次
+- **想同步证书过期等事件**：这些事件没有事件编号，本集成不处理
+
+更多占位符和请求头说明请参阅 [Phare Outgoing Webhooks](https://docs.phare.io/integrations/outgoing-webhook) 和 [Phare 告警规则](https://docs.phare.io/uptime/alerting)。

@@ -1,0 +1,169 @@
+---
+title: "Bitdefender GravityZone 告警集成"
+description: "通过 Event Push Service 将 Bitdefender GravityZone 的恶意软件、勒索软件、网络攻击和事件（Incident）检测同步到 Flashduty On-call。"
+keywords: ["告警集成", "Bitdefender", "GravityZone", "Event Push Service", "EDR", "安全"]
+---
+
+Bitdefender GravityZone 的 Event Push Service 可以把检测事件以 JSON-RPC 2.0 `addEvents` 请求推送到指定地址。接入后，每个检测事件在 Flashduty On-call 中对应一条告警。GravityZone 推送的检测事件不包含恢复信号，请开启协作空间的超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Bitdefender**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Bitdefender**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 GravityZone 中配置
+---
+
+Event Push Service 只能通过 GravityZone 公共 API 配置，控制台界面没有对应入口。
+
+<Steps>
+<Step title="创建 API Key">
+
+1. 登录 GravityZone Control Center，点击右上角用户图标，选择 **My Account**
+2. 在 **API keys** 区域生成 API Key，并勾选 **Event Push Service API**
+3. 在同一页面的 **Control Center API** 区域复制 **Access URL**，下文记为 `CONTROL_CENTER_APIs_ACCESS_URL`
+
+</Step>
+
+<Step title="设置推送服务">
+
+向 `CONTROL_CENTER_APIs_ACCESS_URL/v1.0/jsonrpc/push` 发送 `setPushEventSettings` 请求。请求使用 HTTP POST，`Content-Type: application/json`，HTTP Basic 认证，API Key 作为用户名、密码留空：
+
+```bash
+curl -s -u "<API_KEY>:" -H "Content-Type: application/json" \
+  -X POST "CONTROL_CENTER_APIs_ACCESS_URL/v1.0/jsonrpc/push" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "flashduty-setup",
+    "method": "setPushEventSettings",
+    "params": {
+      "status": 1,
+      "serviceType": "jsonRPC",
+      "serviceSettings": {
+        "url": "<Flashduty 推送地址>",
+        "requireValidSslCertificate": true
+      },
+      "subscribeToEventTypes": {
+        "av": true,
+        "hd": true,
+        "aph": true,
+        "avc": true,
+        "dp": true,
+        "fw": true,
+        "antiexploit": true,
+        "network-monitor": true,
+        "network-sandboxing": true,
+        "ransomware-mitigation": true,
+        "exchange-malware": true,
+        "new-extended-incident": true
+      }
+    }
+  }'
+```
+
+返回 `"result": true` 表示保存成功。`serviceType` 必须是 `jsonRPC`。`Event Push Service` 要求接收端支持 TLS 1.2 及以上，并会从固定的出口 IP 发起请求；如果您为 Flashduty 入口设置了 IP 白名单，请按 [setPushEventSettings](https://www.bitdefender.com/business/support/en/77209-135319-setpusheventsettings.html) 页面列出的地址放行。
+
+</Step>
+
+<Step title="发送测试事件并验证">
+
+调用 `sendTestPushEvent`，`eventType` 取 `av`，GravityZone 会向推送地址发送一条带 `"_testEvent_": true` 的事件：
+
+```bash
+curl -s -u "<API_KEY>:" -H "Content-Type: application/json" \
+  -X POST "CONTROL_CENTER_APIs_ACCESS_URL/v1.0/jsonrpc/push" \
+  -d '{"jsonrpc":"2.0","id":"flashduty-test","method":"sendTestPushEvent","params":{"eventType":"av"}}'
+```
+
+Flashduty 会创建一条 Info 级别、标题为 `Bitdefender GravityZone test notification` 的独立告警，每次测试都是一条新告警，不会自动恢复，验证后请手动关闭。之后可用 [EICAR 测试文件](https://www.eicar.org/) 在受管终端上触发一次真实的 Antimalware 检测，确认 Flashduty 收到 Warning 告警。
+
+</Step>
+</Steps>
+
+## 开启超时自动关闭
+---
+
+检测事件是一次性的，GravityZone 不会推送恢复。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长为 24 小时，计时起点选择 **故障触发**。同一个威胁在告警未关闭期间再次被检测到，会合并到原有告警；关闭后再次出现，会创建新的告警。
+
+## 支持的事件类型
+---
+
+只有下表中的检测类事件会创建告警。状态和资产类事件（如 `modules`、`sva`、`registration`、`task-status`、`install`、`uninstall`、`uc`、`adcloud`）会被忽略，Flashduty 直接返回成功，不建议订阅。
+
+| `module` | 含义 | 告警标题 | 等级 |
+| :--- | :--- | :--- | :--- |
+| `av` | 恶意软件检测 | Antimalware: 恶意软件名 on 主机名 | `final_status` 为 `ignored` 或 `still present` 时 Critical，其余 Warning |
+| `hd` | HyperDetect | HyperDetect: 恶意软件名或攻击类型 | 同 `av` |
+| `aph` | 防钓鱼 | Antiphishing: 被拦截的 URL | Warning |
+| `avc` | 高级威胁控制（ATC） | Advanced Threat Control: 可疑进程路径 | `status` 为 `avc_allowed` 时 Critical，其余 Warning |
+| `dp` | 数据保护 | Data Protection: 规则名 | Warning |
+| `fw` | 防火墙 | Firewall | Info |
+| `antiexploit` | 高级反利用 | Advanced Anti-Exploit: 威胁类型 | Warning |
+| `network-monitor` | 网络攻击防御 | Network Attack Defense: 检测名称 | Warning |
+| `network-sandboxing` | Sandbox Analyzer | Sandbox Analyzer: 威胁类型 | Warning |
+| `ransomware-mitigation` | 勒索软件防护 | Ransomware Mitigation: 攻击类型 | Critical |
+| `exchange-malware` | Exchange 恶意软件 | Exchange malware: 恶意软件名 | Warning |
+| `new-extended-incident` / `new-incident` | GravityZone Incident | Incident: 攻击类型 | `severity` 为 `high` 时 Critical，`medium` Warning，`low` Info；缺失时按 `severity_score` 判断（大于 75 Critical，大于 50 Warning，其余 Info） |
+
+GravityZone 没有为检测事件公布统一的严重程度，以上等级是根据事件字段作出的映射。如需调整，可在协作空间中按标签配置路由或告警处理规则。
+
+## Alert Key
+---
+
+GravityZone 的检测事件没有事件编号，Flashduty 用事件中不会变化的部分计算 Alert Key：`module`、`companyId`、终端编号（`computer_id`，Sandbox Analyzer 为 `endpointId`）以及该类事件的威胁标识，例如 Antimalware 用恶意软件类型、名称和文件路径，Antiphishing 用钓鱼类型和 URL，勒索软件防护用攻击类型和攻击来源。处置状态、计数、时间、哈希、主机名和 IP 的变化不会改变 Alert Key。
+
+事件（Incident）使用 `incident_id`，`new-incident` 与 `new-extended-incident` 共用同一个 Alert Key，同一个事件的版本更新会合并到同一条告警。缺少终端编号或 `incident_id` 的事件会被拒绝。
+
+## 批量推送
+---
+
+一次 `addEvents` 请求可以包含多个事件，Flashduty 为每个事件创建一条告警，并按 Alert Key 排序处理。每次请求最多处理 100 个事件，超出部分不会创建告警，并在响应中返回错误。某个事件格式有误时，其余事件仍会创建，响应会返回该事件的序号和原因。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `module` | 事件类型 |
+| `company_id` | `companyId` |
+| `host` / `computer_id` / `ip` | 终端名称、终端编号、IP |
+| `detected_at` | GravityZone 记录的检测时间 |
+| `malware_name` / `malware_type` / `final_status` / `file_path` | 恶意软件检测字段 |
+| `url` / `aph_type` / `status` | 防钓鱼、ATC、防火墙等模块的对应字段 |
+| `incident_id` / `incident_number` / `version` / `severity` / `main_action` / `attack_types` / `killchain` | 事件（Incident）字段 |
+
+用户名、邮件发件人和收件人、邮件主题、事件节点（`nodes`）不会写入标签或描述。
+
+## 关于签名
+---
+
+GravityZone 会在请求头 `Event-Push-Service-Md5` 中带上 `md5(api_key, md5(请求体))`，也可以在 `serviceSettings` 中设置 `authorization` 请求头。Flashduty 不校验这两项，推送地址中的 `integration_key` 是唯一的凭证，请妥善保管。
+
+## 排查问题
+---
+
+- **`setPushEventSettings` 返回错误**：确认 API Key 已勾选 Event Push Service API，且 `serviceType` 为 `jsonRPC`
+- **Flashduty 没有收到推送**：确认推送地址是公网可访问的 HTTPS 地址且支持 TLS 1.2 以上；GravityZone 要求接收端返回 2xx，否则视为失败
+- **返回参数错误**：响应会列出出错事件的序号，常见原因是缺少 `computer_id`（或 `endpointId`）、`incident_id`，或请求的 `method` 不是 `addEvents`
+- **告警没有关闭**：检测事件没有恢复信号，请开启协作空间的超时自动关闭，或手动关闭；测试事件产生的 Info 告警同样需要手动关闭
+- **收到的告警过多**：只订阅上表中的事件类型；`fw`、`dp` 等模块在规则命中频繁时会产生大量告警
+
+更多信息请参阅 GravityZone 文档中的 [Push event JSON RPC messages](https://www.bitdefender.com/business/support/en/77209-135325-push-event-json-rpc-messages.html)。

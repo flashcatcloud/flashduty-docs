@@ -1,0 +1,118 @@
+---
+title: "Robusta alert integration"
+description: "Send Robusta alerts from your Kubernetes clusters to Flashduty On-call through the Robusta webhook sink."
+keywords: ["alert integration", "Robusta", "Kubernetes", "K8s", "Prometheus", "webhook"]
+---
+
+Use the Robusta webhook sink (`webhook_sink`) to send Robusta findings to Flashduty On-call. A Prometheus alert that Robusta forwards creates a Flashduty alert when it fires and recovers automatically when Alertmanager sends the resolution. Problems that Robusta detects itself (such as CrashLoopBackoff, OOMKilled, or image pull failures) are notified once and do not recover automatically.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Robusta** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Robusta** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Robusta
+---
+
+<Steps>
+<Step title="Add a webhook sink">
+
+In the Helm values file you installed Robusta with (usually `generated_values.yaml`), add a `webhook_sink` to `sinksConfig`:
+
+```yaml
+sinksConfig:
+- webhook_sink:
+    name: flashduty
+    url: "<Flashduty push URL>"
+    format: json
+```
+
+- `url`: the full Flashduty push URL (starting with `https://` and including `integration_key`)
+- `format`: must be `json`. The default `text` sends plain text, which Flashduty cannot parse and rejects with a parameter error
+- Do not turn on `slack_webhook`. With it, Robusta sends a Slack-formatted body without `fingerprint`, and Flashduty rejects it
+- Keep `size_limit` at its default of `4096`. Over the limit, Robusta drops the trailing fields; `enrichments` goes first, and Flashduty does not read it
+
+</Step>
+
+<Step title="Upgrade Robusta">
+
+```bash
+helm upgrade robusta robusta/robusta --values=generated_values.yaml --set clusterName=<cluster name>
+```
+
+`clusterName` is written to the alert as the `cluster` label and is part of the Alert Key. If several clusters push to the same integration, give each cluster a different `clusterName`.
+
+</Step>
+
+<Step title="Turn on auto-close after timeout">
+
+Problems that Robusta detects itself (`source` is `KUBERNETES_API_SERVER` and similar) send no resolution, so these alerts stay open. In the channel that receives this integration, turn on [auto-close after timeout](/en/on-call/channel/create-edit) and set it to how quickly your team handles problems, for example 4 hours.
+
+</Step>
+</Steps>
+
+<Tip>
+If your Prometheus alerts do not go through Robusta, Alertmanager can also push them straight to the Flashduty [Prometheus integration](/en/on-call/integration/alert-integration/alert-sources/prometheus).
+</Tip>
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from `cluster_name` and `fingerprint`.
+
+- **Prometheus alerts**: `fingerprint` is the fingerprint Alertmanager computes for the alert. It stays the same from firing to resolution, so the firing, escalation, and resolution notifications land on the same Flashduty alert
+- **Problems Robusta detects itself**: `fingerprint` is computed from the resource kind, name, namespace, node, and problem type, so the same kind of problem recurring on the same pod merges into one alert
+
+Changes to the title, description, severity, timestamps, or finding ID do not change the Alert Key. Flashduty rejects a request without `fingerprint`, because later notifications could not be matched to it.
+
+## Status and severity
+---
+
+Flashduty marks the alert as recovered when the request has a non-empty `ends_at` or the title starts with `[RESOLVED] `. Robusta sends such notifications only for Prometheus alerts that Alertmanager has resolved, so make sure the Robusta receiver in Alertmanager has `send_resolved: true` (the Prometheus bundled with Robusta has it on by default).
+
+| Robusta `severity` | Flashduty severity |
+| :--- | :--- |
+| `HIGH` | Critical |
+| `LOW` | Warning |
+| `INFO`, `DEBUG` | Info |
+| Empty or any other value | Warning |
+
+When Robusta forwards a Prometheus alert, it converts the alert's `severity` label: `critical`, `high`, `medium`, and `error` become `HIGH`; `warning` and `low` become `LOW`; `info` and any other value become `INFO`; `debug` becomes `DEBUG`. A resolution keeps the last severity.
+
+## Alert content
+---
+
+- **Title**: `title`, with the `[RESOLVED] ` prefix removed from resolutions
+- **Description**: `description`, the links in `links` (such as the Prometheus graph), and the resolution time `ends_at`
+- **Labels**: `cluster`, `fingerprint`, `aggregation_key` (alert name or problem type), `finding_source` (such as `PROMETHEUS` or `KUBERNETES_API_SERVER`), `finding_type`, `severity` (the original Robusta severity), `resource` (`kind/namespace/name`), `kind`, `namespace`, `node`, `container`, `source` (always `robusta`), plus the resource labels and Prometheus alert labels from `subject.labels` (such as `alertname` and `pod`)
+
+## Troubleshooting
+---
+
+- **Flashduty returns request body is not Robusta JSON**: the `webhook_sink` does not set `format: json`
+- **Flashduty returns fingerprint is required**: make sure `slack_webhook` is off and `size_limit` is not set too small
+- **A Prometheus alert does not recover**: make sure the Robusta receiver in Alertmanager has `send_resolved` on and the alert has resolved in Alertmanager
+- **CrashLoopBackoff and similar alerts do not recover**: Robusta notifies these problems once; use auto-close after timeout or close them manually
+- **Send only some alerts**: use the sink `scope` to filter by namespace, alert name, and so on
+
+Robusta has no test button. To check delivery, create a pod that keeps crashing (for example `kubectl run crashy --image=busybox --restart=Always -- sh -c 'exit 1'`), then delete the pod and close the alert manually.
+
+For field details, see [Robusta webhook sink](https://docs.robusta.dev/master/configuration/sinks/webhook.html).

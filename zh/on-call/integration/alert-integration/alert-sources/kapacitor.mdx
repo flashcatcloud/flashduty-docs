@@ -1,0 +1,120 @@
+---
+title: "Kapacitor 告警集成"
+description: "通过 Kapacitor 的 post 事件处理器，使用 Flashduty 的 InfluxData 集成接收 Kapacitor 告警，恢复时自动关闭告警。"
+keywords: ["告警集成", "Kapacitor", "InfluxData", "TICKscript", "post 事件处理器", "时序数据告警"]
+---
+
+Kapacitor 的 [post 事件处理器](https://docs.influxdata.com/kapacitor/v1/reference/event_handlers/post/) 把每个告警事件以 JSON 的形式 POST 到一个 HTTP 地址。请求体是 Kapacitor 的告警数据（`id`、`message`、`details`、`time`、`duration`、`level`、`data`、`previousLevel`、`recoverable`），Flashduty 的 [InfluxData 集成](/zh/on-call/integration/alert-integration/alert-sources/influxdata) 按这个格式解析，因此不需要单独的 Kapacitor 集成：在 Flashduty 创建 InfluxData 集成，把它的推送地址填进 Kapacitor 即可。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 InfluxData**。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **InfluxData**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **InfluxData**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Kapacitor 中配置
+---
+
+以下三种方式任选其一，推送地址都要填写完整（包含 `?integration_key=...`）。
+
+<Steps>
+<Step title="在 TICKscript 中直接写地址">
+
+在 `alert()` 节点上添加 `post`：
+
+```javascript
+stream
+    |from()
+        .measurement('cpu')
+        .groupBy('host')
+    |alert()
+        .crit(lambda: "usage_idle" < 10)
+        .post('https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<集成密钥>')
+```
+
+</Step>
+
+<Step title="或使用 kapacitor.conf 中的 endpoint">
+
+在 `kapacitor.conf` 中配置 `[[httppost]]`，TICKscript 里用名称引用，避免把集成密钥写进每个脚本：
+
+```toml
+[[httppost]]
+  endpoint = "flashduty"
+  url = "https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<集成密钥>"
+```
+
+```javascript
+|alert()
+    .crit(lambda: "usage_idle" < 10)
+    .post()
+        .endpoint('flashduty')
+```
+
+</Step>
+
+<Step title="或使用 topic 处理器">
+
+多个任务向同一个 topic 发送告警时，可以只定义一个处理器。处理器文件 `flashduty.yaml`：
+
+```yaml
+id: flashduty
+topic: cpu-alerts
+kind: post
+options:
+  url: https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<集成密钥>
+```
+
+然后执行 `kapacitor define-topic-handler flashduty.yaml`，并在任务的 `alert()` 节点上使用 `.topic('cpu-alerts')`。
+
+</Step>
+</Steps>
+
+通过 Chronograf 1.x 的 Alert Rule Builder 添加 `post` 处理器，实际使用的就是同一个 Kapacitor 处理器，配置方法见 [InfluxData 集成](/zh/on-call/integration/alert-integration/alert-sources/influxdata)。
+
+## 字段映射
+---
+
+| Kapacitor 字段 | Flashduty |
+| :--- | :--- |
+| `id` | Alert Key（取其 MD5），同一个 `id` 的事件归为同一条告警；也是告警标题，并写入标签 `check` |
+| `level` | `CRITICAL` → Critical；`WARNING` 或 `WARN` → Warning；`INFO` → Info；`OK` → 恢复，关闭对应告警 |
+| `previousLevel` | 恢复事件沿用的严重程度 |
+| `message` | 告警描述，并写入标签 `message` |
+| `data.series` 的最后一个序列 | `name` 写入标签 `measurement`，`tags` 的每个键展开为一个标签；若列中有名为 `value` 的列，其最后一个取值写入标签 `value` |
+| 标签 `host` | 同时写入标签 `resource`；`resource` 默认是 `host` 的值；`host` 是 `ip:端口` 形式时取其中的 IP |
+| `details`、`time`、`duration`、`recoverable` | 不使用 |
+
+`level` 不是以上取值时，Flashduty 返回 `level ... is not supported` 并拒绝该事件。
+
+## 恢复与去重
+---
+
+- Kapacitor 在级别回到 `OK` 时发送 `level` 为 `OK` 的事件，Flashduty 按相同的 `id` 关闭告警。不要在 `alert()` 上使用 `.noRecoveries()`，否则 Kapacitor 不发送恢复事件。
+- `id` 默认是 `{{ .Name }}:{{ .Group }}`（测量名称和分组）。用 `.id()` 自定义时，请保证同一个对象的触发和恢复使用相同的值。
+- 需要在 Kapacitor 日志中看到 Flashduty 返回的错误时，给 `.post()` 加 `.captureResponse()`（topic 处理器为 `capture-response: true`），响应状态码不是 2xx 时会记录响应内容。
+
+## 排查问题
+---
+
+- **Flashduty 返回 `Invalid parameters`**：推送地址不完整，缺少 `integration_key`，或集成类型不是 InfluxData
+- **返回 `level ... is not supported`**：请求体的 `level` 不是 `CRITICAL`、`WARNING`、`INFO`、`OK`；请确认发送的是 Kapacitor 原始的告警数据，而不是经过转发或改写的内容
+- **告警没有恢复**：确认恢复事件的 `id` 与触发时一致，且任务会在恢复时发出 `OK` 事件
+- **收不到任何告警**：确认 Kapacitor 所在主机能访问 `api.flashcat.cloud`

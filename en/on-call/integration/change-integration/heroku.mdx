@@ -1,0 +1,138 @@
+---
+title: "Heroku Change Integration"
+description: "Sync Heroku app releases to Flashduty On-call through an app webhook, so they appear as changes next to alerts and incidents."
+keywords: ["change integration", "Heroku", "release", "webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires the On-call Standard plan or above. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Subscribe a Heroku app webhook to `api:release` to sync the app's releases to Flashduty On-call. Each release is one Flashduty change, updated as the release goes from in progress to succeeded or failed. Code deploys, config var changes, add-on changes and rollbacks each create a new release in Heroku, so all of them are recorded.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Heroku** and enter an integration name
+3. To route changes to a specific channel, add rules on the integration's **Routing** tab using labels (for example `app`)
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Heroku
+---
+
+<Steps>
+<Step title="Create the app webhook">
+
+Use the Heroku CLI to create a subscription for the target app. Replace `<push-url>` with the full push URL of the Flashduty integration:
+
+```bash
+heroku webhooks:add -a <app-name> -i api:release -l sync -u "<push-url>"
+```
+
+- `-i api:release`: subscribe to release events only. Other events (builds, dynos, domains, and so on) never create changes, so there is no need to subscribe to them
+- `-l sync`: Heroku retries failed deliveries for up to 72 hours; the `notify` level does not retry
+- `-s` (signing secret) and `-t` (Authorization header) are not needed
+
+You can also create it from the app dashboard under **More → View Webhooks** and choose the `api:release` event type. Heroku webhooks are configured per app, so each app in a pipeline needs its own.
+
+Flashduty authenticates the request by the `integration_key` in the push URL. The `Heroku-Webhook-Hmac-SHA256` signature header that Heroku sends is not verified.
+
+</Step>
+
+<Step title="Trigger a release">
+
+Heroku has no test delivery. Run `git push heroku main`, or change a config var (`heroku config:set KEY=value`), and the app's release shows up in the Flashduty change list.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| Heroku object | Change key (`change_key`) | Notes |
+|---|---|---|
+| Release | `data.id` (the release UUID) | The delivery that creates the release and every later status delivery carry the same `data.id`, so they are one change; two releases of one app are two changes |
+
+The release version (`v12`) is unique only within an app, so it is not used as the key. It appears in the title and the `version` label only.
+
+## Status mapping
+---
+
+| Heroku `data.status` | Flashduty change status |
+|---|---|
+| `pending` | Processing |
+| `succeeded` | Done |
+| `failed` | Failed |
+
+These deliveries return success and record nothing:
+
+- Deliveries whose `resource` is not `release`: builds (`api:build`), apps, dynos, formations, domains, collaborators, add-ons, SNI endpoints
+- Release actions other than `create` and `update`
+
+Builds are not recorded on their own: a successful build creates the release that actually ships the deploy, so recording both would show one deploy as two changes. A failed build creates no release and leaves the running version unchanged, so it is not recorded either.
+
+A `data.status` outside the table returns `InvalidParameter` (see the FAQ).
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<app name>: release v<version>`, for example `my-app: release v12` |
+| Description | The release `description`, for example `Deploy 3a2f9c1` or `Set FOO config vars` (variable names only, never values), truncated to 1024 bytes |
+| Link | The app's Activity page in the Heroku dashboard |
+| Change time | The release's `updated_at`, the time of this state |
+
+The title and description come from the first delivery of a change and are not updated afterwards.
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `app` | App name |
+| `app_id` | App ID |
+| `release_id` | Release ID |
+| `version` | Release version number |
+| `heroku_state` | The raw `data.status` |
+
+Heroku deliveries identify the user who triggered a release only by email. Emails are never written to labels, so there is no `actor` label.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Do Heroku retries create duplicate records?">
+
+No. A retry carries the same content, and Flashduty de-duplicates on the delivery's time and status. An earlier state that arrives late does not overwrite a finished change.
+
+</Accordion>
+
+<Accordion title="Why is there no change for a build after git push?">
+
+Builds do not create changes, as described above. The release created after a successful build does; a failed build creates no release and therefore no change, so check the build log in Heroku.
+
+</Accordion>
+
+<Accordion title="Why does a config var change appear as a change?">
+
+Changing a config var creates a new release and restarts the app with the new configuration, which is a real change. The change description contains only the variable names; Flashduty never receives the values.
+
+</Accordion>
+
+<Accordion title="Heroku reports failing deliveries or stops delivering?">
+
+If deliveries fail continuously for a week, Heroku sends an email and may disable the webhook. Make sure the push URL is complete and the integration has not been deleted. `heroku webhooks:deliveries -a <app-name>` shows delivery status.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `data.id is missing`: the payload is incomplete; make sure it comes from a native Heroku webhook subscribed to `api:release`
+- `data.status is missing` / `unknown release status`: a release status that is not mapped yet; contact us to add it
+- `invalid timestamp`: a timestamp field in the payload has an invalid format
+
+</Accordion>
+</AccordionGroup>

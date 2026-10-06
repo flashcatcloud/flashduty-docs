@@ -1,0 +1,108 @@
+---
+title: "Google Security Command Center alert integration"
+description: "Send Google Security Command Center finding notifications to Flashduty On-call through a Pub/Sub push subscription."
+keywords: ["alert integration", "Google Security Command Center", "SCC", "Pub/Sub", "finding"]
+---
+
+Google Security Command Center (SCC) publishes new and updated findings to a Pub/Sub topic, and a Pub/Sub push subscription POSTs each message to Flashduty. Each finding maps to one Flashduty alert. Later updates to the same finding merge into that alert, and the alert recovers when the finding becomes `INACTIVE`. Google documents notifications for new and updated findings; that the change to `INACTIVE` is published like any other update is not stated explicitly, so confirm the recovery in the verification step.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **Google Security Command Center** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure Google Cloud
+---
+
+You need an organization with Security Command Center enabled and a project to hold the Pub/Sub topic. Creating a notification config requires Security Center Admin (`roles/securitycenter.admin`) on the organization and Project IAM Admin (`roles/resourcemanager.projectIamAdmin`) on the project that holds the topic.
+
+<Steps>
+<Step title="Create a Pub/Sub topic">
+
+```bash
+gcloud pubsub topics create scc-findings --project=PROJECT_ID
+```
+
+</Step>
+
+<Step title="Create an SCC notification config">
+
+```bash
+gcloud scc notifications create flashduty \
+  --organization=ORGANIZATION_ID \
+  --description="Send findings to Flashduty" \
+  --pubsub-topic=projects/PROJECT_ID/topics/scc-findings \
+  --filter='severity="CRITICAL" OR severity="HIGH"'
+```
+
+<Warning>
+Do **not** limit the filter to `state="ACTIVE"`. When a finding is fixed its state becomes `INACTIVE`; a filter that drops that update means Flashduty never receives the recovery and the alert stays open. The example above filters on severity only.
+</Warning>
+
+SCC creates a service account when you create your first notification config and grants it the `securitycenter.notificationServiceAgent` role. It publishes the messages to the topic.
+
+</Step>
+
+<Step title="Create a push subscription">
+
+Use the complete Flashduty Push URL as the push endpoint:
+
+```bash
+gcloud pubsub subscriptions create scc-to-flashduty \
+  --topic=scc-findings \
+  --project=PROJECT_ID \
+  --push-endpoint='https://api.flashcat.cloud/event/push/alert/google-scc?integration_key=YOUR_INTEGRATION_KEY'
+```
+
+<Warning>
+Do not turn on **Enable payload unwrapping** for the subscription. Flashduty parses the default wrapped format, where `message.data` is the Base64-encoded finding notification. With unwrapping on, the request body is the raw notification and is rejected.
+</Warning>
+
+The push endpoint must be a publicly reachable HTTPS address with a trusted certificate.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Pub/Sub push subscriptions have no test button. Make SCC produce a finding that matches the filter (for example, open a firewall rule to `0.0.0.0/0`) and confirm Flashduty receives the alert. After you fix it the finding becomes `INACTIVE`; confirm the alert recovers. To check connectivity only, you can also publish a finding notification JSON to the topic manually from the Pub/Sub console.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `finding.name` as the Alert Key, in the form `organizations/{organization ID}/sources/{source ID}/findings/{finding ID}`. In the SCC Finding resource, `name` is the finding's relative resource name, and the notifications for a finding's creation, updates and change to `INACTIVE` all carry the same value.
+
+Changes to the title, severity, state, category or event time do not change the Alert Key. A request without `finding.name` is rejected, because later updates and the recovery could not be matched to the alert.
+
+## Status and severity
+---
+
+| SCC field | Flashduty status or severity |
+| :--- | :--- |
+| `finding.state` = `ACTIVE` or empty | Trigger |
+| `finding.state` = `INACTIVE` | Recovery, severity stays at the last value |
+| `finding.severity` = `CRITICAL` | Critical |
+| `finding.severity` = `HIGH` | Critical |
+| `finding.severity` = `MEDIUM` | Warning |
+| `finding.severity` = `LOW` | Info |
+| `SEVERITY_UNSPECIFIED`, empty or unknown | Warning |
+
+The alert title is `category: resource display name` (for example `OPEN_FIREWALL: allow-all`), falling back to the category, then the resource display name. The description comes from `finding.description`. The mute state (`finding.mute`) is kept only as the `mute` label and does not change the alert status.
+
+Flashduty also writes these labels: `category`, `resource_name`, `resource_type`, `project`, `location`, `service`, `finding_name`, `finding_state`, `finding_severity`, `finding_class`, `finding_source`, `notification_config_name`, `external_uri`. `securityMarks` is not read.
+
+## Troubleshooting
+---
+
+- **Pub/Sub keeps redelivering the same message**: Flashduty returns a 4xx for requests it cannot parse, and Pub/Sub retries with backoff. Check that the push endpoint contains `integration_key` and that payload unwrapping is off. Configure a dead-letter topic on the subscription to avoid endless retries
+- **Flashduty returns an invalid-parameter error**: the message names the missing field, for example `finding.name is required` means the notification has no finding
+- **The alert does not recover**: check whether the notification config filter contains only `state="ACTIVE"`
+- **No alerts arrive**: confirm the notification config filter matches a finding, the SCC service account can publish to the topic, and the subscription is active
+
+For more details see [Enable finding notifications for Pub/Sub](https://docs.cloud.google.com/security-command-center/docs/how-to-notifications) and [Pub/Sub push subscriptions](https://docs.cloud.google.com/pubsub/docs/push).

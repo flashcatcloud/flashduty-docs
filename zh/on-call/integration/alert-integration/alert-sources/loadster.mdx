@@ -1,0 +1,119 @@
+---
+title: "Loadster 告警集成"
+description: "通过 Loadster 的 Webhook 集成，将监控项（Monitor）的失败和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Loadster", "Synthetic Monitoring", "拨测", "Webhook"]
+---
+
+通过 Loadster 的 Webhook 集成，把监控项（Monitor）的失败（**Monitor Fails**）和恢复（**Monitor Recovers**）通知同步到 Flashduty On-call。每个监控项对应一条 Flashduty 告警：监控项失败时触发，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Loadster**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Loadster**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Loadster 中配置
+---
+
+<Steps>
+<Step title="启用 Webhooks">
+
+1. 登录 Loadster 控制台，进入 **Account → Integrations**
+2. 在 **Webhooks** 卡片上点击 **Enable Webhooks**
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. 将 Flashduty 集成的完整推送地址同时粘贴到 **Monitor Fails Webhook URL** 和 **Monitor Recovers Webhook URL**
+2. 其余两项（**Load Test Started** / **Load Test Finished**）留空
+3. 点击 **SAVE**
+
+<Note>
+Webhook 为账号级配置，对账号下所有监控项生效。Loadster 在监控项事件发生时向地址发送 HTTP POST 请求，Flashduty 返回 2xx 即视为成功；请求失败时 Loadster 会周期性重试。
+</Note>
+
+</Step>
+
+<Step title="验证生命周期">
+
+让监控项真正失败（例如把 HTTP Request Monitor 指向一个返回 5xx 的地址），确认 Flashduty 收到 Critical 告警；恢复目标后，确认原告警自动关闭。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Loadster 以 JSON 格式 POST 以下字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `monitor.id` | 监控项 ID | Alert Key，标签 `monitor_id` |
+| `monitor.name` | 监控项名称 | 告警标题，标签 `check` |
+| `cycle.status` | 本次检查结果，失败为 `FAIL`，恢复为 `PASS` | 触发或恢复，标签 `cycle_status` |
+| `cycle.message` | 失败原因，例如 `The monitoring script had an error!` | 写入描述 |
+| `cycle.responseTimeAvg` | 平均响应时间（毫秒） | 写入描述 |
+| `url` | 监控项在 Loadster 控制台中的链接 | 写入描述 |
+
+监控项名称为空时，告警标题使用 `Loadster monitor <monitor.id>`。
+
+## Alert Key
+---
+
+Flashduty 使用 `monitor.id` 作为 Alert Key。同一个监控项的失败和恢复通知携带相同的 `monitor.id`，因此会落在同一条告警上；修改监控项名称不会改变 Alert Key。请求顶层的 `id` 是每次通知新生成的 UUID，不参与 Alert Key。
+
+## 状态和告警等级
+---
+
+Loadster 的通知不区分告警等级，Flashduty 按下表处理：
+
+| `cycle.status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `PASS` | 恢复，原等级为 Critical |
+| 其他值（实测为 `FAIL`） | Critical |
+
+不包含 `monitor.id` 的通知（例如压测开始、结束通知）会被确认并忽略，不创建告警。Loadster 的 Webhook 没有测试按钮。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="监控项持续失败时会重复收到通知吗？">
+
+不会。Loadster 在监控项失败并创建事件（Incident）时发送一次失败通知，恢复时发送一次恢复通知；持续失败期间不会重复发送。是否在第一次失败时就创建事件，由监控项的 **Open an incident after N failures** 设置决定。
+
+</Accordion>
+
+<Accordion title="可以只对部分监控项推送吗？">
+
+Loadster 的 Webhook 对整个账号生效。需要按监控项区分时，可在 Flashduty 共享集成的路由规则中按标签 `monitor_id` 或 `check` 分流。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Loadster 没有推送**：确认 **Account → Integrations → Webhooks** 已启用并保存，且两个 URL 是包含 `integration_key` 的完整推送地址
+- **Flashduty 返回参数错误**：确认请求体包含 `monitor.id` 和 `cycle.status`
+- **告警没有恢复**：确认 **Monitor Recovers Webhook URL** 已填写，且恢复通知与失败通知来自同一个监控项
+
+字段说明请参阅 Loadster 官方文档 [Integration with Webhooks](https://loadster.com/manual/integration-with-webhooks)。

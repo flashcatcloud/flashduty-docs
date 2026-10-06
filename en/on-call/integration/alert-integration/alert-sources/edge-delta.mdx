@@ -1,0 +1,151 @@
+---
+title: "Edge Delta alert integration"
+description: "Send Edge Delta monitor alert, warning and recovery notifications to Flashduty On-call through an Edge Delta webhook integration."
+keywords: ["alert integration", "Edge Delta", "observability", "webhook", "monitor"]
+---
+
+An Edge Delta webhook integration has no fixed request body: you write the payload yourself and Edge Delta fills in the content of the monitor event through `$EVENT_*` variables. This integration therefore asks you to create the webhook integrations from the template below, and Flashduty parses exactly the output of that template. The Flashduty alert triggers when the monitor enters the alert or warning state and closes automatically when it recovers.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Edge Delta** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Edge Delta** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Edge Delta
+---
+
+<Steps>
+<Step title="Create one webhook integration per state">
+
+1. Log in to Edge Delta, click **Admin → Legacy Integrations**, open the **Available** tab, then search for and select **Webhook**
+2. Create an integration named `flashduty-alert`: set **Endpoint** to the complete Flashduty push URL, add the header `Content-Type: application/json`, and paste the template below into **Payload**
+3. Create `flashduty-recovery` the same way (with `status` set to `recovery`). For warnings, also create `flashduty-warning` (with `status` set to `warning`)
+
+```json
+{
+  "status": "alert",
+  "monitor": "checkout-error-rate",
+  "group": "$EVENT_GROUP_ALL",
+  "metric": "$EVENT_METRIC",
+  "value": "$EVENT_EVALUATED_VALUE",
+  "event_status": "$EVENT_STATUS",
+  "url": "$EVENT_URL",
+  "time": "$EVENT_DATE"
+}
+```
+
+<Warning>
+`status` and `monitor` are fixed text you type, not variables. Every integration of one monitor must use exactly the same `monitor` text (the monitor name is a good choice); otherwise the recovery cannot close its alert. Each monitor needs its own set of integrations. Integration names cannot contain periods.
+</Warning>
+
+<Note>
+The template leaves out `$EVENT_MSG`, `$EVENT_QUERY` and `$EVENT_TITLE`: they can contain quotes or line breaks that make the JSON invalid, so the alert or its recovery would be lost. `$EVENT_METRIC` and `$EVENT_EVALUATED_VALUE` are empty for log monitors (log threshold, pattern anomaly); Flashduty accepts empty values.
+</Note>
+
+</Step>
+
+<Step title="Reference the integrations in the monitor notification">
+
+Edit the monitor and reference each integration by state in **Notifications**:
+
+```text
+{{#is_alert}}
+@webhook-flashduty-alert
+{{/is_alert}}
+{{#is_warning}}
+@webhook-flashduty-warning
+{{/is_warning}}
+{{#is_recovery}}
+@webhook-flashduty-recovery
+{{/is_recovery}}
+```
+
+Save the monitor. `{{#is_recovery}}` applies when an alert or warning returns to normal.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Click **Test Notifications** in the monitor's notification section to send a test request. Flashduty receives a Critical alert (the test request looks the same as a real alert and cannot be told apart; unless you pick a group in the test dialog, its `group` is empty, so it never merges with a real alert), so close it manually after verifying. You can also let the monitor enter the alert state for real, confirm Flashduty receives the alert, and confirm it closes automatically after recovery.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `status` | `alert`, `warning` or `recovery`, typed by you | Trigger or recovery |
+| `monitor` | The monitor name, typed by you | Alert Key, alert title, label `monitor` |
+| `group` | `$EVENT_GROUP_ALL`, the group-by information of the monitor | Alert Key, added to the title, label `group` |
+| `metric` | `$EVENT_METRIC`, the metric name | Label `metric`, added to the description |
+| `value` | `$EVENT_EVALUATED_VALUE`, the evaluated value, as text such as `avg:1.00` | Added to the description |
+| `event_status` | `$EVENT_STATUS`, the Edge Delta event state | Label `event_status`, added to the description |
+| `url` | `$EVENT_URL`, the event link | Added to the description |
+| `time` | `$EVENT_DATE`, the event time | Added to the description |
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from `monitor` and `group`. The alert, warning and recovery requests of one monitor (and one group) carry the same `monitor` and `group`, so they land on the same alert; different groups stay separate. A monitor without group by sends `*` as `group`, so the whole monitor maps to one alert; a monitor with group by sends `<tag>:<value>` (for example `ed.tag:docker-logs`). `value`, `metric` and the time are not part of the Alert Key.
+
+<Note>
+The Edge Delta documentation does not provide a stable ID for monitor events, so the Alert Key is built from the `monitor` text you type and `$EVENT_GROUP_ALL`. Edge Delta's own PagerDuty example also pairs trigger and resolve on the group value.
+</Note>
+
+## Status and severity
+---
+
+| `status` | Flashduty status or severity |
+| :--- | :--- |
+| `alert` | Critical |
+| `warning` | Warning |
+| `recovery` | Recovery, keeps the earlier Critical severity |
+
+If `monitor` or `status` is missing, or `status` is not one of the values above, Flashduty returns a parameter error.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why must monitor be typed instead of using a variable?">
+
+Among the `$EVENT_*` variables listed in the Edge Delta documentation there is no monitor ID or name, only `$EVENT_ID` (the event ID, and the documentation does not say whether the alert and the recovery of one monitor share it). Fixed text guarantees that the alert and the recovery match.
+
+</Accordion>
+
+<Accordion title="Do I get repeated notifications while the monitor stays in alert?">
+
+If the monitor has a renotification period, Edge Delta sends the alert request again at that interval. These requests have the same Alert Key, so Flashduty merges them into one alert and does not create a new incident.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **The monitor shows `Receiver webhook-flashduty-warning does not exist`**: every `@webhook-...` handle in the notification must match an existing integration; create it or remove its block
+- **Edge Delta does not push**: confirm the monitor's Notifications reference `@webhook-<integration name>` inside the matching `{{#is_alert}}` or similar block
+- **Flashduty returns a parameter error**: confirm `status` in the template is `alert`, `warning` or `recovery`, `monitor` is not empty, and the body is valid JSON
+- **The alert does not recover**: confirm `monitor` in the recovery integration is identical to the alert integration; for a monitor with group by, confirm `group` in the recovery request matches the alert
+
+For variable details, see the Edge Delta documentation [Event Variables](https://docs.edgedelta.com/prepare-api-output/#event-variables) and [Monitor Notifications](https://docs.edgedelta.com/monitor-notifications/).

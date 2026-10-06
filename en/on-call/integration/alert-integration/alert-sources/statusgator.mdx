@@ -1,0 +1,132 @@
+---
+title: "StatusGator alert integration"
+description: "Send StatusGator monitor status changes and early warning signals for third-party services to Flashduty On-call through the Webhook integration."
+keywords: ["alert integration", "StatusGator", "status page monitoring", "webhook", "StatusChange", "EarlyWarningSignal"]
+---
+
+Use StatusGator's Webhook integration (webhook version 3.0) to send monitor status changes to Flashduty On-call. StatusGator sends two notification types: `StatusChange` (a monitor's status changed) and `EarlyWarningSignal` (a possible outage that the service has not confirmed). Each StatusGator monitor maps to one alert: the alert triggers when the monitor becomes down, warn or maintenance, and recovers when it returns to up.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **StatusGator** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **StatusGator** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In StatusGator
+---
+
+<Steps>
+<Step title="Add the Webhook integration">
+
+1. Sign in to StatusGator and open **Integrations** in the page header
+2. Select **Webhooks** and click **Add**
+3. Paste the full Flashduty push URL as the Webhook URL and click **Save**
+
+New Webhook integrations use version 3.0. A Webhook integration created before June 2025 may still use the deprecated version 2.0, whose body format differs and is not parsed by Flashduty. Delete it and add it again.
+
+</Step>
+
+<Step title="Send a test notification and verify">
+
+After saving, click **Test integrations** on the Webhook integration page, choose a status, a monitor and the **Webhooks** integration, then click **Send test**. Flashduty opens one separate Info alert titled `StatusGator test notification`, whatever status you pick. It never changes the monitor's own alert, and it has no recovery, so close it by hand. Real status changes depend on outages of the monitored service and cannot be triggered on demand.
+
+</Step>
+</Steps>
+
+The Webhook integration is available on all Business and Education plans, including Free. If StatusGator does not get a 200 response five times in a row, it disables the webhook. Fix the URL on the **Integrations** page to re-enable it.
+
+## Payload
+---
+
+StatusGator POSTs JSON. The body is fixed and cannot be customized. Flashduty parses it directly, so no template is needed:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `type` | `StatusChange` or `EarlyWarningSignal` | Selects how the request is handled; label `event_type` |
+| `monitor.id` | Monitor ID | Alert Key; label `monitor_id` |
+| `monitor.display_name` | Monitor name (falls back to `service.name`) | Alert title; label `monitor_name` |
+| `monitor.type` / `monitor.url` / `monitor.host` | Monitor type (`ServiceMonitor`, `WebsiteMonitor`, `PingMonitor`), website URL, ping host | Labels `monitor_type`, `monitor_url`, `monitor_host` |
+| `service.id` / `service.name` / `service.slug` / `service.status_page_url` | The monitored service and its official status page | Labels `service_id`, `service_name`, `service_slug`, `status_page_url` |
+| `board.id` / `board.name` | The board the monitor belongs to | Labels `board_id`, `board_name` |
+| `status` / `previous_status` | Status after and before the change | Determines severity or recovery; labels `status`, `previous_status` |
+| `message` / `details` | Summary and long description from the service | The summary goes into the title; both go into the description |
+| `component_status_changes[]` | Component-level changes (group, name, previous and current status) | Written to the description, sorted by name |
+| `summary` | Early warning summary (`EarlyWarningSignal` only) | Written to the description |
+
+The alert title is `<monitor name>: <message>`. When `message` is empty it is `<monitor name> is <status>`.
+
+## Alert Key
+---
+
+`StatusChange` uses `monitor.id` as the Alert Key. The StatusGator body has no event or incident ID, so the monitor is the only stable business object: the down, warn and up notifications of one monitor land on one alert, and different monitors produce different alerts. Changing the message, components, name or time does not change the Alert Key.
+
+`EarlyWarningSignal` uses its own Alert Key computed from a fixed prefix and `monitor.id`, so it never merges with the monitor's status alert. Repeated early warnings for one monitor merge into one alert.
+
+If `monitor.id` is missing, Flashduty returns a parameter error, because a recovery could not be reliably matched to its alert.
+
+## Status and severity
+---
+
+| StatusGator `status` | Flashduty status or severity |
+| :--- | :--- |
+| `down` | Critical |
+| `warn` | Warning |
+| `maintenance` | Info |
+| `up` | Recovery, keeping the severity that `previous_status` maps to; Warning when `previous_status` is missing or is not down, warn or maintenance |
+| `EarlyWarningSignal` | Warning |
+
+Requests whose `type` or `status` is empty or unknown are rejected, so a request that cannot be classified never lands in the wrong alert lifecycle.
+
+## Early warnings do not recover
+---
+
+`EarlyWarningSignal` is a one-shot notification. StatusGator sends no matching recovery event and Flashduty does not close it when the service recovers. Enable [auto-close on timeout](/en/on-call/channel/create-edit) for the channel, with **1 hour** recommended.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does the test notification create an alert?">
+
+Yes. A test from **Test integrations** carries the message `Test message for <board name>`. Flashduty recognises exactly that message and opens one standalone Info alert under its own key, so a test never opens or closes a real monitor alert. There is no recovery for it; close it by hand.
+
+</Accordion>
+
+<Accordion title="The alert did not close after the monitor recovered. What should I check?">
+
+Make sure the recovery is still sent through the same Webhook integration, and check on the **Logs** tab in StatusGator that the delivery with `status` set to `up` returned 200. The recovery and the original notification must carry the same `monitor.id`.
+
+</Accordion>
+
+<Accordion title="Does StatusGator retry failed deliveries?">
+
+Yes. Non-connection failures are retried up to 20 times over about 24 days, with the delay growing from a few seconds to more than a day, and then discarded.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **StatusGator shows failed deliveries or disabled the webhook**: confirm the Webhook URL is the full push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: confirm the request is a version 3.0 JSON notification and that `type`, `monitor.id` and `status` meet the requirements above
+- **Duplicate alerts or alerts that never recover**: check whether an old version 2.0 webhook is still configured
+
+For field details, see the StatusGator documentation [Webhook version 3.0](https://support.statusgator.com/support/solutions/articles/47001278989-webhook-version-3-0).
