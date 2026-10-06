@@ -1,0 +1,93 @@
+---
+title: "Infisical 告警集成"
+description: "通过 Infisical 项目 Webhook，把密钥轮换失败和蜜罐令牌（Honey Token）被触发的事件推送到 Flashduty On-call。"
+keywords: ["告警集成", "Infisical", "密钥管理", "Secret Rotation", "Honey Token", "Webhook"]
+---
+
+通过 Infisical 项目的 Webhook，把两类安全事件同步到 Flashduty On-call：密钥轮换失败（`secrets.rotation-failed`）和蜜罐令牌被触发（`honey-token.triggered`）。两类事件都创建 Critical 告警。Infisical 不发送轮换成功或蜜罐令牌处理完成的通知，所以告警不会自动恢复，需要手动关闭或由协作空间的超时自动关闭处理。
+
+密钥修改（`secrets.modified`）、变更请求、访问请求这几类事件不是告警，Flashduty 会返回成功但不创建告警，可以在 Infisical 一侧取消勾选这些事件。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Infisical**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Infisical**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Infisical 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+1. 打开 Infisical 项目，进入 **Project Settings → Webhooks**，点击 **Add Webhook**
+2. **Type** 选择 **General**
+3. **Environment** 选择要监控的环境。一个 Webhook 只覆盖一个环境，需要监控多个环境时请分别创建
+4. **Secret Path** 填写 `/**`，覆盖该环境下所有文件夹。只填 `/` 只匹配根目录，轮换配置在子文件夹里时不会触发
+5. **Webhook URL** 粘贴 Flashduty 集成的完整推送地址（含 `integration_key`）
+6. 展开 **Advanced Settings**，在 **Events** 中只选 **Secret Rotation Failed** 和 **Honey Token Triggered**
+7. **Secret Key** 可留空。填写后 Infisical 会在请求头 `x-infisical-signature` 里附上签名，Flashduty 只接收不校验，鉴权靠推送地址里的 `integration_key`
+
+</Step>
+
+<Step title="验证">
+
+在 Webhook 列表中点击该行右侧的操作菜单，选择 **Test**。Flashduty 会创建一条 Info 级别的测试告警，标题为 `Infisical test notification`。它不会自动恢复，验证后请手动关闭。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 24 小时。同一个轮换或同一个蜜罐令牌在合并窗口内再次推送时更新同一条告警，已关闭后再次推送会触发新告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Infisical 的请求体里没有告警 ID，Flashduty 用被监控的对象本身作为 Alert Key：
+
+- **轮换失败**：项目 ID + 环境 + 文件夹路径 + 轮换名称（`project.projectId`、`project.environment`、`project.secretPath`、`project.rotationName`）
+- **蜜罐令牌**：项目 ID + 环境 + 文件夹路径 + 令牌名称（`project.projectId`、`project.environment`、`project.secretPath`、`honeyToken.name`）
+
+同一个轮换连续失败（包括手动触发和重试），或同一个蜜罐令牌从不同 IP 被多次触发，都合并到同一条告警。错误信息、项目名称、来源 IP、时间戳的变化不会改变 Alert Key。缺少 `project.projectId`、`project.environment`、`project.rotationName` 或 `honeyToken.name` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+| Infisical 事件 | Flashduty 等级 | 说明 |
+| :--- | :--- | :--- |
+| `secrets.rotation-failed` | Critical | 轮换失败，凭证可能已过期或失效。描述为 Infisical 给出的错误信息 |
+| `honey-token.triggered` | Critical | 蜜罐令牌被使用，说明凭证已泄露。描述包含触发的 AWS 事件、来源 IP 和区域 |
+| `test`（Test 按钮） | Info | 独立的测试告警 |
+| 其他事件 | 不创建告警 | 返回成功 |
+
+两类告警都没有对应的恢复事件。
+
+## 排查问题
+---
+
+- **Infisical 提示 Webhook 失败**：确认推送地址完整并包含 `integration_key`，Webhook 类型是 **General**（Slack 和 Microsoft Teams 类型发送的是各自的消息格式）
+- **轮换失败后没有收到告警**：确认 Webhook 的 **Environment** 与轮换所在环境一致，**Secret Path** 能匹配轮换所在文件夹（例如 `/**`），且勾选了 **Secret Rotation Failed**
+- **告警没有恢复**：Infisical 不发送恢复通知，请手动关闭，或开启协作空间的超时自动关闭
+- **测试告警没有关闭**：Test 按钮的推送不会恢复，需手动关闭
+
+更多说明请参阅 Infisical 官方文档 [Webhooks](https://infisical.com/docs/documentation/platform/webhooks)。

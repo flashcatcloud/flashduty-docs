@@ -1,0 +1,149 @@
+---
+title: "Dependency-Track 告警集成"
+description: "通过 Outbound Webhook 将 Dependency-Track 发现的新漏洞、带漏洞的新依赖和策略违规同步到 Flashduty On-call。"
+keywords: ["告警集成", "Dependency-Track", "Webhook", "SBOM", "漏洞", "策略违规", "软件供应链"]
+---
+
+通过 Dependency-Track 的 Outbound Webhook 通知规则，把软件物料清单（SBOM）分析中发现的问题同步到 Flashduty On-call。本页适用于 Dependency-Track 4.x 和 5.x 的 Outbound Webhook 默认模板；字段依据 4.13 官方通知文档以及 4.x、5.x 源码整理。
+
+Flashduty 处理三类通知，每条通知对应一条告警：
+
+- **NEW_VULNERABILITY**：组件上发现新漏洞
+- **NEW_VULNERABLE_DEPENDENCY**：项目引入了带已知漏洞的依赖
+- **POLICY_VIOLATION**：组件违反了策略
+
+Dependency-Track 只在发现问题时通知一次，不会在问题修复后再发恢复通知，因此这些告警不会自动恢复。请在接收该集成的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，见下文 [告警不会自动恢复](#告警不会自动恢复)。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Dependency-Track**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Dependency-Track**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Dependency-Track 中配置
+---
+
+<Steps>
+<Step title="创建通知规则">
+
+1. 使用具有 `SYSTEM_CONFIGURATION` 权限的账号登录 Dependency-Track，进入 **Administration → Notifications → Alerts**
+2. 点击 **Create Alert**，填写名称，**Scope** 选择 **Portfolio**，**Notification level** 选择 **Informational**，**Publisher** 选择 **Outbound Webhook**，点击 **Create**
+
+<Warning>
+**Notification level** 必须是 **Informational**。Dependency-Track 以 Informational 级别发送这三类通知，规则级别设为 Warning 或 Error 时收不到它们。
+</Warning>
+
+</Step>
+
+<Step title="选择通知类型和推送地址">
+
+1. 打开刚创建的规则，在通知类型（Groups）中只勾选 **NEW_VULNERABILITY**、**NEW_VULNERABLE_DEPENDENCY** 和 **POLICY_VIOLATION**
+2. 将 Flashduty 集成的完整推送地址粘贴到 **Destination**
+3. 如只关心部分项目，展开 **Limit To**，选择项目或标签
+4. 保存规则，并保持规则为启用状态
+
+Outbound Webhook 使用内置的默认模板，以 `Content-Type: application/json` 发送 JSON。请不要修改模板：Flashduty 解析的是默认模板的字段，缺少项目、组件或漏洞的 `uuid` 时会拒绝请求。
+
+<Tip>
+勾选其他通知类型（例如 BOM_CONSUMED、PROJECT_AUDIT_CHANGE）不会出错：Flashduty 返回成功并忽略它们，不会创建告警。
+</Tip>
+
+</Step>
+
+<Step title="验证">
+
+1. 在规则配置页点击测试按钮。Flashduty 返回成功，并为每个已勾选的三类通知各创建一条等级为 Info 的测试告警（标题以 `Dependency-Track test notification` 开头），需要手动关闭。每点击一次，都会创建新的测试告警
+2. 上传一份包含已知漏洞组件的 SBOM（BOM），或为项目启动一次分析，确认 Flashduty 收到对应的告警
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用通知里的 `uuid` 组合出 Alert Key，各部分之间用不可见分隔符连接后取 MD5：
+
+| 通知类型 | Alert Key 的组成 |
+| :--- | :--- |
+| NEW_VULNERABILITY | 通知类型、项目 `uuid`、组件 `uuid`、漏洞 `uuid` |
+| NEW_VULNERABLE_DEPENDENCY | 通知类型、项目 `uuid`、组件 `uuid` |
+| POLICY_VIOLATION | 通知类型、项目 `uuid`、组件 `uuid`、策略违规 `uuid` |
+
+- 同一个项目的同一个组件上，两个不同的漏洞是两条告警；同一个漏洞出现在两个项目里，也是两条告警
+- 4.x 的 NEW_VULNERABILITY 通知可能在 `affectedProjects` 中列出多个项目，Flashduty 为每个项目创建一条告警
+- NEW_VULNERABLE_DEPENDENCY 一条通知可以列出多个漏洞，只对应一条告警，漏洞列表不参与 Alert Key
+- 漏洞严重程度、标题、项目和组件的名称与版本、通知的 `id` 和时间戳的变化都不会改变 Alert Key
+- 缺少项目、组件、漏洞或策略违规的 `uuid` 时，Flashduty 返回 400 并指出缺少的字段
+
+## 状态和告警等级
+---
+
+NEW_VULNERABILITY 取 `subject.vulnerability.severity`，NEW_VULNERABLE_DEPENDENCY 取其中最严重的漏洞：
+
+| Dependency-Track 严重程度 | Flashduty 等级 |
+| :--- | :--- |
+| `CRITICAL`、`HIGH` | Critical |
+| `MEDIUM` | Warning |
+| `LOW`、`INFO`、`UNASSIGNED`、空值或其他值 | Info |
+
+POLICY_VIOLATION 不带漏洞，按策略的违规状态（Violation State）判断：
+
+| 策略的 Violation State | Flashduty 等级 |
+| :--- | :--- |
+| `FAIL` | Critical |
+| `WARN` | Warning |
+| `INFO` 或其他值 | Info |
+
+## 告警不会自动恢复
+---
+
+Dependency-Track 对每个问题只通知一次，没有“漏洞已修复”或“策略违规已解除”的通知，所以所有这些告警都保持打开，直到被关闭。请在接收该集成的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，时长按团队处理漏洞的时效设定，例如 7 天。
+
+同一个问题再次推送（例如重新分析后再次发现同一漏洞）会合并到仍然打开的同一条告警；告警被关闭后再次推送，会创建新的告警。
+
+## 告警内容
+---
+
+- **标题**：NEW_VULNERABILITY 为 `Dependency-Track: <漏洞 ID> in <组件> (<项目>)`；NEW_VULNERABLE_DEPENDENCY 为 `Dependency-Track: vulnerable dependency <组件> in <项目> (<N> vulnerabilities)`；POLICY_VIOLATION 为 `Dependency-Track: policy violation <策略名> on <组件> (<项目>)`
+- **描述**：通知内容，项目和组件，以及漏洞的来源、严重程度、CVSS 评分、别名和修复建议（带漏洞的新依赖最多列出 10 个，按严重程度排序）；策略违规则列出策略、违规类型和条件
+- **标签**：`source=dependency_track`、`group`、`project_uuid`、`project_name`、`project_version`、`component_uuid`、`component_group`、`component_name`、`component_version`、`component_purl`、`vuln_id`、`vuln_source`、`vuln_uuid`、`vuln_severity`、`vuln_count`、`vuln_ids`、`policy_name`、`violation_type`、`violation_state`、`violation_uuid`
+
+## 排查问题
+---
+
+<AccordionGroup>
+<Accordion title="规则保存了，但 Flashduty 没有收到任何请求">
+确认规则处于启用状态，且 **Notification level** 为 **Informational**。规则的 **Limit To** 如果限定了项目或标签，只有这些项目的通知会发送。Dependency-Track 发送失败时会在 apiserver 日志中记录 WARN 或 ERROR；也可以在规则里开启发送成功的 INFO 日志来核对。
+</Accordion>
+
+<Accordion title="Flashduty 返回 400">
+请求缺少项目、组件、漏洞或策略违规的 `uuid`，响应会指出具体字段。通常是修改过 Outbound Webhook 的默认模板，恢复默认模板即可。
+</Accordion>
+
+<Accordion title="勾选了 PROJECT_AUDIT_CHANGE，为什么没有告警">
+审计变更（分析状态、抑制）、BOM 上传和处理、新项目、用户和系统类通知，以及按计划发送的汇总（NEW_VULNERABILITIES_SUMMARY、NEW_POLICY_VIOLATIONS_SUMMARY）都不是单个新发现的问题，Flashduty 接收后忽略。已有的告警不会因为在 Dependency-Track 中标记为误报或抑制而关闭，请用超时自动关闭或手动关闭。
+</Accordion>
+
+<Accordion title="测试按钮创建的告警不会恢复">
+测试通知用的是固定的示例项目、组件和漏洞，Flashduty 为每次点击创建一条独立的 Info 告警，不会与真实告警合并，也没有恢复通知，请手动关闭。
+</Accordion>
+</AccordionGroup>
+
+更多字段含义请参阅 Dependency-Track 官方文档 [Notifications](https://docs.dependencytrack.org/integrations/notifications/)。

@@ -1,0 +1,101 @@
+---
+title: "pgDash 告警集成"
+description: "通过 Webhook 将 pgDash 的 PostgreSQL 监控告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "pgDash", "PostgreSQL", "数据库监控", "Webhook"]
+---
+
+通过 pgDash 的 Webhook 通知将 PostgreSQL 监控告警同步到 Flashduty On-call。每个 pgDash 服务器对应一条 Flashduty 告警：服务器上有告警规则触发时创建或更新，全部告警消除时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **pgDash**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **pgDash**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 pgDash 中配置
+---
+
+pgDash SaaS 版和自托管版的配置方式相同，Webhook 需要 pgDash 2.4.11 及以上版本。
+
+<Steps>
+<Step title="设置告警规则">
+
+1. 登录 pgDash，在服务器列表中选择要接入的服务器
+2. 在左侧菜单选择 **Alerts**，按需添加服务器、数据库、表或表空间级别的告警规则，每条规则可设为警告（warning）或严重（critical）
+
+告警规则在 pgDash 每次收到该服务器的 pgmetrics 报告时计算。
+
+</Step>
+
+<Step title="填写 Webhook 地址">
+
+1. 在该服务器 **Alerts** 页面的 **Notification Settings** 中，找到 Webhook 地址输入框
+2. 填写 Flashduty 集成的完整推送地址（包含 `integration_key`）。使用 `https` 地址时证书必须有效
+3. 点击 **Update** 保存
+
+Webhook 按服务器设置。需要接入多个服务器时，请为每个服务器重复此步骤，可以使用同一个推送地址。
+
+</Step>
+</Steps>
+
+<Warning>
+请只在 **Alerts** 页面填写此推送地址。**Change Alerts** 页面的变更通知没有告警状态，发送到本集成时 Flashduty 会返回成功但不创建告警。
+</Warning>
+
+## 告警生命周期
+---
+
+pgDash 的 Webhook 是边沿触发的：只有服务器的告警状态发生变化时才发送通知，每次通知都带上该服务器当前全部的告警项（`alerts` 数组）；所有告警消除时，发送一次 `alerts` 为空的通知。
+
+因此 Flashduty 按服务器名称 `server` 计算 Alert Key，同一服务器的所有通知落在同一条告警上：
+
+- 有告警项的通知：触发或更新告警，标题和描述替换为最新的告警项
+- `alerts` 为空的通知：告警恢复
+
+单个告警项消除而服务器仍有其他告警时，pgDash 不会单独发送该项的恢复，Flashduty 告警保持触发，描述只列出仍在触发的告警项。请求缺少 `server` 或 `alerts` 字段时 Flashduty 会拒绝。
+
+<Tip>
+在 pgDash 中修改服务器名称会产生新的 Alert Key，旧名称下的告警需要手动关闭。
+</Tip>
+
+## 告警等级
+---
+
+| pgDash 告警项 | Flashduty 等级 |
+| :--- | :--- |
+| 任一告警项的 `type` 为 `crit` | Critical |
+| 其他（`warn`） | Warning |
+| `alerts` 为空 | 恢复 |
+
+## 告警内容
+---
+
+- **标题**：`服务器名: 告警规则描述`，取第一条 `crit` 告警项（没有时取第一条告警项）；有多条告警项时附加 `(+N more)`
+- **描述**：pgmetrics 报告时间（UTC），以及每条告警项的等级、规则描述、当前值、对象名称、链接；查询级别告警附带 SQL 文本（截断到 500 字符）。最多列出 50 条告警项
+- **标签**：`server`、`check`（标题所取告警项的规则描述）、`resource`（该告警项的对象名称）、`link`（该告警项的 pgDash 链接）、`alert_count`（当前告警项数量）、`source`（固定为 `pgdash`）
+
+## 排查问题
+---
+
+- **pgDash 没有发送通知**：pgDash 只在告警状态变化时发送；状态不变不会重复发送。确认告警规则已触发，且 Webhook 设置在 **Alerts** 页面而不是 **Change Alerts** 页面
+- **投递超时**：pgDash 要求 3 秒内响应，超时后最多重试 3 次；请确认 pgDash 服务器（自托管版）可以访问推送地址
+- **告警没有恢复**：只有该服务器全部告警消除时才会恢复；如仍有其他告警项触发，告警保持打开
+
+字段含义请参阅 [pgDash Webhooks](https://docs.pgdash.io/webhooks/)。
