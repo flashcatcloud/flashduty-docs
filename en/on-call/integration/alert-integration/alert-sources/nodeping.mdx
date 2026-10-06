@@ -1,0 +1,138 @@
+---
+title: "NodePing alert integration"
+description: "Send NodePing check down and up notifications to Flashduty On-call through a webhook contact method."
+keywords: ["alert integration", "NodePing", "Uptime", "webhook", "Contact", "uuid"]
+---
+
+Use a webhook contact method on a NodePing contact to send check down (`down`) and recovery (`up`) notifications to Flashduty On-call. Each NodePing check maps to one Flashduty alert: the alert triggers when the check goes down and recovers when the check is up again.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **NodePing** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **NodePing** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure NodePing
+---
+
+<Steps>
+<Step title="Add a webhook contact method">
+
+1. Sign in to NodePing, go to **Checks & Contacts → Contacts**, and click **Add new contact**
+2. Enter `Flashduty` as the **Name**
+3. Select **Webhook** as the contact method type
+4. Keep the request method at **GET** (the default) and paste the complete Flashduty push URL into the URL field
+5. Leave Query Strings, Headers, and Body empty, then click **Save**
+
+<Note>
+NodePing webhook notifications are available only on the Professional and Premiere plans (a 15-day free trial is available).
+</Note>
+
+</Step>
+
+<Step title="Attach the contact method to checks">
+
+Go to **Checks & Contacts → Checks**, edit the check you want to connect, select the `Flashduty` webhook contact method in the notifications section, and save. You can also add it to a contact group or a notification profile and attach that to several checks.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a check actually go down (for example, temporarily point it at an unreachable target) and confirm that Flashduty receives an active alert. Then restore the target and confirm that the same alert recovers.
+
+</Step>
+</Steps>
+
+<Warning>
+Keep the request method at **GET** and do not add custom Query Strings or a Body. NodePing appends the default fields listed below to the query string only when you set just the URL, and Flashduty relies on those fields to identify the check and its state.
+</Warning>
+
+## Payload
+---
+
+NodePing sends a GET request with the following fields appended to the push URL's query string. Flashduty parses them directly, with no template to configure:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `uuid` | UUID of the check | Alert Key, label `check_uuid` |
+| `label` | Check name | Alert title, label `check` |
+| `event` | `down`, `up`, or `first` | Trigger, recovery, or ignored; label `event` |
+| `t` | Check type, such as `HTTP`, `PING`, or `SMTP` | Label `check_type` |
+| `tg` | Check target, usually a URL or server name | Label `resource`, added to the description |
+| `sc` | Result code | Label `result_code`, added to the description |
+| `m` | Message returned with the result | Added to the description |
+| `rt` | Runtime of this check in milliseconds | Added to the description |
+| `location` | Probe location that ran the check | Label `location` |
+| `i` | Check interval in minutes | Label `interval` |
+| `_id` | ID of this check result, different on every notification | Not used |
+
+The alert title is the check name. If the name is empty, Flashduty uses the check target, then `NodePing check <uuid>`.
+
+## Alert Key
+---
+
+Flashduty uses the check `uuid` as the Alert Key. Down and up notifications for the same check carry the same `uuid`, so they land on the same alert. Different checks produce different alerts even when their names and targets are the same. Changing the check name, target, or result code does not change the Alert Key.
+
+`_id` identifies a single check result and changes on every notification, so it is not used to correlate alerts. A request without `uuid` is rejected with a parameter error, because its recovery could not be matched to the original alert reliably.
+
+## Status and severity
+---
+
+NodePing notifications have no severity, so Flashduty treats them all as Critical.
+
+| NodePing `event` | Flashduty status or severity |
+| :--- | :--- |
+| `down` | Critical |
+| `up` | Recovered; the original severity stays Critical |
+| `first` | No alert is created; Flashduty returns success |
+
+`first` means monitoring has started and this webhook is registered as a notification target. It does not describe an outage, so Flashduty only returns success. Requests whose `event` is empty or has any other value are rejected, so that a request with an unknown state never enters the wrong alert lifecycle.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why GET instead of POST with a JSON template like other integrations?">
+
+When you set only the URL, NodePing includes the full check details automatically, so there is no template to write or maintain. NodePing's documentation also does not say whether template values are JSON-escaped, so quotes or line breaks in a check name or message could make a request body invalid JSON. For these reasons, the Flashduty NodePing integration accepts only the default GET request.
+
+</Accordion>
+
+<Accordion title="What happens with delayed notifications or notification schedules?">
+
+NodePing decides whether to send a notification based on the delay and schedule set on the contact method. If a check recovers before the delay ends, NodePing sends no down notification and Flashduty creates no alert. For up notifications to recover alerts, send down and up notifications to the same webhook contact method and do not suppress `up` notifications on it.
+
+</Accordion>
+
+<Accordion title="The contact method is attached, but real alerts do not arrive">
+
+Confirm that the check is enabled, the webhook contact method is not muted, and the down state has lasted through the rechecks set by the check's sensitivity.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **NodePing fails to deliver**: Confirm that the URL is the complete push URL including `integration_key`, and that the request method is GET
+- **Flashduty returns a parameter error**: Confirm that no custom Query Strings or Body are set, and that `uuid` and `event` are present
+- **The alert does not recover**: Confirm that the check still uses the same webhook contact method when it recovers and that `up` notifications are not suppressed
+
+For field details, see the NodePing documentation on [webhook notifications](https://nodeping.com/nodepingnotifications.html#webhooks).

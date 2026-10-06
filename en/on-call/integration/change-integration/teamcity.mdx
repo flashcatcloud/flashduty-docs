@@ -1,0 +1,144 @@
+---
+title: "TeamCity change integration"
+description: "Sync TeamCity build queue, start, and finish states to Flashduty On-call through the TeamCity server's built-in webhooks, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "TeamCity", "build", "deployment", "CI/CD", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use the TeamCity server's built-in webhooks to sync build states to Flashduty On-call. Each build becomes one Flashduty change whose status follows the build through queued, running, and finished.
+
+TeamCity webhooks are configured at server and project level and send every build of every build configuration under the project. To record only deployment build configurations, set the webhook parameters on a project that contains only those configurations instead of on the root project; see the steps below.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **TeamCity** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project`, `build_type_id`, or `ref`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure TeamCity
+---
+
+<Steps>
+<Step title="Add the webhook parameters">
+
+Webhooks are controlled by project parameters, and child projects inherit their parent's settings. In TeamCity, open the project to record (the Root project to record every build), go to **Parameters**, and add:
+
+| Parameter | Value |
+|---|---|
+| `teamcity.internal.webhooks.enable` | `true` |
+| `teamcity.internal.webhooks.url` | The full push URL of the Flashduty integration |
+| `teamcity.internal.webhooks.events` | `BUILD_TYPE_ADDED_TO_QUEUE;BUILD_STARTED;BUILD_FINISHED;BUILD_INTERRUPTED;BUILD_REMOVED_FROM_QUEUE` |
+
+To record only end states, set `events` to `BUILD_FINISHED;BUILD_INTERRUPTED;BUILD_REMOVED_FROM_QUEUE`. Flashduty authenticates through the `integration_key` in the push URL, so `teamcity.internal.webhooks.username` and `teamcity.internal.webhooks.password` are not needed.
+
+</Step>
+
+<Step title="Select the payload fields">
+
+TeamCity sends the full Build object by default, but its documentation does not list which fields that includes. To make sure each change carries the time of each state, the build configuration name, and who triggered it, add one `teamcity.internal.webhooks.<event>.fields` parameter per event, with `<event>` being `BUILD_TYPE_ADDED_TO_QUEUE`, `BUILD_STARTED`, `BUILD_FINISHED`, `BUILD_INTERRUPTED`, and `BUILD_REMOVED_FROM_QUEUE`, each with the value:
+
+```text
+fields=id,buildTypeId,number,status,statusText,branchName,webUrl,queuedDate,startDate,finishDate,buildType(name,projectName,projectId),triggered(user(username)),canceledInfo(timestamp)
+```
+
+`id` is required. Without the date fields, Flashduty uses the time it receives the delivery as the change time, orders states by arrival, and a TeamCity resend of the same delivery can be recorded as a duplicate event.
+
+</Step>
+
+<Step title="Run a build">
+
+TeamCity has no test delivery. Run a build in a project with the webhook configured; once it ends, the change appears in the Flashduty change list.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| TeamCity object | Change key (change_key) | Notes |
+|---|---|---|
+| Build | `id` | A build ID is unique across the whole TeamCity server, and the queued, running, and finished events all carry it. Two builds of the same build configuration and branch are two changes. The build number (`number`) is not used: it counts per build configuration, is empty while queued, and shows `N/A` for a canceled build |
+
+## Status mapping
+---
+
+| TeamCity event | `status` | Flashduty change status |
+|---|---|---|
+| `BUILD_TYPE_ADDED_TO_QUEUE` | | Ready |
+| `BUILD_STARTED` | | Processing |
+| `BUILD_FINISHED` | `SUCCESS` | Done |
+| `BUILD_FINISHED` | `FAILURE`, `ERROR` | Failed |
+| `BUILD_FINISHED` | `UNKNOWN` | Canceled |
+| `BUILD_INTERRUPTED` | any | Canceled |
+| `BUILD_REMOVED_FROM_QUEUE` | with `canceledInfo` | Canceled |
+
+Canceling a running build triggers `BUILD_INTERRUPTED`; canceling a build still in the queue triggers `BUILD_REMOVED_FROM_QUEUE` with `canceledInfo`. Neither triggers `BUILD_FINISHED`. A build that moves from the queue to running also sends `BUILD_REMOVED_FROM_QUEUE`, without `canceledInfo`, and creates no change.
+
+These deliveries return success without creating a change:
+
+- Other event types, such as `AGENT_REGISTERED`, `AGENT_UNREGISTERED`, `AGENT_REMOVED`, `CHANGES_LOADED`, and `BUILD_PROBLEMS_CHANGED`
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project name>: <build configuration name> on <branch>`, for example `Shop: Deploy Production on main`. Without the `fields` parameter, the build configuration ID is used |
+| Description | The build status text (`statusText`) |
+| Link | The build's page in TeamCity (`webUrl`) |
+| Change time | The time of each state: queued `queuedDate`, started `startDate`, finished `finishDate`; for a canceled build `canceledInfo.timestamp` takes precedence |
+
+Labels you can use for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `project` | Project name |
+| `project_id` | Project ID |
+| `build_type` | Build configuration name |
+| `build_type_id` | Build configuration ID |
+| `build_id` | Build ID |
+| `build_number` | Build number. Absent while queued, so do not route on it |
+| `ref` | Branch name |
+| `actor` | Username of the user who triggered the build |
+| `teamcity_event` | The TeamCity event type, as sent |
+| `teamcity_status` | The build status, as sent. Absent while queued, so do not route on it |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a TeamCity resend create a duplicate record?">
+
+No, provided the delivery carries the date fields (see "Select the payload fields" above): Flashduty deduplicates on the time of each state, so an identical delivery is recorded once.
+
+</Accordion>
+
+<Accordion title="A delivery returns an InvalidParameter error?">
+
+- `payload.id is missing`: the delivery has no build ID; make sure the `fields` parameter includes `id`
+- `unknown payload.status`: `BUILD_FINISHED` carried a status value that is not mapped; contact us to add it
+- `invalid payload.<field>`: a date field is not in TeamCity's `yyyyMMdd'T'HHmmssZ` format
+
+</Accordion>
+
+<Accordion title="No change appears?">
+
+- Confirm `teamcity.internal.webhooks.enable` is `true` and the parameters are set on the build's project or one of its parents
+- Confirm `teamcity.internal.webhooks.events` lists the events you need
+- Check the TeamCity server log for failed deliveries; `teamcity.internal.webhooks.retry_count` sets how many times a failed delivery is retried
+
+</Accordion>
+
+<Accordion title="How do I record only deployment builds?">
+
+TeamCity cannot filter webhooks by build configuration type. Set the webhook parameters on a project that contains only deployment build configurations, or route on the `build_type_id` label in the Flashduty integration.
+
+</Accordion>
+</AccordionGroup>

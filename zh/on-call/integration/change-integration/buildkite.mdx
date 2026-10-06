@@ -1,0 +1,123 @@
+---
+title: "Buildkite 变更集成"
+description: "通过 Buildkite Webhook 将流水线构建同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Buildkite", "构建", "部署", "Webhook", "CI/CD"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Buildkite 组织的 Webhook 通知服务，将流水线的构建（Build）同步到 Flashduty On-call。每一次构建对应一条 Flashduty 变更；构建从排队、运行、出现失败到通过、失败或取消的每个状态，都会更新同一条变更。
+
+建议只为部署类流水线开启推送：在 Webhook 中选择对应的流水线，或用分支过滤只推送发布分支的构建。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Buildkite**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `pipeline`、`ref`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Buildkite 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 通知服务">
+
+进入 Buildkite 组织的 **Settings → Notification Services**，在 **Webhook** 一栏点击 **Add**。需要组织管理员权限。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Description**：填写便于识别的名称，例如 `Flashduty`
+2. **Webhook URL**：粘贴 Flashduty 集成的完整推送地址
+3. **Token**：保持默认即可，Flashduty 通过推送地址中的 `integration_key` 鉴权
+
+</Step>
+
+<Step title="选择事件和流水线">
+
+1. 在 **Events** 中勾选 `build.scheduled`、`build.running`、`build.failing`、`build.finished` 和 `build.skipped`
+2. 在 **Pipelines** 中选择要推送的流水线（全部、指定流水线、指定团队或集群的流水线）
+3. 如需只推送部分分支，在 **Branch filtering** 中填写分支规则，留空表示所有分支
+4. 点击 **Add Webhook Notification** 保存
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+一次构建是一条变更，变更标识（change_key）是构建的 `build.id`（Buildkite 平台内唯一的 UUID）。同一次构建的所有 `build.*` 事件更新同一条变更；同一流水线、同一分支的两次构建是两条变更，重新构建（Rebuild）也会产生新的构建和新的变更。
+
+## 状态映射
+---
+
+Flashduty 按推送内容中的 `build.state` 确定状态：
+
+| Buildkite 构建状态 | Flashduty 变更状态 |
+|---|---|
+| blocked（等待 block step 解除） | Planned |
+| creating、scheduled、waiting | Ready |
+| running、failing、waiting_failed、canceling | Processing |
+| passed | Done |
+| failed | Failed |
+| canceled、skipped、not_run | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。等待 block step 的构建以 `build.finished` 推送，状态为 `passed` 且 `blocked` 为 `true`，Flashduty 将其记为 Planned，构建继续运行并结束后更新为最终状态。
+
+以下推送返回成功但不生成变更：`ping`、`job.*`、`agent.*`、`cluster_token.*` 等非构建事件。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<流水线名称>: build #<构建号> on <分支>` |
+| 描述 | 构建的 message，通常是提交信息 |
+| 链接 | Buildkite 中该构建的页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `pipeline` | 流水线 slug |
+| `repo` | 流水线的代码仓库地址 |
+| `ref` | 构建的分支 |
+| `sha` | 构建的提交 SHA（构建尚未解析出提交时不带此标签） |
+| `actor` | 触发构建的用户名称 |
+| `source` | 构建触发方式：`webhook`、`api`、`ui`、`trigger_job`、`schedule` |
+| `build_id` | 构建 UUID |
+| `build_number` | 流水线内的构建号 |
+| `state` | 最新的 Buildkite 构建状态，等待 block step 时为 `blocked` |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到构建变更？">
+
+- 确认 Webhook 勾选了 `build.*` 事件，只勾选 `job.*` 或 `agent.*` 事件不会产生变更
+- 确认构建所在的流水线和分支在 Webhook 的 **Pipelines** 和 **Branch filtering** 范围内
+- 在 Webhook 设置页底部点击 **Load recent requests**，查看最近 20 次推送和 Flashduty 的响应
+
+</Accordion>
+
+<Accordion title="重复推送会重复记录吗？">
+
+不会。同一状态、同一时间的事件只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported build.state`：收到了 Flashduty 尚未支持的构建状态，请联系我们
+- `build.id is missing`：推送内容不完整，请确认推送来自 Buildkite 的 Webhook 通知服务
+
+</Accordion>
+</AccordionGroup>

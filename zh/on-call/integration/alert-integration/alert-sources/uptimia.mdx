@@ -1,0 +1,132 @@
+---
+title: "Uptimia 告警集成"
+description: "通过 Webhook 联系人将 Uptimia 监控的宕机和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Uptimia", "Uptime", "Webhook", "监控", "宕机"]
+---
+
+通过 Uptimia 的 Webhook 集成，把监控的宕机（`down`）和恢复（`up`）通知同步到 Flashduty On-call。每个 Uptimia 监控对应一条 Flashduty 告警：监控宕机时触发，严重程度变化和重复通知合并到同一条告警，监控恢复时关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Uptimia**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Uptimia**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Uptimia 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 集成">
+
+1. 登录 Uptimia，进入 **Alerting → Integrations**，点击 **Add Integration**，选择 **Webhooks**
+2. **Integration Name** 填写 `Flashduty`（Uptimia 会用它作为生成的联系人名称）
+3. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
+4. 点击 **Save Integration** 保存。所有套餐（含免费版）都可以创建 Webhook。**Test** 按钮在保存前是灰色的，保存后在集成列表该行的 **Actions** 菜单中
+
+</Step>
+
+<Step title="关联监控">
+
+编辑需要接入的监控，在 **Alerting** 卡片左侧确认 `Flashduty` 联系人已勾选并保存。新建监控默认选中 **All my contacts**（当前和未来的联系人），`Flashduty` 联系人会自动关联；只有取消该选项、改为逐个勾选联系人时，才需要手动勾选 `Flashduty`。一个联系人可以关联多个监控。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个监控真正宕机（例如临时指向一个不可访问的地址），确认 Flashduty 收到活动告警；再恢复监控目标，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Note>
+Uptimia 集成列表中 **Actions → Test** 发送的测试请求（`monitor_status` 和 `severity` 均为 `test`，`id` 为 1，`monitor_name` 为 `Test monitor`，三个 `incident_*` 字段为字符串 `None`，`message` 以 “Congratulations” 开头）在 Flashduty 中会生成一条独立的 Info 告警，不会与真实告警合并，也不会自动恢复，请手动关闭。该按钮旁的 “Test notification sent successfully” 只表示 Uptimia 已发出请求，不代表 Flashduty 已接收。
+</Note>
+
+## 推送内容
+---
+
+Uptimia 以 `application/json` POST 固定的 11 个字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `id` | 监控 ID（每种监控类型内各自编号） | Alert Key 的一部分，标签 `monitor_id` |
+| `monitor_type` | 监控类型，如 `uptime`、`ssl`、`domain`、`heartbeat`、`api` | Alert Key 的一部分，标签 `monitor_type` |
+| `monitor_name` | 监控名称 | 告警标题，标签 `check` |
+| `monitor_unique_id` | 自定义唯一标识（仅 uptime 监控） | 标签 `monitor_unique_id` |
+| `monitor_status` | `down`、`up` 或 `test` | 触发或恢复，标签 `monitor_status` |
+| `severity` | `critical`、`trouble`，恢复时为空 | 告警等级，标签 `severity` |
+| `incident_start_time` | 故障开始时间 | 标签 `incident_start_time` |
+| `incident_end_time` | 故障结束时间，未恢复时为空 | 标签 `incident_end_time` |
+| `incident_duration_seconds` | 故障持续秒数 | 不保存 |
+| `message` | 告警文本 | 告警描述 |
+| `monitor_notes` | 监控备注 | 追加到告警描述 |
+
+开启告警分组时，Uptimia 会在同样的 11 个字段上附加 `group` 对象（字段描述分组内第一个故障的监控）。Flashduty 按这 11 个字段处理，并把 `group.id` 和 `group.size` 记为标签 `group_id`、`group_size`。
+
+## Alert Key
+---
+
+Flashduty 使用 `monitor_type` 加 `id` 作为 Alert Key。Uptimia 的 `id` 在每种监控类型内各自编号，所以必须与 `monitor_type` 一起使用；Uptimia 的载荷里没有故障 ID。同一个监控的宕机、严重程度变化、重复通知和恢复携带相同的两个字段，会落在同一条告警上；修改监控名称、备注、严重程度或时间不会改变 Alert Key。
+
+请求中缺少 `monitor_type` 或 `id` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+| Uptimia 字段 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `monitor_status` 为 `down`，`severity` 为 `critical` | Critical |
+| `monitor_status` 为 `down`，`severity` 为 `trouble` | Warning |
+| `monitor_status` 为 `down`，`severity` 为其他值 | Critical（宕机按严重处理） |
+| `monitor_status` 为 `up` | 恢复 |
+
+`monitor_status` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="重复投递会产生多条 Flashduty 告警吗？">
+
+不会。Uptimia 至少投递一次，失败时最多重试 5 次，重复的请求带相同的 `monitor_type` 和 `id`，会合并到同一条告警。
+
+</Accordion>
+
+<Accordion title="分组告警的恢复通知如何处理？">
+
+Uptimia 在分组内最后一个成员恢复时发送一条恢复通知，字段描述分组内的监控。Flashduty 只恢复该通知的 `monitor_type` 和 `id` 对应的告警，分组内其他监控的告警不一定会收到各自的恢复通知。如果某条告警长时间未关闭，可在协作空间中手动关闭，或为集成配置超时自动关闭。
+
+</Accordion>
+
+<Accordion title="Uptimia 提示测试成功，但 Flashduty 没有告警？">
+
+该提示只表示 Uptimia 已发出请求。请确认 Webhook URL 是完整的推送地址且包含 `integration_key`，并在 Flashduty 中查看是否出现了标题为 “Uptimia test notification” 的 Info 告警。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Uptimia 推送失败**：确认 Webhook URL 是完整的推送地址，Flashduty 成功时返回 2xx
+- **Flashduty 返回参数错误**：确认请求体包含 `monitor_type`、`id`，且 `monitor_status` 为 `down` 或 `up`
+- **没有收到告警**：确认监控已勾选该 Webhook 联系人，且没有暂停
+
+字段说明请参阅 Uptimia 官方文档 [Webhook payload reference](https://help.uptimia.com/articles/webhook-payload-reference)。

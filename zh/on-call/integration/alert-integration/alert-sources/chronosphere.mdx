@@ -1,0 +1,90 @@
+---
+title: "Chronosphere 告警集成"
+description: "通过 Chronosphere 的 Webhook 通知器，使用 Flashduty 的 Prometheus 集成接收 Chronosphere 告警，开启恢复通知后自动关闭告警。"
+keywords: ["告警集成", "Chronosphere", "Webhook", "Prometheus", "Alertmanager", "可观测性"]
+---
+
+Chronosphere 的 Webhook 通知器（Notifier）向你填写的 URL 发送 HTTP POST 请求，请求体是 Prometheus Alertmanager 格式的 JSON（`version` 为 `4`，包含 `status`、`alerts`、`fingerprint`、`labels`、`annotations`、`startsAt`、`endsAt`，另有一个 `notifier` 字段）。Flashduty 的 [Prometheus 集成](/zh/on-call/integration/alert-integration/alert-sources/prometheus) 与该格式兼容，因此不需要单独的 Chronosphere 集成：在 Flashduty 创建 Prometheus 集成，把它的推送地址填进 Chronosphere 即可。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 Prometheus**，不是 Chronosphere。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Prometheus**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/prometheus?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Prometheus**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Chronosphere 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 通知器">
+
+1. 在 Chronosphere 导航栏选择 **Alerting** → **Notifiers**，点击 **Create notifier**
+2. 填写通知器名称，类型选择 **Webhook**
+3. 在 **URL** 中填入上一步复制的完整推送地址（包含 `?integration_key=...`）
+4. 选择 **Notify when resolved**，否则 Flashduty 收不到恢复通知
+5. 点击 **Save**
+
+也可以用 Chronoctl 或 Terraform 创建。Chronoctl 的 Notifier 资源用 `skip_resolved` 控制是否跳过恢复通知，需要设为 `false`；Terraform 的 `chronosphere_webhook_alert_notifier` 用 `send_resolved` 控制，默认值为 `true`。参见 Chronosphere 文档 [Create a webhook notifier](https://docs.chronosphere.io/investigate/alerts/notifications/notifiers/webhook)。
+
+</Step>
+
+<Step title="在通知策略中使用该通知器">
+
+在 Chronosphere 的通知策略（Notification Policy）中，把这个通知器加入对应严重程度（warn、critical）的路由，监控器触发的告警才会发到 Flashduty。
+
+</Step>
+
+<Step title="验证">
+
+让一个监控器触发告警，确认 Flashduty 收到活动告警；告警恢复后，确认 Flashduty 中的原告警关闭。
+
+</Step>
+</Steps>
+
+## 字段映射
+---
+
+| Chronosphere 字段 | Flashduty |
+| :--- | :--- |
+| `alerts[].fingerprint` | Alert Key。Chronosphere 将其定义为告警序列的标识，由标签哈希得到的确定值，同一序列的通知归为同一条告警 |
+| `alerts[].status` | `firing` 按严重程度生成或更新告警；`resolved` 关闭告警 |
+| `alerts[].labels.severity` | `critical` → Critical；`warn` 或 `warning` → Warning；`info` → Info；未带或无法识别 → Warning |
+| `alerts[].labels.alertname` | 检查项 `check`，并用于标题 |
+| `alerts[].labels.instance` | 标签 `resource` |
+| 其余 `labels`、`annotations` | 每个键展开为一个标签，`annotations.description` 作为告警描述 |
+| `startsAt`、`endsAt` | 标签 `starts_at`、`ends_at` |
+| `notifier` | 不使用 |
+
+一次通知可以包含多条告警，Flashduty 逐条处理（单次最多 100 条）。
+
+## 恢复与去重
+---
+
+- Chronosphere 发送 `status` 为 `resolved` 的通知时，Flashduty 按相同的 `fingerprint` 关闭对应告警。
+- 通知器没有开启恢复通知时，Flashduty 不会收到恢复请求，告警会一直保持活动。此时请在协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)。
+- Chronosphere 的 Webhook 请求带有 `Chronosphere-Webhook-Timestamp` 和 `Chronosphere-Webhook-Signature-V1` 请求头，用 HMAC-SHA256 签名。Flashduty 不要求也不校验签名。
+- Chronosphere 官方文档没有说明 Webhook 通知器是否有测试发送功能。首次配置后，用一条真实告警验证触发与恢复是否都出现在 Flashduty 中。
+
+## 排查问题
+---
+
+- **Flashduty 返回 `Invalid parameters`**：推送地址不完整，缺少 `integration_key`，或集成类型不是 Prometheus
+- **告警没有恢复**：确认通知器已选择 **Notify when resolved**（Terraform 的 `send_resolved` 为 `true`、Chronoctl 的 `skip_resolved` 为 `false`），并且恢复通知的 `fingerprint` 与触发时一致
+- **收不到任何告警**：确认通知策略把该通知器加入了对应严重程度的路由，并检查 Chronosphere 能否访问 `api.flashcat.cloud`

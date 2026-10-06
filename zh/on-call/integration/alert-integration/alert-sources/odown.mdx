@@ -1,0 +1,130 @@
+---
+title: "Odown 告警集成"
+description: "通过 Webhook 通道将 Odown 监控的宕机、恢复和 SSL 证书到期通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Odown", "Uptime", "Webhook", "SSL", "ALERT_FAILURE", "ALERT_RECOVERY"]
+---
+
+通过 Odown 的 Webhook 通道，把监控（Check）的宕机（`ALERT_FAILURE`）、恢复（`ALERT_RECOVERY`）和 SSL 证书到期（`ALERT_EXPIRED_SSL`）通知同步到 Flashduty On-call。每个 Odown 监控对应一条宕机告警：监控宕机时触发，监控恢复时关闭这条告警。SSL 证书到期通知是一次性事件，不会恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Odown**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Odown**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Odown 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 通道">
+
+1. 登录 Odown，进入账号的 **Alert Settings**，点击 **Add more channels**，选择 **Webhooks**
+2. 将 Flashduty 集成的完整推送地址粘贴到 URL
+3. 在 **Sending cases** 中勾选 **A check recovers**、**A check fails**，需要证书提醒时再勾选 **An SSL certificate is due to expire in**（默认全部未勾选，未勾选的情形不会发送）
+4. 点击 URL 旁的 **Test Webhook** 下拉菜单，选择 **Recovered Test**、**Failure Test** 或 **Expired SSL Test** 验证地址：Flashduty 返回成功，不会创建告警
+5. 保存通道
+
+</Step>
+
+<Step title="关联监控">
+
+Webhook 通道是全局的：保存后账号下所有监控都会订阅它（通道列表中的订阅数显示为 1 / 1）。Odown 会在监控宕机时发送 `ALERT_FAILURE`，恢复时发送 `ALERT_RECOVERY`，证书临近到期时发送 `ALERT_EXPIRED_SSL`。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个监控真正宕机（例如临时指向一个不可访问的地址），确认 Flashduty 收到活动告警；再恢复监控目标，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Odown 以 JSON 格式 POST 事件，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `event` | `ALERT_FAILURE`、`ALERT_RECOVERY` 或 `ALERT_EXPIRED_SSL` | 触发、恢复或 SSL 到期告警，标签 `event` |
+| `check.id` | 监控 ID | Alert Key，标签 `check_id` |
+| `check.name` | 监控名称 | 告警标题，标签 `check` |
+| `check.url` | 被监控地址 | 标签 `resource` |
+| `check.method` | 请求方法 | 标签 `method` |
+| `alert.status_code` | 返回的 HTTP 状态码 | 标签 `status_code` |
+| `alert.responseTime` | 响应时间 | 标签 `response_time` |
+| `alert.run_location` | 执行检查的区域 | 标签 `run_location` |
+| `alert.ssl_days_remaining` | 证书剩余天数（仅 SSL 事件） | 标签 `ssl_days_remaining` |
+| `alert.ssl_expired_date` | 证书到期日期（仅 SSL 事件） | 标签 `ssl_expired_date` |
+| `alert.ssl_check_domain` | 证书所属域名（仅 SSL 事件） | 标签 `ssl_check_domain` |
+
+告警标题使用监控名称；监控名称为空时使用被监控地址。SSL 到期告警的标题以 `SSL certificate expiring:` 开头。
+
+## Alert Key
+---
+
+- 宕机和恢复：使用 `check.id` 作为 Alert Key。同一个监控的 `ALERT_FAILURE` 和 `ALERT_RECOVERY` 携带相同的 `check.id`，落在同一条告警上；不同监控会生成不同的告警。修改监控名称、状态码或检查区域不会改变 Alert Key。
+- SSL 到期：使用 `check.id` 加 `:ssl_expiry` 作为 Alert Key，与该监控的宕机告警分开，因此监控恢复不会关闭证书告警，同一监控重复的到期通知会合并到同一条告警。
+
+请求中缺少 `check.id` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+Odown 的通知不区分告警等级。
+
+| Odown `event` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `ALERT_FAILURE` | Critical |
+| `ALERT_RECOVERY` | 恢复，原等级为 Critical |
+| `ALERT_EXPIRED_SSL` | Warning |
+
+`event` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 一次性告警需要开启超时自动关闭
+---
+
+SSL 到期通知没有对应的关闭通知，这类告警在 Flashduty 中不会自动恢复。请开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)，建议设置为 7 天；也可以在续期证书后手动关闭。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Webhook 测试按钮会创建告警吗？">
+
+不会。Odown 编辑页的测试按钮发送文档中的示例监控（名称为 `Check name`、地址为 `https://example.com`），Flashduty 识别后返回成功，不创建告警。如果您的真实监控恰好使用这个名称和地址，它的通知也会被忽略。
+
+</Accordion>
+
+<Accordion title="重复的宕机通知会产生多条告警吗？">
+
+不会。同一个监控的通知携带相同的 `check.id`，会合并到同一条告警中。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Odown 推送失败**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求为 Odown 的 JSON 通知，且 `check.id`、`event` 非空
+- **告警没有恢复**：确认监控恢复时仍使用同一个 Webhook 通道；恢复通知与宕机通知的 `check.id` 必须相同
+
+字段说明请参阅 Odown 官方文档 [Using Webhooks](https://odown.com/docs/alerting/webhooks/)。

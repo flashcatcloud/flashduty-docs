@@ -1,0 +1,175 @@
+---
+title: "SolarWinds Platform (Orion) 告警集成"
+description: "通过 SolarWinds Platform（Orion）告警的 HTTP 请求动作将告警同步到 Flashduty On-call，告警重置时自动关闭告警。"
+keywords: ["告警集成", "SolarWinds", "Orion", "SolarWinds Platform", "NPM", "SAM", "网络监控"]
+---
+
+SolarWinds Platform（原 Orion Platform，本地部署，包括 NPM、SAM 等产品）通过告警的 **Send a GET or POST Request to a Web Server** 动作推送告警：告警触发时执行触发动作（Trigger Action），告警重置时执行重置动作（Reset Action），两个动作都按本文给出的请求体模板向 Flashduty 发送一条 JSON。SolarWinds 中每个「告警定义 + 触发对象」对应一条 Flashduty 告警：触发时打开，重置时自动关闭。
+
+<Note>本文适用于本地部署的 SolarWinds Platform（Orion）。SaaS 产品 SolarWinds Observability 请使用 [SolarWinds 告警事件](/zh/on-call/integration/alert-integration/alert-sources/solarwinds) 集成。</Note>
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **SolarWinds Platform (Orion)**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **SolarWinds Platform (Orion)**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 SolarWinds Platform 中配置
+---
+
+以下操作需要有 **Allow Alert Management Rights** 权限的 SolarWinds Platform 账号。SolarWinds 服务器需要能访问 Flashduty 推送地址所在的域名（HTTPS，443 端口）。
+
+<Steps>
+<Step title="打开告警">
+
+在 SolarWinds Platform Web Console 中进入 **Alerts & Activity → Alerts**，点击 **Manage Alerts**。在 **Alert Manager** 中选择一条已有告警点击 **Edit Alert**，或点击 **Add New Alert** 新建告警。
+
+在 **Reset Condition** 中保留一种会发生的重置条件，例如默认的 **Reset this alert when trigger condition is no longer true**。选择 **No reset condition** 时告警永远不会重置，Flashduty 中的告警也不会自动关闭。
+
+</Step>
+
+<Step title="添加触发动作">
+
+进入 **Trigger Actions**，点击 **Add Action**，选择 **Send a GET or POST Request to a Web Server**，点击 **Configure Action**，按下表填写：
+
+| 字段 | 填写内容 |
+| :--- | :--- |
+| **Name of action** | 自定义名称，例如 `Flashduty - Trigger` |
+| **URL** | 完整的推送地址，包含 `?integration_key=...` |
+| **Method** | **Use HTTP/S POST** |
+| **Body to POST** | 粘贴下方的触发请求体模板 |
+| **ContentType** | `application/json`（Orion Platform 2020.2 及以上版本有此项） |
+| **Authentication** | **None** |
+
+触发请求体模板：
+
+```json
+{
+  "action": "trigger",
+  "alert_object_id": "${N=Alerting;M=AlertObjectID}",
+  "alert_id": "${N=Alerting;M=AlertID}",
+  "alert_name": "${N=Alerting;M=AlertName}",
+  "severity": "${N=Alerting;M=Severity}",
+  "object_type": "${N=Alerting;M=ObjectType}",
+  "object": "${N=SwisEntity;M=Caption}",
+  "alert_details_url": "${N=Alerting;M=AlertDetailsUrl}",
+  "alert_message": "${N=Alerting;M=AlertMessage}"
+}
+```
+
+字段名不要修改，`action` 和 `alert_object_id` 必须保留。**Execution Settings** 中不要勾选 **Repeat this action every X minutes until the alert is acknowledged**，避免同一告警被重复推送。点击 **Add Action** 保存。
+
+</Step>
+
+<Step title="添加重置动作">
+
+进入 **Reset Actions**，点击 **Add Action**，同样选择 **Send a GET or POST Request to a Web Server**，URL、Method、ContentType 和 Authentication 与触发动作相同，**Name of action** 可填 `Flashduty - Reset`，**Body to POST** 粘贴下方的重置请求体模板。它与触发模板只有 `action` 字段不同：
+
+```json
+{
+  "action": "reset",
+  "alert_object_id": "${N=Alerting;M=AlertObjectID}",
+  "alert_id": "${N=Alerting;M=AlertID}",
+  "alert_name": "${N=Alerting;M=AlertName}",
+  "severity": "${N=Alerting;M=Severity}",
+  "object_type": "${N=Alerting;M=ObjectType}",
+  "object": "${N=SwisEntity;M=Caption}",
+  "alert_details_url": "${N=Alerting;M=AlertDetailsUrl}",
+  "alert_message": "${N=Alerting;M=AlertMessage}"
+}
+```
+
+点击 **Add Action** 保存，然后点击 **Next** 到 **Summary** 页面，点击 **Submit**。
+
+<Warning>没有配置重置动作时，SolarWinds 在告警重置时不会通知 Flashduty，Flashduty 中的告警不会关闭。</Warning>
+
+</Step>
+
+<Step title="把动作分配给更多告警（可选）">
+
+在 **Alert Manager** 中勾选其他需要推送到 Flashduty 的告警，选择 **Assign Action → Assign Trigger Action**，选择 `Flashduty - Trigger` 后点击 **Assign**；再选择 **Assign Action → Assign Reset Action**，分配 `Flashduty - Reset`。
+
+</Step>
+
+<Step title="测试">
+
+在告警的 **Trigger Actions** 中点击 `Flashduty - Trigger` 旁的 **Simulate**，选择一个对象后点击 **Execute**。SolarWinds 会忽略触发条件，直接用该对象渲染模板并发送请求，Flashduty 会为该对象打开一条告警。再到 **Reset Actions** 中对同一个对象 **Simulate** `Flashduty - Reset`，这条告警会被关闭。
+
+也可以让告警真实触发一次（例如临时调低阈值），确认 Flashduty 收到告警；恢复后等待告警重置，确认原告警关闭。SolarWinds 按告警的 **Evaluation Frequency** 评估条件，触发和重置通常在一到两个评估周期内送达。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_object_id`（`${N=Alerting;M=AlertObjectID}`）作为 Alert Key。SolarWinds 为每个「告警定义 + 触发对象」（例如「Node is down」+ 某台交换机）分配一个固定的 AlertObjectID，同一对象上的触发、重复通知和重置都使用这个 ID，因此它们落在同一条 Flashduty 告警上；告警重置后再次触发会打开一条新告警。同一个告警定义在不同对象上触发时，AlertObjectID 不同，会生成不同的告警。
+
+告警名称、严重级别、对象名称和告警消息的变化都不会改变 Alert Key。不要把 `alert_object_id` 换成 `${N=Alerting;M=AlertID}`：AlertID 是告警定义的 ID，同一个告警定义在所有对象上都相同，一个对象重置会关掉其他对象的告警。
+
+请求缺少 `action` 或 `alert_object_id`，或 `alert_object_id` 仍是未替换的 `${N=Alerting;M=AlertObjectID}` 时，Flashduty 会拒绝该请求。
+
+## 告警生命周期
+---
+
+Flashduty 按 `action` 字段处理通知（不区分大小写）：
+
+| `action` | 发送时机 | Flashduty 处理 |
+| :--- | :--- | :--- |
+| `trigger` | 触发动作执行：告警触发，或升级级别（Escalation Level）中的动作执行 | 触发告警，或更新已有告警 |
+| `reset` | 重置动作执行：满足重置条件 | 恢复告警 |
+
+在 SolarWinds 中确认（Acknowledge）告警不会执行动作，Flashduty 中的告警状态不变。
+
+## 告警等级
+---
+
+告警等级取自告警定义的 **Severity of Alert**（`${N=Alerting;M=Severity}`），不区分大小写：
+
+| SolarWinds Severity | Flashduty 等级 |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Serious` | Critical |
+| `Warning` | Warning |
+| `Notice` | Info |
+| `Informational` | Info |
+| 其他值或为空 | Warning |
+
+重置通知携带告警定义的严重级别，恢复事件保留该等级。
+
+## 告警内容
+---
+
+- **标题**：`<告警名称> on <对象名称>`；缺少对象名称时只用告警名称，全部缺少时为 `SolarWinds alert <alert_object_id>`
+- **描述**：`${N=Alerting;M=AlertMessage}` 渲染出的告警消息，即告警 **Trigger Actions** 中 **Message displayed when this alert is triggered** 的内容
+- **标签**：`alert_object_id`、`alert_id`（告警定义 ID）、`check`（告警名称）、`resource`（对象名称）、`object_type`（对象类型，例如 `Node`、`Interface`）、`severity`（原始严重级别）、`alert_details_url`（SolarWinds 告警详情页链接）
+
+SolarWinds 不会对变量值做 JSON 转义，对象名称、告警消息等值中含有双引号、反斜杠或换行时，Flashduty 仍按模板字段原样读取这些值。值为空的字段不会写入标签。变量不适用于当前对象类型时，SolarWinds 可能原样保留 `${...}` 这样的变量，Flashduty 会把它当作空值处理。
+
+## 排查问题
+---
+
+- **Simulate 提示 Failed to execute HTTP request**：确认 **URL** 是完整的推送地址，包含 `integration_key` 参数；确认 SolarWinds 服务器可以访问该地址（代理、防火墙）
+- **Flashduty 提示请求体不是合法 JSON**：请求体不是本文的模板。确认模板完整粘贴，花括号、每个字段的 `"字段名": "` 和结尾的 `"` 都在
+- **告警没有恢复**：确认告警配置了 **Reset Actions** 中的 `Flashduty - Reset`，重置条件不是 **No reset condition**，且重置模板中的 `action` 为 `reset`
+- **同一个问题重复通知**：取消触发动作 **Execution Settings** 中的 **Repeat this action every X minutes until the alert is acknowledged**
+- **多台 SolarWinds 服务器**：AlertObjectID 只在一套 SolarWinds 数据库内唯一。多套独立部署的 SolarWinds Platform 请分别创建 Flashduty 集成，不要共用同一个推送地址
+
+动作和变量的说明请参阅 SolarWinds 文档 [Send a GET or POST request](https://documentation.solarwinds.com/en/success_center/orionplatform/content/core-using-get-or-post-url-functions-sw1058.htm)、[Reset actions](https://documentation.solarwinds.com/en/success_center/orionplatform/content/core-setting-reset-actions-sw1022.htm) 和 [General alert variables](https://documentation.solarwinds.com/en/success_center/orionplatform/content/core-general-alert-variables-sw1121.htm)。

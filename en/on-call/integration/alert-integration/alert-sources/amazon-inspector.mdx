@@ -1,0 +1,98 @@
+---
+title: "Amazon Inspector Alert Integration"
+description: "Send Amazon Inspector vulnerability and network reachability findings to Flashduty's AWS EventBridge integration through an EventBridge rule; alerts recover when a finding is closed or suppressed."
+keywords: ["alert integration", "Amazon Inspector", "Inspector2", "vulnerability scanning", "EventBridge", "AWS"]
+---
+
+Amazon Inspector sends an **Inspector2 Finding** event to Amazon EventBridge when it finds a new vulnerability or a finding changes state. The Flashduty [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge) recognizes these events: each finding becomes one alert, and the alert recovers automatically when the status becomes `CLOSED` or `SUPPRESSED`. No separate Inspector integration is needed: create an AWS EventBridge integration in Flashduty, then create an EventBridge rule that forwards Inspector events to it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the AWS EventBridge integration type** in both, not Amazon Inspector.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **AWS EventBridge** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/aws/eventbridge?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **AWS EventBridge** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in AWS
+---
+
+Inspector emits events to the default event bus of each Region where it is enabled, so create the rule in every such Region.
+
+1. Follow "Option 1: API destination" in the [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge) to create the Connection and API destination, using the Flashduty push URL as the endpoint. "Option 2: SNS topic" also works
+2. In the EventBridge console, select **Rules** → **Create rule** and choose **Rule with an event pattern** for **Rule type**
+3. In **Event pattern**, choose **Custom patterns (JSON editor)** and paste the pattern below
+4. For **Target types** choose **EventBridge API destination** and select the API destination created above
+
+Event pattern:
+
+```json
+{
+  "source": ["aws.inspector2"],
+  "detail-type": ["Inspector2 Finding"]
+}
+```
+
+To keep only high-severity findings, filter on severity:
+
+```json
+{
+  "source": ["aws.inspector2"],
+  "detail-type": ["Inspector2 Finding"],
+  "detail": {
+    "severity": ["HIGH", "CRITICAL"]
+  }
+}
+```
+
+<Warning>
+Do not add `"status": ["ACTIVE"]` to the pattern. The notification example in the Amazon Inspector documentation uses it to receive only active findings, but it also filters out the `CLOSED` event sent when a finding is closed, so Flashduty never receives the recovery and the alert cannot recover.
+</Warning>
+
+Other Inspector events (`Inspector2 Scan`, `Inspector2 Coverage`, `Inspector2 AutoEnable`) are not findings and should not be forwarded to Flashduty; the `detail-type` above already excludes them.
+
+## Field mapping
+---
+
+The mapping below is how Flashduty processes these AWS EventBridge events:
+
+| Inspector field | Flashduty |
+| :--- | :--- |
+| `detail.findingArn` | Alert Key. The ID stays the same when a finding is updated, so later events merge into one alert |
+| `detail.status` | `CLOSED` or `SUPPRESSED` recovers the alert; `ACTIVE` triggers or updates it |
+| `detail.title` | Label `summary` (the alert title is always `aws.inspector2 / Inspector2 Finding`) |
+| `detail.severity` | Label `inspector_severity`; the alert severity is always Warning, and an [alert pipeline](/en/on-call/integration/alert-integration/alert-pipelines) can rewrite it based on this label |
+| `detail.type` | Label `finding_type` (for example `PACKAGE_VULNERABILITY`, `NETWORK_REACHABILITY`, `CODE_VULNERABILITY`) |
+| `detail.resources[0].id`, `detail.resources[0].type` | Labels `resource`, `resource_type` |
+| `detail.awsAccountId`, `detail.findingArn`, `detail.status` | Labels `aws_account_id`, `finding_arn`, `finding_status` |
+| Event `source`, `region`, `account`, `detail-type`, `detail`, `resources` | Labels `source`, `region`, `account`, `check`, `detail`, `resources` |
+
+## Recovery and deduplication
+---
+
+- Inspector sends another event for the same `findingArn` when a vulnerability is fixed or a finding changes state. When `status` is `CLOSED` (fixed) or `SUPPRESSED`, Flashduty closes the alert.
+- If the account is an Inspector delegated administrator, findings of member accounts are also delivered to it; use the label `aws_account_id` to tell the source account.
+- If an event lacks `detail.findingArn`, Flashduty returns HTTP 400.
+- The `detail` of code vulnerability findings contains file paths and detector names, which end up in the alert through the `detail` label.
+
+## Troubleshooting
+---
+
+- **The API destination call fails**: confirm the endpoint is the full push URL including `integration_key` and that `HTTP method` is `POST`
+- **Alerts do not recover**: check whether the rule's event pattern filters on `status`, and whether the target has an Input transformer (the full event must be sent)
+- **Findings from a Region are missing**: Inspector only emits events to the event bus of its own Region; create a rule in every Region where Inspector is enabled

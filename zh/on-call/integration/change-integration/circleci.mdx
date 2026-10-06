@@ -1,0 +1,130 @@
+---
+title: "CircleCI 变更集成"
+description: "通过 CircleCI 出站 Webhook 将 Workflow 的执行结果同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "CircleCI", "Workflow", "CI/CD", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 CircleCI 项目的出站 Webhook（Outbound webhook），将 Workflow 的执行结果同步到 Flashduty On-call。每个 Workflow 对应一条 Flashduty 变更，在 Workflow 结束时记录一次。
+
+CircleCI 只在 Workflow 结束时推送 `workflow-completed` 事件，没有开始事件，因此变更没有 Processing 中间状态，直接记录为结束状态：Done、Failed 或 Canceled。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **CircleCI**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`ref`、`workflow`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 CircleCI 中配置
+---
+
+<Steps>
+<Step title="打开项目的 Webhooks 设置">
+
+1. 在 CircleCI 控制台进入组织，选择 **Projects**，在目标项目的菜单中点击 **Project Settings**
+2. 在左侧选择 **Webhooks**，点击 **Add Webhook**
+
+Webhook 按项目配置，每个项目最多 5 个。需要为每个要同步的项目分别添加。
+
+</Step>
+
+<Step title="填写推送地址与事件">
+
+1. **Webhook name**：填写便于识别的名称，例如 `Flashduty`
+2. **URL**：粘贴 Flashduty 集成的完整推送地址
+3. **Certificate Validation**：保持勾选
+4. **Secret token**：无需填写。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `circleci-signature`
+5. **Select an event**：勾选 `workflow-completed`
+
+同时勾选 `job-completed` 也不会出错，但 Job 事件不生成变更，会被忽略。
+
+</Step>
+
+<Step title="发送测试">
+
+点击 **Test Ping Event**，Flashduty 返回成功且不生成变更。之后运行一次 Workflow，即可在 Flashduty 变更列表中看到记录。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| CircleCI 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Workflow | `workflow.id` | 每次 Pipeline 运行中的每个 Workflow 有独立的 ID，对应一条 Flashduty 变更；同一项目、同一分支上的两次运行是两条变更 |
+
+## 状态映射
+---
+
+| CircleCI `workflow.status` | Flashduty 变更状态 |
+|---|---|
+| `success` | Done |
+| `failed` | Failed |
+| `error` | Failed |
+| `unauthorized` | Failed |
+| `canceled` | Canceled |
+
+以下推送返回成功但不生成变更：
+
+- `job-completed`（Job 级事件）
+- `ping`（测试推送）
+- 其他事件类型
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目名>: <Workflow 名> on <分支或 Tag> (<短 SHA>)`，例如 `webhook-service: build-test-deploy on main (1dc6aa6)` |
+| 描述 | 提交的第一行说明（Commit subject） |
+| 链接 | CircleCI 中该 Workflow 的页面 |
+| 变更时间 | Workflow 的结束时间（`workflow.stopped_at`） |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目名 |
+| `project_slug` | 项目标识，例如 `github/<组织>/<仓库>` |
+| `organization` | 组织名 |
+| `workflow` | Workflow 名称 |
+| `workflow_id` | Workflow ID |
+| `pipeline_id` | Pipeline ID |
+| `pipeline_number` | Pipeline 编号 |
+| `ref` | 分支或 Tag |
+| `sha` | 提交的完整 SHA |
+| `actor` | 提交作者姓名；GitLab 或 GitHub App 类型的项目为触发用户名 |
+| `circleci_state` | CircleCI 的 Workflow 状态原值 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么看不到 Workflow 的运行中状态？">
+
+CircleCI 的出站 Webhook 只提供 Workflow 和 Job 结束的事件，不推送开始事件。变更在 Workflow 结束时以最终状态出现。
+
+</Accordion>
+
+<Accordion title="CircleCI 重试推送会重复记录吗？">
+
+不会。CircleCI 收到非 2xx 响应后会稍后重试，重试内容相同，Flashduty 以 Workflow 结束时间去重，只记录一次。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `workflow.id is missing`：推送内容不完整，请确认推送来自 CircleCI 原生 Webhook
+- `unknown workflow.status`：出现了未收录的 Workflow 状态值，请联系我们补充映射
+- `invalid workflow.stopped_at` 或 `invalid happened_at`：推送中的时间字段格式不正确
+
+</Accordion>
+</AccordionGroup>

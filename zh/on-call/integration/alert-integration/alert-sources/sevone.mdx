@@ -1,0 +1,160 @@
+---
+title: "IBM SevOne NPM 告警集成"
+description: "通过 SevOne NPM 的 Webhook Definition 把策略告警的触发和清除同步到 Flashduty On-call。"
+keywords: ["告警集成", "IBM SevOne", "SevOne NPM", "Webhook Definition", "Policy", "alertId"]
+---
+
+通过 IBM SevOne NPM 8.x 的 Webhook Definition Manager，把策略（Policy）告警的触发和清除同步到 Flashduty On-call。SevOne 的 Webhook 请求体由您在模板里自己编写，本页给出需要粘贴的 JSON 模板，Flashduty 按该模板解析。每条 SevOne 告警对应一条 Flashduty 告警：策略触发时创建，再次触发合并到同一条告警，策略清除时关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **IBM SevOne NPM**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **IBM SevOne NPM**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 SevOne NPM 中配置
+---
+
+需要创建两个 Webhook Definition：一个在告警触发时发送，一个在告警清除时发送。
+
+<Steps>
+<Step title="创建触发 Webhook">
+
+1. 登录 SevOne NMS，进入 **Events → Configuration → Webhook Definition Manager**，点击添加
+2. **Definition Type** 选择 **Policy**，**Webhook Definition Name** 填写 `Flashduty trigger`
+3. **Destination URL** 粘贴 Flashduty 集成的完整推送地址
+4. **Request Method** 选择 **POST**，**Content Type** 选择 **application/json**
+5. 在 **Body** 中粘贴下面的模板：
+
+```json
+{"event":"trigger","alert_id":"$alertId","severity":"$alertState","message":"$alertMessage","alert_type":"$alertType","occurrences":"$occurrences","device_id":"$deviceId","device_name":"$deviceName","device_ip":"$deviceIp","device_group":"$groupName","policy_id":"$policyId","policy_name":"$policyName","threshold_name":"$thresholdName","object_name":"$objectName","plugin":"$pluginName","cluster":"$clusterName"}
+```
+
+6. 点击 **Test Definition** 检查请求能否发出，然后点击 **Save**
+
+</Step>
+
+<Step title="创建清除 Webhook">
+
+按上一步再创建一个 Definition，名称填写 `Flashduty clear`，**Body** 粘贴下面的模板（`event` 为 `clear`，并多一个 `closure_message`）：
+
+```json
+{"event":"clear","alert_id":"$alertId","severity":"$alertState","message":"$alertMessage","alert_type":"$alertType","occurrences":"$occurrences","device_id":"$deviceId","device_name":"$deviceName","device_ip":"$deviceIp","device_group":"$groupName","policy_id":"$policyId","policy_name":"$policyName","threshold_name":"$thresholdName","object_name":"$objectName","plugin":"$pluginName","cluster":"$clusterName","closure_message":"$closureMessage"}
+```
+
+</Step>
+
+<Step title="把 Webhook 分配给策略">
+
+1. 进入 **Events → Configuration → Policy Browser**，选中需要接入的策略，点击 **Assign Webhooks**
+2. 选择 `Flashduty trigger`，**Apply To** 勾选 **Trigger**，保存
+3. 再次 **Assign Webhooks**，选择 `Flashduty clear`，**Apply To** 勾选 **Clear**，保存
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一条策略真正触发，确认 Flashduty 收到活动告警；再让它清除（条件恢复，或在 **Events → Alerts** 手动确认），确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+- **Content Type** 必须选 **application/json**。SevOne 会按 Content Type 对变量做转义，选其他类型可能生成无法解析的 JSON。
+- 触发和清除的模板中 `event` 取值必须分别是 `trigger` 和 `clear`，其他值会被 Flashduty 拒绝。
+- 推送地址包含 `integration_key`，不需要额外的认证头。
+</Warning>
+
+## 推送内容
+---
+
+模板中的每个字段都是一个 SevOne 变量的替换结果（变量说明见 IBM 文档 [Webhook Definition Manager](https://www.ibm.com/docs/en/SSUWLY_8.0/nms/Webhook_Definition_Manager.html)）：
+
+| 字段 | SevOne 变量 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `event` | 固定文本 | `trigger` 触发，`clear` 恢复 |
+| `alert_id` | `$alertId` | Alert Key，标签 `alert_id` |
+| `severity` | `$alertState` | 告警等级，标签 `severity` |
+| `message` | `$alertMessage` | 告警标题（前面加设备名） |
+| `alert_type` | `$alertType` | 标签 `alert_type` |
+| `occurrences` | `$occurrences` | 描述 |
+| `device_id` / `device_name` / `device_ip` / `device_group` | `$deviceId` 等 | 标签 `device_id`、`host`、`resource`、`device_ip`、`device_group` |
+| `policy_id` / `policy_name` | `$policyId` / `$policyName` | 标签 `policy_id`、`policy_name`、`check` |
+| `threshold_name` | `$thresholdName` | 标签 `threshold_name`，描述 |
+| `object_name` / `plugin` | `$objectName` / `$pluginName` | 标签 `object_name`、`plugin`，仅指标策略有值 |
+| `cluster` | `$clusterName` | 标签 `cluster` |
+| `closure_message` | `$closureMessage` | 描述，仅清除模板 |
+
+SevOne 对不支持的变量输出 `n/a`（例如流量策略的 `$pluginName`），Flashduty 会忽略 `n/a`。
+
+## Alert Key
+---
+
+Flashduty 使用 `alert_id`（`$alertId`，IBM 文档描述为 "The id of the triggered alert"）作为 Alert Key。同一条 SevOne 告警的多次触发和清除携带相同的 `alert_id`，会落在同一条 Flashduty 告警上；修改策略名称、等级或消息不会改变 Alert Key。
+
+请求中 `alert_id` 为空、为 `n/a` 或仍是未替换的 `$alertId` 时，Flashduty 返回参数错误。
+
+## 状态和告警等级
+---
+
+`$alertState` 是策略的等级。清除事件沿用该告警的等级，状态变为恢复。
+
+| SevOne 等级 | Flashduty 等级 |
+| :--- | :--- |
+| Emergency、Alert、Critical | Critical |
+| Error、Warning | Warning |
+| Notice、Info、Debug | Info |
+| 为空或其他值 | Warning |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Test Definition 会在 Flashduty 创建告警吗？">
+
+IBM 文档只说明 Test Definition 会返回状态码、响应头和响应体，没有给出测试请求体的格式。如果测试请求带有有效的 `alert_id` 和 `event`，会像真实通知一样创建或关闭告警；不带时 Flashduty 返回参数错误。测试产生的告警请手动关闭。
+
+</Accordion>
+
+<Accordion title="只配触发 Webhook，不配清除 Webhook 可以吗？">
+
+可以接收告警，但 Flashduty 告警不会自动恢复。建议在集成或协作空间中开启超时自动关闭，或补配清除 Webhook。
+
+</Accordion>
+
+<Accordion title="策略持续触发会产生多条告警吗？">
+
+不会。同一条 SevOne 告警每次触发的 `alert_id` 相同，合并到同一条 Flashduty 告警。
+
+</Accordion>
+
+<Accordion title="Trap 事件的告警可以接入吗？">
+
+本页模板按 Policy 类型设计。Trap 类型的 Definition 使用另一组变量，不在本集成范围内。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **SevOne 推送失败**：确认 Destination URL 是完整的推送地址；自签名 TLS 证书需要勾选 **Allow insecure webhook connection**，且证书需使用 SAN 而不是仅 Common Name
+- **Flashduty 返回参数错误**：确认 Content Type 为 application/json，`event` 为 `trigger` 或 `clear`，且 `alert_id` 有值
+- **告警没有恢复**：确认清除 Webhook 已分配给同一策略并勾选 **Clear**

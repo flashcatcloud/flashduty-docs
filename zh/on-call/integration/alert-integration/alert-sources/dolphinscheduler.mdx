@@ -1,0 +1,157 @@
+---
+title: "Apache DolphinScheduler 告警集成"
+description: "通过 DolphinScheduler 的 HTTP 告警插件，把工作流实例的失败、成功和超时通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "DolphinScheduler", "海豚调度", "工作流", "Webhook", "任务调度"]
+---
+
+Apache DolphinScheduler 的工作流实例结束或超时时，会把通知发给所选告警组中的告警实例。通过 **HTTP** 告警插件把告警实例指向 Flashduty 的推送地址后，工作流实例失败会产生一条 Critical 告警；同一个实例重跑后成功，这条告警自动恢复。
+
+本集成基于 DolphinScheduler 3.4.3 验证。必须按下文 [配置请求体](#配置请求体) 填写 **请求体**，否则 DolphinScheduler 不会发送告警内容。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Dolphinscheduler**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Dolphinscheduler**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 DolphinScheduler 中配置
+---
+
+<Steps>
+<Step title="创建 HTTP 告警实例">
+
+1. 使用有权限的账号登录 DolphinScheduler，进入 **安全中心 → 告警实例管理**，点击 **创建告警实例**
+2. **选择插件** 选 `Http`，填写 **告警实例名称**
+3. 按下表填写插件参数：
+
+| 参数 | 取值 |
+| :--- | :--- |
+| URL | Flashduty 集成的完整推送地址（含 `integration_key`） |
+| 请求方式 | `POST` |
+| 请求头 | 留空 |
+| 请求体 | `{"content":"${msg}"}` |
+| Content Type | `application/json` |
+| 超时时间（秒） | 默认 120 |
+
+4. 保存。DolphinScheduler 服务端需要能访问公网上的 Flashduty。
+
+<a id="配置请求体"></a>
+
+**配置请求体**：HTTP 插件只发送 **请求体** 中配置的内容，并把请求体里字符串值中的 `${msg}` 替换为告警内容。不写 `${msg}`，Flashduty 收不到任何告警内容。请求体中的 `content` 值必须是 `"${msg}"`，其余键会被忽略。替换后的 `content` 是一个 JSON 字符串，里面是告警对象数组，Flashduty 会再解析一次。
+
+</Step>
+
+<Step title="创建告警组">
+
+1. 进入 **安全中心 → 告警组管理**，点击 **创建告警组**
+2. 填写 **告警组名称**，在 **告警组实例** 中选中上一步的告警实例，保存
+
+</Step>
+
+<Step title="在工作流上选择告警组和通知策略">
+
+启动工作流（或为工作流设置定时调度）时：
+
+1. **告警组** 选中上一步的告警组
+2. **通知策略** 选 **成功或失败都发**（`ALL`）。选 **失败发** 只能收到失败告警，Flashduty 中的告警不会恢复
+
+</Step>
+
+<Step title="验证">
+
+在 **告警实例管理** 中点击该告警实例的编辑，在弹出的对话框中点击 **测试发送**，确认 Flashduty 出现一条 Info 告警，标题为 `DolphinScheduler test notification`。再让一个工作流中的任务失败（例如 Shell 任务执行 `exit 1`），确认出现标题为 `DolphinScheduler workflow failed: <工作流实例名称>` 的 Critical 告警。
+
+</Step>
+</Steps>
+
+## 告警恢复和自动关闭
+---
+
+DolphinScheduler 按工作流实例结束时的状态发送通知：
+
+| 工作流实例状态 | Flashduty 处理 |
+| :--- | :--- |
+| `FAILURE` | 触发 Critical 告警 |
+| `SUCCESS` | 恢复同一个实例的告警 |
+| `STOP`、`PAUSE` 等其他状态 | 忽略。手动停止或暂停既不是失败，也不是恢复 |
+
+在 DolphinScheduler 中对失败的实例执行 **重跑失败任务**（英文界面为 Recovery Failed）（`START_FAILURE_TASK_PROCESS`）时，实例 ID 不变，`runTimes` 加 1。重跑仍然失败，会更新同一条告警；重跑成功且通知策略为 **成功或失败都发**，告警恢复。
+
+工作流或任务超时的告警只发送一次，不会恢复。如果工作流失败后没有人重跑，也不会有恢复通知。请在接收该集成的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 12 小时，并按团队处理失败任务的时效调整。
+
+子工作流的状态不会单独通知。
+
+## 告警类型
+---
+
+一次请求的 `content` 数组中可以有多个告警对象，每个对象对应一条 Flashduty 告警。
+
+- **工作流实例失败或成功**：标题为 `DolphinScheduler workflow failed: <工作流实例名称>` 或 `DolphinScheduler workflow succeeded: <工作流实例名称>`
+- **工作流超时**：标题为 `DolphinScheduler workflow timeout: <工作流实例名称>`，Warning 等级
+- **任务超时**：标题为 `DolphinScheduler task timeout: <任务名称>`，Warning 等级
+- **测试发送**：告警实例的测试发送内容是固定的，Flashduty 会识别它并创建一条独立的 Info 告警，每次发送都是新告警，不会合并或关闭真实告警。需要手动关闭这条告警
+
+告警组中如果还收到不带工作流信息的告警（例如服务下线），Flashduty 会拒绝（返回参数错误）。如果不想在 DolphinScheduler 中看到发送失败，请为本集成单独建立告警组。
+
+## Alert Key
+---
+
+| 告警类型 | Alert Key |
+| :--- | :--- |
+| 工作流实例失败、成功 | 项目编码 `projectCode` + 工作流实例 ID `workflowInstanceId` |
+| 工作流超时 | 项目编码 + 工作流实例 ID，另加固定标识 `timeout` |
+| 任务超时 | 项目编码 + 工作流实例 ID + 任务编码 `taskCode`，另加固定标识 `timeout` |
+
+工作流实例名称、状态、运行次数、时间的变化不会改变 Alert Key。同一个实例的失败和后续成功使用同一个 Alert Key，所以成功会恢复失败。缺少 `projectCode` 或 `workflowInstanceId` 的告警对象会使整个请求被拒绝。
+
+## 状态和告警等级
+---
+
+| 来源 | 状态 | 等级 |
+| :--- | :--- | :--- |
+| `FAILURE` | 触发 | Critical |
+| `SUCCESS` | 恢复 | 保持触发时的等级 |
+| 超时 | 触发 | Warning |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `source` | 固定为 `dolphinscheduler` |
+| `check` | 工作流实例名称（缺失时为 `workflow instance <ID>`） |
+| `resource` | 项目名称 `projectName` |
+| `project_code` / `project_name` | 项目编码、项目名称 |
+| `workflow_instance_id` / `workflow_instance_name` | 工作流实例 ID、名称 |
+| `workflow_definition_code` | 工作流定义编码 |
+| `command_type` | 触发方式，例如 `START_PROCESS`、`START_FAILURE_TASK_PROCESS` |
+| `run_times` | 运行次数 |
+| `workflow_status` | 工作流实例状态 |
+| `workflow_host` | 执行该工作流的 Master 地址 |
+| `event` / `warn_level` | 超时告警的事件和级别 |
+| `task_code` / `task_name` | 任务编码、任务名称（任务超时） |
+
+## 排查问题
+---
+
+- **Flashduty 没有收到事件**：确认工作流启动时选了告警组且通知策略不是 **都不发**；确认告警组包含该告警实例；确认推送地址完整且包含 `integration_key`。在告警实例的创建或编辑对话框中点击 **测试发送** 可以验证网络
+- **Flashduty 返回参数错误**：多半是 **请求体** 没有写成 `{"content":"${msg}"}`，或收到了不带工作流信息的告警（例如服务下线）
+- **告警一直不关闭**：失败后没有成功的重跑，或通知策略不是 **成功或失败都发**。请开启协作空间的超时自动关闭
+- **看不到成功通知**：通知策略选了 **失败发**

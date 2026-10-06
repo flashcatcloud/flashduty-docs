@@ -1,0 +1,118 @@
+---
+title: "Robusta 告警集成"
+description: "通过 Robusta 的 Webhook Sink 将 Kubernetes 集群中的 Robusta 告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Robusta", "Kubernetes", "K8s", "Prometheus", "Webhook"]
+---
+
+通过 Robusta 的 Webhook Sink（`webhook_sink`）将 Robusta 发现的问题（finding）同步到 Flashduty On-call。Robusta 转发的 Prometheus 告警在触发时创建 Flashduty 告警，在 Alertmanager 发送恢复后自动恢复；Robusta 自己检测到的问题（如 CrashLoopBackoff、OOMKilled、镜像拉取失败）只通知一次，不会自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Robusta**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Robusta**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Robusta 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook Sink">
+
+在安装 Robusta 时使用的 Helm values 文件（通常是 `generated_values.yaml`）中，向 `sinksConfig` 添加一个 `webhook_sink`：
+
+```yaml
+sinksConfig:
+- webhook_sink:
+    name: flashduty
+    url: "<Flashduty 推送地址>"
+    format: json
+```
+
+- `url`：填写 Flashduty 集成的完整推送地址（以 `https://` 开头，包含 `integration_key`）
+- `format`：必须设置为 `json`。默认值 `text` 发送的是纯文本，Flashduty 无法解析，会返回参数错误
+- 不要开启 `slack_webhook`。开启后 Robusta 发送的是 Slack 格式的正文，不含 `fingerprint`，Flashduty 会拒绝
+- `size_limit` 保持默认的 `4096` 即可。超过限制时 Robusta 会丢弃靠后的字段，`enrichments` 最先被丢弃，Flashduty 不读取该字段
+
+</Step>
+
+<Step title="更新 Robusta">
+
+```bash
+helm upgrade robusta robusta/robusta --values=generated_values.yaml --set clusterName=<集群名称>
+```
+
+`clusterName` 会作为 `cluster` 标签写入告警，并参与 Alert Key 计算。多个集群推送到同一个集成时，请为每个集群设置不同的 `clusterName`。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Robusta 自己检测到的问题（`source` 为 `KUBERNETES_API_SERVER` 等）不发送恢复通知，这些告警会一直保持打开。请在接收该集成的协作空间中开启[超时自动关闭](/zh/on-call/channel/create-edit)，时长按团队处理问题的时效设定，例如 4 小时。
+
+</Step>
+</Steps>
+
+<Tip>
+如果您的 Prometheus 告警不经过 Robusta，也可以让 Alertmanager 直接推送到 Flashduty 的 [Prometheus 集成](/zh/on-call/integration/alert-integration/alert-sources/prometheus)。
+</Tip>
+
+## Alert Key
+---
+
+Flashduty 用 `cluster_name` 加 `fingerprint` 计算 Alert Key。
+
+- **Prometheus 告警**：`fingerprint` 是 Alertmanager 为告警计算的指纹，同一条告警从触发到恢复保持不变，所以触发、升级和恢复通知落在同一条 Flashduty 告警上
+- **Robusta 自己检测到的问题**：`fingerprint` 由资源类型、名称、命名空间、节点和问题类型计算，同一个 Pod 反复出现的同类问题会合并到同一条告警
+
+标题、描述、等级、时间和事件 ID 的变化都不会改变 Alert Key。请求缺少 `fingerprint` 时 Flashduty 会拒绝，因为无法关联后续通知。
+
+## 状态和告警等级
+---
+
+当请求中的 `ends_at` 不为空，或标题以 `[RESOLVED] ` 开头时，Flashduty 将告警标记为恢复。Robusta 只为 Alertmanager 已恢复的 Prometheus 告警发送这类通知，请确认 Alertmanager 中 Robusta 接收器的 `send_resolved` 为 `true`（Robusta 自带的 Prometheus 默认已开启）。
+
+| Robusta `severity` | Flashduty 等级 |
+| :--- | :--- |
+| `HIGH` | Critical |
+| `LOW` | Warning |
+| `INFO`、`DEBUG` | Info |
+| 空值或其他值 | Warning |
+
+Robusta 转发 Prometheus 告警时按告警的 `severity` 标签换算等级：`critical`、`high`、`medium`、`error` 为 `HIGH`，`warning`、`low` 为 `LOW`，`info` 和其他值为 `INFO`，`debug` 为 `DEBUG`。恢复通知保留最后一次的等级。
+
+## 告警内容
+---
+
+- **标题**：`title`，恢复通知会去掉 `[RESOLVED] ` 前缀
+- **描述**：`description`，`links` 中的链接（如 Prometheus 图表），以及恢复时间 `ends_at`
+- **标签**：`cluster`、`fingerprint`、`aggregation_key`（告警名或问题类型）、`finding_source`（如 `PROMETHEUS`、`KUBERNETES_API_SERVER`）、`finding_type`、`severity`（Robusta 原始等级）、`resource`（`类型/命名空间/名称`）、`kind`、`namespace`、`node`、`container`、`source`（固定为 `robusta`），以及 `subject.labels` 中的资源标签和 Prometheus 告警标签（如 `alertname`、`pod`）
+
+## 排查问题
+---
+
+- **Flashduty 返回 request body is not Robusta JSON**：`webhook_sink` 没有设置 `format: json`
+- **Flashduty 返回 fingerprint is required**：确认没有开启 `slack_webhook`，且没有把 `size_limit` 调得过小
+- **Prometheus 告警没有恢复**：确认 Alertmanager 中 Robusta 接收器开启了 `send_resolved`，且告警已在 Alertmanager 中恢复
+- **CrashLoopBackoff 等告警没有恢复**：这类问题 Robusta 只通知一次，请使用超时自动关闭或手动关闭
+- **只想推送部分告警**：使用 Robusta Sink 的 `scope` 按命名空间、告警名等过滤
+
+Robusta 不提供测试按钮。可以创建一个持续崩溃的 Pod（例如 `kubectl run crashy --image=busybox --restart=Always -- sh -c 'exit 1'`）验证投递，验证后删除该 Pod 并手动关闭告警。
+
+字段含义请参阅 [Robusta Webhook Sink](https://docs.robusta.dev/master/configuration/sinks/webhook.html)。

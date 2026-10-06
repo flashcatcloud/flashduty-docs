@@ -1,0 +1,112 @@
+---
+title: "Flagsmith change integration"
+description: "Sync Flagsmith feature flag and segment changes to Flashduty On-call through a Flagsmith audit log webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Flagsmith", "Feature Flag", "feature flag", "audit log", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Flagsmith organisation-level audit log webhook to sync feature flag and segment changes to Flashduty On-call. Each audit log entry in Flagsmith that affects flag evaluation becomes one Flashduty change, for example changing a flag's state or remote config value, creating or deleting a flag, editing segment rules or segment overrides, publishing an environment feature version, or changing an identity override.
+
+Flagsmith sends changes that have already taken effect, so each change is recorded as **Done** directly.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Flagsmith** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project` or `environment`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Flagsmith
+---
+
+<Steps>
+<Step title="Create an organisation webhook">
+
+1. Go to **Organisation Settings** and open the **Webhooks** tab
+2. Create an audit log webhook
+
+You need organisation administrator permission. Use the organisation audit webhook (**Create audit webhook**). Besides audit log entries, Flagsmith also sends `FLAG_UPDATED` and `FLAG_DELETED` events to this URL; Flashduty returns success for them and records nothing.
+
+</Step>
+
+<Step title="Enter the push URL">
+
+1. **URL**: paste the full push URL of the Flashduty integration
+2. **Secret**: leave it empty. Flashduty authenticates the delivery by the `integration_key` in the push URL and does not verify `X-Flagsmith-Signature`
+3. Enable the webhook and save
+
+</Step>
+</Steps>
+
+Flagsmith sends the audit log of every project in the organisation to this URL. After saving, make a change to any flag and it appears in the Flashduty change list. The **Test your webhook** button in the webhook dialog gets a success response from Flashduty and records no change.
+
+## What one change is
+---
+
+| Flagsmith object | Change key (change_key) | Notes |
+|---|---|---|
+| Audit log entry | `data.id` in the payload | Each save produces one audit log entry, which is one Flashduty change; turning a flag on and then off again is two changes |
+
+## Status mapping
+---
+
+| Flagsmith audit log entry (`related_object_type`) | Flashduty change status |
+|---|---|
+| `FEATURE` (flag created or deleted), `FEATURE_STATE` (flag state, remote config value, segment override, change request or scheduled change going live), `SEGMENT`, `EF_VERSION` (feature version published), `EDGE_IDENTITY` (identity override) | Done |
+
+These deliveries return success but record no change:
+
+- Entries of other types, such as change requests (`CHANGE_REQUEST`), environments, import requests, feature health, and release pipelines
+- Flag metadata edits such as name, description, and tags (`Flag / Remote Config updated`)
+- Entries that only schedule a change that has not taken effect yet (the log text contains `scheduled for`); Flagsmith sends a separate entry when the change goes live
+- Deliveries whose event type is not `AUDIT_LOG_CREATED`, such as `FLAG_UPDATED` and `FLAG_DELETED`
+- Flagsmith's test request
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project> / <environment>: <audit log text>`, for example `Web Shop / Production: Flag state updated for feature: new_checkout`; project-level entries (such as creating a flag) have no environment |
+| Description | Empty |
+| Link | Empty. Flagsmith's payload contains neither a page URL nor the instance address |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `project` | Project name |
+| `environment` | Environment name; absent for project-level entries |
+| `kind` | `related_object_type`, for example `FEATURE_STATE` |
+| `actor` | Name of the user who made the change; absent when the change was made without a user (for example with a master API key) or the user has no name set |
+| `audit_log_id` | Audit log entry ID |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a Flagsmith retry record a duplicate?">
+
+No. A retry carries the same content as the original delivery, and Flashduty records it once.
+
+</Accordion>
+
+<Accordion title="Why was a particular edit not recorded?">
+
+Check the ignore list in **Status mapping** above: metadata edits, the change request itself, and the creation of a scheduled change are not recorded. A record appears when the change request is committed and takes effect, or when the scheduled change goes live. Also confirm the webhook is configured at the organisation level and enabled.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `data.id is missing`: the payload lacks the audit log entry ID; confirm the delivery comes from a Flagsmith organisation webhook
+- `invalid created_date`: the time field in the payload is malformed
+
+</Accordion>
+</AccordionGroup>

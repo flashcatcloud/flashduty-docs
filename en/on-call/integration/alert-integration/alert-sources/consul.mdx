@@ -1,0 +1,227 @@
+---
+title: "HashiCorp Consul alert integration"
+description: "Send HashiCorp Consul health check failures and recoveries to Flashduty On-call through a checks watch with an HTTP handler on a Consul agent."
+keywords: ["alert integration", "Consul", "HashiCorp Consul", "watch", "health check", "http_handler_config"]
+---
+
+Use the watch mechanism built into Consul to send the state of Consul health checks to Flashduty On-call. Each health check on each node maps to one Flashduty alert: the alert is raised when the check turns `warning` or `critical`, and recovers automatically when the check returns to `passing`.
+
+This integration works with both Consul Community Edition and Consul Enterprise. It needs only a watch definition on one Consul agent, with no extra scripts or plugins.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+Choose this method when you do not need to route alerts to different channels.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Channel** and open a channel
+  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+  3. Select **HashiCorp Consul**, then click **Save**
+  4. Open the generated integration card and copy the **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+### Use a shared integration
+
+Choose this method when you need to route alerts to different channels based on the payload.
+
+<AccordionGroup>
+  <Accordion title="Expand">
+
+  1. In the Flashduty console, select **Integration Center → Alert Events**
+  2. Select **HashiCorp Consul** and enter an integration name
+  3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+  4. Click **Save** and copy the generated **Push URL**
+
+  </Accordion>
+</AccordionGroup>
+
+</div>
+
+## How it works
+---
+
+Whenever any watched health check changes (its status or its output), a Consul watch of type `checks` POSTs the current state of **all** watched checks to the push URL as one JSON array. Flashduty turns each check in the array into one event:
+
+- A `warning` or `critical` check raises an alert, or merges into the alert it already has
+- A `passing` check recovers its alert; if there is no such alert, nothing happens
+- The `_node_maintenance` and `_service_maintenance:<service ID>` checks created by maintenance mode (`consul maint`) are planned changes and never create alerts
+
+The watch sends the current state once as soon as it is loaded, so checks that are already `warning` or `critical` raise alerts right away.
+
+## Prerequisites
+---
+
+- **Network**: the Consul agent that runs the watch must be able to reach the Flashduty push URL (for example `https://api.flashcat.cloud`).
+- **Permissions**: you need to be able to edit that agent's configuration directory (for example `/etc/consul.d`) and run `consul reload`.
+- **ACL**: when ACLs are enabled, the token the watch uses needs read access to all nodes and services, as described below.
+
+## In Consul
+---
+
+<Steps>
+<Step title="Choose the agent that runs the watch">
+
+The watch queries the health checks of the whole datacenter, so configure it on **one** agent: a server, or a dedicated client. Configuring the same watch on several agents does not create duplicate alerts (events for the same check merge), but it multiplies the event count of every alert.
+
+</Step>
+
+<Step title="Add the watch definition">
+
+In that agent's configuration directory, create a file named `flashduty-watch.json` with the content below, and replace `path` with the full push URL of your Flashduty integration (including the `integration_key` parameter):
+
+```json
+{
+  "watches": [
+    {
+      "type": "checks",
+      "handler_type": "http",
+      "http_handler_config": {
+        "path": "https://api.flashcat.cloud/event/push/alert/consul?integration_key=<integration key>",
+        "method": "POST",
+        "timeout": "10s"
+      }
+    }
+  ]
+}
+```
+
+- Do not set the `state` parameter. With `"state": "critical"`, a check drops out of the array when it recovers, Flashduty never receives `passing`, and the alert cannot recover automatically.
+- To watch only some checks, narrow the watch with the `filter` parameter, for example `"filter": "ServiceName == \"web\" or CheckID == \"serfHealth\""`, or watch the checks of one service with `"service": "web"` (this leaves out node-level checks such as `serfHealth`).
+- When ACLs are enabled, add `"token": "<ACL token>"` to the watch. The token's policy needs at least:
+
+  ```hcl
+  node_prefix "" { policy = "read" }
+  service_prefix "" { policy = "read" }
+  ```
+
+</Step>
+
+<Step title="Reload the configuration">
+
+```bash
+consul reload
+```
+
+For a Docker deployment, put the file in the directory mounted at `/consul/config` in the container, then run:
+
+```bash
+docker exec <container name> consul reload
+```
+
+Once loaded, the agent immediately sends the current state of all checks to Flashduty. If the agent log shows `http watch handler failed with output`, Flashduty rejected the request; the log line carries the HTTP status and the reason.
+
+</Step>
+
+<Step title="Verify an alert and its recovery">
+
+Consul has no test notification button. Register a TTL check to verify the setup instead. A TTL check starts as `critical`, so it raises an alert right away:
+
+```bash
+curl -X PUT --data '{"ID": "flashduty-test", "Name": "Flashduty test", "TTL": "30m"}' \
+  http://127.0.0.1:8500/v1/agent/check/register
+```
+
+Set the check to `passing`, and the alert recovers:
+
+```bash
+curl -X PUT http://127.0.0.1:8500/v1/agent/check/pass/flashduty-test
+```
+
+Deregister the check when you are done:
+
+```bash
+curl -X PUT http://127.0.0.1:8500/v1/agent/check/deregister/flashduty-test
+```
+
+When ACLs are enabled, add `-H "X-Consul-Token: <ACL token>"` to each command.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from `Partition`, `Node`, and `CheckID`.
+
+- `Node` is the name of the node the check runs on.
+- `CheckID` is the ID of the check. Consul requires `CheckID` to be unique on a node; a service check's default ID looks like `service:<service ID>`, and the node liveness check is `serfHealth`.
+- `Partition` is the admin partition in Consul Enterprise and is empty in Community Edition.
+
+Changes to a check's status, name, output, or notes do not change its Alert Key. When the agent restarts and sends the same check again, the Alert Key stays the same.
+
+A watch only returns the checks of its own datacenter, and the payload does not include the datacenter name. If several datacenters share one integration and have nodes with the same name, checks with the same ID on those nodes merge into one alert. We recommend one integration per datacenter.
+
+## Status and severity
+---
+
+| Consul `Status` | Flashduty status | Flashduty severity |
+| :--- | :--- | :--- |
+| `critical` | Triggered | Critical |
+| `warning` | Triggered | Warning |
+| `passing` | Recovered | Keeps the severity from before recovery |
+
+When a check moves between `warning` and `critical`, Flashduty keeps one alert per severity: `warning` turning `critical` creates a new Critical alert, and `passing` recovers both.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `host`, `resource` | Node name `Node` |
+| `check` | Check name `Name` |
+| `check_id` | Check ID `CheckID` |
+| `check_type` | Check type `Type`, for example `http`, `tcp`, `ttl` |
+| `service`, `service_id` | `ServiceName` and `ServiceID` of the service (empty for node-level checks) |
+| `service_tags` | Service tags, comma-separated |
+| `status` | Consul status |
+| `namespace`, `partition` | Namespace and admin partition in Consul Enterprise |
+| `source` | Always `consul` |
+
+The alert title is `<check name> on <node name>`, and the alert description is the check's `Output` and `Notes`.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="A check or node was removed and its alert did not recover. What should I do?">
+
+When a `warning` or `critical` check is deregistered, or its node leaves the cluster, it no longer appears in the array the watch sends, so Flashduty never receives a recovery. Close the alert by hand. In environments where nodes are removed often, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit) in the channel.
+
+</Accordion>
+
+<Accordion title="Does Consul retry a failed delivery?">
+
+No. Consul's HTTP handler does not retry a failed request. The next time any watched check changes, the watch sends the current state of every check again, which fills in a missed trigger or recovery.
+
+</Accordion>
+
+<Accordion title="Why does the event count of an alert keep growing?">
+
+Every change to any watched check, including a change in output, makes the watch send all checks, and each failing check merges one more event into its alert. Use the `filter` or `service` parameter to watch only the checks your on-call team acts on.
+
+</Accordion>
+
+<Accordion title="The agent log shows request body exceeds 1 MiB limit. What should I do?">
+
+One delivery must not exceed 1 MiB. With many checks, split them across several watches with the `filter` or `service` parameter; all watches can use the same push URL.
+
+</Accordion>
+
+<Accordion title="Do I need consul-alerts, as in the PagerDuty integration?">
+
+No. consul-alerts is a third-party daemon; this integration uses Consul's own watch mechanism and needs no extra component.
+
+</Accordion>
+</AccordionGroup>
+
+For more parameters, see the Consul documentation on [Watches](https://developer.hashicorp.com/consul/docs/automate/watch) and the [Check API](https://developer.hashicorp.com/consul/api-docs/agent/check).

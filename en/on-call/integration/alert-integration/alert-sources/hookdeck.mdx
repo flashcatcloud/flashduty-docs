@@ -1,0 +1,144 @@
+---
+title: "Hookdeck alert integration"
+description: "Send Hookdeck issues (failed deliveries, rejected requests, transformation errors, queue backpressure) to Flashduty On-call through the project's webhook notifications. Alerts recover when the issue is resolved."
+keywords: ["alert integration", "Hookdeck", "issue", "webhook notifications", "delivery failure"]
+---
+
+Hookdeck opens an issue when a delivery fails, a source rejects a request, a transformation logs an error, or a destination queue backs up. Use the Hookdeck project's webhook notifications to send issues to Flashduty On-call. Each issue maps to one Flashduty alert: the alert triggers when the issue opens, recovers when the issue is marked Resolved or Ignored in Hookdeck, and triggers again if the issue reopens.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Hookdeck**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Hookdeck** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Hookdeck
+---
+
+Hookdeck sends webhook notifications to a source in your project, and a connection forwards them to a destination. So first create a connection that forwards notifications to Flashduty, then turn on webhook notifications in the project settings.
+
+<Steps>
+<Step title="Create a connection to Flashduty">
+
+1. In the Hookdeck Dashboard, open **Connections** and click **+ Connection**
+2. Create a new source named `hookdeck` and keep the default Webhook type
+3. Create a new HTTP destination named `flashduty` and paste the full Flashduty push URL into **URL**. The URL must include `integration_key`
+4. Keep the destination's default authentication. Flashduty authenticates the request by the `integration_key` in the URL
+5. Name the connection `flashduty` and click **+ Create**
+
+</Step>
+
+<Step title="Turn on webhook notifications">
+
+1. Open **Settings** → **Project** → **General** and find the notification settings
+2. Turn on **Webhook Notifications**
+3. Under **Webhook topics**, select `issue.opened` and `issue.updated`. You don't need `event.successful`; Flashduty accepts and ignores it
+4. Under **Webhook source**, select the `hookdeck` source created in the previous step
+5. Click **Save**
+
+If you select only `issue.opened`, Flashduty never hears that an issue was resolved, and the alert does not recover automatically.
+
+</Step>
+
+<Step title="Check the issue triggers">
+
+1. Open **Issues** → **Issue Triggers** and make sure every issue type you want alerts for has an enabled trigger. Each project starts with four triggers: delivery (opens on the first failed attempt), transformation logs at `warn` level, destination backpressure above 10 minutes, and all rejected requests on all sources
+2. When a delivery trigger's **Strategy** is `first_attempt`, the issue opens on the first failed attempt even if a retry later succeeds. If you only care about deliveries whose retries all fail, change it to `last_attempt`
+3. We recommend excluding the `flashduty` connection from delivery triggers (for example, set the connections to `!flashduty`). Otherwise a failed push to Flashduty opens another issue, which is sent to the same failing address
+
+</Step>
+
+<Step title="Verify">
+
+1. Create a test connection whose destination URL is `https://mock.hookdeck.com?status=500` (a Hookdeck mock endpoint that always returns HTTP 500), then send a request to the connection's source URL (shown when you open the source in Hookdeck):
+
+```bash
+curl -X POST '<source URL>' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"flashduty.test"}'
+```
+
+2. Once a new delivery issue appears on the Hookdeck **Issues** page, confirm that Flashduty receives a Critical alert
+3. On the Issues page, change the issue's status to **Resolved** and confirm that the alert recovers
+4. Delete the test connection when you are done
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the Hookdeck issue ID (`issue.id`, such as `iss_...`) as the Alert Key. An issue keeps the same ID when it is opened, acknowledged, resolved, and reopened, so status update notifications apply to the alert created when the issue opened.
+
+Changes to the issue's error code, response status, first and last seen times, or connection name do not change the Alert Key. Requests without `issue.id` are rejected.
+
+## Status and severity
+---
+
+The severity comes from the issue type (`issue.type`):
+
+| Issue type | Meaning | Flashduty severity |
+| :--- | :--- | :--- |
+| `delivery` | Delivery to a destination failed | Critical |
+| `request` | A source rejected an incoming request (verification failed, no connection, and so on) | Critical |
+| `transformation` | A transformation logged at warn, error, or fatal level | Warning |
+| `backpressure` | A destination's estimated queue time exceeded the threshold | Warning |
+| Other or empty | | Warning |
+
+The status comes from `issue.status`:
+
+| `issue.status` | Status |
+| :--- | :--- |
+| `OPENED` | Triggered (including a resolved issue that occurs again and reopens) |
+| `ACKNOWLEDGED` | Triggered, updates the existing alert |
+| `RESOLVED` | Recovered; the severity stays at the level set when the issue opened |
+| `IGNORED` | Recovered. An ignored issue does not reopen or notify again when it recurs |
+
+Other status values are rejected with a parameter error. Only the `issue.opened` and `issue.updated` topics create alerts; other topics (such as `event.successful`) are accepted and ignored.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `issue_id` | Issue ID, which is the Alert Key |
+| `issue_type` | `delivery`, `request`, `transformation`, `backpressure` |
+| `issue_status` | Current issue status |
+| `project_id` | Hookdeck project ID |
+| `resource` | What the issue is about: the connection name, otherwise the connection ID, transformation ID, source ID, or destination ID, in that order |
+| `connection` / `connection_id` | Name (`source -> connection`) and ID of the failing connection |
+| `source_name` / `source_id` | Source name and ID |
+| `destination_name` / `destination_id` | Destination name and ID |
+| `error_code` / `response_status` | Delivery error code (such as `TIMEOUT`) or the HTTP status returned by the destination |
+| `rejection_cause` | Why a request was rejected, such as `VERIFICATION_FAILED` |
+| `transformation_id` / `log_level` | The failing transformation and its log level |
+| `delay` | Backpressure threshold in milliseconds |
+
+The failed request included in the notification (headers and body) is not written to labels.
+
+## Troubleshooting
+---
+
+- **No alerts arrive**: Check that webhook notifications are on and point to the right source, and that the `flashduty` connection is not paused. In Hookdeck, open that connection's events and confirm that Flashduty returned 200
+- **The alert does not recover**: Check that `issue.updated` is selected under Webhook topics, and mark the issue Resolved or Ignored in Hookdeck. Dismissing an issue does not change its status
+- **Repeated alerts for the same problem**: An ignored issue no longer notifies. A resolved issue that occurs again reopens and triggers the alert with the same Alert Key again
+- **Flashduty returns a parameter error**: Check that the URL is complete and includes `integration_key`, and that the request comes from Hookdeck webhook notifications (the body has a `topic` field)
+
+For more details, see [Hookdeck Issues & Notifications](https://hookdeck.com/docs/issues) and [Issue Triggers](https://hookdeck.com/docs/issue-triggers).

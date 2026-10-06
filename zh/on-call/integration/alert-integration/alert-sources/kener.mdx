@@ -1,0 +1,134 @@
+---
+title: "Kener 告警集成"
+description: "通过 Webhook 触发器将 Kener 监控的宕机、延迟和可用率告警同步到 Flashduty On-call。"
+keywords: ["告警集成", "Kener", "Webhook", "状态页", "监控", "自托管"]
+---
+
+Kener 是开源的状态页和监控系统。通过 Kener 的 Webhook 触发器（Trigger），可以把告警配置（Alert）产生的告警同步到 Flashduty On-call：监控达到失败阈值时在 Flashduty 触发告警，达到成功阈值时自动恢复。
+
+Kener 的 Webhook 请求体由您在触发器的模板里编写，本页提供了一份可直接使用的模板，Flashduty 按这份模板的字段解析。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Kener**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Kener**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Kener 中配置
+---
+
+需要 Kener 4.x，并使用有权限管理触发器和告警配置的账号登录管理后台。Kener 所在的服务器需要能访问 Flashduty 的推送地址。
+
+<Steps>
+<Step title="创建 Webhook 触发器">
+
+1. 在 Kener 管理后台打开 **Triggers**，新建触发器，**Trigger Type** 选择 **Webhook**
+2. 填写 **Trigger Name**，**URL** 粘贴 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`
+3. **Headers** 保持为空，Flashduty 通过地址中的 `integration_key` 认证
+4. 将 **Webhook Body** 替换为下面的模板：
+
+```json
+{
+  "alert_id": {{alert_id}},
+  "alert_name": "{{alert_name}}",
+  "alert_for": "{{alert_for}}",
+  "alert_value": "{{alert_value}}",
+  "alert_status": "{{alert_status}}",
+  "alert_severity": "{{alert_severity}}",
+  "alert_cta_url": "{{alert_cta_url}}",
+  "alert_incident_id": {{#alert_incident_id}}{{alert_incident_id}}{{/alert_incident_id}}{{^alert_incident_id}}null{{/alert_incident_id}},
+  "alert_failure_threshold": {{alert_failure_threshold}},
+  "alert_success_threshold": {{alert_success_threshold}},
+  "is_resolved": {{is_resolved}},
+  "is_triggered": {{is_triggered}}
+}
+```
+
+5. 保存触发器
+
+Kener 渲染模板时不做 JSON 转义。内置默认模板包含 `alert_message`（告警配置里的 Details 文本）和站点名称，其中的双引号或换行会让请求体不再是合法 JSON，Flashduty 将拒绝这类请求，告警和恢复都会丢失，因此请使用上面不含这些字段的模板。
+
+</Step>
+
+<Step title="创建告警配置并关联触发器">
+
+1. 打开 **Alerts**，新建告警配置，选择要监控的 **Monitors**
+2. 选择 **Alert Type**（`STATUS` 状态、`LATENCY` 延迟、`UPTIME` 可用率）并填写对应的值
+3. 设置 **Failure Threshold**（连续失败多少次后触发）和 **Success Threshold**（连续成功多少次后恢复）
+4. 选择 **Severity**（`CRITICAL` 或 `WARNING`）
+5. 在触发器列表中选择上一步创建的触发器，保存
+
+</Step>
+
+<Step title="验证">
+
+1. 在触发器页面点击测试按钮，确认 Kener 显示发送成功。测试请求是 Kener 内置的固定内容（告警 ID 为 `1`，严重程度 `WARNING`，状态随机为 `TRIGGERED` 或 `RESOLVED`），Flashduty 按普通告警处理：`TRIGGERED` 时会创建或更新 Alert Key 为 `1` 的 Warning 告警，`RESOLVED` 时会恢复这条告警，没有打开的告警时不产生新告警。验证后若该告警仍未恢复，请在 Flashduty 中手动关闭
+2. 让被监控的服务失败，达到失败阈值后确认 Flashduty 出现活动告警
+3. 服务恢复并达到成功阈值后，确认该告警自动恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Kener 的 `alert_id` 作为 Alert Key。Kener 在监控达到失败阈值时创建一条告警记录，恢复时更新同一条记录的状态，因此触发和恢复的 `alert_id` 相同；同一个监控再次宕机会生成新的 `alert_id`，对应 Flashduty 的新告警。
+
+监控名称、等级、状态、取值等字段变化不会改变 Alert Key。请求中缺少 `alert_id` 会被拒绝。`alert_id` 只在同一个 Kener 实例内唯一，一个 Flashduty 集成请只接收一个 Kener 实例的推送。
+
+## 状态和告警等级
+---
+
+| `alert_status` | Flashduty 状态 |
+| :--- | :--- |
+| `TRIGGERED` | 触发 |
+| `RESOLVED` | 恢复 |
+
+| `alert_severity` | Flashduty 等级 |
+| :--- | :--- |
+| `CRITICAL` | Critical |
+| `WARNING` | Warning |
+| 其他或为空 | Warning |
+
+告警标题由监控标识、告警类型和取值拼成，例如 `my-api STATUS: DOWN`。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` / `resource` | `alert_name`，即监控的标识（tag） |
+| `source` | 固定为 `kener` |
+| `alert_id` | Kener 告警记录 ID |
+| `alert_type` | `alert_for`，即 `STATUS`、`LATENCY` 或 `UPTIME` |
+| `alert_value` | `alert_value`，状态类为 `DOWN` 或 `DEGRADED`，延迟为毫秒阈值，可用率为百分比阈值 |
+| `alert_severity` / `alert_status` | Kener 原始等级和状态 |
+| `incident_id` | 告警关联的 Kener 事件 ID，告警配置开启创建事件时才有 |
+| `alert_url` | Kener 中该监控页面的链接 |
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，并确认触发器使用了本页的模板；响应信息会指出缺少的字段
+- **Kener 触发器测试失败**：测试结果里会显示 HTTP 状态码或网络错误，确认 Kener 所在服务器能访问 Flashduty 推送地址
+- **告警没有恢复**：确认告警配置的 Success Threshold 已满足，并确认触发器没有被禁用；同一监控在满足成功阈值前不会发送恢复
+- **没有收到告警**：确认告警配置处于启用状态，并且已关联这个触发器
+
+更多变量说明请参阅 [Kener 告警模板](https://kener.ing/docs/v4/alerting/templates) 和 [Kener 触发器](https://kener.ing/docs/v4/alerting/triggers)。

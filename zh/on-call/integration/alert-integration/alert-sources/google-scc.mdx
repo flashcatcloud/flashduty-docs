@@ -1,0 +1,122 @@
+---
+title: "Google Security Command Center 告警集成"
+description: "通过 Pub/Sub 推送订阅，将 Google Security Command Center 的 Finding 通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Google Security Command Center", "SCC", "Pub/Sub", "Finding"]
+---
+
+Google Security Command Center（SCC）把 Finding 的新增和更新发布到 Pub/Sub 主题，再由 Pub/Sub 推送订阅把每条消息 POST 到 Flashduty。每个 Finding 对应一条 Flashduty 告警；同一个 Finding 的后续更新会合并到这条告警，Finding 变为 `INACTIVE` 时告警自动恢复。Google 文档说明会为新增和更新的 Finding 发送通知，但没有明确写出变为 `INACTIVE` 也会照常发布，请在验证步骤中确认恢复通知确实到达。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Google Security Command Center**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Google Security Command Center**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Google Cloud 中配置
+---
+
+需要一个已启用 Security Command Center 的组织，以及一个存放 Pub/Sub 主题的项目。创建通知配置需要组织上的 Security Center Admin（`roles/securitycenter.admin`）权限，以及主题所在项目的 Project IAM Admin（`roles/resourcemanager.projectIamAdmin`）权限。
+
+<Steps>
+<Step title="创建 Pub/Sub 主题">
+
+```bash
+gcloud pubsub topics create scc-findings --project=PROJECT_ID
+```
+
+</Step>
+
+<Step title="创建 SCC 通知配置">
+
+```bash
+gcloud scc notifications create flashduty \
+  --organization=ORGANIZATION_ID \
+  --description="Send findings to Flashduty" \
+  --pubsub-topic=projects/PROJECT_ID/topics/scc-findings \
+  --filter='severity="CRITICAL" OR severity="HIGH"'
+```
+
+<Warning>
+过滤条件里**不要**只保留 `state="ACTIVE"`。Finding 被修复后状态变为 `INACTIVE`，这条更新被过滤掉，Flashduty 就收不到恢复通知，告警会一直处于未恢复状态。上面的示例只按等级过滤，状态不限。
+</Warning>
+
+SCC 会在首次创建通知配置时创建服务账号并授予 `securitycenter.notificationServiceAgent` 角色，由它向主题发布消息。
+
+</Step>
+
+<Step title="创建推送订阅">
+
+把 Flashduty 集成的完整推送地址作为推送端点：
+
+```bash
+gcloud pubsub subscriptions create scc-to-flashduty \
+  --topic=scc-findings \
+  --project=PROJECT_ID \
+  --push-endpoint='https://api.flashcat.cloud/event/push/alert/google-scc?integration_key=YOUR_INTEGRATION_KEY'
+```
+
+<Warning>
+不要开启推送订阅的 **Enable payload unwrapping**。Flashduty 解析的是默认的封装格式：`message.data` 是 Base64 编码的 Finding 通知。开启后请求体是未封装的原始内容，会被拒绝。
+</Warning>
+
+推送地址必须是公网可访问的 HTTPS 地址，并使用受信任的证书。
+
+</Step>
+
+<Step title="验证生命周期">
+
+Pub/Sub 推送订阅没有测试按钮。让 SCC 产生一个符合过滤条件的 Finding（例如开放一条 `0.0.0.0/0` 的防火墙规则），确认 Flashduty 收到告警；修复后 Finding 变为 `INACTIVE`，确认原告警恢复。也可以在 Pub/Sub 控制台向主题手动发布一条 Finding 通知 JSON 用来验证连通性。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `finding.name` 作为 Alert Key，格式为 `organizations/{组织 ID}/sources/{来源 ID}/findings/{Finding ID}`。SCC 的 Finding 资源定义里，`name` 是 Finding 的相对资源名称，同一个 Finding 的新增、更新和变为 `INACTIVE` 的通知都携带相同的值。
+
+标题、等级、状态、类别、事件时间的变化都不会改变 Alert Key。缺少 `finding.name` 的请求会被拒绝，因为无法可靠关联后续更新和恢复。
+
+## 状态和告警等级
+---
+
+| SCC 字段 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `finding.state` = `ACTIVE` 或未填写 | 触发 |
+| `finding.state` = `INACTIVE` | 恢复，等级保持为最近一次的等级 |
+| `finding.severity` = `CRITICAL` | Critical |
+| `finding.severity` = `HIGH` | Critical |
+| `finding.severity` = `MEDIUM` | Warning |
+| `finding.severity` = `LOW` | Info |
+| `SEVERITY_UNSPECIFIED`、未填写或未知值 | Warning |
+
+告警标题为 `类别: 资源显示名`（例如 `OPEN_FIREWALL: allow-all`），缺少时依次回退到类别、资源显示名。告警描述取自 `finding.description`。静音状态（`finding.mute`）只作为标签 `mute` 保留，不影响告警状态。
+
+Flashduty 还会把以下字段写入标签：`category`、`resource_name`、`resource_type`、`project`、`location`、`service`、`finding_name`、`finding_state`、`finding_severity`、`finding_class`、`finding_source`、`notification_config_name`、`external_uri`。不会读取 `securityMarks`。
+
+## 排查问题
+---
+
+- **Pub/Sub 反复重发同一条消息**：Flashduty 对无法解析的请求返回 4xx，Pub/Sub 会按退避策略重发。检查推送端点是否带有 `integration_key`，以及是否误开了 payload unwrapping；可为订阅配置死信主题，避免无限重试
+- **Flashduty 返回参数错误**：错误信息会指出缺失的字段，例如 `finding.name is required` 表示通知里没有 Finding
+- **告警没有恢复**：检查通知配置的过滤条件是否只包含 `state="ACTIVE"`
+- **没有收到任何告警**：确认通知配置的过滤条件确实命中了 Finding，SCC 服务账号有权限向主题发布消息，订阅状态为有效
+
+更多信息请参阅 [Enable finding notifications for Pub/Sub](https://docs.cloud.google.com/security-command-center/docs/how-to-notifications) 和 [Pub/Sub push subscriptions](https://docs.cloud.google.com/pubsub/docs/push)。

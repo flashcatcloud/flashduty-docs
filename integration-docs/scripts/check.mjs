@@ -40,10 +40,7 @@ async function loadDocs(locale) {
 }
 
 function getSourceDescription(locale, entry) {
-  const source = typeof entry === 'string' ? entry : entry[locale];
-  const absolute = entry?.legacy
-    ? path.resolve(packageRoot, source)
-    : path.resolve(repoRoot, locale, source);
+  const absolute = path.resolve(repoRoot, locale, entry);
   if (!fs.existsSync(absolute)) return '';
 
   const raw = fs.readFileSync(absolute, 'utf8');
@@ -55,10 +52,7 @@ function getSourceDescription(locale, entry) {
 }
 
 function getSourceAnchorIds(locale, entry) {
-  const source = typeof entry === 'string' ? entry : entry[locale];
-  const absolute = entry?.legacy
-    ? path.resolve(packageRoot, source)
-    : path.resolve(repoRoot, locale, source);
+  const absolute = path.resolve(repoRoot, locale, entry);
   if (!fs.existsSync(absolute)) return [];
 
   const raw = fs.readFileSync(absolute, 'utf8');

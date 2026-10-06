@@ -1,0 +1,119 @@
+---
+title: "UptimeObserver 告警集成"
+description: "通过 Incident 和 Resolution 两个 Webhook 将 UptimeObserver 的故障与恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "UptimeObserver", "Webhook", "拨测", "incident_id"]
+---
+
+通过 UptimeObserver Webhook 将监控故障同步到 Flashduty On-call。每个 UptimeObserver Incident 对应一条 Flashduty 告警；Incident Webhook 触发告警，Resolution Webhook 恢复同一条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **UptimeObserver**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **UptimeObserver**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 UptimeObserver 中配置
+---
+
+UptimeObserver 没有固定的 Webhook 报文，报文由您填写的模板决定。Flashduty 只解析下面两个模板，需要创建两个 Webhook：一个用于故障，一个用于恢复。
+
+<Steps>
+<Step title="创建 Incident Webhook（故障）">
+
+1. 在 UptimeObserver 控制台进入集成（Integrations）页面，新增 **Webhook** 集成
+2. 填写名称，Method 选择 **POST**，HTTP Body Encoding 选择 **application/json**，Authentication 选择 **None**（这些选项默认均未选中）。Webhook 表单本身没有触发时机，触发时机在关联 Monitor 时选择
+3. 将 Flashduty 集成的完整推送地址粘贴到 URL
+4. 将下面的 JSON 粘贴到 Body 模板：
+
+```json
+{
+  "event_type": "trigger",
+  "incident_url": "__INCIDENT_URL__",
+  "incident_id": __INCIDENT_ID__,
+  "incident_status": "__INCIDENT_STATUS__",
+  "monitor_id": __MONITOR_ID__,
+  "monitor_name": "__MONITOR_FRIENDLY_NAME__",
+  "monitor_url": "__MONITOR_URL__",
+  "root_cause": "__INCIDENT_ROOT_CAUSE__"
+}
+```
+
+</Step>
+
+<Step title="创建 Resolution Webhook（恢复）">
+
+再新增一个 Webhook，URL 与上一步相同，其余选项也与上一步相同，Body 模板粘贴：
+
+```json
+{
+  "event_type": "resolved",
+  "incident_url": "__INCIDENT_URL__",
+  "incident_id": __INCIDENT_ID__,
+  "incident_status": "__INCIDENT_STATUS__",
+  "monitor_id": __MONITOR_ID__,
+  "monitor_name": "__MONITOR_FRIENDLY_NAME__",
+  "monitor_url": "__MONITOR_URL__"
+}
+```
+
+<Warning>
+`event_type` 必须分别保持 `trigger` 和 `resolved`，`incident_id` 两处都要保留且不加引号。缺少 `incident_id` 或 `event_type` 时 Flashduty 会拒绝请求，因为无法可靠关联故障与恢复。
+</Warning>
+
+</Step>
+
+<Step title="关联 Monitor">
+
+打开需要通知的 Monitor，点击 **Add Alert**，**Alert Type** 选择 **Webhook**，并选中对应的 Webhook。**Event** 中，故障 Webhook 选择 **Monitor Down**，恢复 Webhook 选择 **Monitor Up**，然后点击 **Save changes**。每个 Monitor 各添加这两条 Alert。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让被监控的地址真实不可达，确认 Flashduty 收到活动告警；恢复访问后，确认同一条告警自动恢复。UptimeObserver 的测试发送只能验证连通性，不能证明故障与恢复能被关联。
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `incident_id`（`__INCIDENT_ID__`）作为 Alert Key。UptimeObserver 文档将其定义为数字型 Incident 标识，并在故障与恢复两个示例模板中都使用它。文档没有明确写出两个 Webhook 对同一 Incident 返回相同的值，这一点属于推断，请在首次接入时按上一节的方法用真实故障验证。
+
+`monitor_id` 只作为标签。监控名称、根因和 `incident_status` 的变化不会改变 Alert Key；同一监控的下一次故障会产生新的 Incident，因此是一条新的告警。
+
+## 状态和告警等级
+---
+
+| `event_type` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `trigger` | Critical（监控项宕机） |
+| `resolved` | 恢复，原等级为 Critical |
+
+`event_type` 为空或其他值会被拒绝。请求体为空对象 `{}` 时返回 200 且不创建告警。
+
+## 排查问题
+---
+
+- **UptimeObserver 返回非 2xx**：确认 URL 完整且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认 Body 是有效 JSON。`__INCIDENT_ROOT_CAUSE__` 或监控名称含双引号时，UptimeObserver 直接替换文本，可能破坏 JSON，可删除 `root_cause` 字段或改用不含引号的监控名称
+- **告警没有恢复**：确认已创建 Resolution Webhook，其 `event_type` 为 `resolved`，且已关联到同一个 Monitor
+- **测试成功但真实告警没收到**：检查 Monitor 是否真正进入 Incident，以及是否关联了两个 Webhook
+
+更多变量说明请参阅 [UptimeObserver Webhooks](https://support.uptimeobserver.com/integrations/webhooks/)。

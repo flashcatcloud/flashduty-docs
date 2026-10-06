@@ -1,0 +1,153 @@
+---
+title: "Opsview 告警集成"
+description: "通过 Opsview 的自定义通知方法脚本把主机和服务告警推送到 Flashduty 的标准告警事件集成，恢复通知自动关闭告警。"
+keywords: ["告警集成", "Opsview", "ITRS Opsview", "Notification Method", "自定义通知", "标准告警事件"]
+---
+
+Opsview 支持添加自定义通知方法（Custom Notification Method）：Opsview 在通知时执行你安装的脚本，并把告警内容通过 `NAGIOS_` 开头的环境变量（`NAGIOS_HOSTNAME`、`NAGIOS_SERVICEDESC`、`NAGIOS_NOTIFICATIONTYPE` 等）传给它。用一个脚本把这些内容以 [标准告警事件](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 格式推送给 Flashduty 即可：问题通知触发告警，恢复通知关闭告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 标准告警事件**，不是 Opsview。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **标准告警事件**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **标准告警事件**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Opsview 中配置
+---
+
+### 步骤 1：创建通知脚本
+
+在 Opsview Orchestrator 服务器上创建脚本 `notify_by_flashduty`，并设置为可执行（`chmod +x`）。脚本使用 `curl`；如果通知方法在 Collector 上运行，Collector 上也要安装 `curl`，并能访问 `api.flashcat.cloud`。推送地址通过脚本的第一个参数传入，不写在脚本里。
+
+```sh
+#!/bin/sh
+# Opsview custom notification method: forward host/service notifications to a
+# Flashduty Standard Alert Event integration. The push URL is the first argument.
+URL="$1"
+[ -n "$URL" ] || exit 1
+
+case "$NAGIOS_NOTIFICATIONTYPE" in
+  PROBLEM|RECOVERY) ;;
+  *) exit 0 ;;   # ignore acknowledgements, flapping and downtime notifications
+esac
+
+if [ -n "$NAGIOS_SERVICEDESC" ]; then
+  KEY="opsview:$NAGIOS_HOSTNAME:$NAGIOS_SERVICEDESC"
+  STATE="$NAGIOS_SERVICESTATE"
+  OUTPUT="$NAGIOS_SERVICEOUTPUT"
+  CHECK="$NAGIOS_SERVICEDESC"
+  TITLE="$NAGIOS_HOSTNAME - $NAGIOS_SERVICEDESC - $STATE"
+else
+  KEY="opsview:$NAGIOS_HOSTNAME"
+  STATE="$NAGIOS_HOSTSTATE"
+  OUTPUT="$NAGIOS_HOSTOUTPUT"
+  CHECK="host"
+  TITLE="$NAGIOS_HOSTNAME - $STATE"
+fi
+
+if [ "$NAGIOS_NOTIFICATIONTYPE" = "RECOVERY" ]; then
+  STATUS=Ok
+else
+  case "$STATE" in
+    CRITICAL|DOWN|UNREACHABLE) STATUS=Critical ;;
+    WARNING)                   STATUS=Warning ;;
+    OK|UP)                     STATUS=Ok ;;
+    *)                         STATUS=Info ;;
+  esac
+fi
+
+esc() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+JSON=$(printf '{"title_rule":"%s","event_status":"%s","alert_key":"%s","description":"%s","labels":{"resource":"%s","check":"%s","host_address":"%s","host_alias":"%s","opsview_keywords":"%s"}}' \
+  "$(esc "$TITLE")" "$STATUS" "$(esc "$KEY")" "$(esc "$OUTPUT")" "$(esc "$NAGIOS_HOSTNAME")" "$(esc "$CHECK")" \
+  "$(esc "$NAGIOS_HOSTADDRESS")" "$(esc "$NAGIOS_HOSTALIAS")" "$(esc "$OPSVIEW_KEYWORDS")")
+
+curl -fsS -m 10 -X POST -H 'Content-Type: application/json' -d "$JSON" "$URL" >/dev/null
+```
+
+脚本读取的环境变量都在 Opsview 文档列出的通知环境变量中，处理规则如下：
+
+| 环境变量 | 用途 |
+| :--- | :--- |
+| `NAGIOS_NOTIFICATIONTYPE` | 只处理 `PROBLEM` 和 `RECOVERY`；`ACKNOWLEDGEMENT`、`FLAPPINGSTART` 等类型直接忽略 |
+| `NAGIOS_SERVICEDESC` | 非空表示服务告警，否则是主机告警 |
+| `NAGIOS_HOSTNAME`、`NAGIOS_SERVICEDESC` | Alert Key：服务为 `opsview:<主机名>:<服务名>`，主机为 `opsview:<主机名>`；标题为 `<主机名> - <服务名> - <状态>` 或 `<主机名> - <状态>` |
+| `NAGIOS_SERVICESTATE`、`NAGIOS_HOSTSTATE` | 告警等级：`CRITICAL`、`DOWN`、`UNREACHABLE` → Critical；`WARNING` → Warning；`OK`、`UP` → 恢复；其他（`UNKNOWN`）→ Info。`RECOVERY` 通知一律按恢复处理 |
+| `NAGIOS_SERVICEOUTPUT`、`NAGIOS_HOSTOUTPUT` | 告警描述 |
+| `NAGIOS_HOSTADDRESS`、`NAGIOS_HOSTALIAS`、`OPSVIEW_KEYWORDS` | 标签 `host_address`、`host_alias`、`opsview_keywords`；`NAGIOS_HOSTNAME` 写入标签 `resource` |
+
+### 步骤 2：安装并测试脚本
+
+在 Orchestrator 上以 `opsview` 用户导入脚本：
+
+```bash
+sudo -u opsview /opt/opsview/orchestrator/bin/orchestratorimportscripts notifications /path/to/notify_by_flashduty
+```
+
+Opsview 提供 `test_notifications` 工具，模拟 Nagios Core 通知时设置的环境变量，用它测试脚本（`<推送地址>` 替换为步骤 1 复制的地址）：
+
+```bash
+# 主机问题
+sudo -u opsview /opt/opsview/coreutils/utils/test_notifications hostproblem /path/to/notify_by_flashduty '<推送地址>'
+# 服务问题
+sudo -u opsview /opt/opsview/coreutils/utils/test_notifications serviceproblem /path/to/notify_by_flashduty '<推送地址>'
+```
+
+测试会向 Flashduty 发送真实事件，确认告警出现后在 Flashduty 中手动关闭。没有出现告警时，按下文“排查问题”查看脚本实际收到的环境变量。
+
+<Note>
+如果通知方法设置为在 Collector 上运行，需要在 Collector 服务器上同样测试脚本。
+</Note>
+
+### 步骤 3：添加通知方法
+
+1. 进入 **Configuration** → **Apply Changes** 完成脚本安装
+2. 进入 **Configuration** → **Notification Methods**，点击 **Add New**
+3. `Name` 填 `Flashduty`，勾选 `Enable`，`Run on` 选择在 Orchestrator 或 Collector 上运行
+4. `Command` 填 `notify_by_flashduty <推送地址>`（脚本默认从 `/opt/opsview/monitoringscripts/notifications` 读取，参数写在脚本名后面）
+5. 保存后再次进入 **Configuration** → **Apply Changes**，让新通知方法生效
+
+### 步骤 4：把通知方法加入通知配置
+
+Opsview 的通知由用户的 Notification Profile 决定，每个要接收 Flashduty 通知的用户都要选择这个通知方法：
+
+1. 进入 **Configuration** → **Users and Roles** → **Users**，编辑用户（或从右上角的用户名进入 **My Profile**），打开 **Notification Profiles** 标签页，点击 **Add New**
+2. **Alert me by** 选择 `Flashduty`，**During** 选择生效的时间段
+3. 在 **Host and Services** 中选择要通知的主机组和服务检查，并勾选要通知的状态，需要同时包含问题状态和恢复状态，否则 Flashduty 收不到恢复通知
+4. 点击 **Update**，再点击 **Submit Changes**，最后进入 **Configuration** → **Apply Changes** 使配置生效
+
+也可以在 Shared Notification Profiles 中创建共享配置，分配给多个用户。
+
+## 恢复与去重
+---
+
+- 同一台主机或同一个服务始终使用同一个 Alert Key，重复的问题通知（例如 Opsview 的重复通知间隔）只更新同一条告警，`RECOVERY` 通知恢复它
+- 服务从 WARNING 变为 CRITICAL 时，等级在同一条告警上更新
+- 确认（`ACKNOWLEDGEMENT`）、抖动（`FLAPPING*`）和停机维护（`DOWNTIME*`）通知被脚本忽略，不会在 Flashduty 产生事件
+
+## 排查问题
+---
+
+- **没有收到告警**：确认 Notification Profile 中选择了 `Flashduty` 且已执行 **Apply Changes**；在 Opsview 的 **Notifications View** 查看通知是否已发送；用 `test_notifications` 单独测试脚本
+- **测试成功但真实告警没有推送**：脚本在真实通知中读取的是 Opsview 传入的环境变量；在脚本开头加入 `{ date; echo "Called with $@"; env; echo; } >> /tmp/env.txt`（Opsview 文档给出的排查方法）查看实际收到的变量
+- **告警没有恢复**：确认 Notification Profile 勾选了恢复状态；Nagios 只在发过问题通知后才发送对应的恢复通知
+- **Flashduty 返回参数错误**：确认 `Command` 里的推送地址完整，包含 `integration_key`
+
+更多说明请参阅 Opsview 文档 [Custom Notification Methods](https://docs.itrsgroup.com/docs/opsview/6.9.0/monitoring/notifications/customized-notification-methods/index.html) 和 [Notification Profiles](https://docs.itrsgroup.com/docs/opsview/6.9.0/monitoring/notifications/notification-profiles/index.html)。

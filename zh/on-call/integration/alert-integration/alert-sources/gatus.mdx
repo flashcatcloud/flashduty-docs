@@ -1,0 +1,125 @@
+---
+title: "Gatus 告警集成"
+description: "通过 Gatus 的自定义告警提供商（custom provider）将端点的触发和恢复事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Gatus", "健康检查", "Webhook", "custom provider"]
+---
+
+通过 Gatus 的 `alerting.custom` 提供商，把端点（endpoint）的健康检查告警推送到 Flashduty On-call。同一个端点的触发、重复提醒和恢复会更新同一条 Flashduty 告警。
+
+Gatus 没有固定的 Webhook 格式，请求体由您在配置里书写。本页给出的模板就是 Flashduty 解析的格式，请照抄。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Gatus**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Gatus**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Gatus 中配置
+---
+
+<Steps>
+<Step title="配置 custom 提供商">
+
+在 Gatus 配置文件中加入 `alerting.custom`，把 `url` 换成 Flashduty 的完整推送地址：
+
+```yaml
+alerting:
+  custom:
+    url: "https://api.flashcat.cloud/event/push/alert/gatus?integration_key=<your-integration-key>"
+    method: "POST"
+    headers:
+      Content-Type: "application/json"
+    body: |
+      {
+        "status": "[ALERT_TRIGGERED_OR_RESOLVED]",
+        "group": "[ENDPOINT_GROUP]",
+        "name": "[ENDPOINT_NAME]",
+        "url": "[ENDPOINT_URL]",
+        "description": "[ALERT_DESCRIPTION]",
+        "errors": "[RESULT_ERRORS]"
+      }
+```
+
+<Warning>
+`method` 必须写 `POST`，Gatus 的默认值是 `GET`。请保留 `status` 和 `name` 两个字段，并且不要用 `placeholders` 改写 `[ALERT_TRIGGERED_OR_RESOLVED]` 的取值：Flashduty 只认 `TRIGGERED` 和 `RESOLVED`，缺少 `name` 或状态值无法识别时会拒绝请求，因为无法可靠关联后续更新和恢复。
+</Warning>
+
+</Step>
+
+<Step title="在端点上启用 custom 告警">
+
+在每个需要推送的端点下添加 `type: custom` 的告警，并打开 `send-on-resolved`，否则 Gatus 不会发送恢复通知：
+
+```yaml
+endpoints:
+  - name: website
+    group: core
+    url: "https://example.org/health"
+    interval: 30s
+    conditions:
+      - "[STATUS] == 200"
+    alerts:
+      - type: custom
+        failure-threshold: 3
+        success-threshold: 2
+        send-on-resolved: true
+        description: "health check failed"
+```
+
+`failure-threshold` 决定连续失败多少次后触发，`success-threshold` 决定连续成功多少次后恢复。若设置了 `minimum-reminder-interval`，Gatus 会在告警持续期间重复发送 `TRIGGERED`，这些提醒会更新同一条 Flashduty 告警。
+
+</Step>
+
+<Step title="重载 Gatus 并验证生命周期">
+
+重启或重载 Gatus 使配置生效。让某个端点的条件持续失败，确认 Flashduty 收到活动告警；再让端点恢复正常，确认原告警恢复。Gatus 没有测试按钮，只能用真实的失败和恢复来验证。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 用端点的 `group` 与 `name` 计算 Alert Key。Gatus 文档用 `<group>_<name>` 标识一个端点，官方没有为单次告警提供独立 ID，因此同一端点的触发、提醒和恢复共用一个 Alert Key；没有分组时只用 `name`。
+
+- 修改端点的 `name` 或 `group` 后，Gatus 会把它当作新端点，Flashduty 中旧告警不会被恢复，需要手动关闭
+- 同一端点上配置多条 `custom` 告警（不同 `description`）时，它们共用一个 Alert Key
+- `url`、`description`、`errors` 的变化不会改变 Alert Key
+
+## 状态和告警等级
+---
+
+| Gatus `[ALERT_TRIGGERED_OR_RESOLVED]` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `TRIGGERED` | Critical |
+| `RESOLVED` | 恢复，原等级为 Critical |
+
+Gatus 告警没有等级字段，端点健康检查失败按 Critical 处理。空值或其他状态值会被拒绝。
+
+## 排查问题
+---
+
+- **Gatus 日志出现 `status code 400`**：确认 `method` 为 `POST`，请求体是有效 JSON，且 `name`、`status` 非空。Gatus 只对 `[RESULT_ERRORS]` 转义双引号，端点名称、分组或描述里含有双引号、反斜杠或换行时会破坏 JSON，请避免这些字符
+- **Gatus 日志出现 `status code 404` 或 `401`**：确认推送地址完整并包含 `integration_key`
+- **告警没有恢复**：确认端点告警设置了 `send-on-resolved: true`，且未用 `placeholders` 改写状态值
+- **没有收到告警**：确认端点的告警类型是 `custom`，且失败次数已达到 `failure-threshold`
+- **不建议加入 `[RESULT_CONDITIONS]`**：它含有反引号且不做转义，条件里出现双引号时会破坏 JSON
+
+更多参数请参阅 [Gatus 自定义告警文档](https://github.com/TwiN/gatus#configuring-custom-alerts)。
