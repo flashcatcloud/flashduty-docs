@@ -1,0 +1,145 @@
+---
+title: "Fleet alert integration"
+description: "Send failing policy checks and newly detected vulnerabilities (CVEs) from Fleet automation webhooks to Flashduty On-call."
+keywords: ["alert integration", "Fleet", "osquery", "endpoint management", "policy", "vulnerability", "webhook"]
+---
+
+Fleet is an open-source endpoint management and osquery platform. Its automation webhooks can send two kinds of events to Flashduty On-call, one alert per host:
+
+- **Failing policy**: Fleet posts once when a policy changes from passing (or no result) to failing on a host.
+- **New vulnerability**: Fleet posts when it detects a new CVE on a host, checked hourly by default.
+
+Fleet sends these webhooks once, when the event happens, and never sends a recovery notification. The alerts do not recover on their own, so turn on **auto-close** (see below).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the integration push URL in either of the following ways.
+
+### Dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integration** and click **Add an integration**
+3. Select **Fleet** and click **Save**
+4. Open the integration card and copy the **push URL**
+
+### Shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert events**
+2. Select **Fleet** and enter a name
+3. Set the default route and pick a channel; you can add more rules under **Routes** later
+4. Click **Save** and copy the **push URL**
+
+</div>
+
+## In Fleet
+---
+
+Enable the webhooks under **Manage automations** in the Fleet admin UI, or set them through GitOps or the configuration file, as shown below. Use the full Flashduty push URL, including `integration_key`, as `destination_url` for both webhooks.
+
+<Steps>
+<Step title="Failing policy webhook">
+
+```yaml
+org_settings:
+  webhook_settings:
+    failing_policies_webhook:
+      enable_failing_policies_webhook: true
+      destination_url: <Flashduty push URL>
+      host_batch_size: 100
+      policy_ids:
+        - 42
+```
+
+- `policy_ids`: the policies that trigger the webhook
+- `host_batch_size`: the maximum number of hosts in one request. The default `0` puts every failing host in a single request. Set it to 200 or less, because Flashduty processes at most 200 hosts per request
+
+</Step>
+
+<Step title="Vulnerability webhook">
+
+```yaml
+org_settings:
+  webhook_settings:
+    vulnerabilities_webhook:
+      enable_vulnerabilities_webhook: true
+      destination_url: <Flashduty push URL>
+      host_batch_size: 100
+```
+
+</Step>
+
+<Step title="Do not enable the host status or activity webhooks">
+
+Fleet's host status and activity webhooks carry no per-object identifier. Flashduty rejects them with a parameter error, so do not point them at this URL.
+
+</Step>
+
+<Step title="Verify">
+
+The Fleet documentation describes no test button for these webhooks. Make a selected policy fail on a host (passing to failing). Fleet checks policy webhooks once a day by default, which you can change with `webhook_settings.interval`. Then confirm the alert appears in Flashduty.
+
+Hosts run policies at the interval set by `FLEET_OSQUERY_POLICY_UPDATE_INTERVAL` (default 1 hour), so the first alert can take that long to appear.
+
+</Step>
+</Steps>
+
+## Events and recovery
+---
+
+| Fleet delivery | Effect in Flashduty |
+| :--- | :--- |
+| Failing policy (`policy` + `hosts`) | One alert per host |
+| New vulnerability (`vulnerability` + `hosts_affected`) | One alert per affected host |
+| Host status, activity, and other webhooks | Rejected with a parameter error |
+
+One delivery can carry many hosts. Flashduty handles them in host ID order and processes at most 200 hosts per delivery; the rest are ignored, so use `host_batch_size` to control the batch size.
+
+Fleet does not notify Flashduty when a host is fixed. Turn on [auto-close](/en/on-call/channel/create-edit) for the integration's channel, with a suggested window of 24 hours to 7 days depending on how long you take to handle failing policies. When the same policy fails again on the same host (for example after the policy is reset in Fleet), it merges into the same alert.
+
+## Alert Key
+---
+
+- Failing policy: computed from the policy ID (`policy.id`) and the host ID (`hosts[].id`)
+- Vulnerability: computed from the CVE ID and the host ID
+
+Both IDs are Fleet database IDs and stay constant within one Fleet instance. Changes to the policy name, host name, or failing-host counts do not change the Alert Key. A delivery without the policy ID, CVE ID, or host ID is rejected, and the error names the missing field.
+
+## Severity
+---
+
+| Source | Condition | Flashduty severity |
+| :--- | :--- | :--- |
+| Policy | `policy.critical` is `true` | Critical |
+| Policy | Otherwise | Warning |
+| Vulnerability | `cvss_score` 7.0 or higher | Critical |
+| Vulnerability | `cvss_score` 4.0 to 6.9 | Warning |
+| Vulnerability | `cvss_score` below 4.0 | Info |
+| Vulnerability | No score (the field is Fleet Premium only) | Warning |
+
+The policy `critical` option requires a Fleet Premium license; free Fleet rejects it with `option critical requires a premium license`. On free Fleet, every policy alert therefore arrives as Warning.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `source` | Always `fleet` |
+| `check` | Policy name or CVE ID |
+| `resource` | Host display name, or the hostname when empty |
+| `host_id` / `hostname` / `host_url` | Host ID, hostname, and the host link in Fleet |
+| `policy_id` / `policy_name` / `critical` / `platform` / `team_id` | Policy fields |
+| `cve` / `details_link` / `cvss_score` / `epss_probability` / `cisa_known_exploit` | Vulnerability fields |
+
+The policy query, author details, and software installation paths in the payload are not stored as labels.
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: the message names the missing field. If it says only failing policy and vulnerability webhooks are supported, check whether a host status or activity webhook points at this URL
+- **No alert arrives**: the policy webhook fires only when a policy changes from passing to failing; a host that keeps failing is not sent again. Hosts run policies every `FLEET_OSQUERY_POLICY_UPDATE_INTERVAL` (default 1 hour), and Fleet posts only after a result changes
+- **Alerts never close**: Fleet sends no recovery, so turn on **auto-close**
+
+For field details, see [Fleet automations](https://fleetdm.com/guides/automations).

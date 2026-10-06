@@ -1,0 +1,141 @@
+---
+title: "Gitea change integration"
+description: "Sync Gitea Actions workflow runs and releases to Flashduty On-call through a Gitea webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Gitea", "Gitea Actions", "workflow", "Release", "Webhook", "deployment events"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Gitea repository or organization webhook to sync Gitea Actions workflow runs and releases to Flashduty On-call. Each workflow run and each release becomes one Flashduty change; every state of a run, from running to success, failure or cancellation, updates that same change.
+
+A Gitea webhook cannot filter workflow runs by workflow or by branch (its **Branch filter** applies only to push and branch events), so every run of every workflow in the repository becomes a change, including workflows that only build or test. Use the `workflow` and `ref` labels to route or filter deployment runs in Flashduty.
+
+This page covers Gitea. Forgejo names its Actions events differently and sends a different payload, so it is not supported; connect it through [custom change events](/en/on-call/integration/change-integration/custom-event) instead.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Gitea** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `repo` or `workflow`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Gitea
+---
+
+<Steps>
+<Step title="Open webhook settings">
+
+- Repository: go to the repository's **Settings → Webhooks** and click **Add Webhook → Gitea**
+- Organization: go to the organization's **Settings → Webhooks** and click **Add Webhook → Gitea**; events from every repository in the organization are sent
+
+You need admin permission on the repository or organization. The repository must have Gitea Actions enabled and an available runner.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **Target URL**: paste the complete Flashduty integration Push URL
+2. **HTTP Method**: select `POST`
+3. **POST Content Type**: select `application/json` (`application/x-www-form-urlencoded` is also accepted)
+4. **Secret**: leave empty; Flashduty authenticates with the `integration_key` in the Push URL
+
+</Step>
+
+<Step title="Select events">
+
+1. Under **Trigger On**, select **Custom Events…**
+2. Check **Workflow Run** and **Release** and uncheck the others; do not check **Workflow Jobs**, which does not produce changes
+3. Leave **Branch filter** empty; it does not apply to workflow runs
+4. Keep **Active** checked and click **Add Webhook**
+
+</Step>
+</Steps>
+
+Gitea's **Test Push Event** sends a fake `push` event; Flashduty returns success and records no change.
+
+## What one change is
+---
+
+| Gitea object | Change key (change_key) | Notes |
+|---|---|---|
+| Workflow run | `run:<workflow_run.id>` | The in-progress and completed events of one run update the same change; two runs of the same workflow on the same branch are two changes. A rerun keeps the run ID, so it updates the original change: the change goes from an end status back to Processing, and the `run_attempt` label records which attempt it is |
+| Release | `release:<release.id>` | Publishing and deleting the same release update the same change |
+
+## Status mapping
+---
+
+| Gitea event | Gitea state | Flashduty change status |
+|---|---|---|
+| workflow_run, `requested` | `waiting` (waiting for a maintainer to approve the run) | Planned |
+| workflow_run, `in_progress` | running (including being canceled) | Processing |
+| workflow_run, `completed` | `success` | Done |
+| workflow_run, `completed` | `failure` | Failed |
+| workflow_run, `completed` | `cancelled` | Canceled |
+| workflow_run, `completed` | `skipped` (every job was skipped, nothing ran) | Canceled |
+| release | published | Done |
+| release | deleted | Canceled |
+
+Done, Failed and Canceled are end statuses; Flashduty records the change's end time.
+
+These deliveries return success and record nothing: every other Gitea event type (including `workflow_job` and the `push` sent by the test button), the release `updated` action, draft releases, and a queued run (the `requested` event with state `queued`, `pending` or `requested`; the change starts when the run starts).
+
+## Change content
+---
+
+| Field | Workflow run | Release |
+|---|---|---|
+| Title | `<repository>: <workflow> on <branch> (<short SHA>)` | `<repository>: release <tag>` |
+| Description | The run's display title (commit message or pull request title) | Release name (empty when it equals the tag) |
+| Link | The run's page, or the repository's Actions page when missing | Release page |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Workflow run | Release |
+|---|---|---|
+| `repo` | Repository full name, e.g. `octo-org/hello-world` | Same |
+| `workflow` | Workflow name, usually the workflow file name such as `deploy.yaml` | — |
+| `ref` | Branch of the run | Release target branch or commit |
+| `sha` | Full commit SHA of the run | — |
+| `version` | — | Release tag |
+| `trigger` | Event that triggered the run, e.g. `push`, `schedule`, `workflow_dispatch` | — |
+| `actor` | User who triggered the run | Publisher |
+| `run_id` / `release_id` | Gitea object ID | Gitea object ID |
+| `run_attempt` | Attempt number | — |
+| `state` | Latest run state; `success`, `failure`, `cancelled` or `skipped` once the run ends | — |
+| `prerelease` | — | `true` for a prerelease |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why did I not receive workflow changes?">
+
+- Make sure the webhook has **Workflow Run** checked and that your Gitea version offers that event
+- Open the webhook page's delivery history to see the request and Flashduty's response
+
+</Accordion>
+
+<Accordion title="Does replaying a delivery in Gitea record it twice?">
+
+No. An event with the same state and time is recorded once.
+
+</Accordion>
+
+<Accordion title="Why did every workflow become a change?">
+
+Gitea cannot filter webhook events by workflow. The **Branch filter** does not apply to workflow runs either. Use the integration's **Routes** to send deployment workflows to the right channel by the `workflow` or `ref` label.
+
+</Accordion>
+
+<Accordion title="The delivery returned an InvalidParameter error?">
+
+- `unsupported action`, `unsupported workflow_run.status` or `unsupported workflow_run.conclusion`: a run state Flashduty does not support yet was received; please contact us
+- `workflow_run.id is missing` or `release.id is missing`: the payload is incomplete; make sure it comes from a native Gitea webhook
+
+</Accordion>
+</AccordionGroup>

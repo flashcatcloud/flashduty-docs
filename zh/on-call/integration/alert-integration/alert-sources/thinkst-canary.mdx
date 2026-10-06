@@ -1,0 +1,91 @@
+---
+title: "Thinkst Canary 告警集成"
+description: "通过 Thinkst Canary 控制台的通用 Webhook 将蜜罐设备和 Canarytoken 的入侵事件同步到 Flashduty On-call，每个事件生成一条告警。"
+keywords: ["告警集成", "Thinkst Canary", "Canarytoken", "Webhook", "蜜罐", "入侵检测"]
+---
+
+Thinkst Canary 是蜜罐与蜜标（Canarytoken）产品。有人访问诱饵设备或触发蜜标时，Canary 控制台通过 **通用 Webhook** 向配置的地址发送一条 JSON。每个事件（incident）对应一条 Flashduty 告警。Canary 不会在事件被确认或关闭时再发消息，告警不会自动恢复，需要开启超时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Thinkst Canary**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Thinkst Canary**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Thinkst Canary 中配置
+---
+
+<Steps>
+<Step title="添加通用 Webhook">
+
+登录 Canary 控制台，在 **Console Settings** 的 **Notification Channels**（或 Flock Settings 的 **Webhooks**）中添加一个通用 Webhook，地址填入完整的推送地址（包含 `?integration_key=...`）。
+
+</Step>
+
+<Step title="验证连通性">
+
+保存 Webhook 时，Canary 控制台会向该地址发送一条固定内容的测试事件（设备名 `DummyDevice`、说明 `This is a dummy incident.`）。Flashduty 识别该测试事件，返回 `200`，并生成一条标题为 `Thinkst Canary test notification`、等级为 Info 的独立告警，与真实事件互不影响，验证后手动关闭即可。
+
+</Step>
+
+<Step title="（可选）发送审计日志">
+
+Canary 也可以把控制台审计事件（`{"type":"console-audit"}`，例如用户登录、创建 Canarytoken）推送到同一地址。Flashduty 会返回 `200` 并忽略这类消息，不生成告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用事件中的 `IncidentHash`（事件哈希）作为 Alert Key。Canary 设备事件和 Canarytoken 事件都带有该字段，相同的事件哈希会合并到同一条告警；请求缺少 `IncidentHash` 时，Flashduty 会拒绝该请求（测试事件除外）。
+
+## 告警生命周期
+---
+
+Canary 只发送事件触发消息，没有恢复消息。请在协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)，超时计时起点选 **故障触发**，超时时长建议 24 小时，也可以按响应流程调整。
+
+## 告警等级
+---
+
+Canary 的消息没有等级字段。`AlertType` 为 `CanaryIncident`（设备事件）或 `CanarytokenIncident`（蜜标事件）时为 **Critical**，因为任何对诱饵的访问都是入侵信号；其他取值为 **Warning**。需要调整时，可在协作空间的告警处理规则中按 `alert_type` 或 `log_type` 标签重设等级。
+
+## 告警内容
+---
+
+- **标题**：事件类型（`Description`）
+- **描述**：事件摘要（`Intro`）
+- **标签**：`check`、`resource`（设备名，蜜标事件为 `Reminder` 备注）、`incident_hash`、`alert_type`、`log_type`、`canary_name`、`canary_id`、`canary_ip`、`canary_port`、`canary_location`、`source_ip`（访问来源）、`reverse_dns`、`source`（固定为 `thinkst_canary`）
+
+`AdditionalDetails`（请求明细，可能含用户名等）和蜜标的 Token 值不会写入告警。
+
+## 关于签名
+---
+
+Canary 通用 Webhook 的文档没有说明请求签名，Flashduty 通过推送地址中的 `integration_key` 识别集成。
+
+## 排查问题
+---
+
+- **没有收到告警**：确认 Webhook 地址是完整的推送地址，且集成没有被停用；控制台需要能访问公网地址
+- **只看到 Info 告警**：这是保存 Webhook 时的测试事件，真实事件在设备或蜜标被触发后才会发送
+- **告警一直不关闭**：Canary 不发送恢复消息，请开启超时自动关闭
+
+Webhook 的完整字段说明请参阅 Canary 文档 [Generic Webhook events](https://docs.canary.tools/webhooks/generic)。

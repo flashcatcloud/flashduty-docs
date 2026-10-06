@@ -1,0 +1,268 @@
+---
+title: "Argo Rollouts 变更集成"
+description: "通过 Argo Rollouts 内置的 Notifications Webhook 将 Rollout 的发布版本同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Argo Rollouts", "Rollout", "金丝雀发布", "蓝绿发布", "渐进式交付", "Notifications", "Webhook", "部署事件"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Argo Rollouts 控制器内置 **Notifications**（基于 Argo 的 notifications-engine），在 Rollout 发布过程中发送通知。本集成提供一段 `argo-rollouts-notification-configmap` 配置，包含一个 Webhook 服务、四个请求体模板和四个触发器。Rollout 每一次 Pod 模板变更（新的发布版本）对应一条 Flashduty 变更：新版本开始发布时记录为 Processing，发布完成时更新为 Done，被中止时更新为 Failed。
+
+金丝雀（Canary）和蓝绿（BlueGreen）两种策略都会记录。Rollout 的分析（AnalysisRun）失败、Pod 副本数变化等事件不属于变更，不会记录。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Argo Rollouts**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `rollout`、`namespace`、`strategy`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Argo Rollouts 中配置
+---
+
+以下操作需要能修改 Argo Rollouts 控制器所在命名空间（默认 `argo-rollouts`）中 ConfigMap 的 Kubernetes 权限，以及修改 Rollout 注解的权限。Argo Rollouts 控制器需要能访问推送地址所在的域名。
+
+<Steps>
+<Step title="写入 Webhook 服务、模板和触发器">
+
+把下面的内容保存为 `flashduty-change.yaml`，将 `url` 替换为上一步复制的推送地址（包含 `?integration_key=...`）：
+
+```yaml
+data:
+  service.webhook.flashduty-change: |
+    url: <推送地址>
+    headers:
+    - name: Content-Type
+      value: application/json
+
+  template.flashduty-change-updated: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "updated",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  template.flashduty-change-completed: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "completed",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  template.flashduty-change-aborted: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "aborted",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  template.flashduty-change-skip-steps: |
+    webhook:
+      flashduty-change:
+        method: POST
+        body: |
+          {
+            "event": "skip_steps",
+            "event_time": {{ now | unixEpoch }},
+            "rollout_uid": {{ .rollout.metadata.uid | toJson }},
+            "name": {{ .rollout.metadata.name | toJson }},
+            "namespace": {{ .rollout.metadata.namespace | toJson }},
+            "revision": {{ dig "metadata" "annotations" "rollout.argoproj.io/revision" "" .rollout | toJson }},
+            "strategy": {{ if dig "spec" "strategy" "blueGreen" "" .rollout }}"blueGreen"{{ else }}"canary"{{ end }},
+            "images": [{{ range $i, $c := .rollout.spec.template.spec.containers }}{{ if $i }}, {{ end }}{{ $c.image | toJson }}{{ end }}]
+          }
+
+  trigger.on-rollout-updated: |
+    - send: [flashduty-change-updated]
+
+  trigger.on-rollout-completed: |
+    - send: [flashduty-change-completed]
+
+  trigger.on-rollout-aborted: |
+    - send: [flashduty-change-aborted]
+
+  trigger.on-skip-steps: |
+    - send: [flashduty-change-skip-steps]
+```
+
+合并到 `argo-rollouts-notification-configmap`（`--type merge` 只增改上面这些键，不影响已有配置）：
+
+```bash
+kubectl patch configmap argo-rollouts-notification-configmap -n argo-rollouts --type merge --patch-file flashduty-change.yaml
+```
+
+如果这个 ConfigMap 还不存在，先执行 `kubectl create configmap argo-rollouts-notification-configmap -n argo-rollouts`。如果 Argo Rollouts 通过 Helm Chart 安装，请把同样的服务、模板和触发器写到 Chart 的 notifications 配置中，否则下次升级会覆盖手动修改。
+
+配置说明：
+
+- Argo Rollouts 的触发器名称由 Kubernetes 事件原因决定，`on-rollout-updated`、`on-rollout-completed`、`on-rollout-aborted` 和 `on-skip-steps` 分别在对应事件发生时触发，所以这里的触发器名称不能修改，也没有 `when` 条件
+- 每个模板的 `event` 值固定，Flashduty 靠它判断发生了什么，不要修改
+- 模板中的每个值都经过 `toJson` 转义，请不要去掉。字段名不要修改，`event`、`event_time`、`rollout_uid` 和 `revision` 必须保留
+- `event_time` 是控制器发送通知时的时间（Unix 秒），用于按先后顺序更新变更状态
+- 服务名 `flashduty-change` 可以改成其他名称，但订阅注解、模板中 `webhook:` 下的键名必须与它一致
+
+<Note>
+如果已经安装了 Argo Rollouts 的 `notifications-install.yaml`，`on-rollout-updated`、`on-rollout-completed` 和 `on-rollout-aborted` 这三个触发器已经存在（内容为 `- send: [rollout-updated]` 这样的一行），上面的写法会覆盖它们，原有的 Slack、邮件订阅会收不到通知。请保留原有模板，把触发器写成下面的形式，两个模板会合并发送，各通知渠道只使用自己的部分：
+
+```yaml
+  trigger.on-rollout-updated: |
+    - send: [rollout-updated, flashduty-change-updated]
+  trigger.on-rollout-completed: |
+    - send: [rollout-completed, flashduty-change-completed]
+  trigger.on-rollout-aborted: |
+    - send: [rollout-aborted, flashduty-change-aborted]
+```
+
+`on-skip-steps` 不是内置触发器，直接使用上面的写法。
+</Note>
+
+</Step>
+
+<Step title="订阅通知">
+
+触发器需要被订阅后才会发送。按需要的范围选择一种方式：
+
+- **单个 Rollout**：在 Rollout 上添加四条注解
+
+  ```bash
+  kubectl annotate rollout <Rollout 名称> -n <命名空间> \
+    'notifications.argoproj.io/subscribe.on-rollout-updated.flashduty-change=' \
+    'notifications.argoproj.io/subscribe.on-rollout-completed.flashduty-change=' \
+    'notifications.argoproj.io/subscribe.on-rollout-aborted.flashduty-change=' \
+    'notifications.argoproj.io/subscribe.on-skip-steps.flashduty-change='
+  ```
+
+- **所有 Rollout**：在 `argo-rollouts-notification-configmap` 的 `subscriptions` 中添加一项。如果已有 `subscriptions`，请在原列表中追加，不要用上一步的 merge 命令整体覆盖
+
+  ```yaml
+  subscriptions: |
+    - recipients:
+      - flashduty-change
+      triggers:
+      - on-rollout-updated
+      - on-rollout-completed
+      - on-rollout-aborted
+      - on-skip-steps
+  ```
+
+四个触发器要一起订阅：只订阅开始事件，变更会一直停留在 Processing。
+
+</Step>
+
+<Step title="验证发布记录">
+
+Argo Rollouts 没有发送测试消息的功能。修改一个已订阅的 Rollout 的镜像（例如 `kubectl argo rollouts set image <Rollout 名称> <容器名>=<新镜像>`），确认 Flashduty 的变更列表中出现一条 Processing 的变更，发布完成（或手动 promote 到最后一步）后更新为 Done。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+一条变更对应一个 Rollout 的一个发布版本，变更标识（change_key）为 `<rollout_uid>/<revision>`：
+
+- `rollout_uid` 是 Rollout 的 `metadata.uid`。Kubernetes 为每个对象分配的 UID 在集群的整个生命周期内唯一，不同集群中同名的 Rollout、删除后重建的 Rollout 都是不同的 Rollout
+- `revision` 是 Rollout 的 `rollout.argoproj.io/revision` 注解。每次 Pod 模板变更，包括回滚到旧版本，修订号都会加 1
+
+因此同一个版本的开始、完成、中止更新同一条变更；同一个 Rollout 的两次发布是两条变更，回滚也是一条新的变更。创建一个已带订阅注解的 Rollout 时，也会为修订号 1 记录一条变更（Processing，可用后更新为 Done）。只修改副本数、发布步骤等不改变 Pod 模板的配置，不产生新的修订号，也不记录变更。
+
+请求缺少 `event`、`rollout_uid`、`revision` 或 `event_time` 时，Flashduty 会拒绝该请求。
+
+## 状态映射
+---
+
+| 触发器 | 事件（`event`） | 含义 | Flashduty 变更状态 |
+|---|---|---|---|
+| `on-rollout-updated` | `updated` | 新的发布版本开始（包括 Rollout 首次创建） | Processing |
+| `on-rollout-completed` | `completed` | 新版本已提升为稳定版本 | Done |
+| `on-skip-steps` | `skip_steps` | 回滚到稳定版本或回滚窗口内的版本，跳过发布步骤 | Done |
+| `on-rollout-aborted` | `aborted` | 发布被中止：执行 `kubectl argo rollouts abort`、分析（Analysis）失败、超过进度期限（`progressDeadlineAbort`） | Failed |
+
+Done 和 Failed 是结束状态，Flashduty 会记录变更结束时间。`event` 的取值区分大小写，其他值会被拒绝。
+
+- 回滚到稳定版本时 Argo Rollouts 只发出 `SkipSteps` 事件，不会发出 `RolloutCompleted`，所以 `on-skip-steps` 也记为 Done
+- 蓝绿发布等待手动 promote、或金丝雀发布停在暂停步骤时，变更保持 Processing
+- 中止后执行 `kubectl argo rollouts retry`，发布最终完成时同一条变更会从 Failed 更新为 Done
+
+## 变更内容
+---
+
+- **标题**：`<命名空间>/<Rollout 名称>: rollout revision <修订号> (<镜像>)`，多个容器的镜像用逗号分隔，没有镜像时省略括号部分
+- **链接**：Argo Rollouts 没有对应每次发布的网页，变更没有链接
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `rollout` | Rollout 名称 |
+| `namespace` | Rollout 所在的命名空间 |
+| `rollout_uid` | Rollout 的 `metadata.uid` |
+| `revision` | 发布版本的修订号 |
+| `strategy` | 发布策略，`canary` 或 `blueGreen` |
+| `image` | 各容器的镜像，逗号分隔，超过 1024 字节时截断 |
+| `event` | 最新一次事件：`updated`、`completed`、`skip_steps` 或 `aborted` |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 查看 Argo Rollouts 控制器的日志（`kubectl logs -n argo-rollouts deploy/argo-rollouts`），确认 Rollout 上有 `notifications.argoproj.io/subscribe.<触发器>.flashduty-change` 注解，或 `subscriptions` 中包含对应触发器
+- 日志中出现 `template 'flashduty-change-updated' is not supported` 时，确认配置已写入 `argo-rollouts-notification-configmap`，Helm 安装请检查对应的 values
+- Rollout 的 Pod 模板没有变化时不会产生新的版本，也就没有通知
+
+</Accordion>
+
+<Accordion title="变更一直停在 Processing？">
+
+四个触发器没有同时订阅，或者发布还没有结束（蓝绿发布等待 promote、金丝雀停在暂停步骤）。Rollout 被删除不会更新变更。
+
+</Accordion>
+
+<Accordion title="重复发送同一条通知会重复记录吗？">
+
+不会。同一事件、同一时间的通知只记录一次。
+
+</Accordion>
+
+<Accordion title="日志中出现 failed with error code 400？">
+
+确认模板与本文一致。响应内容会指出缺少或不支持的字段，例如 `rollout_uid is missing`、`revision is missing`、`unsupported event`。Rollout 没有 `rollout.argoproj.io/revision` 注解（控制器还没有处理过它）时，`revision` 为空，稍后的通知会带上。
+
+</Accordion>
+</AccordionGroup>
+
+相关配置请参阅 Argo Rollouts 文档 [Notifications](https://argo-rollouts.readthedocs.io/en/stable/features/notifications/)，以及 notifications-engine 的 [Webhook](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/services/webhook/) 服务、[Triggers](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/triggers/) 和 [Templates](https://argo-cd.readthedocs.io/en/stable/operator-manual/notifications/templates/)。

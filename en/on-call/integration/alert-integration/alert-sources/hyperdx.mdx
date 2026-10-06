@@ -1,0 +1,147 @@
+---
+title: "HyperDX alert integration"
+description: "Send HyperDX (ClickStack) search alert and chart alert trigger and recovery notifications to Flashduty On-call through a Generic webhook with a fixed body template."
+keywords: ["alert integration", "HyperDX", "ClickStack", "ClickHouse", "Webhook"]
+---
+
+Use a Generic webhook in HyperDX (the UI layer of ClickStack) to send search alerts and dashboard chart alerts to Flashduty On-call. HyperDX identifies one alert (one group of a grouped alert) by `{{eventId}}`, and Flashduty uses it as the Alert Key: the trigger and recovery notifications of the same alert keep updating one Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **HyperDX** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **HyperDX** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Route** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure HyperDX
+---
+
+Both open-source HyperDX and managed ClickStack in ClickHouse Cloud support Generic webhooks. A self-hosted HyperDX must be able to reach the public domain of the Flashduty push URL.
+
+<Steps>
+<Step title="Create a Generic webhook">
+
+1. Open **Team Settings** → **Integrations** and click **Add Webhook** under **Webhooks**. You can also click **Add New Incoming Webhook** while creating an alert
+2. Set **Service Type** to **Generic**
+3. Enter `Flashduty` as the **Webhook Name** and paste the full Flashduty push URL into **Webhook URL**
+4. Leave **Webhook Headers** empty. HyperDX sends `Content-Type: application/json` by default
+5. Paste the following template into **Webhook Body**
+
+```json
+{
+  "event_id": "{{eventId}}",
+  "state": "{{state}}",
+  "severity": "Warning",
+  "title": "{{title}}",
+  "body": "{{body}}",
+  "link": "{{link}}",
+  "alert_id": "{{alertId}}",
+  "group": "{{groupKey}}"
+}
+```
+
+6. Click **Test Webhook** to confirm the push URL is reachable, then click **Add Webhook** to save
+
+<Warning>
+Keep `event_id` and `state`. Flashduty rejects a request without `event_id` because it cannot match the recovery to the original alert, and `state` accepts only `ALERT` and `OK`. HyperDX JSON-escapes string variables such as `title`, `body` and `link`, so keep the surrounding double quotes.
+</Warning>
+
+`severity` is a fixed value in the template and sets the Flashduty severity of every alert this webhook sends. Valid values are `Critical`, `Warning` and `Info`. For a different severity, create another webhook with `Critical` (for example, named `Flashduty Critical`) and select it on important alerts.
+
+Older HyperDX releases do not have the `{{alertId}}` and `{{groupKey}}` variables. They render as empty strings, which does not affect triggering or recovery.
+
+</Step>
+
+<Step title="Select the webhook on alerts">
+
+**Search alerts**:
+
+1. Run a query on the **Search** page and click **Alerts** in the top-right corner
+2. Set the threshold and time window, and fill in **grouped by** under **Advanced Settings** if needed
+3. Under **Send to**, select the `Flashduty` webhook, then click **Save Search with Alert**
+
+**Dashboard chart alerts**:
+
+1. Open the dashboard, edit the chart, go to its alert settings and click **Add Alert**
+2. Set the condition, threshold and time window
+3. Select the `Flashduty` webhook, then save the chart and the dashboard
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+**Test Webhook** sends fixed sample data (`eventId` is `test-event-id`). Flashduty returns success but creates no alert, so it only confirms that the push URL is reachable.
+
+To verify the full flow, make the alert condition actually match and confirm an active alert appears in Flashduty. Then let the condition clear and confirm the original alert recovers. HyperDX evaluates alerts per time window, so a notification can take up to one window to arrive.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `event_id` (`{{eventId}}`) as the Alert Key directly. HyperDX's webhook template variable documentation states that `{{eventId}}` stays the same for one alert, group and webhook from trigger to recovery, and HyperDX's own incident.io template uses it as the deduplication key.
+
+- While the alert condition keeps matching, HyperDX sends another `ALERT` notification in every evaluation window. They all update the same Flashduty alert
+- In a grouped alert (with **grouped by** set), each group has its own `event_id` and becomes a separate Flashduty alert that triggers and recovers on its own
+- Changes to the title, body, value or severity do not change the Alert Key
+- Changing the alert's **grouped by**, or deleting and recreating the webhook, produces a new `event_id`. Flashduty alerts triggered before the change receive no recovery and must be closed manually
+
+## Status and severity
+---
+
+Flashduty uses `state` to decide between trigger and recovery, and `severity` to set the alert severity.
+
+| `state` | Flashduty handling |
+| :--- | :--- |
+| `ALERT` | Triggers or updates the alert |
+| `OK` | Recovers the original alert and keeps its last severity |
+| Empty or other values | Request rejected |
+
+| `severity` | Flashduty severity |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Warning` | Warning |
+| `Info` | Info |
+| Empty or other values | Warning |
+
+`severity` is case-insensitive. HyperDX sends a recovery notification only when it previously sent a trigger notification for the alert. While an alert is silenced, HyperDX sends neither trigger nor recovery notifications.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `event_id` | `{{eventId}}`, the Alert Key |
+| `alert_id` | `{{alertId}}`, the HyperDX alert ID |
+| `group` | `{{groupKey}}`, the group of a grouped alert as `<column>:<value>`, for example `ServiceName:checkout` |
+| `severity` | Raw `severity` value from the template |
+| `link` | `{{link}}`, the link to the search or chart in HyperDX |
+
+The alert title comes from `{{title}}` with the 🚨 and ✅ prefixes added by HyperDX removed. The alert description comes from `{{body}}`.
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: Make sure the webhook body matches the template above, `event_id` and `state` are not empty, and string variables keep their surrounding double quotes
+- **Test Webhook succeeds but no alert appears**: This is expected. Test data does not create alerts
+- **The alert does not recover**: Make sure **grouped by** was not changed and the webhook was not recreated after the alert triggered, and that the alert is not silenced
+- **Every alert is Warning**: The template's `severity` defaults to `Warning`. Edit the template or create another webhook for a different severity
+
+For more information, see the ClickStack documentation [Alerts](https://clickhouse.com/docs/use-cases/observability/clickstack/alerts) and [Alert webhook template variables](https://github.com/hyperdxio/hyperdx/blob/main/docs/alert-webhook-template-variables.md) in the HyperDX repository.

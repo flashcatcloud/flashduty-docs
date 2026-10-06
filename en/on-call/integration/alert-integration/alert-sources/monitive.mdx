@@ -1,0 +1,132 @@
+---
+title: "Monitive alert integration"
+description: "Send Monitive (uptimemonitoring.com) down, flapping, and recovery notifications to Flashduty On-call through a monitor webhook."
+keywords: ["alert integration", "Monitive", "uptimemonitoring.com", "Uptime", "webhook", "monitor_id"]
+---
+
+Use a Monitive (uptimemonitoring.com) monitor webhook to send down (`monitor.down`), flapping (`monitor.flapping`), and recovery (`monitor.up`) notifications to Flashduty On-call. Each monitor maps to one Flashduty alert: the alert triggers when the monitor goes down, flapping notifications update the same alert, and the alert recovers when the monitor is up again.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integration data** → **Dedicated integrations**, then click **Add an integration**
+3. Select **Monitive**, then click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration center → Alert events**
+2. Select **Monitive** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Monitive
+---
+
+Monitive webhooks are set per monitor, and each monitor has one webhook slot. Set the webhook on every monitor you want to send to Flashduty.
+
+<Steps>
+<Step title="Set the monitor webhook">
+
+Use either method to set the full Flashduty push URL as the monitor's webhook URL:
+
+- Console: sign in to [app.uptimemonitoring.com](https://app.uptimemonitoring.com), open the monitor, enter the push URL in the **Webhook** section, and save
+- API: call `PUT /api/v1/monitors/{monitorID}/webhook`
+
+```bash
+curl -X PUT https://api.uptimemonitoring.com/api/v1/monitors/$MONITOR_ID/webhook \
+  -H "Authorization: Bearer $UPTIMEMONITORING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"<Flashduty push URL>"}'
+```
+
+If the monitor already has a webhook, setting it again replaces only the URL; the signing secret stays the same.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make the monitor really go down (for example, point it at a URL that returns 5xx) and confirm Flashduty shows an active alert; then restore the target and confirm the alert recovers. Monitive flips state only after it confirms from other regions, which usually takes one to a few minutes.
+
+</Step>
+</Steps>
+
+<Note>
+Every Monitive delivery carries an `X-UptimeMonitoring-Signature` (HMAC-SHA256) header. Flashduty does not verify it; the `integration_key` in the push URL is the credential, so keep the URL private. If a delivery fails (non-2xx or timeout), Monitive retries up to 5 times, after 1 minute, 5 minutes, 30 minutes, and 2 hours.
+</Note>
+
+## Payload
+---
+
+Monitive POSTs the following fields as `application/json`. Flashduty parses them directly; no template is needed:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `event` | `monitor.down`, `monitor.flapping`, or `monitor.up` | Trigger, update, or recovery; label `event` |
+| `monitor_id` | Monitor ID | Alert Key; label `monitor_id` |
+| `monitor_name` | Monitor name | Alert title; label `check` |
+| `monitor_url` | Monitored URL, may be absent | Label `resource` |
+| `reason` | Down or flapping reason as free text, for example `Unexpected status code 503 received from server.` on a down event and `flap_threshold_exceeded` on a flapping event | Label `reason` |
+| `occurred_at` | Time of the state change | Added to the description |
+| `account_id`, `delivery_id`, `attempt` | Account, delivery number, retry count | Not stored |
+
+The alert title is the monitor name; if it is empty, the monitored URL is used, then `Monitive monitor <monitor_id>`.
+
+## Alert Key
+---
+
+Flashduty uses `monitor_id` as the Alert Key. Down, flapping, and recovery notifications of one monitor carry the same `monitor_id`, so they land on the same alert; different monitors produce different alerts even when their names and URLs match. Renaming the monitor or changing its URL or reason does not change the Alert Key. `delivery_id` differs for every state change, so it is not part of the Alert Key.
+
+A request without `monitor_id` is rejected with a parameter error, because its recovery could not be matched to the original alert. A request whose `event` is none of the three values is acknowledged and ignored without creating an alert.
+
+## Status and severity
+---
+
+Monitive notifications carry no severity. A down monitor is an outage signal and maps to Critical; flapping maps to Warning.
+
+| Monitive `event` | Flashduty status or severity |
+| :--- | :--- |
+| `monitor.down` | Critical |
+| `monitor.flapping` | Warning |
+| `monitor.up` | Recovery, keeping the alert's last severity |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="When does a flapping alert recover?">
+
+Monitive's documentation says a flapping record ends once traffic stabilizes, but does not name the webhook event sent at that point. While a monitor is flapping, Monitive stops sending `monitor.down` and `monitor.up` for its further state changes, so no `monitor.up` closes the flapping alert during that time. A `monitor.flapping` that arrives after an earlier `monitor.up` opens a new Warning alert, because the previous alert is already closed. A later `monitor.up` closes the alert. If a monitor flaps and no `monitor.up` follows, the alert stays open, so turn on **auto-close after timeout** in the channel (for example 24 hours); see [auto-close timeout](/en/on-call/channel/create-edit).
+
+</Accordion>
+
+<Accordion title="Do retries create duplicate alerts?">
+
+No. A retried delivery carries the same `monitor_id` and merges into the same alert.
+
+</Accordion>
+
+<Accordion title="Is this available on the free plan?">
+
+Webhooks are included in the free plan, with one webhook per monitor and up to 50 monitors.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty receives no alert**: query `GET /api/v1/webhook-deliveries?monitor_id=<id>` in Monitive and check the delivery status and response code
+- **Flashduty returns a parameter error**: confirm the body is Monitive's JSON and `monitor_id` is not empty
+- **The alert does not recover**: confirm the `monitor.up` delivery succeeded and the monitor's webhook URL was not changed to another integration
+
+For field details, see Monitive's [Webhooks](https://uptimemonitoring.com/docs/webhooks/) documentation.

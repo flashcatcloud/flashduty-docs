@@ -1,0 +1,144 @@
+---
+title: "Harness alert integration"
+description: "Sync failed Harness pipelines, stages and triggers to Flashduty On-call through the Webhook method of a pipeline notification, and recover them on the next successful run."
+keywords: ["alert integration", "Harness", "webhook", "CI/CD", "pipeline", "deployment"]
+---
+
+Use the Webhook method of a Harness pipeline notification rule to sync failed Harness CI/CD pipelines to Flashduty On-call. Each pipeline and each stage maps to one Flashduty alert: a pipeline's alert triggers when the pipeline fails and recovers when a later run of the same pipeline succeeds; a stage's alert triggers when the stage fails and recovers when a later run of the same stage succeeds. A trigger that fails to start its pipeline also raises an alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Harness**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Harness** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Harness
+---
+
+Every Harness SaaS edition supports notification rules on a pipeline. You need the **Create/Edit** permission on the pipeline. The steps below configure one pipeline. If centralised notifications are enabled on your account, you can also configure many pipelines at once under **Account Settings → Notification Rules**; choose the events and the notification method the same way.
+
+<Steps>
+<Step title="Create a notification rule">
+
+1. In Harness, open the pipeline to connect and go to **Pipeline Studio**
+2. Click **Notify** on the right, then select **Notifications**
+3. Enter a rule name (for example `flashduty`), then click **Continue**
+
+</Step>
+
+<Step title="Select pipeline events">
+
+Select the **Pipeline Events** in the table below. Select failure and success events in pairs: with failure events only, alerts never recover automatically.
+
+| Harness event | Effect in Flashduty |
+| :--- | :--- |
+| **Pipeline Failed** | Triggers the pipeline's alert |
+| **Pipeline Success** | Recovers the pipeline's alert |
+| **Stage Failed** (optional) | Triggers the stage's alert; select all stages or specific ones |
+| **Stage Success** (optional) | Recovers the stage's alert; select the same stages as for **Stage Failed** |
+| **Trigger Failed** (optional) | Triggers an alert when a trigger fails to start the pipeline; it does not recover automatically, see below |
+
+You don't need **Pipeline Start**, **Pipeline End**, **Pipeline Pause**, **Stage Start**, **Step Failed**, **Waiting for User Action** or **Pipeline Resumed**. If they are selected, Flashduty returns success and creates no alert.
+
+**Trigger Failed** requires the `PIPE_ENABLE_TRIGGER_FAILED_NOTIFICATION` feature flag; contact Harness Support to enable it.
+
+</Step>
+
+<Step title="Configure the Webhook method">
+
+1. In **Notification Method**, select **Webhook**
+2. Paste the full Flashduty push URL, including `integration_key`, into **Enter the URL to be called**
+3. No headers are needed
+4. Don't select a **Notification Template**: Flashduty parses Harness's default request body, and a request built from a custom template returns success without creating an alert
+5. For **Connectivity Mode**, select **Connect through Harness Platform**; if only your delegates can reach the internet, select **Connect through Harness Delegate** and choose a delegate
+6. Click **Test** to check that the URL is reachable, then click **Submit**
+
+</Step>
+
+<Step title="Verify">
+
+Run the pipeline so that it fails (for example, run `exit 1` in a Shell Script step) and confirm that Flashduty receives an active alert. Fix it, run the same pipeline again until it succeeds, and confirm that the alert recovers.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the pipeline and stage, so the failure and success events of one object share one Alert Key:
+
+| Object | Fields used | Notes |
+| :--- | :--- | :--- |
+| Pipeline | `accountIdentifier`, `orgIdentifier`, `projectIdentifier`, `pipelineIdentifier` | Later failed runs of the same pipeline merge into this alert; any successful run recovers it |
+| Stage | The pipeline fields above plus `stageIdentifier` | Each stage has its own alert, separate from the pipeline's alert |
+| Trigger | The pipeline fields above plus `triggerIdentifier` | Repeated failures of the same trigger merge into one alert |
+
+Changes to the display names of pipelines, stages and triggers, to the execution ID (`planExecutionId`) and to the error message don't change the Alert Key. Failure or success events missing a field from the table are rejected.
+
+If both pipeline and stage events are selected, one failure raises two alerts: one for the pipeline and one for the failed stage. Select the events of one level only if you need just one.
+
+## Status and severity
+---
+
+| Event | Status | Flashduty severity |
+| :--- | :--- | :--- |
+| `PipelineFailed` | Trigger | Critical |
+| `StageFailed` | Trigger | Warning |
+| `TriggerFailed` | Trigger | Warning |
+| `PipelineSuccess`, `StageSuccess` | Recover | - |
+
+## When alerts do not recover automatically
+---
+
+In these cases no later success event arrives for the same object, so the alert does not recover automatically:
+
+- A trigger failure (`TriggerFailed`): Harness has no matching recovery event
+- The pipeline is deleted after the failure, or never runs again
+- The notification rule selects only failure events, or **Stage Success** covers fewer stages than **Stage Failed**
+
+Turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit), set **Window timing start** to **Incident trigger**, and set the timeout to 12 hours. Pipeline failures are usually fixed on the same day, and alerts that never recover close when the timeout expires.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `account` / `org` / `project` | Identifiers of the Harness account, organization and project |
+| `pipeline` / `pipeline_name` | Pipeline identifier and name |
+| `stage` / `stage_name` | Stage identifier and name, stage events only |
+| `trigger` / `trigger_name` / `trigger_url` | Trigger identifier, name and activity history link, trigger failures only |
+| `trigger_type` | How the pipeline was started (such as `MANUAL` or `WEBHOOK`); the trigger type for trigger failures |
+| `triggered_by` | Name of the user who started the pipeline |
+| `event_type` | Harness event type, such as `PipelineFailed` |
+| `execution_id` / `execution_url` | ID and details link of this execution |
+| `pipeline_url` | Link to the pipeline in Pipeline Studio |
+| `error_message` | Failure reason reported by Harness |
+
+User emails never become labels.
+
+## Troubleshooting
+---
+
+- **No alerts arrive**: Check that the notification rule is enabled, that **Notification Method** is **Webhook**, and that the push URL is complete and includes `integration_key`. With delegate connectivity, check that the delegate can reach the Flashduty push URL
+- **Alerts don't recover**: Check that **Pipeline Success** (or **Stage Success**) is selected and that the same pipeline has since run successfully
+- **Requests arrive but no alert is created**: The rule uses a custom **Notification Template**, or selects only start, end, pause, waiting-for-user-action or similar events. Flashduty returns success without creating an alert
+- **One failure raises two alerts**: Both pipeline and stage events are selected; see the Alert Key section above
+
+For all events and request bodies, see [Harness pipeline notifications](https://developer.harness.io/docs/continuous-delivery/x-platform-cd-features/cd-steps/notify-users-of-pipeline-events).

@@ -1,0 +1,130 @@
+---
+title: "HetrixTools alert integration"
+description: "Send HetrixTools uptime monitoring, server resource usage, and blacklist monitoring notifications to Flashduty On-call through a contact list webhook."
+keywords: ["alert integration", "HetrixTools", "webhook", "uptime monitoring", "blacklist monitoring"]
+---
+
+Use the webhook of a HetrixTools contact list to send monitoring notifications to Flashduty On-call. The same push URL receives three kinds of notifications:
+
+- **Uptime Monitoring**: each monitor maps to one Flashduty alert. It triggers when the monitor goes offline and recovers automatically when the monitor is back online
+- **Server Monitoring Resource Usage**: each notification creates one alert, which you close manually
+- **Blacklist Monitoring**: each IP or domain change creates one alert, which you close manually
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **HetrixTools** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **HetrixTools** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure HetrixTools
+---
+
+<Steps>
+<Step title="Create a contact list">
+
+1. Sign in to HetrixTools and select **Contact Lists** in the left menu
+2. Click **Add New Contact List** and enter a **Contact List Name**, for example `Flashduty`
+3. Expand the **Webhook** section and paste the full Flashduty push URL into **Webhook URL**. Leave the optional authentication token empty: Flashduty identifies the integration by the `integration_key` in the push URL
+4. Open **Send test notification** in the Webhook section header. It offers **Blacklist Monitoring**, **Uptime Monitoring** and **Server Resource Usage**; Flashduty returns success for each and creates no alert
+5. Click **Add Contact List** to save it
+
+</Step>
+
+<Step title="Assign the contact list to monitors">
+
+HetrixTools delivers notifications per contact list: only monitors that have this contact list assigned push to Flashduty.
+
+- **Uptime Monitoring**: edit each Uptime Monitor that should alert, select the `Flashduty` contact list, and save
+- **Server Monitoring Resource Usage**: attach the Server Monitor to the Uptime Monitor above, install the server agent, and configure Resource Usage Warnings. Resource usage notifications go out through that Uptime Monitor's contact list
+- **Blacklist Monitoring**: edit the Blacklist Monitor, select the `Flashduty` contact list, and save
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+1. Make an uptime monitor that has the contact list assigned actually fail (for example, point a website monitor at an unreachable address for a while) and confirm that Flashduty receives an active alert
+2. Restore the monitor configuration, wait for the monitor to come back online, and confirm that the alert recovers
+
+</Step>
+</Steps>
+
+<Tip>
+Blacklist Monitoring notifications are not sent in real time: HetrixTools batches the changes over a period set in your account settings (at least every 1 hour) and follows the contact list's Do Not Disturb schedule. One request carries at most 100 IPs or domains.
+</Tip>
+
+## Alert Key
+---
+
+**Uptime Monitoring**: Flashduty computes the Alert Key from `monitor_id`, the HetrixTools monitor ID. The `offline` and `online` notifications of a monitor carry the same `monitor_id`, so they land on the same alert. Repeat notifications while the monitor stays offline merge into that alert as well. Changes to the monitor name, target, category, timestamp, or failing locations do not change the Alert Key. A request without `monitor_id` is rejected, because its recovery could not be matched.
+
+**Server Monitoring Resource Usage and Blacklist Monitoring**: HetrixTools sends no recovery message for these notifications, so Flashduty creates a separate alert for each notification (and for each IP or domain in a blacklist notification). Close these alerts manually once handled.
+
+## Status and severity
+---
+
+Uptime Monitoring notifications are handled by `monitor_status`:
+
+| HetrixTools `monitor_status` | Flashduty handling |
+| :--- | :--- |
+| `offline` | Triggers or updates the alert with severity Critical |
+| `online` | Recovers the alert |
+
+An empty or any other `monitor_status` is rejected so that an ambiguous request cannot enter the wrong alert lifecycle.
+
+Resource usage severity comes from `resource_usage.resource_type`:
+
+| HetrixTools `resource_type` | Flashduty severity |
+| :--- | :--- |
+| `cpu`, `ram`, `disk`, `network_inbound`, `network_outbound` | Warning |
+| `agent` (no data from the agent), `drive health`, `raid`, `service` (services down) | Critical |
+| Any other value | Critical |
+
+Blacklist severity comes from `blacklisted_now`: greater than 0 (still listed) is Warning, and 0 (removed from every blacklist) is Info.
+
+## Alert content
+---
+
+**Uptime Monitoring**
+
+- **Title**: `<monitor name> is offline` or `<monitor name> is online`
+- **Description**: the error from each probe location (`monitor_errors`), one location per line
+- **Labels**: `check` (monitor name), `resource` (monitor target `monitor_target`), `source` (always `hetrixtools`), `notification` (always `uptime`), `monitor_id`, `monitor_type`, `monitor_category`, `monitor_status`
+
+**Server Monitoring Resource Usage**
+
+- **Title**: `<monitor name>: <resource_type> usage warning`, or `<monitor name>: <resource_type> warning` for notifications without usage figures
+- **Description**: the current and average usage, or the `error` text
+- **Labels**: `check`, `source`, `notification` (always `resource_usage`), `monitor_id`, `resource_type`, `current_usage`, `average_usage`, `average_minutes`, `error`
+
+**Blacklist Monitoring**
+
+- **Title**: `<IP or domain> (<label>) is listed on <count> blacklists` or `<IP or domain> (<label>) is no longer blacklisted`
+- **Description**: each listing blacklist and its delist link, one per line
+- **Labels**: `check` (monitor label), `resource` (IP or domain), `source`, `notification` (always `blacklist`), `blacklisted_before`, `blacklisted_now`, `blacklisted_on` (comma-separated), `report_link`
+
+## Troubleshooting
+---
+
+- **HetrixTools reports a failed delivery**: make sure the webhook is the full push URL, including `integration_key`
+- **Flashduty returns a parameter error**: uptime and resource usage notifications need `monitor_id`, and an uptime notification's `monitor_status` must be `offline` or `online`; every item of a blacklist notification needs `monitor`
+- **No alerts arrive**: make sure the monitor has the contact list with the Flashduty webhook assigned. Resource usage notifications need the contact list on the attached Uptime Monitor
+- **The alert does not recover**: only Uptime Monitoring alerts recover automatically. Make sure the monitor is really back online and still has the contact list assigned when it recovers
+
+For field definitions, see the HetrixTools docs: [Uptime Monitoring Webhook Notifications](https://docs.hetrixtools.com/uptime-monitoring-webhook-notifications/), [Server Monitoring Resource Usage Webhook Notifications](https://docs.hetrixtools.com/server-monitoring-resource-usage-webhook-notifications/), and [Blacklist Monitoring Webhook Notifications](https://docs.hetrixtools.com/blacklist-monitoring-webhook-notifications/).

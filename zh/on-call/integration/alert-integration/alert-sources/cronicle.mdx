@@ -1,0 +1,131 @@
+---
+title: "Cronicle 告警集成"
+description: "通过 Cronicle 的事件 Web Hook，将定时任务失败和启动失败同步到 Flashduty On-call，下一次成功执行时自动恢复。"
+keywords: ["告警集成", "Cronicle", "定时任务", "任务调度", "Webhook"]
+---
+
+通过 Cronicle 的事件 Web Hook（Event Web Hook），把定时任务（Job）的失败和启动失败通知同步到 Flashduty On-call。每个 Cronicle 事件（Event，即一条任务定义）对应一条 Flashduty 告警：任务失败或无法启动时触发，同一事件的下一次任务成功结束时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Cronicle**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Cronicle**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Cronicle 中配置
+---
+
+<Steps>
+<Step title="填写 Web Hook URL">
+
+按需选择下列任一位置，把 Flashduty 的完整推送地址填入：
+
+- 单个事件：在 Cronicle 控制台打开 **Schedule**，编辑事件，在 **Notification** 区域的 **Web Hook URL** 中粘贴
+- 一类事件：在 **Admin → Categories** 编辑分类，填写该分类的 Web Hook URL，分类下所有事件都会推送
+- 全部事件：在 Cronicle 配置文件 `conf/config.json` 中设置 `universal_web_hook`，修改后重启 Cronicle
+
+<Note>
+Cronicle 在任务开始和结束时都会发送 HTTP POST 请求（JSON 格式）。Flashduty 只处理任务结束（`job_complete`）和启动失败（`job_launch_failure`），任务开始（`job_start`）通知会被确认并忽略。如果不想发送开始通知，可在 `web_hook_text_templates` 中删除 `job_start` 项。
+</Note>
+
+</Step>
+
+<Step title="验证生命周期">
+
+让事件执行一次失败的任务（例如脚本以非 0 退出码结束），确认 Flashduty 收到 Critical 告警；把脚本改好后再运行一次，确认原告警自动关闭。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+只有同一事件的下一次任务成功结束才会关闭告警。已删除、停用或不再运行的事件不会再发出恢复通知，请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 24 小时。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Cronicle 以 JSON 格式 POST 以下字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `action` | `job_start`、`job_complete` 或 `job_launch_failure` | 决定是否创建告警，标签 `action` |
+| `event` | 事件 ID | Alert Key，标签 `event_id` |
+| `event_title` | 事件标题 | 告警标题，标签 `check` |
+| `id` | 任务 ID，每次执行都不同 | 标签 `job_id` |
+| `code` | 插件返回的退出码，`0` 表示成功 | 决定触发或恢复，标签 `code` |
+| `description` | 插件返回的说明，失败时通常是错误信息 | 写入描述 |
+| `hostname` | 执行任务的服务器 | 标签 `host`，写入描述 |
+| `plugin_title` / `category_title` | 插件和分类名称 | 标签 `plugin`、`category` |
+| `job_details_url` / `edit_event_url` | 任务详情和事件编辑页链接 | 写入描述 |
+
+请求体中还包含事件参数 `params` 和 Web Hook 地址 `web_hook`，Flashduty 不读取也不保存这两项。
+
+## Alert Key
+---
+
+Flashduty 使用 `event`（事件 ID）作为 Alert Key。同一事件的每次任务都携带相同的 `event`，只有任务 ID `id` 每次不同，因此同一事件的失败、启动失败和后续成功会落在同一条告警上。修改事件标题、退出码或执行服务器不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+Cronicle 的通知不区分告警等级，定时任务失败按 Critical 处理：
+
+| 通知 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `job_complete` 且 `code` 为 `0` | 恢复，原等级为 Critical |
+| `job_complete` 且 `code` 不为 `0` | Critical |
+| `job_launch_failure` | Critical |
+| `job_start` | 忽略，不创建告警 |
+
+Cronicle 的 Web Hook 没有测试按钮；需要验证连通性时，运行一次事件即可。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="任务设置了失败重试，会在每次重试失败时都收到通知吗？">
+
+不会。Cronicle 在重试用尽、任务最终结束时才发送 `job_complete`，重试过程中不发送通知。
+
+</Accordion>
+
+<Accordion title="启动失败会重复推送吗？">
+
+会。定时事件每分钟都会重新尝试启动，目标服务器不可用时每次都会发送 `job_launch_failure`。这些通知携带相同的 Alert Key，会合并到同一条告警中，不会产生多条告警。
+
+</Accordion>
+
+<Accordion title="可以只对部分事件推送吗？">
+
+Web Hook URL 可以设置在单个事件或分类上，只在需要的位置填写即可。也可以在 Flashduty 共享集成的路由规则中按标签 `event_id` 或 `check` 分流。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Cronicle 没有推送**：确认 Web Hook URL 是包含 `integration_key` 的完整推送地址，并把 `debug_level` 调到 9，在 Cronicle 日志中查看 `Web Hook Error` 和 `Web Hook Response` 记录
+- **Flashduty 返回参数错误**：确认请求体包含 `action`、`event`，且 `job_complete` 通知包含 `code`
+- **告警没有恢复**：确认同一事件之后有一次 `code` 为 `0` 的任务结束，且该事件配置了 Web Hook URL
+
+字段说明请参阅 Cronicle 官方文档 [Event Web Hook](https://github.com/jhuckaby/Cronicle/blob/master/docs/WebUI.md#event-web-hook)。

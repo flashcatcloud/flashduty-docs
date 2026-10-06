@@ -1,0 +1,135 @@
+---
+title: "NetBeez 告警集成"
+description: "通过 NetBeez Webhook 将网络监控的告警（Alert）和故障（Incident）通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "NetBeez", "网络监控", "Webhook", "alert_dedup_id", "incident_id"]
+---
+
+通过 NetBeez 的 Webhook 集成，把网络监控产生的告警（Alert）和故障（Incident）通知同步到 Flashduty On-call。NetBeez 的每个告警、每个故障都成对发送“打开”和“清除”两条通知：打开时 Flashduty 触发告警，清除时关闭同一条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **NetBeez**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **NetBeez**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 NetBeez 中配置
+---
+
+<Steps>
+<Step title="启用 Webhook 集成">
+
+1. 使用管理员账号登录 NetBeez（BeezKeeper 13.0 及以上版本支持 Webhook）
+2. 进入 **Settings → Integrations → Webhooks**，启用该集成
+3. 将 Flashduty 集成的完整推送地址粘贴到 Webhook URL 并保存
+4. 可使用页面上的测试功能验证地址。Flashduty 对不含事件类型（`event_type` 或 `event`）的请求返回成功且不创建告警
+
+</Step>
+
+<Step title="选择要发送的通知类型">
+
+在同一页面的通知设置里，按需勾选要发送到 Webhook 的通知：Agent 设备告警、Agent / Target / WiFi Profile / 计划测试的告警，以及 Agent / Target / WiFi Profile 的故障。每一类可以选择单条通知或聚合通知，聚合通知会在一个请求里带多条事件，Flashduty 逐条处理。
+
+<Note>
+告警和故障是两套独立的通知：同一次网络问题如果两类都勾选，Flashduty 会产生两条告警。只想按故障响应时，只勾选故障类通知即可。
+</Note>
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个 Target 或 Agent 真正异常（例如临时停用某个 Agent），确认 Flashduty 收到活动告警；恢复后确认原告警关闭。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+NetBeez 以 `application/json` POST 一个只有 `data` 字段的对象：单条通知时 `data` 是对象，聚合通知时是数组。Flashduty 直接解析，无需配置模板。
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `alert_dedup_id` | 告警的去重 ID，清除通知携带打开通知的 ID | Alert Key（告警类通知），标签 `alert_dedup_id` |
+| `event_type` | `ALERT_OPEN` 或 `ALERT_CLEARED` | 触发或恢复 |
+| `severity` / `severity_name` | 打开时不大于 5，清除时为 6 | 告警等级，标签 `severity`、`severity_name` |
+| `event` | `INCIDENT_OPEN` 或 `INCIDENT_CLEARED` | 故障类通知的触发或恢复 |
+| `incident_id`、`incident_ts` | 故障 ID 和故障开始时间（毫秒时间戳） | 标签 `incident_id`、`incident_ts`；`incident_ts` 参与 Alert Key |
+| `agent_id` / `target_id` / `wifi_profile_id` | 故障所属对象的 ID | 参与故障的 Alert Key，同名标签 |
+| `agent` / `target` / `wifi_profile` | 对象名称 | 告警标题，标签同名，标签 `check` |
+| `destination` | 测试的目标主机 | 标签 `destination`、`resource` |
+| `test_type` | 测试类型，如 `DnsTest`、`HttpTest` | 标签 `test_type` |
+| `message` | 说明文字 | 告警标题和描述 |
+| `url` | 故障在 NetBeez 界面中的链接 | 标签 `url` |
+
+告警标题为“对象名称: 说明文字”，对象名称依次取 `target`、`wifi_profile`、`agent`、`destination`。
+
+## Alert Key
+---
+
+- 告警类通知使用 `alert_dedup_id`。NetBeez 文档说明同一个告警的打开和清除通知共享它，按它归并即可。
+- 故障类通知使用“对象类型 + 对象 ID + `incident_ts`”。`incident_ts` 始终是故障开始时间，打开和清除通知一致。NetBeez 文档也建议按 `incident_id` 关联故障，但文档中的清除通知示例带了与打开通知不同的 `incident_id`，所以 Flashduty 不依赖它，`incident_id` 只作为标签保留。
+- 告警类和故障类的 Alert Key 互不相同，修改对象名称、说明文字或等级不会改变 Alert Key。
+
+告警类通知缺少 `alert_dedup_id`，或故障类通知缺少对象 ID 或 `incident_ts` 时，Flashduty 返回参数错误，因为无法可靠地把清除通知关联到原告警。
+
+## 状态和告警等级
+---
+
+| NetBeez 通知 | Flashduty 状态或等级 |
+| :--- | :--- |
+| 告警 `ALERT_OPEN`，`severity` 为 1 或 2 | Critical |
+| 告警 `ALERT_OPEN`，其他 `severity`（含缺失） | Warning |
+| 告警 `ALERT_CLEARED` | 恢复 |
+| 故障 `INCIDENT_OPEN` | Warning |
+| 故障 `INCIDENT_CLEARED` | 恢复 |
+
+NetBeez 文档只说明打开的告警 `severity` 不大于 5，等级名称形如 `alert`、`critical`，没有给出完整对照表，因此只把 1 和 2 映射为 Critical。需要调整时，可在协作空间的 **配置** 中用规则改写等级。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="聚合通知里同时有打开和清除事件，会怎样？">
+
+Flashduty 按 `alert_ts` 从早到晚逐条处理，同一告警的打开事件先于清除事件，最终状态为恢复。
+
+</Accordion>
+
+<Accordion title="Webhook 测试会创建告警吗？">
+
+NetBeez 的测试发送示例数据。Flashduty 只把含 `event_type` 或 `event` 的请求当作告警，其他请求返回成功且不创建告警。如果示例数据被识别为告警，请在 Flashduty 中手动关闭。
+
+</Accordion>
+
+<Accordion title="NetBeez 重试会产生重复告警吗？">
+
+不会。NetBeez 对非 2xx 响应重试，同一事件的 Alert Key 不变，重复投递会合并到同一条告警。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **NetBeez 推送失败**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求体包含 `data`，告警带 `alert_dedup_id`，故障带对象 ID 和 `incident_ts`
+- **告警没有恢复**：确认 NetBeez 已勾选对应类型的清除通知（打开和清除随同一个通知类型发送）
+
+字段说明请参阅 NetBeez 官方文档 [NetBeez Webhook Payloads Reference](https://community.netbeez.net/t/netbeez-webhook-payload-reference/320)。

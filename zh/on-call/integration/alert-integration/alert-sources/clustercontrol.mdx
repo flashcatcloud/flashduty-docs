@@ -1,0 +1,133 @@
+---
+title: "ClusterControl 告警集成"
+description: "通过 ClusterControl 通知服务（Notification Services）的 Webhook，将 Severalnines ClusterControl 的告警和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "ClusterControl", "Severalnines", "Notification Services", "Webhook", "数据库运维", "cmon-events"]
+---
+
+通过 Severalnines ClusterControl 的 **Notification Services → Webhook**，把数据库集群告警（Alarm）的产生（`CREATED`）和结束（`ENDED`）同步到 Flashduty On-call。每个 ClusterControl 告警对应一条 Flashduty 告警：告警产生时触发，告警结束时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **ClusterControl**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **ClusterControl**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 ClusterControl 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 登录 ClusterControl 控制台，进入 **Settings → Notification services → Add new integration → Webhook**
+2. **Integration name** 可填写 `Flashduty`
+3. 将 Flashduty 集成的完整推送地址粘贴到 **Url**
+4. 点击 **Test credentials** 验证配置
+
+</Step>
+
+<Step title="选择集群和事件">
+
+在 **Notification settings** 中选择要通知的 **Clusters** 和 **Events**（例如 All Warnings Events 与 All Critical Events），点击 **Finish** 保存。
+
+</Step>
+
+<Step title="验证生命周期">
+
+触发一条真实告警（例如停止一个被管理的数据库节点），确认 Flashduty 收到活动告警；节点恢复后，ClusterControl 发送 `ENDED` 通知，Flashduty 中的原告警自动恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+ClusterControl 只有在许可证有效（试用或付费）时才发送通知；许可证过期或为社区版时，`cmon-events` 会记录 `Skipping an event due to no license`，不发送任何通知。
+
+ClusterControl 只对集成创建之后产生的告警发送通知，此前已存在的告警不会补发。通知由 ClusterControl 节点上的 `cmon-events` 进程（软件包 `clustercontrol-notifications`，默认监听 9510 端口）发出，请确认 ClusterControl 节点能访问 Flashduty 推送地址。
+</Warning>
+
+## 推送内容
+---
+
+ClusterControl 以 JSON 格式 POST 以下字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `id` | 告警 ID | Alert Key，标签 `alarm_id` |
+| `status` | `CREATED`、`CHANGED` 或 `ENDED` | 触发、更新或恢复，标签 `status` |
+| `component` | 告警类别，例如 `Node`、`Host` | 标签 `component` |
+| `hostname` | 相关主机 | 标签 `host` |
+| `title` | 告警标题 | 告警标题，标签 `check` |
+| `message` | 详细信息 | 告警描述 |
+| `recommendation` | 处理建议 | 告警描述 |
+| `severity` | `CRITICAL` 或 `WARNING` | 告警等级，标签 `severity` |
+
+告警标题使用 `title`；为空时使用 `ClusterControl alarm <id>`。
+
+## Alert Key
+---
+
+Flashduty 使用告警 `id` 作为 Alert Key。ClusterControl 文档说明，告警恢复时会发送同一个告警 ID、`status` 为 `ENDED` 的通知，因此产生、更新和恢复通知落在同一条 Flashduty 告警上；不同 `id` 生成不同的告警。修改标题、主机或等级不会改变 Alert Key。
+
+文档记载的推送内容不含集群 ID（ClusterControl 2.1.0 还会发送 `controller_hostname`、`cluster_id`、`cluster_name`，Flashduty 不使用这些字段），告警 ID 只在同一个 ClusterControl 控制器内唯一。如果有多个 ClusterControl 控制器，请为每个控制器创建独立的 Flashduty 集成。
+
+请求中缺少 `id` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+| ClusterControl 字段 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `severity` = `CRITICAL` | Critical |
+| `severity` = `WARNING`、为空或其他值 | Warning |
+| `status` = `CREATED` / `CHANGED` | 触发或更新告警，使用上表的等级 |
+| `status` = `ENDED` | 恢复，等级保持原告警的等级 |
+
+`status` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。ClusterControl 默认只转发 `CREATED` 和 `ENDED`；`CHANGED` 需要通过 `cmon-events` 的 `allowed_events` 参数开启。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="点击 Test credentials 后 ClusterControl 提示失败？">
+
+该按钮发送一条固定的测试告警（`id` 为 1，`component` 为 `ServiceCredentialsTest`，标题为 "Test credentials alarm"）。Flashduty 返回 HTTP 200，并以独立的 Alert Key 新建一条 Info 告警，不会与真实告警合并。测试没有对应的恢复通知，请在协作空间中手动关闭。
+
+</Accordion>
+
+<Accordion title="已经存在的告警为什么没有同步？">
+
+ClusterControl 只转发集成创建之后产生的告警。已存在的告警结束时发送的 `ENDED` 通知，在 Flashduty 中没有对应的活动告警，不会产生新的告警。
+
+</Accordion>
+
+<Accordion title="告警被静音（Mute）后会推送吗？">
+
+ClusterControl 中被静音的告警类型在取消静音前不会发送任何通知。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 没有收到告警**：确认 URL 是完整的推送地址（含 `integration_key`），并检查 `cmon-events` 进程运行正常、已为对应集群和事件开启通知
+- **Flashduty 返回参数错误**：确认请求体为 ClusterControl 的 JSON，且 `id`、`status` 非空
+- **告警没有恢复**：确认 ClusterControl 中该告警已结束，并且恢复通知的 `id` 与触发通知相同
+
+字段说明请参阅 ClusterControl 官方文档 [Notification Services](https://docs.severalnines.com/clustercontrol/latest/user-guide/integration/notification-services/)。

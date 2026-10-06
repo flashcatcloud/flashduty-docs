@@ -1,0 +1,144 @@
+---
+title: "Pulseway alert integration"
+description: "Sync Pulseway RMM device notifications to Flashduty On-call through Pulseway notification webhooks."
+keywords: ["alert integration", "Pulseway", "RMM", "remote monitoring", "notification webhook", "webhook"]
+---
+
+Pulseway is a remote monitoring and management (RMM) platform for IT teams and MSPs. When a device runs low on disk space, a service stops, a machine goes offline and so on, Pulseway raises a notification. This integration uses Pulseway notification webhooks and turns each notification into one Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Pulseway**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Pulseway** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Pulseway
+---
+
+Pulseway notification webhooks are created through the REST API. One webhook covers every device in the selected organizations, and nothing is installed on the devices.
+
+<Steps>
+<Step title="Prepare an API token">
+
+Create a REST API token in the Pulseway web console and note the token ID and token secret. The REST API uses HTTP Basic authentication with the token ID as the user name and the token secret as the password. The token is only used to create the webhook; Flashduty does not need it.
+
+</Step>
+
+<Step title="Create the notification webhook">
+
+Call `POST /v3/notifications/webhooks` and set `Url` to the full push URL of the Flashduty integration:
+
+```bash
+curl -X POST https://api.pulseway.com/v3/notifications/webhooks \
+  -u "<TOKEN_ID>:<TOKEN_SECRET>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "Name": "Flashduty",
+    "Url": "https://api.flashcat.cloud/event/push/alert/pulseway?integration_key=<your_integration_key>",
+    "Priorities": ["Critical", "Elevated"],
+    "Language": "en"
+  }'
+```
+
+| Field | Description |
+| :--- | :--- |
+| `Name` | Webhook name, to recognize it in the list |
+| `Url` | The push URL of the Flashduty integration, including `integration_key` |
+| `Priorities` | Notification priorities to send: `Low`, `Normal`, `Elevated`, `Critical`. Priorities not listed are not sent |
+| `OrganizationIds` | Optional. Limits the notifications to these organizations; leave it out to send all organizations |
+| `Language` | Optional. Language of the notification title and message, `en` or `de`; default `en` |
+
+For a self-hosted Pulseway Enterprise Server, replace `https://api.pulseway.com/v3/` with `https://<your-server-name>/api/v3/`.
+
+The `Id` in the response is the webhook ID; use `GET`, `PATCH` or `DELETE /v3/notifications/webhooks/<Id>` to view, change or delete the webhook later. The `SecretKey` in the response is what Pulseway uses to compute the `x-hmac-signature` header. Flashduty identifies the integration by the `integration_key` in the push URL and does not check that header, so you do not need to keep the key. Protect the push URL like a secret.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+A Pulseway notification is a one-shot event: when the problem clears, Pulseway sends no recovery notification. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit), counted from **Incident trigger**. Closing the incident also closes its alerts.
+
+</Step>
+
+<Step title="Verify">
+
+On a monitored test device, trigger a notification at one of the selected priorities, for example by stopping a monitored service. The matching alert appears in Flashduty.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the notification `Id` as the Alert Key, so each notification opens its own alert. While a problem persists, Pulseway notifies again with a new `Id`, which opens a new alert; the channel can group these alerts into one incident by rule. A device coming back online is a separate notification in Pulseway and does not close the earlier alert.
+
+## Alert severity
+---
+
+| Pulseway `Priority` | Flashduty severity |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Elevated` | Warning |
+| `Normal` | Info |
+| `Low` | Info |
+| Other or empty | Warning |
+
+Priority matching is case-insensitive.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Notification title `Title` |
+| `resource` / `device_id` | Device ID `DeviceIdentifier` |
+| `organization_id` | Organization ID `OrganizationId` |
+| `priority` | Notification priority `Priority` |
+| `notification_id` | Notification ID `Id`, the source of the Alert Key |
+| `notified_at` | Notification time `DateTime` |
+
+The alert title is the notification `Title` and the description is the notification `Message`.
+
+## FAQ
+---
+
+<AccordionGroup>
+
+<Accordion title="No alert appears in Flashduty after creating the webhook?">
+
+Use `GET /v3/notifications/webhooks` to confirm that `Url` is the full push URL and that `Priorities` includes the priority of the notifications that actually fire. With only `Critical` selected, an environment without serious problems sends nothing.
+
+</Accordion>
+
+<Accordion title="Do I need to configure signature verification?">
+
+No. Flashduty identifies the integration only by `integration_key` and does not check `x-hmac-signature`.
+
+</Accordion>
+
+<Accordion title="Why does the alert never close?">
+
+Pulseway sends no recovery notification. Turn on the auto-resolve timeout of the channel, or close the alert in Flashduty by hand.
+
+</Accordion>
+
+</AccordionGroup>
+
+For field details, see [Pulseway REST API: Notification Webhooks](https://api.pulseway.com/).

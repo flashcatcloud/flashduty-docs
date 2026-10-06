@@ -1,0 +1,150 @@
+---
+title: "Aqua Tracee alert integration"
+description: "Send runtime security detections from Tracee to Flashduty On-call through its webhook output destination."
+keywords: ["alert integration", "Aqua Tracee", "Tracee", "eBPF", "runtime security", "webhook"]
+---
+
+Use Tracee's webhook output destination to send runtime security detections to Flashduty On-call. When the same detection rule fires again in the same container, the events merge into one alert. Tracee's webhook sends detections only and no recovery notification, so alerts are closed by the channel's auto-close or manually.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Aqua Tracee**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Aqua Tracee** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Tracee
+---
+
+<Steps>
+<Step title="Add a webhook output destination">
+
+Tracee defines output destinations with the `--output` flag or the `output:` section of its configuration file. Put the Flashduty push URL in `url` and keep the default `json` format. The webhook POSTs every event to that URL as `application/json`, with no signature and no extra headers needed.
+
+Command line:
+
+```console
+tracee \
+  --output destinations.flashduty.type=webhook \
+  --output 'destinations.flashduty.url=https://api.flashcat.cloud/event/push/alert/tracee?integration_key=<your_integration_key>'
+```
+
+Configuration file:
+
+```yaml
+output:
+  destinations:
+    - name: flashduty
+      type: webhook
+      url: https://api.flashcat.cloud/event/push/alert/tracee?integration_key=<your_integration_key>
+```
+
+</Step>
+
+<Step title="Send detections only">
+
+Flashduty creates alerts only for detection events, which carry a `threat` field. Events without `threat` (for example `sched_process_exec`) are acknowledged and dropped. To avoid sending every event to Flashduty, use a stream so that only detection events reach this destination:
+
+```yaml
+output:
+  destinations:
+    - name: flashduty
+      type: webhook
+      url: https://api.flashcat.cloud/event/push/alert/tracee?integration_key=<your_integration_key>
+  streams:
+    - name: flashduty_stream
+      destinations:
+        - flashduty
+      filters:
+        events:
+          - anti_debugging
+          - <your_detection_event_name>
+```
+
+List the detection events you want to alert on under `events` (events produced by a detector or signature, such as `anti_debugging`).
+
+<Warning>
+Use the default `json` format. With a custom `gotemplate=` template, Flashduty still parses the default JSON field names, so missing fields lead to missing labels or alerts that merge together.
+</Warning>
+
+</Step>
+
+<Step title="Turn on auto-close">
+
+Tracee's detections have no recovery notification: after a threat is handled, Flashduty receives nothing.
+
+Turn on [auto-close](/en/on-call/channel/create-edit) in the channel that receives these alerts, with a suggested duration of 24 hours. When the same rule fires again in the same container within the grouping window, the same alert is updated; after the alert is closed, the next detection opens a new one.
+
+</Step>
+
+<Step title="Verify">
+
+Tracee has no "send test notification" feature. Trigger a real detection in Tracee, or send a sample detection to the push URL:
+
+```console
+curl -X POST 'https://api.flashcat.cloud/event/push/alert/tracee?integration_key=<your_integration_key>' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"anti_debugging","threat":{"name":"Anti-Debugging detected","severity":1,"description":"example"},"workload":{"process":{"host_pid":1234,"pid":1234}}}'
+```
+
+Confirm that an active alert appears in Flashduty with `threat.name` as the title. The sample opens a real alert, so close it manually after verifying.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Tracee events have no unique ID. Flashduty builds the Alert Key from the rule identity plus where the event ran (the MD5 of `"tracee"`, the rule identity and the location, separated by NUL):
+
+- **Rule identity**: the first non-empty of `threat.properties.signatureID`, `threat.properties.id` and the event `name`. Tracee documents `threat.properties.signatureID` as the signature ID of a detection; events from newer detectors do not carry it, so the event `name` stands in
+- **Location**: `workload.container.id` for an event inside a container; otherwise `workload.process.host_pid`, then `workload.process.pid`
+
+So repeated hits of the same rule in the same container merge into one alert, while different rules or different containers stay separate alerts. Changes to the event time, process name, event data, severity and `threat.name` do not change the Alert Key.
+
+<Note>
+Events outside a container are told apart by process ID only. Tracee events carry no hostname, so the same rule on two hosts with the same process ID merges into one alert; in that case use a separate integration per host.
+</Note>
+
+## Severity
+---
+
+In the default JSON, `threat.severity` is a number (`INFO`=0 to `CRITICAL`=4):
+
+| Tracee `threat.severity` | Flashduty severity |
+| :--- | :--- |
+| `4` (CRITICAL), `3` (HIGH) | Critical |
+| `2` (MEDIUM) | Warning |
+| `1` (LOW), `0` (INFO) | Info |
+| Empty or unknown | Warning |
+
+## Labels
+---
+
+Flashduty sets these labels when they have a value: `rule_id`, `signature_id`, `event_name`, `category`, `threat_severity`, `mitre_tactic`, `mitre_technique_id`, `mitre_technique`, `container_id`, `container_name`, `image`, `pod`, `namespace`, `process`, `executable`, `pid`, `host_pid`, `policies`, `detected_from`. The event's `data` array (file paths, command arguments and so on) is never copied into labels.
+
+## Troubleshooting
+---
+
+- **Tracee logs `Error sending webhook, http status`**: confirm the URL is complete and includes `integration_key`
+- **No alerts arrive**: confirm the event carries a `threat` field; ordinary events create no alert, and the stream's `events` must include the detection event
+- **Alerts do not recover**: Tracee sends no recovery notification; turn on the channel's auto-close or close alerts manually
+- **Alerts from different hosts merge**: events outside a container are told apart by process ID only; see the note under Alert Key
+
+For field details see the [Tracee outputs documentation](https://aquasecurity.github.io/tracee/latest/outputs/) and [Event structure](https://aquasecurity.github.io/tracee/latest/outputs/event-structure/).

@@ -1,0 +1,131 @@
+---
+title: "apcupsd 告警集成"
+description: "通过 apcupsd 的事件脚本把 APC UPS 的断电、电池故障、通信中断等事件推送到 Flashduty 的标准告警事件集成，恢复事件自动关闭告警。"
+keywords: ["告警集成", "apcupsd", "APC UPS", "UPS", "断电告警", "apccontrol", "标准告警事件"]
+---
+
+apcupsd 检测到 UPS 状态变化时会调用 `apccontrol`，`apccontrol` 再执行 `/etc/apcupsd` 目录下与事件同名的可执行文件，并把 UPS 名称作为第一个参数传给它。apcupsd 没有原生的 Webhook，用事件脚本把事件以 [标准告警事件](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 格式推送给 Flashduty 即可：`onbattery` 触发告警，`offbattery` 恢复告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择 标准告警事件**，不是 apcupsd。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **标准告警事件**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **标准告警事件**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 apcupsd 中配置
+---
+
+### 步骤 1：创建推送脚本
+
+在运行 `apcupsd` 的主机上创建 `/etc/apcupsd/flashduty-notify.sh`，把 `URL` 换成上一步复制的推送地址，并设置为可执行（`chmod +x`）。该主机需要安装 `curl`。
+
+```sh
+#!/bin/sh
+# apcupsd event hook: forward a UPS event to a Flashduty Standard Alert Event integration.
+# Usage: flashduty-notify.sh <event> <ups-name>
+URL='https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY'
+
+EVENT="$1"
+UPS="${2:-unknown}"
+
+case "$EVENT" in
+  onbattery)  KEY=power;   STATUS=Warning;  TEXT="on battery" ;;
+  failing|timeout|loadlimit|runlimit)
+              KEY=power;   STATUS=Critical; TEXT="battery limit reached ($EVENT)" ;;
+  offbattery|mainsback)
+              KEY=power;   STATUS=Ok;       TEXT="utility power restored" ;;
+  commfailure) KEY=comm;   STATUS=Critical; TEXT="communication lost" ;;
+  commok)     KEY=comm;    STATUS=Ok;       TEXT="communication restored" ;;
+  changeme|emergency)
+              KEY=battery; STATUS=Critical; TEXT="battery failure ($EVENT)" ;;
+  battdetach) KEY=battconn; STATUS=Warning; TEXT="battery disconnected" ;;
+  battattach) KEY=battconn; STATUS=Ok;      TEXT="battery reconnected" ;;
+  *) exit 0 ;;
+esac
+
+esc() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+JSON=$(printf '{"title_rule":"UPS %s: %s","event_status":"%s","alert_key":"apcupsd:%s:%s","description":"apcupsd event %s on UPS %s","labels":{"resource":"%s","check":"%s","apcupsd_event":"%s"}}' \
+  "$(esc "$UPS")" "$TEXT" "$STATUS" "$(esc "$UPS")" "$KEY" "$(esc "$EVENT")" "$(esc "$UPS")" "$(esc "$UPS")" "$KEY" "$(esc "$EVENT")")
+
+curl -fsS -m 10 -X POST -H 'Content-Type: application/json' -d "$JSON" "$URL" >/dev/null
+exit 0
+```
+
+### 步骤 2：为事件挂接脚本
+
+apcupsd 的定制方式（见 `apccontrol` 手册）：在 `/etc/apcupsd` 目录创建与事件同名的可执行文件，事件发生时 `apccontrol` 会先执行它，脚本以退出码 0 结束时，`apccontrol` 继续执行该事件的默认动作；以退出码 99 结束则跳过默认动作。上面的脚本始终以 0 退出，不会改变 apcupsd 的默认行为（包括关机流程）。
+
+下面的命令为每个事件创建一个只调用推送脚本的事件文件；目录里已经存在同名文件的事件（apcupsd 默认安装的 `onbattery`、`offbattery`、`commfailure`、`commok`、`changeme` 示例脚本就是这种情况）不会被覆盖，命令会提示你手动在文件开头附近加一行调用：
+
+```sh
+for e in onbattery offbattery mainsback failing timeout loadlimit runlimit commfailure commok changeme emergency battdetach battattach; do
+  f="/etc/apcupsd/$e"
+  if [ -e "$f" ]; then
+    echo "$f already exists: add the line  /etc/apcupsd/flashduty-notify.sh $e \"\$1\"  near its top"
+  else
+    printf '#!/bin/sh\n/etc/apcupsd/flashduty-notify.sh %s "$1"\nexit 0\n' "$e" > "$f"
+    chmod +x "$f"
+  fi
+done
+```
+
+事件与告警的对应关系：
+
+| apcupsd 事件 | 含义（apcupsd 手册） | 告警等级 | Alert Key |
+| :--- | :--- | :--- | :--- |
+| `onbattery` | 停电后，UPS 在 `ONBATTERYDELAY` 到期时仍使用电池 | Warning | `apcupsd:<UPS 名称>:power` |
+| `failing`、`timeout`、`loadlimit`、`runlimit` | 电池即将耗尽，或达到时间、电量、剩余运行时间的限制，随后会关机 | Critical | `apcupsd:<UPS 名称>:power` |
+| `offbattery`、`mainsback` | 市电恢复 | 恢复 | `apcupsd:<UPS 名称>:power` |
+| `commfailure` | 与 UPS 通信中断 | Critical | `apcupsd:<UPS 名称>:comm` |
+| `commok` | 与 UPS 的通信恢复 | 恢复 | `apcupsd:<UPS 名称>:comm` |
+| `changeme`、`emergency` | 电池故障（市电正常但电池不工作，或电池低电量而市电在线） | Critical | `apcupsd:<UPS 名称>:battery` |
+| `battdetach` | 检测到 UPS 电池被断开 | Warning | `apcupsd:<UPS 名称>:battconn` |
+| `battattach` | 电池重新接上 | 恢复 | `apcupsd:<UPS 名称>:battconn` |
+
+`powerout`（UPS 一切换到电池就触发）没有挂接：`onbattery` 只在停电持续超过 `ONBATTERYDELAY` 后触发，可以避免市电瞬断产生告警。
+
+### 步骤 3：验证
+
+在主机上手动运行事件脚本，先触发再恢复：
+
+```bash
+/etc/apcupsd/onbattery myups
+/etc/apcupsd/offbattery myups
+```
+
+在 Flashduty 中应先看到告警 `UPS myups: on battery`，随后被恢复。手动运行 `onbattery` 会同时执行该事件文件里已有的其他内容；只想测试推送时，直接运行 `/etc/apcupsd/flashduty-notify.sh onbattery myups`。
+
+## 恢复与去重
+---
+
+- `onbattery`、失效类事件（`failing`、`timeout`、`loadlimit`、`runlimit`）与 `offbattery`、`mainsback` 共用 Alert Key `apcupsd:<UPS 名称>:power`：`onbattery` 触发告警，随后的失效类事件把它升级为 Critical，市电恢复时被恢复
+- `commfailure` 与 `commok`、`battdetach` 与 `battattach` 各自成对
+- `changeme` 和 `emergency` 没有对应的恢复事件。apcupsd 在电池故障持续期间每 9 小时重复发送 `changeme`。更换电池后请在 Flashduty 手动关闭告警，或在协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 24 小时；电池仍未更换时，下一次 `changeme` 会重新触发告警
+- 多台 UPS 的告警互不影响：Alert Key 中带有 UPS 名称（`apcupsd.conf` 中配置的名称）
+
+## 排查问题
+---
+
+- **没有收到告警**：确认 `/etc/apcupsd` 下与事件同名的文件存在且可执行，`flashduty-notify.sh` 中的 `URL` 正确；手动运行事件文件检查输出
+- **告警没有恢复**：确认恢复事件（`offbattery`、`mainsback`、`commok`、`battattach`）也挂接了脚本
+- **Flashduty 返回参数错误**：确认 `URL` 是完整的推送地址，包含 `integration_key`
+
+更多说明请参阅 apcupsd 的 [apccontrol 手册](https://svn.code.sf.net/p/apcupsd/svn/trunk/doc/apccontrol.8)。

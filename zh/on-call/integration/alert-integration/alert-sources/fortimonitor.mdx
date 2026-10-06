@@ -1,0 +1,168 @@
+---
+title: "FortiMonitor 告警集成"
+description: "通过 Webhook 将 FortiMonitor 的故障和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "FortiMonitor", "Panopta", "Fortinet", "Webhook", "Alert Timeline", "outage_id"]
+---
+
+通过 FortiMonitor（原 Panopta）的 Webhook 集成，把故障（Incident）的发生和恢复通知同步到 Flashduty On-call。每个 FortiMonitor 故障对应一条 Flashduty 告警：故障发生时触发，告警时间线（Alert Timeline）的升级通知合并到同一条告警，故障恢复时关闭这条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **FortiMonitor**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **FortiMonitor**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 FortiMonitor 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 集成">
+
+1. 登录 FortiMonitor，进入 **Teams & Activity → Integrations**，找到 **Webhook** 卡片，点击 **Configure**
+2. **Title** 填写 `Flashduty`，后续在告警时间线中按这个名称选择
+3. **Trigger Event** 选择故障发生（outage）事件
+4. **Request Method** 选择 **POST**
+5. **Postback URL** 粘贴 Flashduty 集成的完整推送地址
+6. **Authentication Method** 选择 **None**
+7. **Payload Type** 选择 **Form Variables**，按下表逐行添加变量（变量名区分大小写，值为 FortiMonitor 宏）：
+
+| 变量名 | 值 |
+| :--- | :--- |
+| `trigger` | `$trigger` |
+| `outage_id` | `$outage_id` |
+| `severity` | `$severity` |
+| `name` | `$name` |
+| `fqdn` | `$fqdn` |
+| `server_id` | `$server_id` |
+| `items` | `$items` |
+| `reasons` | `$reasons` |
+| `duration` | `$duration` |
+| `tags` | `$tags` |
+
+8. 点击 **Save**
+
+</Step>
+
+<Step title="添加恢复事件">
+
+在同一个 Webhook 中点击 **Add Event**，**Trigger Event** 选择故障恢复（clear）事件，其余字段和变量与上一步完全相同，点击 **Save**。
+
+缺少这一步时，Flashduty 只会收到故障通知，告警不会自动恢复。
+
+</Step>
+
+<Step title="在告警时间线中使用 Webhook">
+
+1. 打开需要接入的告警时间线（Alert Timeline），或通过 **Add → Alert Timeline** 新建一条
+2. 点击 **Add New Alert Event**，设置故障发生后多久通知，在集成中选择 `Flashduty` Webhook
+3. 确认需要接入的实例（Instance）或实例组使用了这条告警时间线
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个被监控的指标真正越过阈值（例如临时调低阈值），等待告警时间线的通知时间到达，确认 Flashduty 收到活动告警；再恢复阈值，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Note>
+FortiMonitor 的 Webhook 请求来自固定 IP：`104.197.35.194/32` 和 `35.185.29.9/32`。如果推送地址所在网络有访问限制，请放行这两个地址。
+</Note>
+
+<Warning>
+**Payload Type** 必须选择 **Form Variables**，并严格按上表填写变量名。默认的 Raw Payload 是 Google Chat 卡片格式，不包含 Flashduty 需要的字段，推送会被拒绝。
+</Warning>
+
+## 推送内容
+---
+
+FortiMonitor 按上表以表单格式 POST 以下字段，每个故障、每次事件单独发送一次请求：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `trigger` | 事件类型：`outage`、`clear`、`ack`、`broadcast` | 触发、恢复或忽略，标签 `trigger` |
+| `outage_id` | 故障 ID，可能为负数 | Alert Key，标签 `outage_id` |
+| `severity` | `critical` 或 `warning` | 告警等级，标签 `severity` |
+| `name` | 实例名称 | 告警标题，标签 `host` |
+| `fqdn` | 实例的完整域名 | 标签 `resource` |
+| `server_id` | 实例 ID | 标签 `server_id` |
+| `items` | 发生故障的服务或指标 | 告警标题，标签 `check` |
+| `reasons` | 故障原因 | 告警描述 |
+| `duration` | 故障持续时间，恢复时才有值 | 标签 `duration` |
+| `tags` | 实例标签 | 标签 `tags` |
+
+告警标题为 `<实例名称>: <故障指标>`；实例名称为空时使用完整域名，两者都为空时使用 `FortiMonitor incident <outage_id>`。
+
+## Alert Key
+---
+
+Flashduty 使用 `outage_id`（FortiMonitor 故障 ID）作为 Alert Key。同一个故障的发生、升级通知和恢复通知携带相同的 `outage_id`，因此会落在同一条告警上。同一个实例、同一个指标恢复后再次出故障时，FortiMonitor 会生成新的故障 ID，Flashduty 也会生成新的告警。修改实例名称、故障原因或告警等级不会改变 Alert Key。
+
+请求中缺少 `outage_id`，或值仍是未替换的 `$outage_id` 时，Flashduty 会返回参数错误，因为无法把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+| FortiMonitor `trigger` | Flashduty 处理 |
+| :--- | :--- |
+| `outage` | 触发或更新告警 |
+| `clear` | 恢复告警，保留原等级 |
+| `ack`、`broadcast` | 返回成功，不创建或修改告警 |
+
+| FortiMonitor `severity` | Flashduty 告警等级 |
+| :--- | :--- |
+| `critical` | Critical |
+| `warning` | Warning |
+| 为空或其他值 | Critical |
+
+`trigger` 为空或为其他值的请求会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="告警时间线里有多个通知事件，会产生多条告警吗？">
+
+不会。告警时间线的每个升级事件都会再次推送同一个故障的 `outage` 通知，`outage_id` 相同，会合并到同一条告警中。
+
+</Accordion>
+
+<Accordion title="在 FortiMonitor 中确认（Acknowledge）故障后，Flashduty 告警会被认领吗？">
+
+不会。确认和广播（Broadcast）消息不改变故障状态，Flashduty 收到后直接返回成功，不修改告警。请在 Flashduty 中认领故障。
+
+</Accordion>
+
+<Accordion title="故障很快恢复，Flashduty 没有收到任何通知？">
+
+告警时间线只在故障持续到设定的通知时间后才推送。故障在此之前就恢复时，FortiMonitor 不会发送故障通知，Flashduty 也不会创建告警。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **推送失败**：确认 Postback URL 是完整的推送地址，且包含 `integration_key`；网络有访问限制时放行 FortiMonitor 的推送 IP
+- **Flashduty 返回参数错误**：确认 Payload Type 为 Form Variables，变量名与上表一致，且 `trigger`、`outage_id` 的值分别为 `$trigger`、`$outage_id`
+- **告警没有恢复**：确认 Webhook 已添加 clear 事件，且恢复事件的变量与故障事件相同
+
+宏参数说明请参阅 FortiMonitor 官方文档 [Webhooks](https://docs.fortinet.com/document/fortimonitor/26.3.0/user-guide/826350/webhooks)。

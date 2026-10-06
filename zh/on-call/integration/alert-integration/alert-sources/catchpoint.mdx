@@ -1,0 +1,129 @@
+---
+title: "Catchpoint 告警集成"
+description: "通过 Alert Webhook 的自定义 Template，将 Catchpoint 测试的告警触发、升级和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Catchpoint", "Alert Webhook", "Template", "TestId"]
+---
+
+通过 Catchpoint 的 Alert Webhook 将测试告警同步到 Flashduty On-call。每个 Catchpoint 告警对应一条 Flashduty 告警；同一次生命周期中的 Warning、Critical 和 Improved（恢复）通知会持续更新这条告警。
+
+Catchpoint 的 Alert Webhook 默认发送的 [JSON 格式](https://docs.catchpoint.com/docs/alert-webhook-json-result) 把字段嵌套在 `Setting` 对象下，不带能唯一标识一次告警生命周期的字段。Flashduty 要求改用 Catchpoint 的 **Template** 格式，粘贴下方给出的 JSON 模板——模板里的宏会被替换成对应告警的值。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Catchpoint**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Catchpoint**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Catchpoint 中配置
+---
+
+<Steps>
+<Step title="创建 Alert Webhook">
+
+1. 进入 Catchpoint 控制台，打开左侧导航的 **Integrations**
+2. 找到 **Webhook**，点击 **Add URL → Alert Webhook**
+3. 名称可填写 `Flashduty`，状态设为 **Active**
+4. **Endpoint URL** 粘贴 Flashduty 集成的完整推送地址
+
+<Warning>
+Catchpoint 默认每个 division/client 下最多只能创建 3 个 Alert Webhook Endpoint。如果已经用满，需要联系 Catchpoint 的 CSM 提升上限。
+</Warning>
+
+</Step>
+
+<Step title="选择 Template 格式，粘贴 JSON 模板">
+
+**Format** 选择 **Template**，点击 **New Template**，粘贴以下 JSON：
+
+```json
+{
+  "test_id": "${testId}",
+  "test_name": "${testName}",
+  "test_url": "${testUrl}",
+  "test_link": "${testLink}",
+  "test_path": "${testPath}",
+  "description": "${TestDescription}",
+  "alert_group_item_id": "${alertGroupItemId}",
+  "alert_initial_trigger_epoch": "${alertInitialTriggerDateLocalEpoch}",
+  "notification_level_id": "${notificationLevelId}",
+  "alert_type_id": "${alertTypeId}",
+  "alert_sub_type_id": "${alertSubTypeId}",
+  "alert_threshold": "${alertThreshold}",
+  "alert_trigger_total": "${alertTriggerTotal}",
+  "product_name": "${productName}",
+  "division_name": "${divisionName}",
+  "client_name": "${clientName}"
+}
+```
+
+<Warning>
+请保留 `test_id`、`alert_group_item_id` 和 `alert_initial_trigger_epoch` 三个字段，且不要修改它们对应的宏。三者共同构成 Flashduty 用来关联同一次告警生命周期的标识；缺少任意一个，Flashduty 会拒绝这条请求。
+</Warning>
+
+</Step>
+
+<Step title="关联 Endpoint 到告警">
+
+Alert Webhook Endpoint 需要在具体告警上启用才会收到推送：
+
+- 勾选 Endpoint 的 **Apply to All Alerts**，让该 division/client 下所有告警都推送到这个 Endpoint；或
+- 打开某个 Test / Folder / Product / RUM 的 **Alerts** 设置，在 **API Endpoints** 下拉框中勾选刚创建的 Endpoint
+
+</Step>
+
+<Step title="验证生命周期">
+
+让某个测试真正触发 Warning 或 Critical 告警，确认 Flashduty 收到活动告警；再等待该测试恢复正常，确认 Flashduty 收到 Improved 通知并关闭原告警。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `test_id`、`alert_group_item_id` 和 `alert_initial_trigger_epoch` 三个字段组合计算 Alert Key。
+
+Catchpoint 官方发布的 [PagerDuty Events API v2 集成模板](https://docs.catchpoint.com/docs/pagerduty-integration-guide) 将 `dedup_key` 设为 `${AlertInitialTriggerDateLocalEpoch}`，仅凭这一个宏就把 Warning → Critical → Improved 的完整生命周期归并为 PagerDuty 里的同一个 incident；[宏索引](https://docs.catchpoint.com/docs/alert-webhook-macro-index) 中该宏的说明是「The Alert-Initial-Trigger-Date-Local-Epoch timestamp, local time」，即告警**首次**触发的本地时间戳，在同一次告警从产生到恢复的过程中保持不变。Flashduty 额外叠加 `test_id`（测试 ID）和 `alert_group_item_id`（告警规则项 ID），降低两个不同测试恰好在同一秒触发时撞键的概率。
+
+标题、描述、等级、触发节点数、阈值等字段的变化都不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+Catchpoint 的 `notification_level_id` 共有 4 个官方取值：
+
+| `notification_level_id` | 含义 | Flashduty 状态或等级 |
+| :--- | :--- | :--- |
+| `0` | Warning | Warning |
+| `1` | Critical | Critical |
+| `2` | (System Internal，官方文档未说明具体含义) | 丢弃，不产生告警 |
+| `3` | Improved | 恢复 |
+
+`notification_level_id` 为空或不在以上 4 个值中的请求会被拒绝。Improved 通知本身不携带"从哪个等级恢复"的信息，Flashduty 按 Critical 处理其展示等级，实际状态以恢复（Ok）为准。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 Format 已经切换成 **Template**，且模板是有效 JSON；确认 `test_id`、`alert_group_item_id`、`alert_initial_trigger_epoch` 三个宏都保留在模板里，没有被删除或改成别的宏
+- **告警没有触发**：确认对应 Test / Folder / Product 的 **Alerts** 设置里，**API Endpoints** 下拉框已经勾选了这个 Endpoint，或者 Endpoint 上启用了 **Apply to All Alerts**
+- **告警没有恢复**：Improved 通知走的是同一个 Endpoint，无需单独配置；请确认告警确实已经恢复到正常状态，而不是仍处于 Warning/Critical
+- **看不到推送记录**：Catchpoint 的告警是从拉斯维加斯数据中心 `64.147.163.0/24` 发出的，且只走标准端口 443/80/8080；如果推送地址前有防火墙或代理，需要放行该网段
+
+更多字段含义请参阅 [Alert Webhook Guide](https://docs.catchpoint.com/docs/alert-webhook-guide)、[Alert Webhook Templates](https://docs.catchpoint.com/docs/alert-webhook-templates) 和 [Alert Webhook Macro Index](https://docs.catchpoint.com/docs/alert-webhook-macro-index)。

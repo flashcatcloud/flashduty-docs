@@ -1,0 +1,151 @@
+---
+title: "Edge Delta 告警集成"
+description: "通过 Edge Delta 的 Webhook 集成和监控项通知，将监控项的告警、预警和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Edge Delta", "可观测性", "Webhook", "Monitor"]
+---
+
+Edge Delta 的 Webhook 集成没有固定的请求体，请求体由用户自己编写，并用 `$EVENT_*` 变量填入监控项事件的内容。因此本集成要求您按下文的模板创建 Webhook 集成，Flashduty 解析的正是这个模板的输出。监控项进入告警或预警状态时触发 Flashduty 告警，恢复时自动关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Edge Delta**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Edge Delta**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Edge Delta 中配置
+---
+
+<Steps>
+<Step title="为每个状态创建一个 Webhook 集成">
+
+1. 登录 Edge Delta，点击 **Admin → Legacy Integrations**，打开 **Available** 页签，搜索并选择 **Webhook**
+2. 创建名为 `flashduty-alert` 的集成：**Endpoint** 填 Flashduty 完整推送地址，**Headers** 添加 `Content-Type: application/json`，**Payload** 填入下面的模板
+3. 用同样的方法创建 `flashduty-recovery`（`status` 改为 `recovery`）；如需预警，再创建 `flashduty-warning`（`status` 改为 `warning`）
+
+```json
+{
+  "status": "alert",
+  "monitor": "checkout-error-rate",
+  "group": "$EVENT_GROUP_ALL",
+  "metric": "$EVENT_METRIC",
+  "value": "$EVENT_EVALUATED_VALUE",
+  "event_status": "$EVENT_STATUS",
+  "url": "$EVENT_URL",
+  "time": "$EVENT_DATE"
+}
+```
+
+<Warning>
+`status` 和 `monitor` 是您手写的固定文本，不是变量。同一个监控项的所有集成里，`monitor` 必须写成完全相同的文本（建议用监控项名称），否则恢复通知无法关闭对应的告警。每个监控项都需要自己的一组集成。集成名称不能包含点号。
+</Warning>
+
+<Note>
+模板里没有包含 `$EVENT_MSG`、`$EVENT_QUERY` 和 `$EVENT_TITLE`：这些变量可能带有引号或换行，会让 JSON 失效，导致告警或恢复丢失。`$EVENT_METRIC` 和 `$EVENT_EVALUATED_VALUE` 对日志类监控项（日志阈值、Pattern 异常）为空，Flashduty 允许它们为空。
+</Note>
+
+</Step>
+
+<Step title="在监控项通知中引用集成">
+
+编辑监控项，在 **Notifications** 中按状态引用对应的集成：
+
+```text
+{{#is_alert}}
+@webhook-flashduty-alert
+{{/is_alert}}
+{{#is_warning}}
+@webhook-flashduty-warning
+{{/is_warning}}
+{{#is_recovery}}
+@webhook-flashduty-recovery
+{{/is_recovery}}
+```
+
+保存监控项。`{{#is_recovery}}` 在告警或预警恢复正常时生效。
+
+</Step>
+
+<Step title="验证生命周期">
+
+点击监控项通知区域的 **Test Notifications** 可以发送测试请求，Flashduty 会收到一条 Critical 告警（测试请求与真实告警内容相同，无法区分；除非在测试对话框里选择了分组，否则 `group` 为空，不会与真实告警合并），验证后请手动关闭。也可以让监控项真正进入告警状态，确认 Flashduty 收到告警，恢复后确认原告警自动关闭。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `status` | 您手写的 `alert`、`warning` 或 `recovery` | 触发或恢复 |
+| `monitor` | 您手写的监控项名称 | Alert Key，告警标题，标签 `monitor` |
+| `group` | `$EVENT_GROUP_ALL`，监控项 group by 的分组信息 | Alert Key，写入标题，标签 `group` |
+| `metric` | `$EVENT_METRIC`，指标名 | 标签 `metric`，写入描述 |
+| `value` | `$EVENT_EVALUATED_VALUE`，评估值，文本形式，如 `avg:1.00` | 写入描述 |
+| `event_status` | `$EVENT_STATUS`，Edge Delta 的事件状态 | 标签 `event_status`，写入描述 |
+| `url` | `$EVENT_URL`，事件链接 | 写入描述 |
+| `time` | `$EVENT_DATE`，事件时间 | 写入描述 |
+
+## Alert Key
+---
+
+Flashduty 用 `monitor` 加 `group` 生成 Alert Key。同一个监控项（以及同一个分组）的告警、预警和恢复请求携带相同的 `monitor` 和 `group`，因此落在同一条告警上；不同分组各自独立。没有设置 group by 的监控项，`group` 为 `*`，整个监控项对应一条告警；设置了 group by 的监控项，`group` 形如 `<标签>:<值>`（例如 `ed.tag:docker-logs`）。`value`、`metric` 和时间不参与 Alert Key。
+
+<Note>
+Edge Delta 官方文档没有给出监控项事件的稳定 ID，所以 Alert Key 由您手写的 `monitor` 和 `$EVENT_GROUP_ALL` 组成。Edge Delta 自己的 PagerDuty 集成示例也是用分组值把触发和恢复配对。
+</Note>
+
+## 状态和告警等级
+---
+
+| `status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `alert` | Critical |
+| `warning` | Warning |
+| `recovery` | 恢复，原等级为 Critical |
+
+请求缺少 `monitor` 或 `status`，或 `status` 不是上表中的值时，Flashduty 返回参数错误。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么 monitor 要手写，不能用变量？">
+
+Edge Delta 官方文档列出的 `$EVENT_*` 变量里没有监控项 ID 或名称，只有 `$EVENT_ID`（事件 ID，文档未说明同一个监控项的告警和恢复是否相同）。手写的固定文本能保证告警和恢复一致。
+
+</Accordion>
+
+<Accordion title="监控项持续告警时会重复收到通知吗？">
+
+如果监控项设置了 renotification，会按设置的间隔再次发送告警请求；这些请求的 Alert Key 相同，Flashduty 合并到同一条告警，不会新建故障。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **监控项提示 `Receiver webhook-flashduty-warning does not exist`**：通知里的每个 `@webhook-...` 都必须对应一个已创建的集成，请创建该集成或删掉对应的块
+- **Edge Delta 没有推送**：确认监控项的 Notifications 中引用了 `@webhook-<集成名称>`，且位于对应的 `{{#is_alert}}` 等条件块内
+- **Flashduty 返回参数错误**：确认模板里的 `status` 是 `alert`、`warning` 或 `recovery`，`monitor` 不为空，且请求体是合法 JSON
+- **告警没有恢复**：确认恢复集成里的 `monitor` 与告警集成逐字相同；监控项设置了 group by 时，确认恢复请求里的 `group` 与告警一致
+
+变量说明请参阅 Edge Delta 官方文档 [Event Variables](https://docs.edgedelta.com/prepare-api-output/#event-variables) 和 [Monitor Notifications](https://docs.edgedelta.com/monitor-notifications/)。

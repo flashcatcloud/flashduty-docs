@@ -1,0 +1,110 @@
+---
+title: "Monte Carlo 告警集成"
+description: "通过 Webhook 将 Monte Carlo 数据可观测性平台的异常事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Monte Carlo", "数据可观测性", "Webhook", "incident_id"]
+---
+
+通过 Monte Carlo 的 Webhook 通知渠道，将数据质量规则告警和系统检测到的异常同步到 Flashduty On-call。每个 Monte Carlo Incident 对应一条 Flashduty 告警：告警产生时触发，状态被更新为已修复、符合预期、无需处理或误报时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Monte Carlo**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Monte Carlo**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Monte Carlo 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook Audience">
+
+1. 进入 Monte Carlo 控制台的 [Notification Settings](https://getmontecarlo.com/settings/notifications) 页面
+2. 点击 **Create audience**，Channel 选择 **Webhook**
+3. 将 Flashduty 集成的完整推送地址粘贴到 Webhook 的 URL 栏
+4. Secret 为可选项，Monte Carlo 用它对请求做 HMAC SHA-512 签名；Flashduty 暂不校验该签名，可留空
+
+</Step>
+
+<Step title="绑定告警来源">
+
+Audience 创建后默认不接收任何告警，需要显式绑定：
+
+- 在需要接入的 Monitor（含自定义规则和系统异常检测）的 **Audiences** 或 **Failure audiences** 属性中加入刚创建的 Audience；或在新建 Monitor 时的 **Send Notifications** 步骤直接选择它
+- 每个 Audience 可按 **High / Medium / Low / Not triaged** 四档重要性单独开关；如果只想接收高优先级异常，取消勾选 Low 和 Not triaged 即可。注意：至少要有一个 Audience 覆盖 **Not triaged**，否则未分诊的异常不会通知任何人
+
+</Step>
+
+<Step title="验证生命周期">
+
+让某个 Monitor 真正触发一次异常，确认 Flashduty 收到活动告警；然后在 Monte Carlo 中将该告警的状态改为 **Fixed**（或 Expected / No action needed / False positive），确认原告警恢复。
+
+Monte Carlo 官方文档未公开 Webhook 的连通性测试按钮，也未给出上述恢复事件的完整示例 payload（只给出了会变化的字段名和取值），Flashduty 按字段名称和取值推测的位置解析。接入初期建议同时在协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)作为兜底，确认恢复能正常关闭告警后再关闭该开关。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `payload.incident_id` 作为 Alert Key。Monte Carlo 官方文档给出的两个示例 payload（自定义规则触发、数据量异常）中都携带该字段；同一 payload 中的 `payload.url` 固定为 `https://getmontecarlo.com/incidents/<incident_id>`，是 Monte Carlo 控制台中定位该 Incident 的地址，据此推测该字段在 Incident 生命周期中保持不变。缺少 `incident_id` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+告警状态由 `payload.alert_feedback` 决定：取值为 `fixed`、`expected`、`no_action_needed`、`false_positive` 时恢复，其余取值（`investigating`、`no_status`、`work_in_progress` 等）保持活动。
+
+告警等级由 `payload.declared_alert_severity` 决定，该字段只在告警被人工标记为 Incident 并指定级别后才会出现，多数 Monte Carlo 告警不会经过这一步：
+
+| Monte Carlo `declared_alert_severity` | Flashduty 等级 |
+| :--- | :--- |
+| `SEV-1` | Critical |
+| `SEV-2` | Critical |
+| `SEV-3` | Warning |
+| `SEV-4` | Info |
+| 空值或未标记（默认） | Warning |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `incident_id` | Incident ID，即 Alert Key |
+| `incident_url` | Monte Carlo 中该 Incident 的链接 |
+| `account_id` | Monte Carlo 账号 ID |
+| `group_id` | Monte Carlo 分组 ID（部分异常类型才有） |
+| `type` | 触发该 Webhook 的异常类型，如 `open_custom_rule_anomaly_incident` |
+| `alert_feedback` | 本次推送携带的状态取值 |
+| `declared_alert_severity` | 本次推送携带的等级取值 |
+| `table_name` | 相关的数据表名 |
+| `metric_display_name` | 自定义规则监控的指标名 |
+| `rule_type` | 规则类型，如 `custom_sql` |
+| `event_details` | 系统异常检测给出的说明文字 |
+
+Monte Carlo 官方文档将 Audience 负责人（assigned owner）描述为一个邮箱地址；出于隐私考虑，Flashduty 不会把邮箱写入标签。
+
+## 排查问题
+---
+
+- **Monte Carlo 提示 Webhook 调用失败**：确认推送地址完整且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认 Audience 已正确配置为 Webhook 渠道，且 Monte Carlo 没有发送自定义 Payload（Flashduty 只解析官方固定格式）
+- **告警没有恢复**：确认告警状态确实被改为 Fixed / Expected / No action needed / False positive 之一；如果恢复仍未生效，先用[超时自动关闭](/zh/on-call/channel/create-edit)兜底，并联系 Flashduty 支持核对该次推送
+- **收不到任何告警**：检查该 Audience 是否已被加入目标 Monitor 的 Audiences 或 Failure audiences，以及重要性开关是否覆盖了实际产生的异常等级
+
+更多字段含义请参阅 [Monte Carlo Webhooks](https://docs.getmontecarlo.com/docs/webhooks) 和 [Creating and Routing Notification Audiences](https://docs.getmontecarlo.com/docs/notifications-v2)。

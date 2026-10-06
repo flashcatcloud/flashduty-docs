@@ -1,7 +1,7 @@
 ---
 title: "GoogleCloudMonitoring 告警事件"
-description: "通过 webhook 的方式同步 GoogleCloudMonitoring 告警事件到 Flashduty On-call，实现告警事件自动化降噪处理"
-keywords: ["告警集成", "GoogleCloudMonitoring 告警事件", "监控告警", "数据接入"]
+description: "通过 webhook 或 Pub/Sub 推送订阅，把 Google Cloud Monitoring、Error Reporting、Security Command Center 和 Cloud Billing 预算告警同步到 Flashduty On-call"
+keywords: ["告警集成", "GoogleCloudMonitoring 告警事件", "Google Cloud", "Pub/Sub", "Error Reporting", "Security Command Center", "预算告警", "数据接入"]
 ---
 
 <div className="hide">
@@ -50,7 +50,18 @@ keywords: ["告警集成", "GoogleCloudMonitoring 告警事件", "监控告警",
 
 <div className="md-block">
 
-## 一、GoogleCloudMonitoring 告警推送配置
+一个 **GCP 云监控** 集成的推送地址可以同时接收以下来源，无需在 Google Cloud 部署任何代码：
+
+| 来源 | 投递方式 | 是否自动恢复 |
+|---|---|---|
+| Cloud Monitoring 告警策略 | Webhook 通知渠道，或 Pub/Sub 通知渠道 + 推送订阅 | 是，事件关闭时恢复 |
+| Error Reporting | Webhook 通知渠道 | 否 |
+| Security Command Center 发现 | 持续导出（NotificationConfig）到 Pub/Sub + 推送订阅 | 是，发现变为 INACTIVE 或被静音时恢复 |
+| Cloud Billing 预算 | 预算关联 Pub/Sub 主题 + 推送订阅 | 否 |
+
+下文的 **推送地址** 指上一步复制的集成推送地址，形如 `https://api.flashcat.cloud/event/push/alert/google-cm?integration_key=<集成密钥>`。
+
+## 一、Cloud Monitoring：Webhook 通知渠道
 
 ### 步骤1：配置告警通道
 1. 登录 GoogleCloud 控制台，检索 `Monitoring` 产品，并进入对应产品控制台
@@ -76,18 +87,150 @@ keywords: ["告警集成", "GoogleCloudMonitoring 告警事件", "监控告警",
 
 <img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/google-cm-3.png" />
 
+指标告警、正常运行时间检查、基于日志的告警和 PromQL 告警（Managed Service for Prometheus）都通过告警策略发送，配置方式相同。
+
+## 二、Cloud Monitoring：Pub/Sub 通知渠道
+
+如果您的组织要求告警经 Pub/Sub 转发，可以使用 Pub/Sub 通知渠道。告警的 Alert Key 与 Webhook 渠道相同（`incident_id`），两种渠道可以互相替换。
+
+1. 按 **第六节 创建 Pub/Sub 推送订阅** 创建主题和推送订阅。
+2. 在 `Alerting` → `EDIT NOTIFICATION CHANNELS` 的 `Pub/Sub` 部分点击 `ADD NEW`，填写主题名称。
+3. 按页面提示，为 `service-<项目编号>@gcp-sa-monitoring-notification.iam.gserviceaccount.com` 授予该主题的 `Pub/Sub Publisher` 角色。
+4. 在告警策略的 `Notification channels` 中选择该 Pub/Sub 渠道，并勾选 `Notify on incident closure`。
+
+## 三、Error Reporting
+
+Error Reporting 通过 Cloud Monitoring 的 Webhook 通知渠道发送通知（1.0 版本格式），只支持 Webhook，不支持 Pub/Sub。
+
+1. 按 **第一节步骤1** 创建一个 Webhook 通知渠道（可以复用同一个 **Flashduty** 渠道）。
+2. 进入 `Error Reporting` 页面，点击 `Configure notifications`。
+3. 在 `Notification channels` 中选择 **Flashduty** 渠道并保存。
+
+Error Reporting 在以下两种情况发送通知：出现无法归入已有错误组的新错误；已标记为 `Resolved` 的错误组再次出现。
+
+- 同一个错误组（同一项目、同一错误详情链接）对应一条告警，告警未关闭时再次出现的通知会合并进这条告警。
+- Error Reporting 不发送"已解决"通知，告警不会自动恢复，请在 Flashduty 中手动关闭。
+- 告警等级固定为 Warning。如需其他等级，在推送地址后追加 `&severity=Critical`（或 `Info`）。
+
+## 四、Security Command Center
+
+Security Command Center（SCC）只能把发现（finding）持续导出到 Pub/Sub，再由推送订阅转发给 Flashduty。
+
+1. 按 **第六节 创建 Pub/Sub 推送订阅** 创建主题和推送订阅。
+2. 为 SCC 服务账号授予主题的 `Pub/Sub Publisher` 角色，然后创建持续导出（NotificationConfig），例如：
+
+```bash
+gcloud scc notifications create flashduty-findings \
+    --organization=<组织 ID> \
+    --location=global \
+    --pubsub-topic=projects/<项目 ID>/topics/<主题名称> \
+    --filter='severity="HIGH" OR severity="CRITICAL"'
+```
+
+<Warning>
+过滤条件中不要加 `state="ACTIVE"`。SCC 只推送与过滤条件匹配的发现更新，限定 ACTIVE 后，发现变为 INACTIVE 的更新不会送达，Flashduty 中的告警就无法自动恢复。
+</Warning>
+
+- 以发现的资源名 `finding.name` 作为 Alert Key，同一发现的所有更新合并为一条告警。
+- 发现 `state` 变为 `INACTIVE`（已修复、资源已删除或手动标记），或 `mute` 变为 `MUTED` 时，告警恢复；再次变为 `ACTIVE` 或 `UNMUTED` 时重新触发。
+- 威胁类发现（例如 Event Threat Detection）不会自动变为 INACTIVE，需要在 SCC 中手动修改状态或静音。
+
+## 五、Cloud Billing 预算
+
+预算告警只能通过 Pub/Sub 以程序化通知的方式发出。
+
+1. 按 **第六节 创建 Pub/Sub 推送订阅** 创建主题和推送订阅。
+2. 进入 `Billing` → `Budgets & alerts`，创建或编辑预算，设置阈值规则（实际费用和/或预测费用）。
+3. 在 `Manage notifications` 中勾选 `Connect a Pub/Sub topic to this budget`，选择上面的主题并保存。
+
+Cloud Billing 每天会向主题多次推送预算的当前状态，首次推送可能需要数小时。Flashduty 按以下规则处理：
+
+- 通知中没有超过任何阈值时，不产生告警。
+- 实际费用（`alertThresholdExceeded`）和预测费用（`forecastThresholdExceeded`）分别产生告警。
+- Alert Key 由结算账号、预算、预算周期、费用类型和已超过的最高阈值组成：同一阈值的重复推送合并为一条告警；超过更高阈值时产生一条新告警。
+- 预算告警不会自动恢复。新的预算周期开始后，告警按新周期重新计算，旧周期的告警请手动关闭。
+
+## 六、创建 Pub/Sub 推送订阅
+
+第二、四、五节共用以下步骤。一个推送订阅可以同时承载多种来源。
+
+1. 进入 `Pub/Sub` → `Topics`，点击 `CREATE TOPIC` 创建主题（或使用已有主题）。
+2. 在主题中点击 `CREATE SUBSCRIPTION`：
+    - **Delivery type**：选择 `Push`。
+    - **Endpoint URL**：填写集成的推送地址。
+    - **Enable authentication**：不勾选。推送地址中的 `integration_key` 已用于鉴权，Flashduty 不校验 Pub/Sub 的身份令牌。
+    - **Enable payload unwrapping**：不勾选。Flashduty 需要消息属性（例如预算的 `budgetId`），取消封装后这些属性会丢失。
+3. 保存订阅。
+
+Flashduty 对无法转换为告警的 Pub/Sub 消息（例如格式未知的消息）也会返回 200 并记录日志，避免 Pub/Sub 反复重投。
+
 </div>
 
-
-## 二、状态对照
+## 告警等级对照
 
 <div className="md-block">
-  
+
+**Cloud Monitoring**（Webhook 与 Pub/Sub 相同）
+
 |GoogleCloudMonitoring| Flashduty|状态|
 |---|---|---|
 |Critical|Critical|严重|
 |Error|Warning|警告|
 |Warning|Warning|警告|
 |No severity|Info|提醒|
+
+**Security Command Center**
+
+|SCC severity|Flashduty|状态|
+|---|---|---|
+|CRITICAL、HIGH|Critical|严重|
+|MEDIUM|Warning|警告|
+|LOW、未指定|Info|提醒|
+
+**Cloud Billing 预算**
+
+|费用类型|已超过的最高阈值|Flashduty|
+|---|---|---|
+|实际费用|≥ 100%|Critical|
+|实际费用|< 100%|Warning|
+|预测费用|≥ 100%|Warning|
+|预测费用|< 100%|Info|
+
+**Error Reporting**：固定为 Warning，可通过推送地址参数 `severity` 调整。
+
+</div>
+
+## 告警标签
+
+<div className="md-block">
+
+|来源|主要标签|
+|---|---|
+|Cloud Monitoring|`policy_name`、`check`（条件名称）、`resource_name`、`resource_type`、`resource_display_name`、`severity`、`url`、`threshold_value`、`observed_value`，以及资源标签、指标标签、元数据用户/系统标签、策略用户标签|
+|Error Reporting|`project_id`、`service`、`service_version`、`exception_type`、`detail_link`、`request_method`、`request_url`（不含查询参数）、`response_status`|
+|Security Command Center|`check`（category）、`resource`（resourceName）、`finding_name`、`finding_class`、`state`、`mute`、`severity`、`external_uri`、`notification_config`|
+|Cloud Billing 预算|`budget_name`、`budget_id`、`billing_account_id`、`budget_amount`、`cost_amount`、`currency_code`、`cost_interval_start`、`threshold_type`、`threshold`|
+
+Cloud Monitoring 的资源标签和元数据标签不会覆盖同名的已有标签。
+
+</div>
+
+## 常见问题
+
+<div className="md-block">
+
+<AccordionGroup>
+  <Accordion title="Pub/Sub 推送订阅需要配置鉴权吗？">
+  不需要。推送地址中的 `integration_key` 用于识别集成，保持 `Enable authentication` 不勾选即可。
+  </Accordion>
+  <Accordion title="预算告警为什么没有出现？">
+  - 首次推送可能需要数小时。
+  - 通知中没有超过任何阈值时，Flashduty 不产生告警。
+  - 检查推送订阅是否勾选了 `Enable payload unwrapping`。勾选后消息属性会丢失，Flashduty 无法识别预算。
+  </Accordion>
+  <Accordion title="SCC 告警为什么没有自动恢复？">
+  检查 NotificationConfig 的过滤条件是否限定了 `state="ACTIVE"`，以及该发现是否属于不会自动变为 INACTIVE 的威胁类发现。
+  </Accordion>
+</AccordionGroup>
 
 </div>

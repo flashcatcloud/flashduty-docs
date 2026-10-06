@@ -1,0 +1,119 @@
+---
+title: "Redgate SQL Monitor alert integration"
+description: "Send Redgate Monitor (formerly SQL Monitor) alerts to Flashduty On-call through a webhook, with automatic recovery when an alert ends."
+keywords: ["alert integration", "Redgate", "SQL Monitor", "Redgate Monitor", "SQL Server", "webhook"]
+---
+
+Use the webhook notifications of Redgate Monitor (formerly Redgate SQL Monitor) to send alerts for SQL Server, Azure SQL, and other monitored databases to Flashduty On-call. Each Redgate Monitor alert maps to one Flashduty alert: it triggers when the alert is raised (Raised), updates when its severity goes up (Escalated) or down (DeEscalated), and recovers automatically when the alert ends (Ended).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Redgate SQL Monitor**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Redgate SQL Monitor** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Redgate Monitor
+---
+
+Webhook notifications are configured in the Redgate Monitor web console, apply to every alert raised by that Base Monitor, and require administrator permissions. The machine that runs the Base Monitor service must be able to reach the Flashduty push URL.
+
+<Steps>
+<Step title="Open the notification settings">
+
+1. Sign in to the Redgate Monitor web console and open the **Configuration** page
+2. Under **Alerts**, select **Notification settings** and find the **Webhook notifications** section
+
+</Step>
+
+<Step title="Configure the webhook">
+
+1. Choose when Redgate Monitor sends webhook messages
+2. Select the **Default message** format. Flashduty parses the JSON fields of the default message and does not support a custom message
+3. Paste the full Flashduty push URL into **URL**. The URL must include `integration_key`
+4. No additional HTTP headers are needed. Flashduty authenticates the request by the `integration_key` in the URL
+5. Save the settings
+
+</Step>
+
+<Step title="Verify">
+
+1. Click **Send Test Notification** to confirm that Redgate Monitor can send messages to Flashduty. Redgate does not document the content of the test message; if it creates an alert in Flashduty, close that alert manually
+2. Wait for a real alert to be raised and confirm that Flashduty receives an active alert. After the alert ends in Redgate Monitor, confirm that the Flashduty alert recovers
+
+</Step>
+</Steps>
+
+<Note>
+If the Base Monitor reaches the internet through a proxy, configure the proxy on the Base Monitor machine as described in the Proxy configuration section of [Setting up Webhook notifications](https://documentation.red-gate.com/monitor/setting-up-webhook-notifications-239668082.html).
+</Note>
+
+## Alert Key
+---
+
+A Redgate Monitor alert ID (`id`) is unique only within a single Base Monitor, so Flashduty computes the Alert Key from both the Base Monitor identifier (`baseMonitorGuid`) and the alert ID (`id`). The Raised, Escalated, DeEscalated, and Ended messages of one alert share the same Alert Key, and alerts from several Base Monitors that push to the same integration never merge. Changes to the alert name, severity, description, or timestamps do not change the Alert Key. Messages without `id` or `baseMonitorGuid` are rejected.
+
+## Status and severity
+---
+
+| `statusChange` | Meaning | Flashduty status |
+| :--- | :--- | :--- |
+| `Raised` | The alert is raised | Triggered |
+| `Escalated` | The alert severity increases | Triggered, updated to the new severity |
+| `DeEscalated` | The alert severity decreases | Triggered, updated to the new severity |
+| `Ended` | The alert ends | Recovered |
+
+| Redgate Monitor severity (`severity`) | Flashduty severity |
+| :--- | :--- |
+| `High` | Critical |
+| `Medium` | Warning |
+| `Low` | Info |
+
+An `Ended` message carries `severity` `None`, so Flashduty uses `previousSeverity` (the severity before the alert ended) as the severity of the recovery event. An empty or unrecognized severity is treated as Warning. Messages whose `messageType` is not `AlertNotification` do not create alerts; Flashduty returns success for them.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Alert name, such as `Long-running query` |
+| `resource` | Name of the monitored object (such as `machine\instance`); `server/database` for Azure SQL |
+| `host` | Machine name |
+| `group` | Group name in Redgate Monitor |
+| `cluster` | Cluster name |
+| `sql_instance` | SQL Server instance name |
+| `azure_sql_server` / `azure_sql_database` / `azure_elastic_pool` | Azure SQL server, database, and elastic pool names |
+| `tags` | Instance tags, comma-separated |
+| `cir` | Redgate Monitor's internal path of the monitored object |
+| `alert_id` / `base_monitor_guid` | Alert ID and Base Monitor identifier that the Alert Key is built from |
+| `status_change` | Status change of this message |
+| `severity` | Original Redgate Monitor severity |
+| `url` | Link to the alert's details page in Redgate Monitor |
+
+The alert description is Redgate Monitor's description of the alert type. For a custom metric with a secondary query, it also includes the detail text that query returns (`alertDetailText`).
+
+## Troubleshooting
+---
+
+- **The test message fails**: Confirm that the Base Monitor machine can reach the Flashduty push URL, and configure the proxy as described above if one is required
+- **Flashduty returns a parameter error**: Confirm that the URL is complete and includes `integration_key`, and that the default message format is selected
+- **An alert does not recover**: Redgate Monitor sends a webhook 20 seconds after it receives an alert and retries once after 10 minutes if delivery fails. If both attempts fail, the message is lost and you need to close the alert in Flashduty manually. Each alert type also has a limit on how many notifications it can send for each monitored object in 24 hours (30 by default); raise it if alerts change often
+- **Alerts arrive with a delay**: Webhook messages are sent about 20 seconds after the alert is raised, which is expected
+
+For field details, see [Redgate Monitor webhook notifications](https://documentation.red-gate.com/monitor/setting-up-webhook-notifications-239668082.html).

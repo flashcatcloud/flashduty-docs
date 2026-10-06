@@ -1,0 +1,135 @@
+---
+title: "Twilio 告警集成"
+description: "通过 Error webhook 将 Twilio Debugger 中的 Error 级别事件同步到 Flashduty On-call，同一账户的同一错误码合并为一条告警。"
+keywords: ["告警集成", "Twilio", "Debugger", "Error webhook", "错误码", "Webhook"]
+---
+
+Twilio 在处理短信、语音等请求时遇到问题，会在 Debugger 中记录一条事件，并按级别分为 Error（请求无法处理）和 Warning（请求仍被处理）。通过 Twilio 控制台的 **Error webhook**，可以把 Error 级别的事件同步到 Flashduty On-call：
+
+- 同一 Twilio 账户上同一错误码的事件合并为一条告警，例如您的应用地址返回 404 导致的一批 `11200` 错误
+- Warning 级别的事件不生成告警
+
+Error webhook 在 Twilio 的所有区域（US1、IE、AU）都可以使用。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Twilio**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Twilio**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Twilio 中配置
+---
+
+<Steps>
+<Step title="填写 Error webhook">
+
+1. 登录 [Twilio Console](https://console.twilio.com)，进入 **Monitor** → **Error webhook**
+2. 在 webhook 地址中填写 Flashduty 集成的完整推送地址，保存
+
+</Step>
+
+<Step title="测试">
+
+Error webhook 没有“发送测试通知”按钮。可以用下面的方式产生一条真实的 Error 事件：
+
+1. 在 **Phone Numbers** 中打开一个号码，把 **A call comes in** 的地址改成一个会返回 404 的地址，例如 `https://example.com/not-found`
+2. 拨打这个号码，Twilio 请求该地址失败，在 Debugger 中记录错误 `11200`
+3. 几秒后 Flashduty 中出现标题为 `Twilio error 11200: ...` 的告警
+
+测试完成后把号码的地址改回原值。
+
+</Step>
+
+<Step title="开启超时自动关闭">
+
+Debugger 事件是一次性的日志，Twilio 不会在错误消失后再发送通知，告警不会自动恢复。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长 **2 小时**，计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭；错误仍在发生时，下一条事件会重新打开告警。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Twilio 每次推送一个 Debugger 事件，请求体为 `application/x-www-form-urlencoded`，其中 `Payload` 是 JSON：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `AccountSid` | 产生事件的账户 | Alert Key，标签 `account_sid` |
+| `ParentAccountSid` | 父账户（仅子账户的事件有） | 标签 `parent_account_sid` |
+| `Level` | 事件级别：`ERROR` 或 `WARNING` | 是否生成告警，标签 `level` |
+| `Sid` | Debugger 事件 ID | 告警描述 |
+| `Timestamp` | 事件发生时间 | 告警描述 |
+| `Payload.error_code` | 错误码 | Alert Key，告警标题，标签 `error_code` |
+| `Payload.resource_sid` | 出错的资源，例如通话或短信的 SID | 告警描述，标签 `resource_sid` |
+| `Payload.service_sid` | 出错的服务 SID | 标签 `service_sid` |
+| `Payload.more_info.msg` | 错误说明 | 告警标题和描述 |
+| `Payload.more_info.url` | Twilio 请求失败的地址 | 标签 `url` |
+| `Payload.more_info.httpResponse` | 该地址返回的 HTTP 状态码 | 标签 `http_response` |
+
+每条告警还带有标签 `source=twilio`，描述中附有该错误码在 Twilio 错误字典中的链接（`https://www.twilio.com/docs/errors/<错误码>`）。标题示例：`Twilio error 11200: An attempt to retrieve content from https://app.example.com/voice returned the HTTP status code 404`。
+
+## Alert Key
+---
+
+Flashduty 用 `AccountSid` 和 `Payload.error_code` 共同计算 Alert Key，不使用事件 ID `Sid`：
+
+- 同一账户上同一错误码的事件合并到同一条告警，告警的标题、描述和标签显示最近一次事件的内容
+- 不同错误码、不同账户（包括不同子账户）的事件是不同的告警
+- 这与 Twilio [Alarms](https://www.twilio.com/docs/usage/troubleshooting/alarms) 按账户、按错误码统计错误的方式一致
+
+## 状态和告警等级
+---
+
+| Twilio 事件级别 | Flashduty 状态或等级 |
+| :--- | :--- |
+| `ERROR` | Critical |
+| `WARNING` 及其他级别 | 不生成告警 |
+
+Error 事件缺少 `AccountSid` 或 `Payload.error_code`，或 `Payload` 不是合法的 JSON 时，请求会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么 Warning 事件没有生成告警？">
+
+Twilio 把请求仍能被处理的问题记为 Warning，例如 TwiML 校验警告。这类事件数量多、通常不需要值班人员立即处理，Flashduty 返回成功但不生成告警。它们仍然可以在 Twilio 的 Debugger 中查看。
+
+</Accordion>
+
+<Accordion title="同一个错误持续发生，为什么只有一条告警？">
+
+同一账户、同一错误码的事件会合并到一条告警上，告警的事件数随之增加，不会为每次出错单独打开告警。开启超时自动关闭后，故障在超时后关闭；如果错误还在发生，下一条事件会打开新的告警。
+
+</Accordion>
+
+<Accordion title="需要校验 X-Twilio-Signature 吗？">
+
+不需要。Flashduty 通过推送地址中的 `integration_key` 识别集成，不校验 `X-Twilio-Signature` 签名。请像保管密钥一样保管推送地址。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Twilio 的 Debugger 中出现错误但 Flashduty 没有告警**：确认 **Monitor** → **Error webhook** 中的地址完整（包含 `integration_key`），并且事件级别为 Error
+- **请求被拒绝（4xx）**：确认推送地址是 Twilio 集成的地址，不是其他集成的地址
+- **告警一直不关闭**：在协作空间中开启超时自动关闭

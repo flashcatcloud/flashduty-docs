@@ -1,0 +1,120 @@
+---
+title: "Bitbucket change integration"
+description: "Sync commit build statuses from Bitbucket Cloud (Pipelines and third-party CI) to Flashduty On-call through a repository webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Bitbucket", "Bitbucket Pipelines", "build status", "deployment", "Webhook", "CI/CD"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Bitbucket Cloud repository webhook to sync the build statuses on commits to Flashduty On-call. Bitbucket Pipelines, and third-party CI that publishes build statuses through the Bitbucket API, produce these events. Each build status becomes one Flashduty change; when the state moves from in progress to successful, failed, or stopped, the same change is updated.
+
+Bitbucket has no separate deployment event, so build statuses are the source of pipeline results. We recommend enabling the webhook only on repositories whose pipelines deploy.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Bitbucket** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `repo` or `build_key`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Bitbucket
+---
+
+<Steps>
+<Step title="Add a webhook">
+
+In the repository, go to **Repository settings → Webhooks** and click **Add webhook**. You need repository admin permission.
+
+</Step>
+
+<Step title="Enter the Push URL">
+
+1. **Title**: a name you can recognize, such as `Flashduty`
+2. **URL**: paste the complete Flashduty integration Push URL
+3. **Status**: keep **Active**
+
+</Step>
+
+<Step title="Select triggers">
+
+1. Under **Triggers**, select **Choose from a full list**
+2. Expand **Repository** and select **Build status created** and **Build status updated**
+3. Click **Save**
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+A Bitbucket build status has no id of its own; it is addressed by repository, commit, and status key (the API path `/commit/<hash>/statuses/build/<key>`). The Flashduty change identifier (change_key) is `<repository uuid>/<commit hash>/<status key>`, so the created and updated events of one build status update the same change.
+
+- Build statuses with different keys on the same commit (for example a test check and a lint check) are two changes
+- The same key on two commits is two changes; Bitbucket Pipelines uses a distinct key for each run
+- If a third-party CI reuses one key on the same commit (for example when re-running), Bitbucket overwrites the status. In Flashduty the same change returns to in progress and is updated with the new final state when it ends
+
+## Status mapping
+---
+
+Flashduty derives the status from `commit_status.state` in the payload:
+
+| Bitbucket build status | Flashduty change status |
+|---|---|
+| INPROGRESS | Processing |
+| SUCCESSFUL | Done |
+| FAILED | Failed |
+| STOPPED | Canceled |
+
+Done, Failed, and Canceled are end states, and Flashduty records the change end time. STOPPED appears in the Bitbucket REST API's state enum; the webhook documentation lists only the first three states.
+
+These deliveries return success but create no change: `repo:push`, pull request, comment, and other events that are not build statuses, and statuses whose type is not `build`.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<repository full name>: <status name> (<short commit hash>)`; the status key when there is no name |
+| Description | The build status description, taken from the first event of the change only |
+| Link | The build status url (the build's page in the CI); the commit's page in Bitbucket when it has none |
+
+The payload carries no branch, so there is no branch label. Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `repo` | Repository full name, `<workspace>/<repository>` |
+| `sha` | The commit hash the status belongs to |
+| `actor` | Name of the user who published the status |
+| `build_key` | The build status key |
+| `state` | The latest Bitbucket build state |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why are no build changes arriving?">
+
+- Confirm the webhook has **Build status created** and **Build status updated** selected; push and similar events create no change
+- Check the recent deliveries and Flashduty's responses under the webhook's **View requests**
+- Confirm the repository's pipeline or CI actually publishes build statuses on commits
+
+</Accordion>
+
+<Accordion title="Are redeliveries recorded twice?">
+
+No. An event with the same state and update time is recorded once. When a delivery fails, Bitbucket retries up to two more times; retries add no event.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `unsupported commit_status.state`: a build state Flashduty does not support yet was received; contact us
+- `repository.uuid is missing`, `commit_status.key is missing`, `commit_status.links.commit.href is missing the commit hash`: the payload is incomplete; confirm it comes from a Bitbucket Cloud repository webhook
+
+</Accordion>
+</AccordionGroup>

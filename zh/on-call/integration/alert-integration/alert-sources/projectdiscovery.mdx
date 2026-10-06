@@ -1,0 +1,143 @@
+---
+title: "ProjectDiscovery Cloud 告警集成"
+description: "通过 ProjectDiscovery Cloud 的 Webhook 告警，把扫描发现的新漏洞和扫描、资产发现的失败通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "ProjectDiscovery", "Nuclei", "漏洞扫描", "资产发现", "Webhook", "scan_id"]
+---
+
+通过 ProjectDiscovery Cloud（Settings → Integrations → Alerting）的 Webhook，把两类通知同步到 Flashduty On-call：重复扫描（rescan）发现新漏洞（`new_vuln`），以及扫描或资产发现失败（`failed_stopped`）。扫描开始、扫描完成（`running`、`finished`）和新资产（`new_asset`）通知会被接收并丢弃，不产生告警。
+
+ProjectDiscovery 不会推送“漏洞已修复”或“失败已解决”的通知，因此这两类告警不会自动恢复，请在接收告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)（见下文）。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **ProjectDiscovery**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **ProjectDiscovery**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 ProjectDiscovery Cloud 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 告警配置">
+
+1. 登录 [ProjectDiscovery Cloud](https://cloud.projectdiscovery.io)，进入 **Settings → Integrations → Alerting**
+2. 选择 **Webhook**，填写 **Config Name**（例如 `Flashduty`）
+3. 将 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**（必须是 HTTPS 地址）
+4. 认证项为可选，Flashduty 通过推送地址中的 `integration_key` 鉴权，无需填写
+
+</Step>
+
+<Step title="选择事件类型">
+
+勾选 **New Vulnerability**（新漏洞）和 **Scan / Asset Finished / Failed** 中的失败事件。其他事件可以不勾选；勾选后 Flashduty 也会返回成功并忽略它们。如需按严重程度过滤，可以设置严重程度筛选，筛选后的漏洞数量和列表才会出现在通知中。
+
+</Step>
+
+<Step title="保存并关联扫描">
+
+保存告警配置，并在需要通知的扫描或资产发现任务中启用该配置。
+
+</Step>
+</Steps>
+
+<Note>
+创建 Webhook 时点击 **Verify** 会推送 `{"type":"verify","message":"This is a test message from PDCP to verify alerting configuration! Please ignore."}`，Flashduty 返回成功，并创建一条标题为 "ProjectDiscovery test notification" 的独立 Info 告警，请手动关闭。
+</Note>
+
+## 推送内容
+---
+
+ProjectDiscovery 以 `application/json` POST 通知，Flashduty 直接解析，无需配置模板。扫描通知携带 `scan_name`、`scan_id`，资产发现通知携带 `enumeration_name`、`enumeration_id`。
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `type` | `running`、`finished`、`failed_stopped`、`new_vuln`、`new_asset` | 标签 `event_type`；只有 `new_vuln` 和 `failed_stopped` 产生告警 |
+| `scan_id` / `enumeration_id` | 执行 ID | Alert Key，同名标签 |
+| `scan_name` / `enumeration_name` | 扫描或资产发现名称 | 告警标题，同名标签 |
+| `message` | 状态描述 | 描述首行 |
+| `finished.rescan_new_vulnerabilities` | 新漏洞数量 | 标签 `new_vulnerabilities` |
+| `finished.total_matches` | 匹配总数 | 标签 `total_matches` |
+| `finished.rescan_vulns_list` | 新漏洞列表（最多 15 条） | 描述中逐条列出名称、严重程度、数量 |
+| `failed_stopped.progress` | 完成百分比 | 标签 `progress` |
+| `failed_stopped.failure_reason` | 失败原因 | 标签 `failure_reason`，并写入描述 |
+
+告警标题：新漏洞为 `<名称>: new vulnerabilities`，失败为 `<名称> failed`。
+
+## Alert Key
+---
+
+Flashduty 使用 `scan_id`（资产发现使用 `enumeration_id`）作为 Alert Key。ProjectDiscovery 文档将其定义为执行的唯一标识。同一个 ID 的多次通知合并到同一条告警；不同扫描或资产发现生成不同的告警。修改名称、数量或时间不会改变 Alert Key。
+
+新漏洞和失败通知缺少对应 ID 时，Flashduty 返回参数错误，并指出缺少的字段。
+
+## 状态和告警等级
+---
+
+| ProjectDiscovery 事件 | Flashduty 等级 |
+| :--- | :--- |
+| `new_vuln`，漏洞列表中最高为 `critical` | Critical |
+| `new_vuln`，最高为 `high` 或 `medium` | Warning |
+| `new_vuln`，最高为 `low` 或 `info` | Info |
+| `new_vuln`，没有可比较的严重程度 | Warning |
+| `failed_stopped` | Warning |
+
+`new_vuln` 优先按 `rescan_vulns_list` 中最高的严重程度判定；列表为空时改用 `severity_breakdown` 中数量大于 0 的最高级别。扫描失败意味着覆盖缺口，不是服务中断，因此按 Warning 处理。
+
+## 超时自动关闭
+---
+
+ProjectDiscovery 不推送恢复通知，这两类告警会一直保持活动。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议时长 24 小时，可按扫描频率调整。
+
+## 关于签名
+---
+
+ProjectDiscovery 的 Webhook 支持可选的自定义认证头。Flashduty 不校验该头，鉴权依靠推送地址中的 `integration_key`，请妥善保管推送地址。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么扫描完成通知没有产生告警？">
+
+`finished`、`running` 和 `new_asset` 只表示任务状态或资产变化，不是需要处理的问题，Flashduty 返回成功后丢弃。只有发现新漏洞和失败才会产生告警。
+
+</Accordion>
+
+<Accordion title="首次扫描发现的漏洞会通知吗？">
+
+ProjectDiscovery 只在重复扫描（rescan）时发送 `new_vuln`，首次扫描的结果不会通过该通知发送。
+
+</Accordion>
+
+<Accordion title="列表里的漏洞不全？">
+
+`rescan_vulns_list` 每次最多包含 15 条，完整列表请在 ProjectDiscovery 控制台或 API 中查看。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **ProjectDiscovery 推送失败**：确认 Webhook URL 是包含 `integration_key` 的完整 HTTPS 推送地址
+- **Flashduty 返回参数错误**：确认请求体是 ProjectDiscovery 的 JSON 通知，且 `new_vuln`、`failed_stopped` 带有 `scan_id` 或 `enumeration_id`
+- **告警没有关闭**：这是预期行为，请开启超时自动关闭
+
+字段说明请参阅 ProjectDiscovery 官方文档 [Integrations](https://docs.projectdiscovery.io/cloud/integrations)。

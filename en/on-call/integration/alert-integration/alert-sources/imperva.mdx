@@ -1,0 +1,121 @@
+---
+title: "Imperva alert integration"
+description: "Send Imperva DDoS attack start and stop, BGP connection down and up, and connection performance events to Flashduty On-call through a Webhook Connection."
+keywords: ["alert integration", "Imperva", "Thales", "DDoS", "BGP", "webhook", "network protection"]
+---
+
+The Imperva (Thales) Cloud Application and Network Security console has Webhook Connections: set a notification policy's delivery channel to a webhook and Imperva POSTs a fixed JSON payload to that URL. Once connected to Flashduty On-call, website DDoS, IP range DDoS, and single-IP DDoS start and stop events, and BGP connection down and up events, merge into one alert per object and resolve automatically.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Imperva** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Imperva** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Imperva
+---
+
+<Steps>
+<Step title="Add a Webhook Connection">
+
+1. Sign in to `my.imperva.com` and select **Account** → **Account Management** in the top menu
+2. In the sidebar select **Webhook Connections**, then click **Add Webhook**
+3. Enter a **Name** and paste the full Flashduty push URL (including `integration_key`) into **URL**
+4. **Secret Token** is optional. Imperva sends it in a custom HTTP header with every request; Flashduty does not check that header
+5. Click **Test Webhook** to confirm the URL is reachable, then save
+
+Configuring webhooks needs the **Manage notification settings** permission; viewing them needs **View notification settings**.
+
+</Step>
+
+<Step title="Select the webhook in notification policies">
+
+Add or edit a notification policy and choose the new Webhook Connection in **Recipients** → **Channel**. Create a policy for each notification subtype in the "Events and recovery" table below (Website DDoS, Website Group DDoS, Individual IP Protection, Network Protection, Network Connectivity).
+
+</Step>
+
+<Step title="Verify">
+
+Click **Test Webhook** on the connection. Flashduty creates an Info alert titled like `Hello World Test - <webhook name>`. The test has no recovery notification, so close it by hand.
+
+</Step>
+</Steps>
+
+Imperva's webhook payload has a fixed format and cannot be templated. Imperva may deliver the same event more than once; Flashduty merges repeats under the same Alert Key, so no duplicate alerts appear.
+
+## Events and recovery
+---
+
+| Notification subtype | Start event | End event | Flashduty severity |
+| :--- | :--- | :--- | :--- |
+| Website DDoS | `WebsiteDdosStart` | `WebsiteDdosStop` | Warning |
+| Website Group DDoS | `WebsiteProtectNetworkTrafficDdosStart` | `WebsiteProtectNetworkTrafficDdosStop` | Warning |
+| Individual IP Protection | `SingleIpDdosStart` | `SingleIpDdosStop` | Warning |
+| Network Protection | `IpRangeDdosStart` | `IpRangeDdosStop` | Warning |
+| Network Connectivity | `BgpDown` | `BgpUp` | Critical |
+| Network Connectivity | `PerformanceDegraded` | `PerformanceRestored` | Warning |
+| Network Protection | `MonitoringAttackStartCritical` | none | Critical |
+| Network Protection | `TrafficStartDivert` | none | Warning |
+
+- The Imperva payload has no severity field, so severity comes from the event type. DDoS start events mean Imperva is blocking or diverting the attack, so they map to Warning. A BGP connection down and an attack alert that needs manual confirmation map to Critical
+- An end event (`...Stop`, `BgpUp`, `PerformanceRestored`) resolves the alert for the same object
+- `MonitoringAttackStartCritical` and `TrafficStartDivert` have no end notification, so each event opens its own alert. Turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) (24 hours suggested)
+- Other notification types (account, site, billing, subscription, policy changes, range status changes) create no alert; Flashduty acknowledges them and returns success
+
+## Alert Key
+---
+
+The Alert Key is computed from the event family, the Imperva account ID, and the object identity. Start and end events read the same fields:
+
+| Event family | Object identity |
+| :--- | :--- |
+| Website DDoS | `extended_parameters.site_name` |
+| Website group network-layer DDoS | `extended_parameters.ip_range` + `extended_parameters.slice_name` |
+| IP range DDoS, single-IP DDoS | `extended_parameters.range` |
+| BGP connection, connection performance | `extended_parameters.connection_name` |
+| One-shot events | network prefix or range + `event_metadata.event_date` |
+
+The title, event time, account name in the payload, and the webhook ID do not take part. A request without `event_type`, or without the object identity of its family, is rejected with an error that names the missing field.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` / `event_type` | `event_metadata.event_type` |
+| `resource` | Site, IP range, connection name, or network prefix |
+| `account_id` / `asset_id` | Account ID and Imperva asset ID |
+| `main_category` / `sub_type` | Notification type and subtype |
+| `site_name` / `range` / `ip_range` / `slice_name` / `network_prefix` | Attack target |
+| `connection_name` / `connection_type` / `pop_name` / `affected_networks` | BGP and connection performance events |
+| `attack_duration` / `event_duration` / `max_blocked_bps` / `max_blocked_pps` / `request_rate` | Attack size and duration |
+| `dashboard_link` / `analytics_link` / `attack_report_link` | Links into the Imperva console |
+
+The alert title comes from `event_title` and the description from `event_details.event_body`.
+
+## Troubleshooting
+---
+
+- **Test Webhook fails**: Imperva requires the receiver to answer 200 or 201. Check that the push URL is complete, the `integration_key` is valid, and the integration type is Imperva
+- **No alerts arrive**: check that the notification policy's Recipients use this Webhook Connection and that the event type is in the table above. Event types outside the table create no alert
+- **An alert never resolves**: check that the notification subtype of the end event is also in a notification policy. `MonitoringAttackStartCritical` and `TrafficStartDivert` never resolve automatically
+- **A 400 response**: the request lacks `event_type` or the object identity field; the response names the field
+
+For more, see the [Imperva Webhook Connections documentation](https://docs-cybersec.thalesgroup.com/bundle/cloud-application-security/page/webhooks.htm).

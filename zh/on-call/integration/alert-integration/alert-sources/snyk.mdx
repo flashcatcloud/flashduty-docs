@@ -1,0 +1,127 @@
+---
+title: "Snyk 告警集成"
+description: "通过 Snyk Webhook 将开源依赖和容器镜像的新增、消除漏洞同步到 Flashduty On-call。"
+keywords: ["告警集成", "Snyk", "Webhook", "漏洞", "安全告警", "SCA"]
+---
+
+通过 Snyk Webhook 将项目扫描中发现的漏洞同步到 Flashduty On-call。Snyk 每次复测项目都会发送一次 `project_snapshot/v0` 事件：`newIssues` 中的每个漏洞在 Flashduty 触发一条告警，`removedIssues` 中的漏洞恢复对应的告警。
+
+目前 Snyk Webhook 支持开源依赖（Open Source）和容器（Container）两类扫描，且处于 Beta 阶段，仅在 Snyk US-01、US-02、EU-01、AU-01 区域可用。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Snyk**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Snyk**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Snyk 中配置
+---
+
+Snyk 只能通过 API 创建 Webhook，控制台界面没有对应入口。
+
+<Steps>
+<Step title="准备 Snyk 凭证">
+
+准备 Snyk 组织 ID（Organization ID）和 API Token。Webhook 属于组织，需要有该组织权限的 Token。
+
+组织的套餐必须包含 API 访问权限。Free 套餐调用 Webhooks API 会返回 `The org <name> (<id>) is not entitled for api access. Please upgrade your plan`。请先在 **Settings → Billing → Available plans** 中开通 14 天免费试用或升级套餐，再创建 Webhook。
+
+</Step>
+
+<Step title="创建 Webhook">
+
+调用 [Create a webhook](https://docs.snyk.io/developer-tools/snyk-api/reference/webhooks-v1) 接口，`url` 填 Flashduty 集成的完整推送地址（Snyk 只接受 HTTPS 地址），`secret` 填一个只有您知道的随机字符串：
+
+```bash
+curl -X POST "https://api.snyk.io/v1/org/<ORG_ID>/webhooks" \
+  -H "Authorization: token <SNYK_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"url": "<Flashduty 推送地址>", "secret": "<随机字符串>"}'
+```
+
+返回值中的 `id` 是 Webhook ID，后续测试和删除都要用到。
+
+</Step>
+
+<Step title="发送测试">
+
+创建 Webhook 后 Snyk 会自动发送一次 `ping/v0` 事件，也可以调用 Ping 接口重新发送：
+
+```bash
+curl -X POST "https://api.snyk.io/v1/org/<ORG_ID>/webhooks/<WEBHOOK_ID>/ping" \
+  -H "Authorization: token <SNYK_TOKEN>"
+```
+
+测试事件会在 Flashduty 中产生一条独立的 Info 等级告警，标题为 `Snyk test notification`，不关联任何真实漏洞，也没有对应的恢复事件，请确认收到后手动关闭。
+
+</Step>
+
+<Step title="验证生命周期">
+
+等待或手动触发一次项目复测，确认新增漏洞在 Flashduty 触发告警；修复漏洞（例如升级依赖）并再次复测，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 关于签名
+---
+
+Snyk 会在请求头 `X-Hub-Signature`（格式 `sha256=<HMAC 十六进制摘要>`，密钥为创建 Webhook 时填写的 `secret`）中带上签名。Flashduty 不校验该签名，`secret` 可以填任意随机字符串；推送地址中的 `integration_key` 是唯一的凭证，请妥善保管。
+
+## Alert Key
+---
+
+Flashduty 用 **项目 ID（`project.id`）加漏洞 ID（`id`）** 生成 Alert Key，即同一项目中的同一个漏洞对应一条告警。`newIssues` 和 `removedIssues` 中的漏洞使用相同的结构和 `id`，所以新增和消除落在同一条告警上。
+
+项目名称、分支、严重等级的变化不会改变 Alert Key。同一个漏洞在同一项目的多个依赖路径中重复出现时只生成一条告警。不同项目中的同一个漏洞是不同的告警。
+
+## 状态和告警等级
+---
+
+| 来源 | Flashduty 处理 |
+| :--- | :--- |
+| `project_snapshot/v0` 的 `newIssues` | 每个漏洞触发一条告警 |
+| `project_snapshot/v0` 的 `removedIssues` | 恢复对应告警，保留原等级 |
+| `project_snapshot/v0`，两个列表都为空 | 返回成功，不生成告警 |
+| `ping/v0` | 独立的 Info 告警，需手动关闭 |
+| 其他事件类型 | 返回成功，不生成告警 |
+
+| Snyk `issueData.severity` | Flashduty 等级 |
+| :--- | :--- |
+| `critical`、`high` | Critical |
+| `medium` | Warning |
+| `low` | Info |
+| 空值或其他 | Warning |
+
+Flashduty 只处理 `newIssues` 和 `removedIssues` 中列出的漏洞；漏洞被忽略（ignore）时是否出现在 `removedIssues` 中，Snyk 文档未说明。为避免告警长期悬挂，建议在协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)作为兜底。
+
+一次推送最多处理 `newIssues` 和 `removedIssues` 各前 100 个漏洞（按漏洞 ID 排序），超出部分不会生成告警。
+
+告警标签包含项目 ID 和名称、项目类型、分支、组织、漏洞 ID、依赖包名称和版本、CVE、CWE、CVSS 分数和修复版本。导入用户的姓名和邮箱不会写入告警。
+
+## 排查问题
+---
+
+- **创建 Webhook 时返回错误**：确认 `url` 是 HTTPS 地址，Token 有该组织权限，组织位于 Snyk 支持 Webhook 的区域，且套餐包含 API 访问权限（Free 套餐会返回 `not entitled for api access`）
+- **没有收到告警**：Snyk 只在项目复测且漏洞发生变化时发送事件；项目刚导入时不会发送。请确认项目的扫描类型是开源依赖或容器
+- **告警没有恢复**：只有 `removedIssues` 中出现的漏洞才会恢复
+- **收到测试告警**：这是 `ping/v0` 事件产生的独立 Info 告警，手动关闭即可
+
+更多信息请参阅 Snyk 文档 [Webhook events and payloads](https://docs.snyk.io/developer-tools/snyk-api/using-specific-snyk-apis/webhooks-apis/webhooks) 和 [About webhooks](https://docs.snyk.io/developer-tools/snyk-api/using-specific-snyk-apis/webhooks-apis/about-webhooks)。

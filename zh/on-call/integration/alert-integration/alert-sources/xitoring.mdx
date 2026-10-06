@@ -1,0 +1,135 @@
+---
+title: "Xitoring 告警集成"
+description: "通过通知角色的 Webhook 将 Xitoring 的宕机和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Xitoring", "Notification Role", "Webhook", "Uptime", "服务器监控"]
+---
+
+通过 Xitoring 通知角色（Notification Role）的 Webhook，把检查项和服务器指标的宕机、恢复通知同步到 Flashduty On-call。同一个检查项或指标触发器的宕机和恢复落在同一条 Flashduty 告警上：宕机时触发，重复通知合并，恢复时关闭。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Xitoring**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Xitoring**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Xitoring 中配置
+---
+
+<Steps>
+<Step title="创建通知角色">
+
+1. 登录 Xitoring，进入 **Notification Roles** 页面，新建一个通知角色，或编辑已有角色
+2. 打开角色的 **Automation & webhooks** 标签页，打开 **Webhook** 开关，把 Flashduty 集成的完整推送地址粘贴到 **Webhook URL**
+3. 点击 **Save changes**，再点击 **Send test** 并在弹窗中确认，验证地址：Flashduty 返回成功，不会创建告警。Send test 会通知所有角色的所有渠道，请使用只有你自己接收的角色
+
+<Note>
+试用版只允许一个通知角色（`default`），请直接编辑它，而不是新建。
+</Note>
+
+</Step>
+
+<Step title="把通知角色关联到触发器">
+
+编辑需要接入的检查项或服务器指标触发器（Trigger），在通知角色中选择刚才的角色并保存。一个触发器可以选择多个通知角色，一个通知角色也可以被多个触发器使用。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个检查项真正宕机（例如临时指向一个不可访问的地址），确认 Flashduty 收到活动告警；再恢复目标，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Xitoring 以 `application/x-www-form-urlencoded` 表单格式 POST 以下字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `id` | 事件（Incident）ID | 标签 `incident_id`，不参与 Alert Key |
+| `group` / `sub_group` | 检查项或服务器所属分组、子分组 | 标签 `group`、`sub_group` |
+| `server_id` | 服务器 ID | Alert Key，标签 `server_id` |
+| `check_id` | 检查项 ID | Alert Key，标签 `check_id` |
+| `label` | 服务器或检查项名称 | 告警标题，标签 `check`、`resource` |
+| `name` | 触发器名称，如 `total`、`used` | Alert Key，标签 `trigger` |
+| `type` | 类型编号，如 `20` 为 Ping | Alert Key，决定告警等级 |
+| `type_human_readable` | 类型名称，如 `ping` | 告警标题，标签 `type` |
+| `unit` / `value` | 触发时的指标单位和值 | 标签 `unit`、`value` |
+| `status` | `0` 宕机，`1` 恢复 | 触发或恢复 |
+| `message` | 通知正文 | 告警描述 |
+| `incident_time` | 事件时间 | 不保存 |
+
+## Alert Key
+---
+
+Xitoring 文档把 `id` 定义为事件 ID，但没有说明恢复通知是否沿用同一个 `id`。因此 Flashduty 不用 `id`，而是把每次通知都携带的资源字段 `server_id`、`check_id`、`type`、`name` 用分隔符拼接后取 MD5 作为 Alert Key。同一个检查项或指标触发器的宕机、重复宕机和恢复通知得到相同的 Alert Key，落在同一条告警上；不同检查项、服务器或触发器得到不同的告警。修改名称、分组、指标值、`id` 或时间不会改变 Alert Key。
+
+`server_id` 和 `check_id` 都为空，或 `type` 为空时，Flashduty 返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+Xitoring 的通知不携带告警等级，Flashduty 按检查类型判断：
+
+| Xitoring `type` | Flashduty 等级 | 原因 |
+| :--- | :--- | :--- |
+| `20`-`30`（Ping、HTTP(s)、DNS、FTP、SMTP、POP3、IMAP、SSL、TCP、UDP、Heartbeat） | Critical | 可用性检查宕机即服务不可达 |
+| 其他（CPU、内存、磁盘等服务器指标，Nginx、MySQL、Redis 等服务检查） | Warning | 指标越限，不一定中断服务 |
+
+| Xitoring `status` | Flashduty 状态 |
+| :--- | :--- |
+| `0` | 触发，等级如上 |
+| `1` | 恢复，等级保持触发时的等级 |
+
+`status` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="测试通知会创建告警吗？">
+
+不会。Xitoring 的测试通知使用事件 ID `0`，Flashduty 识别后返回成功，不创建告警。
+
+</Accordion>
+
+<Accordion title="重复通知会产生多条 Flashduty 告警吗？">
+
+不会。Xitoring 对持续未恢复的事件会重复推送（消息带 `[REPEATED]` 标记），这些通知的资源字段相同，合并到同一条告警。
+
+</Accordion>
+
+<Accordion title="同一个检查项再次宕机会是新告警吗？">
+
+同一个检查项或触发器的两次宕机使用相同的 Alert Key。上一条告警已恢复后再次宕机，会按 Flashduty 的合并规则生成新的告警；仍在合并时间窗口内时，会并入已有告警。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Xitoring 推送失败**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求中 `status` 为 `0` 或 `1`，`type` 非空，且 `server_id` 或 `check_id` 至少一个非空
+- **告警没有恢复**：确认恢复通知也发到了同一个通知角色，且其 `server_id`、`check_id`、`type`、`name` 与宕机通知一致
+
+字段说明请参阅 Xitoring 官方文档 [Webhook](https://xitoring.com/docs/notifications/notification-roles/webhook/)。

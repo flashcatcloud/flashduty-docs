@@ -1,0 +1,90 @@
+---
+title: "Chronosphere Alert Integration"
+description: "Receive Chronosphere alerts through Chronosphere's webhook notifier using a Flashduty Prometheus integration; with resolved notifications on, alerts close automatically."
+keywords: ["alert integration", "Chronosphere", "webhook", "Prometheus", "Alertmanager", "observability"]
+---
+
+Chronosphere's webhook notifier sends an HTTP POST to the URL you enter. The body is Prometheus Alertmanager JSON (`version` is `4`, with `status`, `alerts`, `fingerprint`, `labels`, `annotations`, `startsAt`, `endsAt`, plus an extra `notifier` field). The Flashduty [Prometheus integration](/en/on-call/integration/alert-integration/alert-sources/prometheus) accepts this format, so no separate Chronosphere integration is needed: create a Prometheus integration in Flashduty and paste its push URL into Chronosphere.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Prometheus integration type** in both, not Chronosphere.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Prometheus** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/prometheus?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Prometheus** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Chronosphere
+---
+
+<Steps>
+<Step title="Create a webhook notifier">
+
+1. In Chronosphere, go to **Alerting** → **Notifiers** and click **Create notifier**
+2. Enter a name and select **Webhook** as the type
+3. In **URL**, enter the full push URL copied above, including `?integration_key=...`
+4. Select **Notify when resolved**; otherwise Flashduty receives no recovery notifications
+5. Click **Save**
+
+You can also create the notifier with Chronoctl or Terraform. In a Chronoctl Notifier resource, `skip_resolved` controls whether resolved notifications are skipped and must be `false`; in the Terraform `chronosphere_webhook_alert_notifier` resource, `send_resolved` controls it and defaults to `true`. See the Chronosphere documentation [Create a webhook notifier](https://docs.chronosphere.io/investigate/alerts/notifications/notifiers/webhook).
+
+</Step>
+
+<Step title="Use the notifier in a notification policy">
+
+In a Chronosphere notification policy, add this notifier to the route for the relevant severities (warn, critical); only then do alerts from your monitors reach Flashduty.
+
+</Step>
+
+<Step title="Verify">
+
+Trigger an alert from a monitor and confirm Flashduty receives an active alert; after the alert resolves, confirm the original alert closes in Flashduty.
+
+</Step>
+</Steps>
+
+## Field mapping
+---
+
+| Chronosphere field | Flashduty |
+| :--- | :--- |
+| `alerts[].fingerprint` | Alert Key. Chronosphere defines it as the identity of an alerting series, a deterministic value hashed from the labels; notifications for one series belong to one alert |
+| `alerts[].status` | `firing` creates or updates the alert with the mapped severity; `resolved` closes it |
+| `alerts[].labels.severity` | `critical` → Critical; `warn` or `warning` → Warning; `info` → Info; missing or unrecognized → Warning |
+| `alerts[].labels.alertname` | Check (`check`), also used in the title |
+| `alerts[].labels.instance` | Label `resource` |
+| Other `labels` and `annotations` | Each key becomes a label; `annotations.description` becomes the alert description |
+| `startsAt`, `endsAt` | Labels `starts_at` and `ends_at` |
+| `notifier` | Not used |
+
+One notification can carry several alerts, and Flashduty handles each one separately (up to 100 per request).
+
+## Recovery and deduplication
+---
+
+- When Chronosphere sends a notification with `status` set to `resolved`, Flashduty closes the alert with the same `fingerprint`.
+- If the notifier does not send resolved notifications, Flashduty never receives a recovery request and the alert stays active. In that case enable [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel.
+- Chronosphere webhook requests carry the `Chronosphere-Webhook-Timestamp` and `Chronosphere-Webhook-Signature-V1` headers, signed with HMAC-SHA256. Flashduty neither requires nor verifies the signature.
+- Chronosphere's documentation does not say whether the webhook notifier has a test send. After the first setup, verify with a real alert that both the trigger and the recovery show up in Flashduty.
+
+## Troubleshooting
+---
+
+- **Flashduty returns `Invalid parameters`**: the push URL is incomplete and lacks `integration_key`, or the integration type is not Prometheus
+- **Alerts do not recover**: confirm the notifier has **Notify when resolved** selected (`send_resolved` is `true` in Terraform, `skip_resolved` is `false` in Chronoctl) and that the resolved notification's `fingerprint` matches the trigger
+- **No alerts arrive**: confirm a notification policy routes the relevant severities to this notifier, and that Chronosphere can reach `api.flashcat.cloud`
