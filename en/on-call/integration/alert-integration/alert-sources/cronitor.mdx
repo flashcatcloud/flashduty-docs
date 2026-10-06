@@ -1,0 +1,141 @@
+---
+title: "Cronitor alert integration"
+description: "Send Cronitor monitor alert and recovery notifications to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Cronitor", "cron", "heartbeat monitoring", "webhook"]
+---
+
+Use the Cronitor Webhooks integration to send monitor alert (`Alert`) and recovery (`Recovery`) notifications to Flashduty On-call. It works for cron jobs, heartbeats, and website and API checks: a Flashduty alert triggers when a monitor fails, and recovers when the monitor is healthy again.
+
+According to the Cronitor pricing page, webhook alerts are included in the free Hacker plan and in the paid plans.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Cronitor** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Cronitor** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Cronitor
+---
+
+<Steps>
+<Step title="Create a webhook integration">
+
+1. Sign in to Cronitor, go to **Settings → Integrations**, click **Create Integration**, and select **Webhooks**
+2. Enter a name (shown in the Cronitor UI, for example `Flashduty`) and a unique identifier (used in the Cronitor API)
+3. Paste the full Flashduty push URL into the URL field and click **Create Integration**
+
+</Step>
+
+<Step title="Add it to a notification list">
+
+After the integration is created, Cronitor prompts you to add it to one or more notification lists. You can also do this later by editing a notification list under **Settings → Alerts** and selecting the webhook among its integrations.
+
+A notification list can be limited to specific environments. Only alerts from the environments the list is active in are sent to Flashduty.
+
+</Step>
+
+<Step title="Attach monitors">
+
+On the monitor's edit page, select a notification list that contains the webhook. Monitors without a notification list use the account's **default** list. To send every monitor to Flashduty, add the webhook to the default list.
+
+</Step>
+
+<Step title="Verify">
+
+Cronitor recommends testing alerts with a heartbeat monitor:
+
+1. Create a heartbeat monitor and attach the notification list that contains the webhook
+2. Open the monitor's telemetry URL in a browser to send a normal ping
+3. Open the telemetry URL again with `?state=fail` appended. Cronitor sends an alert notification, and an active alert appears in Flashduty
+4. Open the URL once more without `?state=fail`. Cronitor sends a recovery notification, and the alert in Flashduty recovers
+
+</Step>
+</Steps>
+
+## Payload fields
+---
+
+Cronitor sends the following fields as JSON:
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `id` | Unique key of the monitor | Alert Key, label `monitor_key` |
+| `issue` | Cronitor issue name: the monitor name plus the failure, for example `Nightly backup · Heartbeat Failed` | Alert title |
+| `monitor` | Monitor name | Label `monitor` |
+| `description` | Description of the alert | Alert description, truncated beyond 8 KB |
+| `type` | `Alert` or `Recovery` | Alert status |
+| `rule` | The assertion or rule that triggered the alert | Label `rule` |
+| `environment` | Name of the environment the alert was generated for, for example `Production` | Alert Key, label `env` |
+| `group` | Group the monitor belongs to, `null` if ungrouped | Label `group` |
+| `issue_url` | Link to the Cronitor issue | Label `issue_url` |
+| `monitor_url` | Link to the monitor | Label `monitor_url` |
+
+The alert title is the issue name; when it is empty, the monitor name, then the monitor key. Every alert also carries the label `source=cronitor`.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the monitor key (`id`) and the environment (`environment`):
+
+- Alert, repeated alert, and recovery notifications of one monitor in one environment land on the same alert
+- One monitor in different environments (for example `Production` and `staging`) creates separate alerts, and recovery in one environment does not close the alert of another
+- Renaming a monitor or changing its group or assertions does not change the Alert Key
+
+The monitor key is the same for every outage. After an alert recovers, the next failure of the same monitor creates a new alert instead of reopening the recovered one.
+
+Changing the monitor key, or deleting the monitor and creating it again, produces a new Alert Key that is no longer linked to the old alert.
+
+## Status and severity
+---
+
+Cronitor webhooks carry no severity. Flashduty maps them as follows:
+
+| Cronitor `type` | Meaning | Flashduty status or severity |
+| :--- | :--- | :--- |
+| `Alert` | The monitor failed or an assertion was violated | Critical |
+| `Recovery` | The monitor is healthy again | Recovered, original severity Critical |
+
+`type` is matched case-insensitively. Requests without `id`, or with an empty or any other `type`, are rejected.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a monitor that keeps failing send repeated notifications?">
+
+No. While a Cronitor issue is open, further failures send no new notification; Cronitor only sends reminder alerts at the interval shown in the monitor's **Reminder Alerts** setting (every 8 hours by default). Reminder `Alert` notifications merge into the same active alert and do not create new alerts.
+
+</Accordion>
+
+<Accordion title="Why did I get the alert but not the recovery?">
+
+Make sure the monitor is still attached to a notification list that contains the webhook, and that the list is active in that environment. If a recovery notification is lost, close the alert in Flashduty manually.
+
+Resolving an issue by hand in Cronitor sends no recovery notification. A failure shortly after a recovery can reopen the same Cronitor issue; the reopened issue sends an alert (a new Flashduty alert with the same Alert Key), and in testing it did not send a recovery when the monitor became healthy again. Close such alerts in Flashduty manually.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid parameter error**: make sure the push URL is complete (including `integration_key`) and the body has the `id` and `type` fields
+- **No notifications arrive**: make sure the webhook is selected in the monitor's notification list, and the list's environments include the alert's environment
+- **An alert does not recover**: make sure the alert and recovery notifications come from the same environment; different environments create different alerts

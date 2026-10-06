@@ -1,0 +1,137 @@
+---
+title: "Jira Change Integration"
+description: "Sync Jira issue creates, updates and deletes to Flashduty On-call through a Jira webhook, so they appear as changes next to alerts and incidents."
+keywords: ["change integration", "Jira", "issue", "webhook", "change request"]
+---
+
+<Tip>**Plan requirement**: This feature requires the On-call Standard plan or above. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Create a webhook in Jira that subscribes to issue created, updated and deleted events to sync issues to Flashduty On-call. Each issue is one Flashduty change, and the change status follows the issue status (`status.name`). This fits teams that track change requests or releases as Jira issues.
+
+The integration works with Jira Cloud and Jira Data Center / Server.
+
+<Note>
+This page brings Jira issues in as change events. To create a Jira issue automatically when a Flashduty incident occurs and keep the two in sync, use [Jira Sync](/en/on-call/integration/webhooks/jira-sync).
+</Note>
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Jira** and enter an integration name
+3. To assign changes to a specific channel, add rules under the integration's **Routing** based on labels (for example `project`)
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Jira
+---
+
+<Steps>
+<Step title="Check permissions and network">
+
+- Creating a webhook requires Jira administrator permission (site admin on Jira Cloud, Jira system administrator on Data Center / Server)
+- Jira Data Center / Server must be able to reach the push URL's domain (`api.flashcat.cloud`)
+
+</Step>
+
+<Step title="Create the webhook">
+
+1. Jira Cloud: go to **Settings (gear icon) → System → WebHooks**. Data Center / Server: go to **Administration → System → WebHooks**
+2. Click **Create a WebHook** and set **URL** to the full push URL of the Flashduty integration
+3. Under **Events**, select Issue **created**, **updated** and **deleted**
+4. Optionally limit the scope with JQL, for example `project = OPS AND issuetype = Change` to sync only change requests
+5. Leave **Exclude body** unchecked. Flashduty reads the request body
+6. Click **Create**
+
+Flashduty authenticates the request with the `integration_key` in the push URL. The webhook secret is not verified, so leave it empty.
+
+</Step>
+
+<Step title="Verify">
+
+Create an issue that matches the JQL, or change the status of an existing one. The change appears in the Flashduty change list.
+
+</Step>
+</Steps>
+
+## What a change is
+---
+
+| Jira object | Change key (change_key) | Notes |
+|---|---|---|
+| Issue | `issue.key`, for example `OPS-123` | Created, updated and deleted pushes for the same issue belong to the same change |
+
+Issue updated pushes are handled the same whatever the update type (`issue_event_type_name`): a transition, resolve, reopen, assignment or comment push updates the same change by the issue's current status.
+
+The following pushes return success without creating a change: events other than issue created, updated and deleted, such as comment, worklog, sprint, version and project events.
+
+## Status mapping
+---
+
+Flashduty reads the issue's `status.name` from the push, case-insensitively, and converts it as follows:
+
+| Jira status | Flashduty change status |
+|---|---|
+| `Planned`, `To Do`, `Backlog` | Planned |
+| `Ready`, `Selected for Development` | Ready |
+| `Processing`, `Open`, `Reopen`, `Reopened`, `In Progress`, `In Review` | Processing |
+| `Canceled`, `Aborted` | Canceled |
+| `Done`, `Resolved`, `Closed` | Done |
+
+If the status name is not in the table (for example a custom `Waiting for Approval`, or a localized status name), the push returns `InvalidParameter` and that push does not create or update a change. If your workflow uses other status names, contact us to configure a custom mapping for the integration.
+
+When an issue is deleted, Flashduty updates the change with the issue's status at deletion time. The change is not set to Canceled automatically.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `[<issue key>/<status>] <summary>`, for example `[OPS-123/To Do] Upgrade the order service database` |
+| Description | The issue's `description` |
+| Change time | The push's `timestamp`, the time Jira generated the event |
+
+The title and description come from the first push of the change and are not updated afterwards. Status and labels follow later pushes; a push whose event time is earlier than the last recorded one (delayed or redelivered) does not overwrite them.
+
+Labels can be used for routing and for filtering in the change list:
+
+| Label | Description |
+|---|---|
+| `project` | Project name |
+| `issuetype` | Issue type, for example `Task` or `Change` |
+| `priority` | Priority |
+| `creator` | Creator display name |
+| `reporter` | Reporter display name |
+| `assignee` | Assignee display name |
+| `changelog` | Fields changed by this update, formatted as `field: 'old' -> 'new'`, comma separated |
+| `<Jira label>` | Each issue label becomes one label with the value `true` |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="The change did not update after I changed the issue status">
+
+1. Check that the issue matches the webhook's JQL and that the webhook subscribes to the **updated** event
+2. Check that the new status name is in the status mapping table. Otherwise the push returns `InvalidParameter`, which shows in the Jira webhook's delivery history
+3. Check that **Exclude body** is not selected on the webhook
+
+</Accordion>
+
+<Accordion title="The push returns InvalidParameter">
+
+- `issue status "<name>" is not mapped to a change status`: the issue status is not in the mapping table. Contact us to configure a custom mapping
+- `issue is empty` / `issue.key is empty` / `issue.fields is empty` / `issue.fields.status is empty`: the body is incomplete. Make sure the push comes from a native Jira webhook with Exclude body unchecked
+- `request payload is empty` or a JSON decode error: the body is empty or not valid JSON
+
+</Accordion>
+
+<Accordion title="Do comments create changes?">
+
+Standalone comment events (comment created and so on) do not create changes. When an issue is commented on, Jira also sends an issue updated push, which refreshes the change's status and labels without creating a new change.
+
+</Accordion>
+</AccordionGroup>

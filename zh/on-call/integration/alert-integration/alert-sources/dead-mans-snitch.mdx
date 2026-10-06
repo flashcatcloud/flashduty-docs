@@ -1,0 +1,139 @@
+---
+title: "Dead Man's Snitch 告警集成"
+description: "通过 Webhook 将 Dead Man's Snitch 的 Snitch 缺失、出错和恢复通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "Dead Man's Snitch", "Cron", "心跳监控", "Webhook"]
+---
+
+通过 Dead Man's Snitch 的 Webhooks 集成，把 Snitch 的状态通知同步到 Flashduty On-call。定时任务在一个周期内没有签到（check-in）时，Dead Man's Snitch 发送缺失（`snitch.missing`）通知，Flashduty 触发一条告警；任务再次签到时发送恢复（`snitch.reporting`）通知，Flashduty 关闭这条告警。
+
+根据 Dead Man's Snitch 价格页，集成（Integrations）从 Private Eye 计划开始提供；任务出错通知（Error Notices，即 `snitch.errored`）只在 Surveillance Van 计划中提供。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Dead Man's Snitch**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Dead Man's Snitch**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Dead Man's Snitch 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 登录 Dead Man's Snitch，在顶部导航栏点击 **Integrations**
+2. 在可用集成（**Available Integrations**）列表中，点击 **Webhooks** 右侧的 **ADD**
+3. 把 Flashduty 集成的完整推送地址（包含 `integration_key`）粘贴到 **Hook URL** 字段，点击 **Save**
+4. 点击 **SEND TEST**。Dead Man's Snitch 推送一条示例 `snitch.reporting` 通知，Flashduty 返回成功且不生成告警，Dead Man's Snitch 提示 **Webhook is working correctly.**
+
+</Step>
+
+<Step title="按标签过滤（可选）">
+
+集成默认接收当前 Case 中所有 Snitch 的通知。如果只想把部分 Snitch 推送到 Flashduty：
+
+1. 在 **Integrations** 页面点击该 Webhook 旁边的 **Manage Tags** 图标
+2. 添加一个或多个标签，点击 **Save**
+
+之后只有带有其中任一标签的 Snitch 会推送到 Flashduty。删除全部标签即恢复为推送所有 Snitch。
+
+</Step>
+
+<Step title="验证">
+
+1. 新建一个周期为 hourly 的 Snitch，在浏览器中打开它的签到 URL（形如 `https://nosnch.in/<token>`）完成首次签到
+2. 在下一个完整周期内不再签到。周期结束后（整点后约 1 分钟）Dead Man's Snitch 发送缺失通知，Flashduty 中出现一条活动告警
+3. 再次打开签到 URL，Dead Man's Snitch 发送恢复通知，Flashduty 中的原告警恢复
+
+如果您的计划支持 Error Notices，也可以用 `curl -d s=1 https://nosnch.in/<token>` 上报一次非 0 退出码，触发出错通知，再用 `curl -d s=0 https://nosnch.in/<token>` 正常签到。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Dead Man's Snitch 以 JSON 格式推送以下字段：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `type` | 事件类型：`snitch.missing`、`snitch.errored`、`snitch.reporting`、`snitch.paused` | 告警状态，标签 `event_type` |
+| `data.snitch.token` | Snitch 的唯一标识，即签到 URL 中的 token | 生成 Alert Key（不直接展示） |
+| `data.snitch.name` | Snitch 名称 | 告警标题，标签 `snitch` |
+| `data.snitch.notes` | Snitch 的备注，建议写处理说明 | 告警描述，超过 8 KB 时截断 |
+| `data.snitch.tags` | Snitch 的标签列表 | 标签 `tags`（以逗号连接） |
+| `data.snitch.status` | Snitch 的新状态：`healthy`、`missing`、`errored`、`paused` | 标签 `snitch_status` |
+| `data.snitch.previous_status` | Snitch 之前的状态，另有首次签到前的 `pending` | 标签 `previous_status` |
+
+告警标题为 Snitch 名称加状态说明，例如 `Nightly Backup is missing`；名称为空时使用 `Snitch`。每条告警还带有标签 `source=dead-mans-snitch`。
+
+## Alert Key
+---
+
+token 是 Snitch 的签到凭据，任何持有它的人都可以向 Snitch 签到。因此 Flashduty 不在告警中展示 token，而是用 token 的 MD5 值作为 Alert Key：
+
+- 同一 Snitch 的缺失、出错和恢复通知落在同一条告警上
+- 修改 Snitch 的名称、备注或标签不会改变 Alert Key
+
+token 在 Snitch 的整个生命周期中不变。上一条告警恢复后，同一 Snitch 再次缺失会生成一条新告警，不会重新打开已恢复的告警。删除后重新创建 Snitch 会得到新的 token，与旧告警不再关联。
+
+## 状态和告警等级
+---
+
+Dead Man's Snitch 的 Webhook 不携带严重程度，Flashduty 按下表映射：
+
+| Dead Man's Snitch `type` | 含义 | Flashduty 状态或等级 |
+| :--- | :--- | :--- |
+| `snitch.missing` | 上一个周期内没有签到 | Critical |
+| `snitch.errored` | 任务签到时上报了错误（非 0 退出码） | Critical |
+| `snitch.reporting` | 缺失或出错后再次正常签到，或新建后首次签到 | 恢复，原等级为 Critical |
+| `snitch.paused` | Snitch 被暂停 | 不生成告警 |
+
+`type` 不区分大小写。缺少 `data.snitch.token`、`type` 为空或为其他值的请求会被拒绝。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Snitch 持续缺失时会重复推送吗？">
+
+Dead Man's Snitch 的 FAQ 说明邮件告警会在每个缺失周期重复发送，直到 Snitch 被暂停或再次签到。Webhook 集成实测中，周期为 1 分钟的 Snitch 连续缺失多个周期只推送了一次缺失通知。即使收到重复的缺失通知，其 Alert Key 与原告警相同，会合并到同一条活动告警中，不会生成新告警。
+
+</Accordion>
+
+<Accordion title="暂停 Snitch 后告警会关闭吗？">
+
+不会。暂停是人工操作，Flashduty 收到 `snitch.paused` 时不生成告警，也不关闭已有告警。Snitch 在下次签到时自动取消暂停并发送 `snitch.reporting`，届时原告警恢复；如果不再签到，请在 Flashduty 中手动关闭告警。
+
+</Accordion>
+
+<Accordion title="新建 Snitch 首次签到时为什么没有告警？">
+
+新建的 Snitch 首次签到也会发送 `snitch.reporting`。此时没有对应的活动告警，这条恢复通知不会产生任何告警。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认推送地址完整（包含 `integration_key`），请求体中有 `type` 和 `data.snitch.token` 字段
+- **收不到任何通知**：确认账户计划包含集成功能；如果 Webhook 设置了标签过滤，确认 Snitch 带有其中一个标签
+- **收不到出错通知**：Error Notices 只在 Surveillance Van 计划中提供，并且任务需要在签到时上报退出码（`s=$?`），或使用 Dead Man's Snitch 的 Field Agent
+- **告警没有恢复**：Dead Man's Snitch 不保证通知的到达顺序；如果恢复通知早于缺失通知到达，告警不会自动关闭，请在 Flashduty 中手动关闭

@@ -1,0 +1,149 @@
+---
+title: "Uptrends alert integration"
+description: "Send Uptrends monitoring alerts to Flashduty On-call through an Uptrends custom integration. Alerts close automatically when the monitor recovers."
+keywords: ["alert integration", "Uptrends", "custom integration", "webhook", "website monitoring", "synthetic monitoring"]
+---
+
+Uptrends pushes alerts through a **custom integration** (Uptrends integration): when a monitor fails, while the error is ongoing, and when it recovers, Uptrends posts one JSON body to Flashduty, built from the body template on this page. Each Uptrends incident maps to one Flashduty alert: it opens when the monitor fails and closes automatically when the monitor recovers.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Uptrends** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Uptrends** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Uptrends
+---
+
+The steps below need an Uptrends user who can manage **Integrations** and **Alert definitions**.
+
+<Steps>
+<Step title="Create a custom integration">
+
+Go to **Alerting → Integrations** and click **+** (in the new menu: **Configure → Alerting channels → +**), select **Uptrends integration**, click **Choose...**, then:
+
+1. Set **Integration name** to a name of your choice, for example `Flashduty`
+2. For **ApiUrl**, select **Specify value here** and enter the full push URL, including `?integration_key=...`
+
+</Step>
+
+<Step title="Set up the request">
+
+Open the **Customizations** tab and set up the HTTP request as follows:
+
+| Field | Value |
+| :--- | :--- |
+| **Method** | `POST` |
+| **URL** | Keep the default ApiUrl variable (`{{ApiUrl}}`) |
+| **Request headers** | `Content-Type: application/json` |
+| **Request body** | Replace the default template with the body template below |
+
+Body template:
+
+```json
+{
+  "incident_key": "{{@incident.key}}",
+  "alert_type": "{{@alert.type}}",
+  "monitor_guid": "{{@monitor.monitorGuid}}",
+  "monitor_name": "{{@JsonEncode({{@monitor.name}})}}",
+  "monitor_type": "{{@monitor.type}}",
+  "monitor_url": "{{@JsonEncode({{@monitor.url}})}}",
+  "description": "{{@JsonEncode({{@alert.description}})}}",
+  "checkpoint": "{{@JsonEncode({{@alert.checkpointName}})}}",
+  "error_type_id": "{{@alert.errorTypeId}}",
+  "first_error_utc": "{{@alert.firstErrorUtc}}",
+  "first_error_check_url": "{{@alert.firstErrorCheckUrl}}",
+  "dashboard_url": "{{@monitor.dashboardUrl}}",
+  "alert_definition": "{{@JsonEncode({{@alertDefinition.name}})}}"
+}
+```
+
+Do not rename the fields; `incident_key` and `alert_type` are required. Monitor names, error descriptions, and other text can contain quotes or line breaks, so the template escapes them with `@JsonEncode`. Keep it.
+
+By default, Uptrends sends **Error**, **Reminder**, and **Ok** messages with the same request. Do not split them with **Add steps**. If they are already split, make sure every message type uses the template above and that **OK alert** is checked.
+
+</Step>
+
+<Step title="Send a test alert">
+
+Click **Send test alert** at the bottom of the page, pick any **Alert type** (**Error alert**, **OK alert** or **Reminder alert**), click **Start test**, and confirm that the result shows `200 OK`. Then click **Save**.
+
+Uptrends fills a test alert with fictitious monitor and alert data. Flashduty recognizes test alerts of every type, answers `200`, and creates no alert.
+
+</Step>
+
+<Step title="Attach the integration to an alert definition">
+
+An integration sends alerts only when an alert definition uses it. Go to **Alerting → Alert definitions** (in the new menu: **Configure → Alert escalations**), open the alert definition you want to use, select an **Escalation level** tab, check the `Flashduty` integration you created, and click **Save**.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a monitor fail (for example, temporarily point an HTTPS monitor to a path that returns 500) and confirm that Flashduty receives an alert. Restore the address, wait for the monitor to recover, and confirm that the alert closes. Uptrends sends an alert only after the error is confirmed (usually by more than one checkpoint) and the escalation level conditions of the alert definition are met.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `incident_key` (`{{@incident.key}}`) as the Alert Key. Uptrends documents that the error alert and the Ok alert of one incident share the same incident key and that each new incident gets a new key, so the error, reminder, and recovery messages all land on the same Flashduty alert. A new failure after the monitor recovers opens a new alert.
+
+Changes to the monitor name, error description, checkpoint, or alert definition do not change the Alert Key.
+
+Flashduty rejects a request that lacks `incident_key` or `alert_type`, or in which either field is still an unrendered `{{@...}}` variable.
+
+## Alert lifecycle
+---
+
+Flashduty handles each message by its `alert_type` field (`{{@alert.type}}`, case-insensitive):
+
+| Uptrends `alert_type` | Meaning | Flashduty action |
+| :--- | :--- | :--- |
+| `Alert` | The monitor failed (Error message) | Triggers an alert |
+| `Reminder` | The error is still ongoing | Updates the alert |
+| `Ok` | The error has been resolved | Recovers the alert |
+
+Any other value is rejected.
+
+## Severity
+---
+
+Uptrends alerts carry no severity, so every alert is **Critical** by default. For another severity, append `&severity=Warning` (or `Info`) to the push URL. A recovery event keeps the severity of the original alert.
+
+## Alert content
+---
+
+- **Title**: the monitor name, or `Uptrends incident <incident_key>` when the monitor name is missing
+- **Description**: the error description (`{{@alert.description}}`), which includes the failing step number for multi-step monitors
+- **Labels**: `check` (monitor name), `resource` (the address the monitor checks), `incident_key`, `alert_type`, `monitor_guid`, `monitor_type`, `checkpoint` (checkpoint of the last check), `error_type_id`, `first_error_utc` (time of the first error, UTC), `first_error_check_url` (link to the check that first failed), `dashboard_url` (link to the monitor dashboard), and `alert_definition` (alert definition name)
+
+Empty fields are not written as labels.
+
+## Troubleshooting
+---
+
+- **The test alert fails**: Make sure **ApiUrl** is the full push URL, including the `integration_key` parameter, and that **Method** is `POST`
+- **Flashduty reports that the body is not valid JSON**: Make sure the request body matches the template and the text fields use `@JsonEncode`
+- **No alert is sent**: Make sure the alert definition of the monitor has the integration checked in an **Escalation level**. The **Messages** tab of the alert details in Uptrends shows the request Uptrends sent and the response from Flashduty
+- **The alert does not recover**: Make sure Ok messages use the same template and that `incident_key` in the template is `{{@incident.key}}`
+
+For the meaning of each variable, see the Uptrends documentation [Alerting system variables](https://www.uptrends.com/support/kb/alerting/integrations/custom-integrations/alerting-system-variables) and [Custom integrations](https://www.uptrends.com/support/kb/alerting/integrations/custom-integrations/custom-integrations-overview).

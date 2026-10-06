@@ -1,0 +1,105 @@
+---
+title: "Aikido Security 告警集成"
+description: "通过 Webhook 将 Aikido 的安全问题（issue）创建、严重度变化和关闭事件同步到 Flashduty On-call。"
+keywords: ["告警集成", "Aikido", "Aikido Security", "Webhook", "安全漏洞", "issue_id"]
+---
+
+通过 Aikido Security 的 Webhook 将安全问题同步到 Flashduty On-call。每个 Aikido issue 对应一条 Flashduty 告警；issue 被创建、调整严重度、关闭、忽略或暂缓（snooze）时，都会更新或恢复同一条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Aikido**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Aikido**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Aikido 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+Webhook 需要由 Aikido 工作区管理员在 [Settings → Integrations → Webhooks](https://app.aikido.dev/settings/integrations/api/webhooks) 页面配置。把 Flashduty 集成的完整推送地址（含 `integration_key`）填为目标 URL，并勾选需要推送的事件。
+
+</Step>
+
+<Step title="选择事件">
+
+建议勾选以下 issue 事件：
+
+- `issue.open.created`：新 issue，创建告警
+- `issue.severity.changed.manual`、`issue.sla.breached`、`issue.unignored`：更新同一条告警
+- `issue.closed`、`issue.ignored.manual`、`issue.snoozed`：恢复同一条告警
+
+`ci.gate.*`、`zen.*`、`scan.image.finished` 等其他事件的负载不含 issue 信息，Flashduty 会返回 200 并忽略，不会创建告警。
+
+</Step>
+
+<Step title="Webhook 密钥（可选）">
+
+在 Webhooks 页面点击 **Add secret** 可生成签名密钥，Aikido 会在请求头 `X-Aikido-Webhook-Signature` 中带上负载的 HMAC-SHA256 签名。Flashduty 不校验该签名，也不需要您提供密钥；是否配置密钥不影响推送。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让 Aikido 产生一个新 issue，确认 Flashduty 收到告警；再在 Aikido 中关闭该 issue，确认原告警恢复。Aikido 文档未提供发送测试通知的按钮。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `payload.issue_id` 作为 Alert Key。Aikido 官方文档将其定义为 issue 的 ID，同一个 issue 的所有事件都带有这个 ID。严重度、状态和事件类型的变化不会改变 Alert Key。缺少 `payload.issue_id` 的 issue 事件会被拒绝，因为无法关联后续更新和恢复。
+
+## 状态和告警等级
+---
+
+| Aikido `event_type` | Flashduty 处理 |
+| :--- | :--- |
+| `issue.open.created` | 触发告警 |
+| `issue.severity.changed.manual` | 更新告警，等级按新的 `severity` |
+| `issue.sla.breached` | 更新告警 |
+| `issue.unignored` | 触发告警（重新打开） |
+| `issue.closed` | 恢复 |
+| `issue.ignored.manual` | 恢复 |
+| `issue.snoozed` | 恢复 |
+| 其他事件类型 | 忽略，返回 200 |
+
+| Aikido `payload.severity` | Flashduty 等级 |
+| :--- | :--- |
+| `critical` | Critical |
+| `high` | Critical |
+| `medium` | Warning |
+| `low` | Info |
+| 空值或未知值 | Warning |
+
+Aikido 负载中没有标题字段，告警标题形如 `Aikido open_source issue #123 (critical)`。issue 类型（`open_source`、`leaked_secret`、`cloud`、`iac`、`sast`、`surface_monitoring`、`malware`）、`severity_score`、`workspace_id` 等写入告警标签。
+
+## 排查问题
+---
+
+- **Aikido 返回非 200 并重试**：Aikido 对非 200 响应或超时会重试 5 次；请确认推送地址完整且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求体是有效 JSON，且 issue 事件带有 `payload.issue_id`
+- **告警没有恢复**：确认勾选了 `issue.closed` 等恢复事件；被忽略或暂缓的 issue 也会触发恢复
+- **未收到 CI 或 Zen 事件**：这些事件不含 issue 信息，按设计被忽略
+- **来源 IP**：Aikido 从固定 IP 发送请求（EU 52.18.113.172，US 54.225.143.47 与 3.211.221.73，AU 52.65.15.49），需要时可加入网络白名单
+
+更多字段含义请参阅 [Aikido Webhooks](https://apidocs.aikido.dev/reference/webhooks) 和 [Aikido Webhooks 配置说明](https://help.aikido.dev/miscellaneous-integrations/aikido-webhooks)。

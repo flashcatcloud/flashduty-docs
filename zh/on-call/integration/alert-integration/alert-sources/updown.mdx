@@ -1,0 +1,128 @@
+---
+title: "updown.io 告警集成"
+description: "通过 Webhook 将 updown.io 的宕机、恢复、SSL 证书异常和性能下降通知同步到 Flashduty On-call。"
+keywords: ["告警集成", "updown.io", "Updown", "Uptime", "Webhook", "SSL", "check.down", "check.up"]
+---
+
+通过 updown.io 的 Webhook，把监控（Check）的宕机（`check.down`）、恢复（`check.up`）、SSL 证书无效或即将到期、性能下降（`check.performance_drop`）通知同步到 Flashduty On-call。宕机与恢复、证书无效与恢复、证书即将到期与续期都会落在同一条告警上并自动关闭；性能下降是一次性事件，不会恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **updown.io**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **updown.io**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 updown.io 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 地址">
+
+1. 登录 updown.io，进入 **Settings** 页面，找到 Webhook 地址列表
+2. 将 Flashduty 集成的完整推送地址（含 `integration_key`）添加到列表中并保存
+3. 使用 **Send a test webhook** 链接发送一次测试 Webhook，确认 Flashduty 返回成功（见下方常见问题）
+
+updown.io 对该地址的要求只有返回 2xx；非 2xx 会被重试最多 25 次，连续失败 1000 次后地址会被自动移除。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个监控真正宕机（例如新建一个指向不可访问地址的监控），确认 Flashduty 收到活动告警；再恢复监控目标，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+updown.io 以 JSON 数组 POST 事件（同一请求可能包含多个事件），Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `event` | 事件类型 | 触发、恢复或一次性告警，标签 `event` |
+| `check.token` | 监控标识 | Alert Key，标签 `check_token` |
+| `check.alias` | 监控别名 | 告警标题，标签 `check`；为空时使用 `check.url` |
+| `check.url` | 被监控地址 | 标签 `resource` |
+| `check.type` | 监控类型 | 标签 `check_type` |
+| `check.error` | 失败原因 | 标签 `error` |
+| `check.last_status` | 最近一次 HTTP 状态码 | 标签 `status_code` |
+| `downtime.id` | 宕机记录 ID | 标签 `downtime_id` |
+| `ssl.days_before_expiration` | 证书剩余天数 | 标签 `days_before_expiration` |
+| `apdex_dropped` | Apdex 下降幅度 | 标签 `apdex_dropped` |
+| `description` | 事件的文字摘要 | 告警描述 |
+
+updown.io 之后新增的事件类型会被忽略并返回成功，不会创建告警。
+
+## Alert Key
+---
+
+- 宕机和恢复：使用 `check.token` 作为 Alert Key。同一个监控的 `check.down` 与 `check.up` 携带相同的 `check.token`，落在同一条告警上；不同监控生成不同的告警。修改监控别名、状态码或错误信息不会改变 Alert Key。
+- 证书无效：`check.token` 加 `:ssl_invalid`，由 `check.ssl_valid` 恢复。
+- 证书即将到期：`check.token` 加 `:ssl_expiration`，由 `check.ssl_renewed` 恢复；1、7、14、30 天前的多次提醒合并到同一条告警。
+- 性能下降：`check.token` 加 `:performance_drop`，同一监控重复的通知合并到同一条告警。
+
+各类事件的 Alert Key 互不相同，因此监控恢复不会关闭证书或性能告警。事件缺少 `check.token` 时无法可靠地把恢复通知关联到原告警，Flashduty 会跳过该事件，同一请求中的其他有效事件照常处理；请求里没有任何有效事件时才返回参数错误。
+
+## 状态和告警等级
+---
+
+updown.io 的通知不区分告警等级。
+
+| updown.io `event` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `check.down` | Critical |
+| `check.up` | 恢复，原等级为 Critical |
+| `check.ssl_invalid` | Warning |
+| `check.ssl_valid` | 恢复，原等级为 Warning |
+| `check.ssl_expiration` | Warning |
+| `check.ssl_renewed` | 恢复，原等级为 Warning |
+| `check.performance_drop` | Warning |
+
+## 一次性告警需要开启超时自动关闭
+---
+
+性能下降（`check.performance_drop`）没有对应的关闭通知，这类告警不会自动恢复。请开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)，建议设置为 6 小时；也可以手动关闭。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="测试 Webhook 会创建告警吗？">
+
+会创建一条独立的 Info 告警。updown.io 设置页的「Send a test notification」可选择接收方和事件类型，发出的是一个固定的示例监控（`check.token` 为 `xyz0`、地址为 `https://updown.io`）的事件。Flashduty 识别这个固定示例后返回成功，并为每次点击创建一条新的 Info 告警，不会与真实监控的告警合并，也不会被后续通知恢复，请验证后手动关闭。
+
+</Accordion>
+
+<Accordion title="重复的宕机通知会产生多条告警吗？">
+
+不会。同一个监控的通知携带相同的 `check.token`，会合并到同一条告警中。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **updown.io 提示投递失败**：确认 Webhook 地址是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求体是 updown.io 的 JSON 数组，且事件的 `check.token` 非空（缺少 `check.token` 的事件会被跳过，全部无效时才返回错误）
+- **告警没有恢复**：确认恢复通知使用同一个 Webhook 地址；恢复通知与宕机通知的 `check.token` 必须相同
+
+字段说明请参阅 updown.io 官方文档 [API - Webhooks](https://updown.io/api)。

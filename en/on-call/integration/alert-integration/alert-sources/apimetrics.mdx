@@ -1,0 +1,138 @@
+---
+title: "APIContext (APImetrics) alert integration"
+description: "Send failed, warning, slow and recovered API call results from the APIContext (formerly APImetrics) Performance Results Webhook to Flashduty On-call."
+keywords: ["alert integration", "APIContext", "APImetrics", "API monitoring", "webhook", "call_id", "result_class"]
+---
+
+Use the APIContext (formerly APImetrics) Performance Results Webhook to send API monitoring results to Flashduty On-call. A result whose `result_class` is `FAIL`, `WARNING` or `SLOW` triggers or updates a Flashduty alert; a `PASS` result for the same call from any location closes that alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **APIContext (APImetrics)** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **APIContext (APImetrics)** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure APIContext
+---
+
+<Steps>
+<Step title="Add a Generic webhook">
+
+1. Sign in to APIContext (`client.apimetrics.io`) and open the project you want to monitor
+2. In the left navigation, select **Alerts & Webhooks** and click **+ Add new action**
+3. Set **Type** to **Generic** and enter a name, for example `Flashduty`
+4. Paste the full Flashduty push URL (including `integration_key`) into **URL**
+5. Set **Authentication** to **None**; no custom HTTP header is needed
+
+</Step>
+
+<Step title="Choose the result types to send">
+
+Under **Trigger alerts**, turn on **Fail**, **Warning**, **Slow** and **Pass**. **Pass** is required: without it Flashduty receives no recovery notification and alerts never close automatically.
+
+Set **Only alert after this many failures in a row** to `1` to alert on the first failure; `0` sends every result. Use **Include tags** and **Exclude tags** to limit which API calls send notifications.
+
+<Note>
+With **Pass** on, every successful call sends a request to Flashduty. A `PASS` with no matching active alert creates nothing; it only closes the active alert of the same call.
+</Note>
+
+</Step>
+
+<Step title="Enable and verify">
+
+1. Turn on the **Enabled** toggle on the right and click **Save**
+2. Make a monitored API fail (for example, point the call at an address that returns 5xx) and confirm that Flashduty receives an active alert
+3. Restore the API and confirm that the alert closes when the next `PASS` result arrives
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+APIContext sends JSON with an HTTP POST, one request per call result; no template is needed. Flashduty uses these fields:
+
+| Field | Meaning | In Flashduty |
+| :--- | :--- | :--- |
+| `call_id` | Fixed ID of the API call, the same on every run | Alert Key, label `call_id` |
+| `location_id` | Probe location ID, for example `apimetrics_azurenorwayeast` | Label `location_id` |
+| `result_class` | `PASS`, `SLOW`, `WARNING` or `FAIL` | Alert status and severity, label `result_class` |
+| `result` | Finer reason, such as `HTTP_SERVER_ERROR` or `SLA_ERROR` | Alert title, label `result` |
+| `call_meta.name` | Call name | Alert title, label `check` |
+| `call_meta.domain`, `call_meta.tags` | Domain and tags of the call | Labels `domain`, `tags` |
+| `project_meta.name`, `project_meta.organization` | Project and organization names | Labels `project`, `organization` |
+| `target_url` | Probed address | Label `resource` |
+| `http_code`, `http_reason` | HTTP status code and reason | Alert description, label `http_code` |
+| `workflow_name` | Workflow the call belongs to, if any | Alert description, label `workflow` |
+| `result_id`, `result_url`, `call_url` | Result ID, and links to the result and call pages | Alert description |
+
+The alert title is "call name: result", for example `Orders API: HTTP_SERVER_ERROR`.
+
+## Alert Key
+---
+
+The Alert Key is computed from `call_id`, so each API call has one alert. The APIContext documentation describes `call_id` as a static ID that is the same every time the call is made, so the failure and the recovery of one call land on the same alert, whichever probe location reports them. With the default schedule each run executes from one random location, so a `PASS` from any location closes the call's alert and the next failure reopens it. `location_id` is kept as a label and in the description.
+
+Changing the call name, result detail, response time or HTTP status code does not change the Alert Key. When a request has no `call_id`, Flashduty returns a parameter error because it cannot reliably match a recovery to its alert. A request with no `call_id`, `result_id` and `result_class` (such as an empty object) is treated as a test request: it returns success and creates no alert.
+
+## Status and severity
+---
+
+| `result_class` | Flashduty status or severity |
+| :--- | :--- |
+| `FAIL` (HTTP server error, connection error, header or content error, SLA error) | Critical |
+| `WARNING` (redirect, HTTP client error, content or connection warning, SLA warning) | Warning |
+| `SLOW` | Warning |
+| `PASS` | Recovery |
+| Other or missing | Warning |
+
+`SLOW` means the call succeeded but responded slowly. Flashduty records it as Warning and does not close an existing failure alert. To change a severity, rewrite it with a rule under the channel's **Configuration**.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="The alert does not recover automatically?">
+
+Check that the APIContext webhook has **Pass** turned on. APIContext sends the `PASS` result to the webhook, and Flashduty closes the alert with the same `call_id`, whatever the location. If the alert stays open, check that the call's `PASS` results are actually sent.
+
+</Accordion>
+
+<Accordion title="How many alerts are created when one API fails in several locations?">
+
+One. Alerts are grouped per call: failures from every location merge into the same alert, and a `PASS` from any location closes it. If a call fails in only some locations, a success from another location closes the alert and the next failure reopens it, so it may open and close repeatedly. As an optional fallback, turn on the [auto-close timeout](/en/on-call/channel/create-edit) for the channel with the timing start set to **Incident trigger**; you can also pin **Node Locations** in the APIContext **Schedules** so a call always runs from the same places.
+
+</Accordion>
+
+<Accordion title="Do APIContext retries create duplicate alerts?">
+
+No. The Alert Key of a call does not change, so repeated failure results merge into the same alert.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **APIContext does not receive a success response**: confirm the URL is the full push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: the request body has no `call_id`. Confirm that you use the Generic webhook rather than an OpenTelemetry or other export type
+- **No alerts arrive**: check the webhook's **Enabled** toggle, its **Snooze** state, and the **Allow** toggle under **Downtimes** in the organization settings
+
+For field details, see the APIContext documentation: [Performance Results Webhook](https://docs.apimetrics.io/docs/performance-results-webhook) and [Generic Webhook](https://docs.apimetrics.io/docs/generic-webhook).

@@ -1,0 +1,112 @@
+---
+title: "Flagsmith 变更集成"
+description: "通过 Flagsmith 审计日志 Webhook 将功能开关（Flag）、Segment 等的变更同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Flagsmith", "Feature Flag", "功能开关", "审计日志", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Flagsmith 组织级的审计日志 Webhook（Audit Log Webhook），将功能开关和 Segment 的变更同步到 Flashduty On-call。Flagsmith 审计日志中每一条与开关求值相关的记录对应一条 Flashduty 变更，例如修改开关状态或远程配置值、创建或删除开关、修改 Segment 规则和 Segment 覆盖、发布环境特性版本、修改用户身份（Identity）覆盖。
+
+Flagsmith 推送的是已经生效的变更，因此每条变更都直接记录为 **Done**。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Flagsmith**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`environment`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Flagsmith 中配置
+---
+
+<Steps>
+<Step title="创建组织级 Webhook">
+
+1. 进入 **Organisation Settings**，打开 **Webhooks** 页签
+2. 创建审计日志 Webhook（Audit Log Webhook）
+
+需要组织管理员权限。请使用组织级审计日志 Webhook（**Create audit webhook**）。除审计日志外，Flagsmith 还会向该地址推送 `FLAG_UPDATED`、`FLAG_DELETED` 事件，Flashduty 收到后返回成功，不生成变更。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **URL**：粘贴 Flashduty 集成的完整推送地址
+2. **Secret**：留空。Flashduty 通过推送地址中的 `integration_key` 鉴权，不校验 `X-Flagsmith-Signature`
+3. 启用该 Webhook 并保存
+
+</Step>
+</Steps>
+
+Flagsmith 会把组织下所有项目的审计日志推送到该地址，之后在任一开关上做一次变更，即可在 Flashduty 变更列表中看到记录。Webhook 对话框中的 **Test your webhook** 按钮可发送测试推送，Flashduty 收到后返回成功，不生成变更。
+
+## 一条变更是什么
+---
+
+| Flagsmith 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| 审计日志记录（Audit log entry） | 推送内容中的 `data.id` | 每次保存产生一条审计日志，对应一条 Flashduty 变更；同一个开关先打开再关闭是两条变更 |
+
+## 状态映射
+---
+
+| Flagsmith 审计日志记录（`related_object_type`） | Flashduty 变更状态 |
+|---|---|
+| `FEATURE`（创建、删除开关）、`FEATURE_STATE`（开关状态、远程配置值、Segment 覆盖、变更请求或定时变更生效）、`SEGMENT`、`EF_VERSION`（发布特性版本）、`EDGE_IDENTITY`（Identity 覆盖） | Done |
+
+以下推送返回成功但不生成变更：
+
+- 其他类型的记录，例如变更请求（`CHANGE_REQUEST`）、环境、导入请求、开关健康状态、发布流水线
+- 开关的名称、描述、标签等元数据修改（`Flag / Remote Config updated`）
+- 只创建定时变更、尚未生效的记录（日志内容含 `scheduled for`）；变更生效时 Flagsmith 会另外推送一条记录
+- 事件类型不是 `AUDIT_LOG_CREATED` 的推送，例如 `FLAG_UPDATED`、`FLAG_DELETED`
+- Flagsmith 的测试推送
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目> / <环境>: <审计日志内容>`，例如 `Web Shop / Production: Flag state updated for feature: new_checkout`；项目级记录（例如创建开关）不带环境 |
+| 描述 | 空 |
+| 链接 | 空。Flagsmith 的推送内容不含页面地址，也不含实例地址 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目名称 |
+| `environment` | 环境名称；项目级记录没有此标签 |
+| `kind` | `related_object_type`，例如 `FEATURE_STATE` |
+| `actor` | 操作人姓名；通过 Master API Key 等无用户方式操作，或用户未填写姓名时没有此标签 |
+| `audit_log_id` | 审计日志记录 ID |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Flagsmith 重试推送会重复记录吗？">
+
+不会。同一条记录的重试内容与原推送相同，Flashduty 只记录一次。
+
+</Accordion>
+
+<Accordion title="为什么没有收到某次修改？">
+
+先看上文 **状态映射** 中的忽略列表：元数据修改、变更请求本身、定时变更的创建都不记录，变更请求提交并生效、定时变更到期生效时才有记录。另外确认 Webhook 配置在组织级并处于启用状态。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `data.id is missing`：推送内容缺少审计日志 ID，请确认推送来自 Flagsmith 组织级 Webhook
+- `invalid created_date`：推送中的时间字段格式不正确
+
+</Accordion>
+</AccordionGroup>

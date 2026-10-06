@@ -1,0 +1,135 @@
+---
+title: "Rundeck 变更集成"
+description: "通过 Rundeck 的 Webhook 通知将作业（Job）的每次执行同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Rundeck", "Webhook 通知", "作业执行", "运维自动化"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Rundeck 作业（Job）的 [Webhook 通知](https://docs.rundeck.com/docs/manual/notifications/webhooks.html)，将作业的执行同步到 Flashduty On-call。每一次执行对应一条 Flashduty 变更；执行开始和结束时，都会更新同一条变更。
+
+Rundeck 无法区分一个作业是否会改变线上环境，因此只需在**执行发布、变更类操作的作业**上配置通知，不要在只读的巡检类作业上配置。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Rundeck**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`、`job`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Rundeck 中配置
+---
+
+<Steps>
+<Step title="打开作业的通知设置">
+
+打开要同步的作业，点击 **Edit**，切换到 **Notifications** 页签。
+
+</Step>
+
+<Step title="添加 Webhook 通知">
+
+分别为 **On Start**、**On Success**、**On Failure** 和 **On Retryable Failure** 添加通知，类型选择 **Send Webhook**：
+
+1. **URL(s)**：填写 Flashduty 集成的完整推送地址
+2. **Payload Format**：选择 `JSON`。Rundeck 的默认格式是 XML，Flashduty 不接受
+3. **Method**：选择 `POST`
+
+四个触发点都需要配置：On Start 让变更在执行开始时出现；On Success 和 On Failure 给出结束状态；作业设置了重试（**Retry**）时，失败的那一次执行只发送 On Retryable Failure，不发送 On Failure，缺少它变更会一直停在 Processing。
+
+通知也可以写在作业定义文件（YAML 或 XML）的 `notification` 段中，由 `rd jobs load` 或项目导入生效。
+
+</Step>
+
+<Step title="运行一次作业">
+
+保存后运行一次作业，在 Flashduty 的变更列表中即可看到对应的变更。Webhook 通知没有测试按钮。Rundeck 向 Flashduty 推送失败时，只在 Rundeck 服务日志中记录 `Notification failed`，Flashduty 拒绝的推送不会显示在作业页面。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+每一次作业执行是一条变更，变更标识（change_key）为 Rundeck 的执行 ID（execution id），例如 `4711`。
+
+- 同一次执行的开始、结束通知更新同一条变更
+- 同一作业的两次执行是两条变更
+- 作业失败后自动重试，每次重试是一次新的执行，因此是一条新的变更
+- 执行 ID 在一个 Rundeck 服务内唯一。多个 Rundeck 服务请分别创建集成，否则不同服务上相同的执行 ID 会被合并为一条变更
+
+## 状态映射
+---
+
+| 触发点 | 执行状态（status） | Flashduty 变更状态 |
+|---|---|---|
+| On Start | running | Processing |
+| On Success | succeeded | Done |
+| On Failure | failed | Failed |
+| On Failure | timedout（执行超时） | Failed |
+| On Failure | missed（错过计划时间） | Failed |
+| On Failure | aborted（被终止） | Canceled |
+| On Retryable Failure | failed-with-retry | Failed |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。
+
+`On Average Duration Exceeded` 报告的是仍在运行的执行，不是新的阶段，Flashduty 接收但不记录。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<项目>: run <作业分组>/<作业名称>`，例如 `ops: run release/prod/deploy-app`；作业已被删除时为 `<项目>: run execution <执行 ID>` |
+| 描述 | 作业的描述，未填写时为空 |
+| 链接 | Rundeck 中该次执行的页面 |
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | Rundeck 项目名称 |
+| `job` | 作业名称 |
+| `job_group` | 作业分组 |
+| `job_id` | 作业 ID |
+| `execution_id` | 执行 ID |
+| `execution_type` | 执行类型：`user`（手动）、`scheduled`（计划）或 `user-scheduled` |
+| `actor` | 发起执行的用户 |
+| `rundeck_state` | 最新的执行状态 |
+
+作业选项（Option）的值可能包含敏感信息，不会被记录。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到变更？">
+
+- 确认 **Payload Format** 选择的是 `JSON`
+- 确认 On Start、On Success、On Failure、On Retryable Failure 都添加了通知
+- 只有作业（Job）的执行才会触发通知；从 **Commands** 页面直接运行的临时命令（ad hoc）不发送
+- 在 Rundeck 服务日志中搜索 `Notification failed`，查看推送失败的原因
+
+</Accordion>
+
+<Accordion title="变更为什么一直是 Processing？">
+
+结束通知没有送达。常见原因是作业配置了重试却没有添加 **On Retryable Failure**，或 Rundeck 到 Flashduty 的网络不通。Rundeck 只对每次通知尝试一次，失败后不会重发。
+
+</Accordion>
+
+<Accordion title="Flashduty 会拒绝哪些推送？">
+
+Flashduty 在以下情况拒绝推送：
+
+- `must use format JSON`：通知的 **Payload Format** 选择了 `XML`
+- `execution is missing` 或 `execution.id is missing`：推送内容缺少执行信息，请确认推送来自 Rundeck 的 Webhook 通知
+- `unsupported status`：收到了 Flashduty 尚未支持的执行状态，例如作业返回了自定义状态（`other`），请联系我们
+
+</Accordion>
+</AccordionGroup>

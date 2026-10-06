@@ -1,0 +1,115 @@
+---
+title: "Suricata alert integration"
+description: "Suricata has no webhook output. Collect its eve.json log with Wazuh and receive Suricata alerts through Flashduty's Wazuh integration."
+keywords: ["alert integration", "Suricata", "IDS", "intrusion detection", "Wazuh", "eve.json", "network security"]
+---
+
+Suricata only writes events to its EVE JSON log and cannot send HTTP requests itself. The Wazuh documentation describes a Suricata integration: the Wazuh agent reads `/var/log/suricata/eve.json`, and Wazuh's bundled Suricata rules turn each Suricata alert into a Wazuh alert. The Wazuh manager's built-in `shuffle` integration then pushes those alerts to Flashduty's [Wazuh integration](/en/on-call/integration/alert-integration/alert-sources/wazuh), so no separate Suricata integration is needed.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the integration push URL in either of the two ways below. **In both cases choose Wazuh as the integration type**, not Suricata.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Wazuh** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/wazuh?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Wazuh** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Data flow
+---
+
+1. Suricata writes events as JSON to `/var/log/suricata/eve.json`
+2. The Wazuh agent on the same host reads that file
+3. The Wazuh manager uses rule `86601` (groups `ids` and `suricata`, level 3, description `Suricata: Alert - <signature>`) to raise an alert for every event whose `event_type` is `alert`
+4. The manager's `shuffle` integration POSTs the alert to Flashduty
+
+Rule `86601` matches only Suricata alert events. Other event types in the same `eve.json` (`http`, `dns`, `tls`) map to level-0 rules and raise no alert.
+
+## Collect Suricata logs on the Wazuh agent
+---
+
+In the Wazuh agent's `/var/ossec/etc/ossec.conf` on the host that runs Suricata, add:
+
+```xml
+<localfile>
+  <log_format>json</log_format>
+  <location>/var/log/suricata/eve.json</location>
+</localfile>
+```
+
+Then restart the agent:
+
+```bash
+sudo systemctl restart wazuh-agent
+```
+
+Make sure Suricata has EVE JSON output enabled and that the file path matches the `location` above.
+
+## Push to Flashduty from the Wazuh manager
+---
+
+In `/var/ossec/etc/ossec.conf` on the manager, add a `shuffle` integration that forwards only the Suricata alert rule, and replace `hook_url` with the Flashduty push URL:
+
+```xml
+<integration>
+  <name>shuffle</name>
+  <hook_url>https://api.flashcat.cloud/event/push/alert/wazuh?integration_key=YOUR_INTEGRATION_KEY</hook_url>
+  <rule_id>86601</rule_id>
+  <alert_format>json</alert_format>
+</integration>
+```
+
+- Filter with `<rule_id>` rather than `<level>`: rule `86601` is level 3, so any `<level>` above 3 would block it
+- `<alert_format>json</alert_format>` is required
+- Do not set `<api_key>`; Flashduty authenticates with the `integration_key` in the URL
+
+Save, then restart the manager:
+
+```bash
+systemctl restart wazuh-manager
+```
+
+For Docker deployments, restart the manager container. The [Wazuh integration](/en/on-call/integration/alert-integration/alert-sources/wazuh) page covers the full setup, field mapping and troubleshooting.
+
+## Trigger and verify
+---
+
+The Wazuh Suricata example triggers Suricata by sending ICMP from another host to the monitored host:
+
+```bash
+ping -c 20 <IP of the host running Suricata>
+```
+
+Whether this fires depends on Suricata having a rule loaded that matches ICMP. Once it fires, you can filter with `rule.groups:suricata` in the Wazuh console, and an alert titled `Suricata: Alert - <signature>` should appear in Flashduty. If nothing arrives, check `/var/ossec/logs/integrations.log` and `/var/ossec/logs/ossec.log` on the manager.
+
+## Events and recovery
+---
+
+Suricata and Wazuh raise an alert once per event and never send a recovery. Every Wazuh alert has a unique ID, which Flashduty uses as the Alert Key, so each Suricata alert opens its own Flashduty alert and none closes automatically.
+
+Enable the [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel that receives this integration (24 hours suggested). When the same signature fires repeatedly, configure a noise-reduction rule on the channel to merge them into one incident.
+
+## Severity
+---
+
+Rule `86601` is level 3, which Flashduty maps to Info by Wazuh rule level (0-6 Info, 7-11 Warning, 12-15 Critical). Flashduty does not read Suricata's own `alert.severity`; to distinguish severity, adjust it with an [alert processing pipeline](/en/on-call/integration/alert-integration/alert-pipelines) using the signature in the title or the `rule_id` label.
+
+## Notes
+---
+
+- Suricata events carry source and destination IPs and possibly payload content. Flashduty neither reads nor stores the raw log (`full_log`), but `shuffle` sends the whole Wazuh alert to `hook_url`, so forward only the rules that need a human response.
+- To forward only certain signatures or categories, write custom Wazuh rules for them with a higher level, then filter with `<rule_id>` or `<level>`.

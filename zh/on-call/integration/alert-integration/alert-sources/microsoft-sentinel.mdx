@@ -1,0 +1,133 @@
+---
+title: "Microsoft Sentinel 告警集成"
+description: "通过 Microsoft Sentinel 自动化规则运行 Logic App，用 HTTP 操作把事件推送到 Flashduty 标准告警事件集成，事件关闭时自动恢复告警。"
+keywords: ["告警集成", "Microsoft Sentinel", "Azure Sentinel", "Logic App", "SIEM", "自动化规则", "标准告警事件"]
+---
+
+Microsoft Sentinel 的自动化规则不能直接向外部 URL 发送 Webhook，能调用外部系统的动作是 **Run playbook**，即运行一个 Logic App。Logic App 的 **HTTP** 操作可以向任意地址 POST JSON，因此不需要单独的 Sentinel 集成：在 Flashduty 创建 [标准告警事件](/zh/on-call/integration/alert-integration/alert-sources/standard-alert) 集成，让 Logic App 把 Sentinel 事件（incident）按标准告警格式推送过来。
+
+Sentinel 的事件也包含 Microsoft Entra ID Protection、Microsoft Defender for Cloud、Microsoft Defender for Endpoint 等 Microsoft 安全产品产生的告警（这些告警在 Sentinel 中被汇总成事件），因此这条路径同样覆盖它们。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择标准告警事件**，不是 Microsoft Sentinel。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **标准告警事件**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>`
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **标准告警事件**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Microsoft Sentinel 中配置
+---
+
+整个流程分两步：先创建一个以 **Microsoft Sentinel incident** 触发器开头的 Logic App（Sentinel 里叫 playbook），再创建自动化规则去运行它。
+
+### 创建 Logic App
+
+1. 创建一个 Logic App，工作流的触发器选择 **Microsoft Sentinel incident**。只有以事件触发器开头的 playbook 才能被事件类自动化规则选用
+2. 在触发器后添加内置的 **HTTP** 操作，按下一节填写各字段
+3. 保存工作流
+
+### 创建自动化规则
+
+进入 Microsoft Sentinel 的 **Configuration** → **Automation**（Defender 门户中为 **Microsoft Sentinel** → **Configuration** → **Automation**），点击 **Create** → **Automation rule**，创建下面两条规则，两条规则的动作都是 **Run playbook**，选择上一步的 Logic App：
+
+| 规则 | Trigger | Conditions |
+| :--- | :--- | :--- |
+| 事件产生时推送 | **When incident is created** | 按需限制分析规则或严重程度 |
+| 状态或严重程度变化时推送 | **When incident is updated** | 条件 **Status** **Changed**，再用 **OR** 条件组加上 **Severity** **Changed** |
+
+如果 playbook 在下拉列表中显示为灰色，说明 Sentinel 对它所在的资源组没有权限：点击 **Manage playbook permissions**，勾选对应资源组并点击 **Apply**（需要该资源组的 **Owner** 权限）。
+
+## HTTP 操作
+---
+
+HTTP 操作各字段：
+
+| 字段 | 值 |
+| :--- | :--- |
+| **Method** | `POST` |
+| **URI** | Flashduty 推送地址，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>` |
+| **Headers** | `Content-Type`：`application/json` |
+| **Body** | 见下方 |
+
+下面是这个 HTTP 操作的 JSON 定义，可以在 Logic App 的 **Code view** 中放进 `actions`。`@` 开头的整段字符串是 Logic App 表达式，取值来自 Sentinel incident 触发器的输出，按 JSON 类型输出，标题里含引号也不会破坏 JSON：
+
+```json
+"Send_to_Flashduty": {
+  "type": "Http",
+  "runAfter": {},
+  "inputs": {
+    "method": "POST",
+    "uri": "https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>",
+    "headers": { "Content-Type": "application/json" },
+    "body": {
+      "title_rule": "@triggerBody()?['object']?['properties']?['title']",
+      "event_status": "@if(equals(triggerBody()?['object']?['properties']?['status'], 'Closed'), 'Ok', if(equals(triggerBody()?['object']?['properties']?['severity'], 'High'), 'Critical', if(equals(triggerBody()?['object']?['properties']?['severity'], 'Informational'), 'Info', 'Warning')))",
+      "alert_key": "@concat('sentinel-', triggerBody()?['workspaceInfo']?['WorkspaceName'], '-', string(triggerBody()?['object']?['properties']?['incidentNumber']))",
+      "description": "@triggerBody()?['object']?['properties']?['description']",
+      "labels": {
+        "incident_number": "@string(triggerBody()?['object']?['properties']?['incidentNumber'])",
+        "incident_url": "@triggerBody()?['object']?['properties']?['incidentUrl']",
+        "sentinel_severity": "@triggerBody()?['object']?['properties']?['severity']",
+        "sentinel_status": "@triggerBody()?['object']?['properties']?['status']",
+        "workspace": "@triggerBody()?['workspaceInfo']?['WorkspaceName']",
+        "resource_group": "@triggerBody()?['workspaceInfo']?['ResourceGroupName']"
+      }
+    }
+  }
+}
+```
+
+在设计器中，同样的取值对应下面这些动态内容（Microsoft Sentinel incident 触发器的输出）：
+
+| Flashduty 字段 | 动态内容 | 表达式路径 |
+| :--- | :--- | :--- |
+| `title_rule` | Incident Title | `object.properties.title` |
+| `event_status`（严重程度与状态） | Incident Severity、Incident Status | `object.properties.severity`、`object.properties.status` |
+| `alert_key` | Workspace Name、Incident Sentinel ID | `workspaceInfo.WorkspaceName`、`object.properties.incidentNumber` |
+| `description` | Incident Description | `object.properties.description` |
+| 标签 `incident_url` | Incident URL | `object.properties.incidentUrl` |
+| 标签 `workspace`、`resource_group` | Workspace Name、Resource Group Name | `workspaceInfo.WorkspaceName`、`workspaceInfo.ResourceGroupName` |
+
+## 字段映射
+---
+
+| Sentinel 字段 | Flashduty |
+| :--- | :--- |
+| Incident Title | 告警标题（`title_rule`，超过 512 个字符自动截断） |
+| Incident Severity | `High` → Critical；`Informational` → Info；`Medium`、`Low` → Warning。同时保留在标签 `sentinel_severity` |
+| Incident Status | `Closed` → 恢复（`Ok`）；`New`、`Active` 按严重程度触发或更新告警 |
+| Workspace Name + Incident Sentinel ID | Alert Key，形如 `sentinel-<工作区名>-<事件编号>`。同一事件的所有推送合并到同一条告警 |
+| Incident Description | 告警描述（超过 2048 个字符自动截断） |
+| Incident URL 等 | 同名标签，`incident_url` 可在告警详情中直接打开事件 |
+
+## 恢复与去重
+---
+
+- 事件被关闭（**Status** 变为 `Closed`）时，Logic App 发送 `event_status` 为 `Ok` 的事件，Flashduty 按相同的 Alert Key 关闭告警。
+- Sentinel 在事件新增告警、评论、标签等更新时也会触发 **When incident is updated**。上表的更新规则只在状态或严重程度变化时运行；如果去掉这些条件，每次更新都会推送一次，同一 Alert Key 的重复事件会合并到原告警。
+- `event_status` 必须是 `Critical`、`Warning`、`Info`、`Ok` 之一（首字母大写），其他取值会被 Flashduty 拒绝。
+- 一个事件包含多条 Sentinel 告警时，只推送一条 Flashduty 告警，标题和描述取自事件本身。
+
+## 排查问题
+---
+
+- **Flashduty 返回 `InvalidParameter`**：检查 `event_status` 取值是否为首字母大写的四个枚举值之一，`title_rule` 是否为空
+- **HTTP 操作返回 4xx 且提示认证或路由失败**：推送地址缺少 `integration_key`，或复制的不是标准告警事件集成的推送地址
+- **自动化规则没有运行 Logic App**：确认 playbook 以 **Microsoft Sentinel incident** 触发器开头，并且已授予 Sentinel 对其资源组的权限
+- **告警没有恢复**：确认事件更新规则在状态变为 `Closed` 时运行了，且 Logic App 运行记录里 `event_status` 的值为 `Ok`

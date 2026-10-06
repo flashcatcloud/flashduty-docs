@@ -1,0 +1,129 @@
+---
+title: "Firefly alert integration"
+description: "Send configuration drift, unmanaged resource, ghost resource, and insight events detected by Firefly to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Firefly", "webhook", "configuration drift", "drift", "IaC", "unmanaged resource"]
+---
+
+Use Firefly's Webhook notification integration to send the events Firefly detects to Flashduty On-call: a cloud resource whose configuration differs from its IaC definition (Drift), a resource created outside IaC (UnmanagedResource), a resource that exists only in the IaC state file (GhostResource), and a resource that matches an Insight rule (InsightDetected). One delivery can carry several resources, and each resource becomes one Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Firefly**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Firefly** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Firefly
+---
+
+<Steps>
+<Step title="Add a Webhook integration">
+
+1. Sign in to Firefly and click **Settings → Integrations**
+2. Click **Add New → Webhook Integration**
+3. Enter a recognizable name in **Nickname**, such as `Flashduty`
+4. Paste the full push URL of the Flashduty integration into **Webhook URL**. The URL must include `integration_key`
+5. Leave **Add custom credentials** unchecked. Flashduty authenticates the request by the `integration_key` in the URL
+6. Click **Next**, then click **Done**
+
+Before creating the integration, Firefly sends a connectivity test to the URL. If the test fails, the integration is not created.
+
+</Step>
+
+<Step title="Choose the events to send">
+
+Go to **Settings → Notifications** and add notifications for drift, unmanaged resources, ghost resources, policy violations, or other events, with the Webhook integration from the previous step as the destination. The webhook sends these event types (`notificationType`):
+
+| Event type | Meaning | Effect in Flashduty |
+| :--- | :--- | :--- |
+| `Drift` | The resource's live configuration differs from its IaC definition | Triggers one Warning alert per resource |
+| `GhostResource` | The resource was deleted from the cloud but remains in the IaC state file | Triggers one Warning alert per resource |
+| `InsightDetected` | The resource matches an Insight (policy) rule | Triggers one Warning alert per resource |
+| `UnmanagedResource` | The resource was created outside IaC and is not managed by it | Triggers one Info alert per resource |
+
+Other event types, deliveries without resources (empty `samples`), and empty request bodies create no alert; Flashduty acknowledges them with a success response.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+Firefly's Webhook notifications have no "resolved" event: once a resource is fixed, Firefly sends nothing more, so the alert in Flashduty does not recover on its own. In the channel that receives this integration's alerts, turn on the **auto-resolve timeout**, set the window timing start to **Incident trigger**, and set the timeout to **24 hours**. See [Create and edit channels](/en/on-call/channel/create-edit) for the steps. Close issues fixed before the timeout by hand in Flashduty.
+
+</Step>
+
+<Step title="Verify">
+
+Click the notification test button on the integration settings page and confirm that Firefly reports a successful delivery. Then, in a cloud account connected to Firefly, change a Terraform-managed resource by hand, wait for Firefly to detect the drift, and confirm that Flashduty receives an alert for that resource.
+
+Firefly does not document the content of the test notification. If it carries no resource, Flashduty creates no alert; if it carries a sample resource, Flashduty creates an alert for it, which you should close by hand after the check.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Each resource (one entry in `samples`) produces one alert. The Alert Key is computed from the event type `notificationType` and the resource's `FRN`; when `FRN` is empty, the resource's `ARN` is used instead. As a result:
+
+- When the same resource is reported again for the same event type, the event merges into the existing alert
+- Drift and Insight events on the same resource are two separate alerts
+- Changes to the resource name, the drifted attributes and their values, or the detection time do not change the Alert Key
+
+If a resource has neither `FRN` nor `ARN`, Flashduty rejects the whole delivery.
+
+## Status and severity
+---
+
+Firefly's Webhook notifications carry no severity. Flashduty sets the severity by event type, and every event is a trigger:
+
+| Event type | Flashduty severity |
+| :--- | :--- |
+| `Drift`, `GhostResource`, `InsightDetected` | Warning |
+| `UnmanagedResource` | Info |
+
+## Title, description, and labels
+---
+
+The alert title is `Firefly <event type>: <resource name> (<resource type>)`, for example `Firefly drift detected: web-1 (aws_instance)`. The description of a `Drift` alert lists each drifted attribute on its own line with its IaC value and its live cloud value.
+
+| Label | Source |
+| :--- | :--- |
+| `notification_type` | Event type `notificationType` |
+| `resource` | Resource name `name`; `FRN` or `ARN` when the name is empty |
+| `asset_type` | Resource type `assetType`, such as `aws_instance` |
+| `frn` / `arn` | The resource's `FRN` and `ARN` |
+| `provider` | Cloud provider `providerType`, such as `aws`, `gcp`, or `azurerm` |
+| `region` | Region of the resource |
+| `account_name` | Firefly account name `accountName` |
+| `integration_name` / `integration_identifier` | Name and identifier of the data source integration the resource belongs to |
+| `drift_keys` | Names of the drifted attributes, comma-separated |
+| `iac_type` | IaC type, such as `terraform` or `cloudformation` |
+| `action_type` / `cloud_event` | Type of the change and the cloud event name, such as `ModifyInstanceAttribute` |
+
+The actor information in Firefly's delivery (`ownerData.userIdentity`) is not written to labels.
+
+## Troubleshooting
+---
+
+- **Firefly reports an invalid webhook URL when creating the integration**: Make sure the URL is complete, includes `integration_key`, and **Add custom credentials** is unchecked
+- **Flashduty returns an invalid parameter error**: Make sure the `integration_key` in the push URL belongs to a Firefly integration
+- **The test succeeds but no alerts arrive**: Make sure the Webhook integration is selected as the destination for the events you need under **Settings → Notifications**
+- **Alerts never recover**: Firefly sends no recovery events. Turn on the channel's auto-resolve timeout, or close the alerts by hand
+
+For field details, see [Firefly Webhook](https://docs.firefly.ai/integrations/notifications/webhook).

@@ -1,0 +1,126 @@
+---
+title: "IBM QRadar 告警集成"
+description: "IBM QRadar 的规则响应可以发送邮件，使用 Flashduty 的邮件集成按规则接收 QRadar 告警。"
+keywords: ["告警集成", "IBM QRadar", "QRadar", "SIEM", "邮件", "Email", "安全告警"]
+---
+
+IBM QRadar 的规则触发后可以执行邮件响应，并且邮件的主题和正文可以通过 `alert-config.xml` 中的模板自定义。Flashduty 的 [邮件集成](/zh/on-call/integration/alert-integration/alert-sources/email) 可以接收这些邮件，并按规则从邮件标题提取 Alert Key，因此不需要单独的 QRadar 集成：在 Flashduty 创建邮件集成，把它的邮件地址加到 QRadar 规则的邮件响应收件人里，再按下文自定义邮件模板并配置推送规则。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成邮件地址，任选其一即可。**集成类型都选择邮件 Email**，不是 IBM QRadar。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **邮件 Email**，点击 **保存**
+4. 打开生成的集成卡片，复制 **邮件地址**，再按下文配置推送规则
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **邮件 Email**，填写集成名称，复制 **邮箱地址**
+3. 按下文配置推送规则
+4. 配置默认路由并选择协作空间，点击 **保存**
+
+</div>
+
+## 在 QRadar 中配置
+---
+
+规则的邮件响应使用 `alert-config.xml` 里的事件或流量（event / flow）模板。QRadar 官方文档说明了修改方法，见 [Configuring event and flow custom email notifications](https://www.ibm.com/docs/en/qsip/7.4.0?topic=notifications-configuring-event-flow-custom-email)。下面是让邮件适配 Flashduty 规则的最小改动。
+
+<Steps>
+<Step title="编辑邮件模板">
+
+用 root 通过 SSH 登录 QRadar Console，把 `custom_alerts` 目录复制到一个临时目录，编辑其中的 `alert-config.xml`：
+
+```bash
+cp /store/configservices/staging/globalconfig/templates/custom_alerts/*.* <directory_name>
+```
+
+如果该目录下没有这些文件，可以到 `/opt/qradar/conf/templates/custom_alerts` 找。在 `<template>` 中使用下面的写法（事件模板）：
+
+```xml
+<template>
+  <templatename>Flashduty event</templatename>
+  <templatetype>event</templatetype>
+  <active>true</active>
+  <filename></filename>
+  <subject>[QRadar] ${RuleName} from ${SourceIP}</subject>
+  <body>
+     Rule Name:          ${RuleName}
+     Rule Description:   ${RuleDescription}
+     Time:               ${StartTime}
+     Source IP:          ${SourceIP}
+     Destination IP:     ${DestinationIP}
+     Event Name:         ${EventName}
+     Category:           ${Category}
+     Log Source:         ${LogSourceName}
+  </body>
+  <from></from>
+  <to></to>
+  <cc></cc>
+  <bcc></bcc>
+</template>
+```
+
+- 标题以 `[QRadar]` 开头，后面是规则名和来源 IP，规则据此提取 Alert Key。同一条规则、同一个来源 IP 的多封邮件合并到同一条 Flashduty 告警
+- 必须保留 `<active>true</active>`，且 `<filename>` 留空；`${...}` 参数取自官方文档列出的 Common 和 Event 参数
+- 如果规则同时监控流量，再按同样格式增加一个 `<templatetype>flow</templatetype>` 的模板，主题也写成 `[QRadar] ${RuleName} from ${SourceIP}`
+
+</Step>
+
+<Step title="验证并部署">
+
+```bash
+/opt/qradar/bin/runCustAlertValidator.sh <directory_name>
+```
+
+看到 `File alert-config.xml was deployed successfully to staging!` 后，登录 QRadar，进入 **Admin** → **Advanced** → **Deploy Full Configuration**。
+
+</Step>
+
+<Step title="在规则中发送邮件">
+
+在需要通知的 QRadar 规则的响应里启用邮件通知，收件人填 Flashduty 邮件集成的地址，并确认邮件使用了上面新增的模板（`<active>` 为 true 的模板会作为可选项出现在 QRadar 中）。
+
+</Step>
+</Steps>
+
+## 在 Flashduty 中配置推送规则
+---
+
+QRadar 的规则邮件没有恢复邮件，一封邮件对应一次规则触发。因此只需要一条触发规则，Alert Key 从邮件标题提取「规则名 + 来源 IP」。
+
+1. **推送模式** 选择 **根据规则触发或关闭告警**
+2. 添加下面 1 条规则：条件是 **邮件标题** **匹配** 给出的正则，Alert Key **提取自** **邮件标题**
+3. **默认规则** 选择：如果以上规则均不满足，则 **丢弃该邮件**
+
+规则 1：触发告警
+
+```
+条件：邮件标题 匹配 /^\[QRadar\] /
+正则表达式：/^\[QRadar\] (.+)$/
+```
+
+默认规则选丢弃，是为了让不带 `[QRadar]` 前缀的邮件（例如系统通知）不生成告警。
+
+## 恢复与去重
+---
+
+- QRadar 规则响应不会在条件恢复时再发邮件，Flashduty 不会自动关闭这些告警。请在接收该集成的协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时；也可以处理完成后手动关闭。
+- 同一规则、同一来源 IP 再次触发时，标题相同，Alert Key 相同，Flashduty 更新同一条告警。想按目的 IP 或用户区分，就把对应参数（如 `${DestinationIP}`、`${UserName}`）加进 `<subject>`。
+- 告警在 Flashduty 中显示的集成类型是邮件 Email；严重程度统一为 Warning，可以通过 [告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 调整。
+- 邮件正文超过 128 KB 会被截断，附件会被丢弃，详情见 [邮件集成](/zh/on-call/integration/alert-integration/alert-sources/email)。
+
+## 排查问题
+---
+
+- **没有收到告警**：确认已执行 **Deploy Full Configuration**，规则的邮件响应使用了新模板，QRadar 邮件服务器能把邮件发到 Flashduty 邮件地址
+- **告警都被丢弃**：邮件标题不以 `[QRadar] ` 开头，说明规则没有使用新模板；用一封实际收到的邮件核对标题
+- **告警数量太多**：在 `<subject>` 中只保留规则名，让同一规则的告警合并

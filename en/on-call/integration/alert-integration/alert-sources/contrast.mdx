@@ -1,0 +1,119 @@
+---
+title: "Contrast Security Alert Integration"
+description: "Sync Contrast Security new-vulnerability, vulnerability-closed, and server-offline events to Flashduty On-call through a generic webhook."
+keywords: ["alert integration", "Contrast Security", "webhook", "vulnerability", "application security", "IAST"]
+---
+
+Use Contrast Security's generic webhook to sync new vulnerabilities, closed vulnerabilities, server-offline events, and new attacks to Flashduty On-call. Each vulnerability maps to one Flashduty alert: it triggers when a new vulnerability is found and recovers automatically when the vulnerability is closed.
+
+Contrast's generic webhook has no fixed payload; the body is the template you enter in the **Payload** field. Use the template below, because Flashduty parses only the fields it defines.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Go to **Settings** → **Integration Data** → **Dedicated Integrations** and click **Add an Integration**
+3. Select **Contrast Security** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Contrast Security** and enter an integration name
+3. Configure the default route and choose a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Contrast Security
+---
+
+<Steps>
+<Step title="Add a generic webhook">
+
+1. Sign in to Contrast and go to **Organization settings → Integrations**
+2. Click **Connect** on the **Generic webhook** option
+3. Name the webhook and paste the full Flashduty push URL, including `integration_key`, into the URL field
+4. Choose the applications to send events for
+
+</Step>
+
+<Step title="Enter the Payload template">
+
+Paste the following single-line JSON into the **Payload** field:
+
+```json
+{"event_type":"$EventType","organization_id":"$OrganizationId","organization_name":"$OrganizationName","application_id":"$ApplicationId","application_name":"$ApplicationName","server_id":"$ServerId","server_name":"$ServerName","environment":"$Environment","trace_id":"$TraceId","severity":"$Severity","status":"$Status","vulnerability_title":"$VulnerabilityTitle","rule_name":"$VulnerabilityRuleName"}
+```
+
+Contrast replaces each `$` variable with its value and sends the result as a POST. Do not add variables such as `$Message` or `$VulnerabilityEvidence`: they can contain double quotes or line breaks that break the JSON, and Flashduty then returns an invalid-parameter error.
+
+Click **Add**. Contrast disconnects a webhook after 5 consecutive attempts without a 2XX response; to reconnect, test and save it again.
+
+</Step>
+
+<Step title="Verify">
+
+1. Produce a new vulnerability in an application running the Contrast agent and confirm Flashduty shows an active alert
+2. In Contrast, change that vulnerability's status to a closed status (for example Remediated or Fixed) and confirm the alert recovers
+
+</Step>
+</Steps>
+
+## Events and Alert Key
+---
+
+| Contrast event | `event_type` | Effect in Flashduty | Alert Key field |
+| :--- | :--- | :--- | :--- |
+| New vulnerability | `NEW_VULNERABILITY` | Triggers an alert | `trace_id` (`$TraceId`, the vulnerability ID) |
+| Vulnerability closed | `VULNERABILITY_CHANGESTATUS_CLOSED` | Recovers the alert of the same vulnerability | `trace_id` |
+| Server offline | `SERVER_OFFLINE` | Triggers an alert; repeated offline events of one server merge | `server_id` |
+| New attack, new vulnerable library, expiring license | `NEW_ATTACK`, `NEW_VULNERABLE_LIBRARY`, `EXPIRING_LICENSE` | Each delivery triggers its own alert and never recovers | None; each delivery is independent |
+
+Changes to severity, status, title, or application do not change the Alert Key. A `NEW_VULNERABILITY` or `VULNERABILITY_CHANGESTATUS_CLOSED` event without `trace_id`, or a `SERVER_OFFLINE` event without `server_id`, is rejected. Unrecognized event types are handled like the last row.
+
+Server-offline alerts and the events in the last row have no recovery event. Configure **Auto-close after timeout** (for example 24 hours) on the integration or channel, or close them manually.
+
+## Severity mapping
+---
+
+Mapped from `$Severity`:
+
+| Contrast severity | Flashduty severity |
+| :--- | :--- |
+| Critical | Critical |
+| High, Medium | Warning |
+| Low, Note | Info |
+| Empty or any other value (including events without severity such as server offline and attacks) | Warning |
+
+When a vulnerability is closed the alert recovers and keeps the severity carried by the closing event.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `event_type` | Event type |
+| `trace_id` | Vulnerability ID |
+| `application` / `application_id` | Application name and ID |
+| `server` / `server_id` | Server name and ID |
+| `env` | Server environment (DEVELOPMENT, QA, PRODUCTION) |
+| `vendor_severity` | Raw Contrast severity |
+| `vulnerability_status` | Vulnerability status |
+| `rule` | Rule that found the vulnerability |
+| `organization` / `organization_id` | Organization name and ID |
+
+## Troubleshooting
+---
+
+- **Contrast reports the webhook as disconnected**: Flashduty returned a non-2XX response. Check that the URL contains `integration_key` and that the Payload is the template above and valid JSON, then test and save again in Contrast
+- **The alert does not recover**: confirm the vulnerability moved to a closed status in Contrast. Other status changes (such as Confirmed or Suspicious) send no event
+- **An extra alert appears when saving or testing**: the Contrast documentation does not show what a test request contains, so Flashduty does not special-case it and handles it as an ordinary event. A test request with unsubstituted or blank variables opens a separate alert for an unrecognized event type. Close it manually after verifying
+
+For more variables and events, see [Contrast Generic Webhooks](https://docs.contrastsecurity.com/en/generic-webhooks.html).

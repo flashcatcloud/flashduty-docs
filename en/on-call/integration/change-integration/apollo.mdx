@@ -1,0 +1,158 @@
+---
+title: "Apollo config center change integration"
+description: "Sync every Apollo config release, rollback, gray release, and full release to Flashduty On-call through the Apollo Portal release webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Apollo", "Ctrip Apollo", "config center", "config release", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use the Apollo Portal release webhook to sync config releases from the Apollo config center to Flashduty On-call. Each release operation (release, rollback, gray release, full release) becomes one Flashduty change, recorded once when Apollo finishes the operation.
+
+Apollo sends a webhook only after the operation is done and has no start event, so a change has no Processing state and is recorded directly in its final state (Done, or Canceled for an abandoned release). A change here is a configuration change, not a deployment of an application.
+
+<Warning>The Apollo payload contains the full configuration after the release (keys and values), which can include passwords and tokens. Flashduty does not read or store it: a change has no config key or value.</Warning>
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Apollo** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `app_id`, `environment`, or `namespace`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Apollo
+---
+
+Apollo supports the config release webhook since version 1.8.0. The settings live in the `ApolloPortalDB.ServerConfig` table. You can also edit them on the Apollo Portal page **Administrator Tools → System Parameters**; a change takes effect in about a minute.
+
+<Steps>
+<Step title="Choose the environments to push">
+
+Add or edit the setting `webhook.supported.envs`. The value is the list of environments that send the webhook, separated by commas:
+
+```
+DEV,FAT,UAT,PRO
+```
+
+Use the environment names shown in your Portal. For example, the environment of the quick-start (all-in-one) image is `LOCAL`.
+
+</Step>
+
+<Step title="Set the push URL">
+
+Add or edit the setting `config.release.webhook.service.url` and set it to the Flashduty **Push URL**:
+
+```
+https://api.flashcat.cloud/event/push/change/apollo/<integration_key>
+```
+
+Paste the Push URL exactly as Flashduty shows it. The integration key is in the path, not in an `?integration_key=` query parameter, because Apollo appends `?env=<environment>` to the configured URL. If the URL already had a query string, the integration key would be corrupted and the request would fail authentication.
+
+Flashduty reads the environment from the `env` parameter, so do not add query parameters to the URL yourself.
+
+</Step>
+
+<Step title="Verify">
+
+Apollo has no test delivery: publish a config in any environment that has the webhook enabled, and the change appears in the Flashduty change list.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+One change is one Apollo release operation. Its change key (`change_key`) is `<environment>/<release history ID>`, for example `PRO/1234`.
+
+The release history ID is the record ID Apollo creates for each release operation. It is unique within one environment, and environments can reuse the same ID, so the key includes the environment name.
+
+The `releaseId` in the payload is not used as the key. When you roll back, Apollo sends the `releaseId` of the older release that becomes active again, which is the same `releaseId` its original release delivery carried. Keying on `releaseId` would merge the rollback into the old release record.
+
+Two releases of the same namespace are two changes, and so are a release and a later rollback.
+
+## Status mapping
+---
+
+The `operation` Apollo sends decides the kind of change; the status is Done, except for abandoned releases (see the note below the table):
+
+| Apollo `operation` | Meaning | Title verb | `operation` label | Flashduty change status |
+|---|---|---|---|---|
+| `0` | Normal release | 发布 | `release` | Done |
+| `1` | Config rollback | 回滚到 | `rollback` | Done |
+| `2` | Gray release | 灰度发布 | `gray` | Done |
+| `4` | Full release (gray merged to the main branch) | 全量发布 | `full` | Done |
+
+When `isReleaseAbandoned` in the payload is `true` (the release the delivery describes has been abandoned), the change status is Canceled.
+
+Any `operation` value other than the four above returns InvalidParameter and creates no change.
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<AppId>/<cluster>/<namespace> [<environment>]: <verb> <release title>`, for example `SampleApp/default/application [PRO]: 发布 20261002-release-1`. For a rollback the release title is that of the release that becomes active. Without a release title, `#<releaseId>` is used |
+| Description | The release comment (`releaseComment`) |
+| Link | None. The Apollo payload carries no Portal address |
+| Change time | The release time (`releaseTime`) |
+
+The title verbs are fixed Chinese words (发布 release, 回滚到 roll back to, 灰度发布 gray release, 全量发布 full release); filter on the `operation` label rather than on the title.
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `app_id` | Application AppId |
+| `cluster` | Cluster name |
+| `namespace` | Namespace |
+| `environment` | Environment, from the `env` parameter Apollo adds to the URL |
+| `branch` | Branch name: `default` for a normal release, the gray branch name for a gray release |
+| `operation` | `release`, `rollback`, `gray`, or `full` |
+| `operator` | The user who released (login name; omitted when it is an email address) |
+| `release_id` | Apollo's release ID (`releaseId`) |
+| `history_id` | Release history ID (part of the change key) |
+| `emergency` | `true` for an emergency release |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why can't I see the config values?">
+
+The Apollo payload carries the full configuration after the release, which can include passwords and tokens. Flashduty does not parse it, so a change contains no config key or value. To see what changed, open the release history in the Apollo Portal.
+
+</Accordion>
+
+<Accordion title="Does changing gray release rules create a change?">
+
+No. Apollo sends the webhook only when a normal release, rollback, gray release, or full release completes. Changing the gray rules does not send one.
+
+</Accordion>
+
+<Accordion title="Does Apollo retry a failed delivery?">
+
+No. Apollo sends each release to each URL once and only logs an error in the Portal log when it fails. A lost delivery means the release does not appear in Flashduty.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `env is missing`: the request has no `env` parameter. Check that the value of `config.release.webhook.service.url` is the Push URL Flashduty shows, with no query parameters added
+- `id is missing`: the payload is incomplete; make sure it comes from the Apollo Portal release webhook
+- `operation is missing` or `unknown operation`: `operation` is absent or not one of `0`, `1`, `2`, `4`
+- `invalid releaseTime`: the release time in the payload has an unexpected format
+
+Apollo does not show the response. Look for `Notify webHook server failed` in the Portal log for failures.
+
+</Accordion>
+
+<Accordion title="Can several environments share one integration?">
+
+Yes. The change key includes the environment name, so releases in different environments are never merged. To send environments to different channels, add route rules on the `environment` label of the integration.
+
+</Accordion>
+</AccordionGroup>

@@ -1,0 +1,127 @@
+---
+title: "CrowdStrike Falcon 告警集成"
+description: "通过 CrowdStrike Falcon Fusion SOAR 工作流的 Cloud HTTP Request 动作，把 EPP / NG-SIEM 检测推送到 Flashduty On-call。"
+keywords: ["告警集成", "CrowdStrike", "Falcon", "Fusion SOAR", "EDR", "NG-SIEM", "Webhook"]
+---
+
+CrowdStrike Falcon 没有内置的通用告警 webhook：检测通知通过 **Falcon Fusion SOAR** 工作流投递，请求体完全由用户在工作流里编写。本集成提供两段可直接粘贴的工作流请求体模板（NG-SIEM 检测、EPP 检测），对应 Falcon Fusion 官方文档中"release-verified"（在工作流发布时已校验可用）的触发器字段。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **CrowdStrike**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **CrowdStrike**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 CrowdStrike Falcon 中配置
+---
+
+以下操作需要能在 Falcon 控制台创建和发布（Release）Fusion SOAR 工作流的权限；NG-SIEM 检测触发器需要开通 Next-Gen SIEM 模块，EPP 检测触发器需要 Falcon Insight/Prevent 端点检测能力。Falcon 云端需要能访问推送地址所在的域名。
+
+<Steps>
+<Step title="创建 NG-SIEM 检测工作流">
+
+1. 登录 Falcon 控制台，进入 **Fusion SOAR → Workflows**（部分租户显示为 **NEXT-GEN SIEM → Automated workflows**），点击 **Create workflow**
+2. 触发器选择 **Detection → NG-SIEM Detection**
+3. 添加一个 **Cloud HTTP Request** 动作：
+   - Method：`POST`
+   - URL：粘贴上一步复制的推送地址（包含 `?integration_key=...`）
+   - Headers：添加 `Content-Type: application/json`
+   - Body（Content type 选 JSON）：
+
+     ```json
+     {
+       "detection_id": "${data['Trigger.Detection.DetectionID']}",
+       "name": "${data['Trigger.Detection.Name']}",
+       "severity": "${data['Trigger.Detection.SeverityDisplayName']}",
+       "product": "NGSIEM",
+       "source_url": "${data['Trigger.SourceEventURL']}"
+     }
+     ```
+
+4. 保存并 **Release**（发布）工作流——只保存为草稿不会真正执行
+
+字段名不要修改，`detection_id` 必须保留。
+
+Fusion 会把 `${...}` 的值原样填入 JSON 字符串，未发现官方提供的 JSON 转义函数。检测名称等自由文本字段若含双引号 `"` 或反斜杠 `\`，请求体将不是合法 JSON，本次推送会以 400 被拒绝。`detection_id` 与 `severity` 为必填，`name` 可省略（省略时告警标题为 `CrowdStrike detection`），如检测名称可能含此类字符，建议从请求体中删除 `name` 行。
+
+</Step>
+
+<Step title="（可选）创建 EPP 检测工作流">
+
+如果还需要接入终端防护（EPP）检测，重复上一步创建第二个工作流，触发器改为 **Detection → EPP Detection**，请求体改为：
+
+```json
+{
+  "detection_id": "${data['Trigger.Detection.DetectionID']}",
+  "name": "${data['Trigger.Detection.Name']}",
+  "severity": "${data['Trigger.Detection.SeverityDisplayName']}",
+  "product": "EPP",
+  "hostname": "${data['Trigger.Detection.EPP.Sensor.Hostname']}",
+  "process_sha256": "${data['Trigger.Detection.EPP.Process.SHA256']}",
+  "ioc_value": "${data['Trigger.Detection.EPP.Behavior.IOCValue']}",
+  "ioc_type": "${data['Trigger.Detection.EPP.Behavior.IOCType']}"
+}
+```
+
+</Step>
+
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用请求体中的 `detection_id` 作为 Alert Key。这个字段对应 Falcon Fusion 触发器变量 `${data['Trigger.Detection.DetectionID']}`——CrowdStrike 官方 Fusion 工作流开发参考称其为"release-verified"（工作流发布时会校验这个路径存在），NG-SIEM 与 EPP 两种检测触发器都会给出这个字段，同一次检测在两种触发器下返回相同格式的复合 ID。
+
+- 同一检测多次触发（例如级别从 High 升级到 Critical）落在同一条告警上
+- 不同检测（`detection_id` 不同）不会合并
+
+请求缺少 `detection_id`，或 `severity` 不是 Critical/High/Medium/Low/Informational 之一时，Flashduty 会拒绝该请求。
+
+Falcon Fusion 没有携带检测 ID 的"检测已关闭"触发器，因此本集成是一次性事件：Flashduty 不会因为检测在 Falcon 中被关闭而自动关闭告警。**请给对应的协作空间开启[超时自动关闭](/zh/on-call/channel/create-edit)，安全类检测建议 24 小时**；同一检测在超时内再次触发会刷新同一条告警。
+
+## 告警等级
+---
+
+| CrowdStrike `severity`（SeverityDisplayName） | Flashduty 等级 |
+| :--- | :--- |
+| `Critical` | **Critical** |
+| `High` | **Critical** |
+| `Medium` | **Warning** |
+| `Low` | **Info** |
+| `Informational` | **Info** |
+| （空） | **Warning** |
+
+## 告警内容
+---
+
+- **标题**：`name`（检测名称），缺失时使用 `CrowdStrike detection`
+- **标签**：`detection_id`、`product`（`NGSIEM` 或 `EPP`）、`severity_raw`（原始 `severity` 值）；NG-SIEM 模板另带 `source_url`；EPP 模板另带 `resource`/`host`（`hostname`）、`process_sha256`、`ioc_value`、`ioc_type`
+
+值为空的字段不会写入标签。
+
+## 排查问题
+---
+
+- **工作流没有报错但 Flashduty 没收到告警**：确认工作流已点击 **Release** 发布，而不是仅保存草稿——草稿状态的工作流不会执行
+- **HTTP Action 报错，日志中出现 400**：检查请求体字段名是否与上文模板完全一致；响应内容会指出缺失或不支持的字段（例如 `detection_id is required`）
+- **HTTP Action 提示 "unknown variable" / "property ... contains unknown variable"**：说明这个变量路径在你的检测类型/触发器下不可用，用 Falcon 控制台的变量选择器确认该触发器实际能取到的字段，替换成可用路径
+- **告警一直不关闭**：本集成不会收到关闭事件，请按上文「Alert Key」一节开启超时自动关闭
+
+参阅 CrowdStrike 官方资料：[Build API integrations with Falcon Fusion SOAR HTTP Actions](https://www.crowdstrike.com/tech-hub/ng-siem/build-api-integrations-with-falcon-fusion-soar-http-actions/)、CrowdStrike 官方 GitHub [fusion-skills](https://github.com/CrowdStrike/fusion-skills)（工作流触发器与 HTTP Action 的字段参考）。

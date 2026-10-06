@@ -1,0 +1,156 @@
+---
+title: "Kentik 告警集成"
+description: "通过 Custom Webhook 通知渠道将 Kentik 告警策略和合成监测（Synthetics）告警同步到 Flashduty On-call，告警清除时自动恢复。"
+keywords: ["告警集成", "Kentik", "Custom Webhook", "通知渠道", "Synthetics"]
+---
+
+通过 Kentik 的 Custom Webhook 通知渠道（Notification Channel），将告警同步到 Flashduty On-call。支持两类告警：告警策略（Alert Policy）触发的告警，以及合成监测测试（Synthetics Test）触发的告警。Kentik 的每条告警对应一条 Flashduty 告警：告警处于 Active 时推送触发，变为 Cleared 时推送恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Kentik**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Kentik**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Kentik 中配置
+---
+
+创建通知渠道需要 Kentik 的 Administrator 权限，Member 只能查看。
+
+<Steps>
+<Step title="创建 Custom Webhook 通知渠道">
+
+1. 登录 Kentik Portal，进入 **Settings** → **Notification Channels**
+2. 点击 **Add Notification Channel**，类型（Type）选择 **Webhook**（列表中显示为 Custom Webhook）。请不要选择 **JSON** 类型，Flashduty 解析的是下面模板的输出
+3. 按下表填写：
+
+| 配置项 | 填写内容 |
+| :--- | :--- |
+| **Name** | 便于识别的名称，如 `Flashduty` |
+| **Status** | 开启 |
+| **URL** | Flashduty 集成的完整推送地址，需包含 `integration_key` |
+| **Custom Headers** | 无需填写 |
+| **Custom Template** | 点击 **Go to Notification Template Setup**，在 **Template & Preview** 标签页的 **TEMPLATE** 中粘贴下方模板，不要修改字段名 |
+| **Uglify JSON** | 保持默认即可 |
+
+```go-template
+{
+  "CompanyID": "{{ .CompanyID }}",
+  "Events": [
+    {{- range $index, $event := .Events -}}
+    {{- join $index }}
+    {
+      "Type": {{ .Type | toJSON }},
+      "AlarmID": "{{ with .Details.GetValue "AlarmID" }}{{ . }}{{ end }}",
+      "IsActive": {{ .IsActive | toJSON }},
+      "Importance": {{ .Importance | toJSON }},
+      "Description": {{ .Description | toJSON }},
+      "CurrentState": {{ .CurrentState | toJSON }},
+      "PreviousState": {{ .PreviousState | toJSON }},
+      "StartTime": {{ .StartTime | toJSON }},
+      "EndTime": {{ .EndTime | toJSON }},
+      "Details": {{ .Details.General.ToMap | toJSON }},
+      "Dimensions": {{ (.Details.WithTag "dimension").ToMap | toJSON }},
+      "Links": {{ (.Details.WithTag "url").ToMap | toJSON }}
+    }
+    {{- end }}
+  ]
+}
+```
+
+4. 点击 **Save** 保存
+
+</Step>
+
+<Step title="在告警策略或合成监测测试中使用该渠道">
+
+- **告警策略**：进入 **Settings** → **Alert Policies**，编辑策略，在每个需要通知的阈值（Threshold）的 **Activate & Clear** 设置中，于 **Notifications** → **Notification Channels** 选择上一步创建的渠道并保存
+- **合成监测测试**：进入 **Synthetics** → **Tests**，编辑测试，在 **Alerting and Notifications** 标签页的 **Notification Channels** 中选择该渠道并保存
+
+请不要把该渠道用于缓解（Mitigation Method）或洞察（Insights）通知：这两类通知不携带告警 ID，Flashduty 会拒绝。
+
+</Step>
+
+<Step title="验证">
+
+1. 让一条使用该渠道的告警策略或合成监测测试进入告警状态，确认 Flashduty 收到活动告警
+2. 等待告警条件消失，或在 Kentik 的 **Alerting** 页面选中该告警点击 **Clear Alert**，确认原告警变为已恢复
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Kentik 的告警 ID（`AlarmID`，Kentik 界面中的 **Alert ID**）作为 Alert Key。同一条 Kentik 告警从 Active 到 Cleared 的每次状态变化通知都携带同一个告警 ID，因此会合并到同一条告警，并由清除通知关闭。
+
+- **按维度告警**：告警策略会为每个满足条件的键（Key，即策略维度的一组取值）分别生成告警，每条告警有自己的 ID，因此在 Flashduty 中是不同的告警，分别恢复
+- **合成监测按代理告警**：合成监测测试为每个测试代理（Agent）分别生成告警，各有自己的 ID；告警清除后再次失败会生成新的告警 ID，对应新的 Flashduty 告警
+- 描述、严重程度、指标值和时间的变化不会改变 Alert Key。缺少 `AlarmID` 的事件会被拒绝
+- 一次推送包含多个事件时，每个事件各自对应一条告警；没有事件的推送会返回成功，但不会创建告警
+
+## 状态和告警等级
+---
+
+状态由 `IsActive` 决定：
+
+| Kentik `IsActive` | 状态 |
+| :--- | :--- |
+| `true`（告警 Active） | 触发 |
+| `false`（告警 Cleared） | 恢复 |
+
+告警等级由事件的重要程度（`Importance`，0 到 7）决定。告警策略告警的 `Importance` 与阈值的严重程度（Severity）一致：
+
+| Kentik 严重程度 | `Importance` | Flashduty 等级 |
+| :--- | :--- | :--- |
+| Critical | 7 | Critical |
+| Severe | 6 | Critical |
+| Major | 5 | Warning |
+| Warning | 4 | Warning |
+| Minor | 3 | Info |
+| Notice、Healthy、无 | 2、1、0 | Info |
+| 其他或为空 | - | Info |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警策略名称（`AlarmPolicyName`），合成监测告警为测试名称（`TestName`） |
+| `event_type` | 事件类型：`alarm`（告警策略）或 `synthetic`（合成监测） |
+| `alarm_id` | Kentik 告警 ID，即 Alert Key |
+| `current_state` / `previous_state` | Kentik 告警的当前状态和上一个状态 |
+| `importance` | Kentik 原始重要程度数值 |
+| `start_time` / `end_time` | 告警开始和结束时间，未结束时 `end_time` 为 `ongoing` |
+| `company_id` | Kentik 公司 ID |
+| 其他 | 模板中 `Details`、`Dimensions`、`Links` 的字段，如 `AlarmPolicyID`、`AlarmThresholdID`、`AlarmSeverity`、`TestID`、`IP_dst`、`DashboardAlarmURL`，与上面的标签重名时以上面的为准 |
+
+告警标题为 Kentik 的事件描述（`Description`），如 `Alarm for DDoS Protect Policy Active`。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`，渠道类型是 **Custom Webhook**，并且模板与上文一致
+- **提示 `AlarmID is required`**：该渠道被用于缓解或洞察通知，或模板被修改。只把该渠道用于告警策略和合成监测测试
+- **告警没有恢复**：确认告警在 Kentik 中已变为 Cleared。开启了 **Acknowledgement Required** 的策略，告警需先在 Kentik 中确认才能清除（参见 [Kentik 策略阈值设置](https://kb.kentik.com/v1/docs/threshold-policy-settings)）
+- **一条策略产生了多条告警**：策略按维度的每组取值分别告警，这是预期行为
+- **测试通知**：**Template & Preview** 标签页的 **Send Test Notification** 使用模拟数据（Mock Data）发送时，事件描述以 `[TEST]` 开头，Flashduty 返回成功但不创建告警。若先通过 **Enter Alert ID** 加载一条真实告警再发送，推送内容就是该告警的真实状态，Flashduty 会按真实通知处理
+
+更多字段含义请参阅 [Kentik 通知渠道](https://kb.kentik.com/docs/notification-channel) 和 [Kentik Custom Webhook 模板参考](https://github.com/kentik/custom-notification-templates/blob/main/docs/TEMPLATING_REFERENCE.md)。

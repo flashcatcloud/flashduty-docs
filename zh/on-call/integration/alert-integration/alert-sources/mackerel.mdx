@@ -1,0 +1,112 @@
+---
+title: "Mackerel 告警集成"
+description: "通过 Webhook 通知渠道将 Mackerel 告警同步到 Flashduty On-call，告警关闭时自动恢复。"
+keywords: ["告警集成", "Mackerel", "Webhook", "服务器监控", "外形监控"]
+---
+
+通过 Mackerel 的 Webhook 通知渠道，将 Mackerel 告警同步到 Flashduty On-call。每条 Mackerel 告警对应一条 Flashduty 告警：告警发生时触发，状态在 Warning 和 Critical 之间变化时更新，告警关闭时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Mackerel**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Mackerel**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Mackerel 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 通知渠道">
+
+1. 登录 Mackerel，在左侧菜单点击 **Channels**
+2. 新建通知渠道，渠道类型选择 **Webhook**
+3. 填写渠道名称，将 Flashduty 集成的完整推送地址粘贴到 **URL**，地址中需包含 `integration_key`
+4. 在通知事件中只勾选告警（`alert`）事件。告警分组、主机状态变化、主机注册、主机退役和监控规则变更事件不会创建告警，Flashduty 收到后直接返回成功
+5. 图表图片选项（Include graph image）默认开启，开启时告警标签中会带上图表链接；不需要可以取消勾选
+6. 保存渠道
+
+</Step>
+
+<Step title="加入通知分组">
+
+新建的渠道默认加入接收整个组织全部通知的默认通知分组。如果只希望部分服务或监控规则的告警进入 Flashduty，可以在 **Channels** 页面新建一个通知分组，选择对应的服务和监控规则，把该渠道加入这个分组，并将它从默认通知分组中移除。
+
+</Step>
+
+<Step title="验证">
+
+1. 在 **Monitors** 中选择一条监控规则（例如主机指标监控），临时调低阈值，使其产生告警
+2. 确认 Flashduty 收到活动告警
+3. 恢复阈值，等 Mackerel 关闭告警后，确认原告警在 Flashduty 中恢复。也可以在 Mackerel 告警页面点击 **Close alert** 手动关闭，Flashduty 同样会恢复该告警
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Mackerel 告警的 `alert.id` 作为 Alert Key。同一条 Mackerel 告警从发生、状态变化到关闭使用同一个 ID，因此这些通知会合并到同一条 Flashduty 告警。
+
+同一监控规则在告警关闭后再次触发时，Mackerel 会生成新的告警 ID，Flashduty 也会创建新的告警。监控规则名称、消息、指标值和主机状态的变化不会改变 Alert Key。缺少 `alert.id` 的告警通知会被拒绝。
+
+## 状态和告警等级
+---
+
+| Mackerel `alert.status` | `alert.isOpen` | 状态 | Flashduty 等级 |
+| :--- | :--- | :--- | :--- |
+| `critical` | `true` | 触发 | Critical |
+| `unknown` | `true` | 触发 | Critical |
+| `warning` | `true` | 触发 | Warning |
+| `ok` | - | 恢复 | Info |
+| `critical`、`unknown`、`warning` | `false` | 恢复 | 与触发时的映射相同 |
+
+Mackerel 把 Unknown 与 Critical 视为同一级别，Flashduty 也将其映射为 Critical。手动关闭、删除监控规则、主机退役或删除服务都会关闭告警（`alert.isOpen` 为 `false`），Flashduty 会随之恢复告警。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 监控规则名称 `alert.monitorName` |
+| `resource` | 主机名，服务指标告警时为服务名 |
+| `host` / `host_id` / `host_status` / `host_url` | 主机名、主机 ID、主机状态（`working`、`standby` 等）和主机详情链接，仅主机告警 |
+| `service` / `service_id` | 服务名和服务 ID，仅服务指标告警 |
+| `roles` | 角色全名（`服务名: 角色名`），逗号分隔 |
+| `org` | Mackerel 组织名称 |
+| `monitor_type` | 监控类型，如 `connectivity`、`host`、`service`、`external`、`check`、`expression`、`anomalyDetection` |
+| `alert_id` | Mackerel 告警 ID |
+| `alert_status` | Mackerel 告警状态原值 |
+| `trigger` | 本次通知的触发原因，如 `monitor`（监控检测）、`manual close`（手动关闭）、`retire host`（主机退役）、`delete monitor`（删除监控规则） |
+| `metric` / `metric_value` | 监控的指标名称和检测时的值 |
+| `url` | Mackerel 告警详情链接 |
+| `image_url` | 告警相关图表的图片链接，需开启图表图片选项 |
+
+告警的消息 `message` 和监控规则的备注 `memo` 会写入告警描述。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **没有收到告警**：确认渠道勾选了告警（`alert`）事件、渠道所在的通知分组包含该监控规则，并且主机状态为 `working`（Mackerel 不为 `standby`、`maintenance`、`poweroff` 状态的主机发送告警通知），监控规则的通知没有被静音
+- **只收到 Critical 告警**：通知分组开启了 **Critical only**，Warning 告警不会推送
+- **渠道显示暂停（suspended）**：Mackerel 在推送连续失败一段时间后会暂停渠道。修复推送地址后，点击渠道旁的警告图标解除暂停
+- **限制来源 IP**：Mackerel 通知的来源 IP 范围见 Mackerel FAQ 中关于通知来源 IP 地址的说明
+
+更多字段含义请参阅 [Mackerel Webhook](https://mackerel.io/docs/entry/howto/alerts/webhook)。

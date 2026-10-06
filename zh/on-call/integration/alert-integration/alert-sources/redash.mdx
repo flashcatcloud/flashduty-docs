@@ -1,0 +1,108 @@
+---
+title: "Redash 告警集成"
+description: "通过 Redash 的 Webhook 告警目的地，将查询告警的触发和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Redash", "Webhook", "查询告警", "数据分析"]
+---
+
+通过 Redash 的 Webhook 告警目的地（Alert Destination），将查询告警（Alert）的状态变化同步到 Flashduty On-call。每个 Redash 告警对应一条 Flashduty 告警：查询结果满足条件（`TRIGGERED`）时触发，恢复正常（`OK`）时自动恢复。适用于自建的 Redash。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Redash**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Redash**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Redash 中配置
+---
+
+需要 Redash 管理员权限创建告警目的地，Redash 服务器需要能访问 Flashduty 推送地址。
+
+<Steps>
+<Step title="创建 Webhook 告警目的地">
+
+1. 以管理员身份进入 Redash，打开 **Settings → Alert Destinations**，点击 **New Alert Destination**
+2. **Type** 选择 **Webhook**，填写名称
+3. 将 Flashduty 集成的完整推送地址粘贴到 **URL**，地址中需包含 `integration_key`
+4. **Username** 和 **Password** 留空即可，Flashduty 通过地址中的 `integration_key` 认证
+5. 点击 **Create**
+
+</Step>
+
+<Step title="在告警上添加该目的地">
+
+1. 打开需要接入的告警（**Alerts**），或新建一个告警：选择已发布且不含参数的查询，设置 **Value column**、条件和阈值
+2. 在 **Destinations** 中点击 **Add**，选择上一步创建的 Webhook 目的地。未添加目的地时 Redash 不会发送任何通知
+3. **When triggered, send notification** 选择 **Each time alert is evaluated** 或 **At most every ...**，让持续触发的告警按周期重复通知；选择 **Just once** 则只在触发时通知一次。重复通知会更新同一条 Flashduty 告警，不会新建
+4. 可选：在 **Template** 中选择 **Custom template**，填写主题（Subject）和正文（Body）。主题会作为 Flashduty 告警标题，正文会作为描述；留空时标题为 Redash 告警名称，描述为触发条件
+5. 保存告警
+
+</Step>
+
+<Step title="验证">
+
+1. 让查询结果满足告警条件，等待查询按刷新计划执行，确认 Flashduty 收到活动告警
+2. 让查询结果恢复正常，确认原告警恢复
+
+Redash 的 Webhook 目的地没有测试按钮。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 Redash 告警的 ID（`alert.id`）作为 Alert Key，同一个 Redash 告警的触发、重复通知和恢复使用同一个 Alert Key。告警名称、条件、阈值、状态等字段变化不会改变 Alert Key。缺少 `alert.id` 的请求会被拒绝。
+
+同一个 Flashduty 集成请只接入一个 Redash 实例；不同 Redash 实例的告警 ID 会重复，请分别创建集成。
+
+## 状态和告警等级
+---
+
+Redash 的通知不携带等级，Flashduty 按告警状态处理：
+
+| Redash 状态 | Flashduty 处理 | 等级 |
+| :--- | :--- | :--- |
+| `triggered` | 触发或更新告警 | Warning |
+| `ok` | 恢复告警 | - |
+| `unknown` | 不处理，直接返回成功 | - |
+
+`unknown` 表示查询暂无数据可供评估。Redash 只在状态变化，或触发状态下超过重复通知间隔时发送通知；告警第一次评估就是 `OK` 时不发送通知。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` / `alert_name` | Redash 告警名称 |
+| `alert_id` | Redash 告警 ID |
+| `query_id` / `user_id` | 告警所用查询的 ID 和告警创建者的 ID |
+| `state` | 告警状态 |
+| `column` / `condition` / `threshold` / `selector` | 告警设置的取值列、比较符、阈值和取值方式 |
+| `alert_url` / `query_url` | Redash 中告警和查询页面的链接 |
+
+## 排查问题
+---
+
+- **Flashduty 没收到告警**：确认告警已添加 Webhook 目的地、告警没有被静音（Muted），查询已发布且按刷新计划运行（自建时 worker 需要消费 `periodic` 和 `scheduled_queries` 队列，默认配置已包含）；Redash 请求超时为 5 秒，失败后不重试，只在 Redash 日志中记录
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **告警没有恢复**：Redash 只在状态变为 `OK` 时发送恢复通知；查询没有数据时状态为 `unknown`，不会恢复告警
+- **收不到重复通知**：**When triggered, send notification** 选择了 **Just once**
+
+更多字段含义请参阅 [Redash 告警文档](https://redash.io/help/user-guide/alerts/setting-up-an-alert)。

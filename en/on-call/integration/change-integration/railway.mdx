@@ -1,0 +1,146 @@
+---
+title: "Railway change integration"
+description: "Sync Railway service deployments to Flashduty On-call through a Railway project webhook, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Railway", "deployment", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Railway project webhook to sync service deployments to Flashduty On-call. Each deployment becomes one Flashduty change, and its status is updated as Railway reports queued, building, deploying, succeeded, or failed.
+
+A Railway webhook is configured per project, and deployments of every environment and service in the project are sent to the same URL.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Railway** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project`, `service`, or `environment`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Railway
+---
+
+<Steps>
+<Step title="Open the project's Webhooks settings">
+
+1. Open the target project in Railway and click **Settings** in the project's top navigation
+2. Choose **Webhooks** in the left sidebar, then click **Create Webhook**
+
+</Step>
+
+<Step title="Enter the push URL and events">
+
+1. Paste the full Flashduty push URL into the URL field
+2. Open the **Event Types** list and select the Deployment states: Queued, Waiting, Needs Approval, Building, Deploying, Deployed, Redeployed, Failed and Crashed (Removed, Restarted, Oom Killed, Slept and Resumed are accepted but record nothing)
+3. Click **Create Webhook**
+
+Railway webhooks are not signed. Flashduty authenticates the request with the `integration_key` in the push URL, so no custom header is needed.
+
+</Step>
+
+<Step title="Send a test">
+
+Click **Test Webhook** before creating the webhook. Railway sends a sample Volume Alert delivery (`VolumeAlert.triggered`). Flashduty returns success and records no change. Then trigger a deployment in the project and check the Flashduty change list.
+
+</Step>
+</Steps>
+
+## What one change is
+---
+
+| Railway object | Change key (change_key) | Notes |
+|---|---|---|
+| Deployment | `resource.deployment.id` (`details.id` when absent) | Each deployment has its own ID, and every status delivery of that deployment belongs to one change; two deployments of the same service and environment are two changes |
+
+## Status mapping
+---
+
+Flashduty reads the delivery's `type` (`Deployment.<state>`) to decide the status and does not read `details.status`. Railway's own webhook guide is inconsistent here: its sample for `Deployment.failed` carries `details.status` set to `SUCCESS`. Deliveries sent by Railway itself pair `Deployment.failed` with `FAILED`, but since the guide shows the two fields disagreeing, `type` is the only one used.
+
+| Railway `type` | Flashduty change status |
+|---|---|
+| `Deployment.needsApproval` | Planned |
+| `Deployment.queued`, `Deployment.initializing`, `Deployment.waiting` | Ready |
+| `Deployment.redeployed` | Ready (Railway sends it when a redeploy starts, before `Deployment.deploying`) |
+| `Deployment.building`, `Deployment.deploying` | Processing |
+| `Deployment.deployed` | Done |
+| `Deployment.failed`, `Deployment.crashed` | Failed |
+
+These deliveries return success but record no change:
+
+- `Deployment.removed`, `Deployment.removing`: an older deployment replaced by a newer one or removed by hand, not progress of this deployment. Railway sends it with the ID of the older deployment right after a new deployment becomes active
+- `Deployment.restarted`, `Deployment.oomKilled`, `Deployment.slept`, `Deployment.resumed`: runtime events
+- Volume usage and CPU/RAM monitor alerts (a `type` that does not start with `Deployment.`)
+
+A `type` that starts with `Deployment.` and is in neither list above returns `InvalidParameter` (see the FAQ).
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project>/<service>: deploy <branch> (<short SHA>) to <environment>`, for example `shop/api: deploy main (a3f2d1e) to production`; a deployment with no branch or commit (an image, a CLI upload) leaves those parts out |
+| Description | The commit message (`details.commitMessage`) |
+| Link | The deployment's page in the Railway dashboard |
+| Change time | The delivery's `timestamp`, the time of that state |
+
+The title and description come from the first delivery of a change and are not updated afterwards.
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `workspace` | Workspace name |
+| `project` | Project name |
+| `service` | Service name |
+| `environment` | Environment name |
+| `deployment_id` | Deployment ID |
+| `ref` | Branch, only when the delivery has it |
+| `sha` | Full commit SHA, only when the delivery has it |
+| `actor` | Commit author, only when the delivery has it |
+| `source` | Deployment source, for example `GitHub` |
+| `railway_state` | The state from `type` as sent, for example `deployed` |
+
+`ref`, `sha`, and `actor` are not on every delivery, so routing on them can send later states of one deployment to another channel. Route on `workspace`, `project`, `service`, or `environment`.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a Railway retry create a duplicate?">
+
+No. Railway retries up to 3 times after a response that is not 2xx or 3xx, or after a timeout, with the same content, and Flashduty de-duplicates on the delivery's `timestamp`. Railway does not guarantee delivery order; Flashduty orders by `timestamp`, so an earlier state arriving late does not overwrite a finished change.
+
+</Accordion>
+
+<Accordion title="Why does an aborted deployment stay Processing?">
+
+Aborting a deployment that is still building marks it Removed in Railway. Flashduty does not record Removed deliveries, so such a change stays at the last state it received.
+
+</Accordion>
+
+<Accordion title="Why did a successful deployment turn Failed?">
+
+If the service crashes while running after a successful deployment, Railway sends `Deployment.crashed` and Flashduty updates the same change to Failed.
+
+</Accordion>
+
+<Accordion title="Railway reports failed deliveries or stops sending?">
+
+After 100 failures within 6 hours, Railway pauses the URL for 24 hours. Check that the push URL is complete and the integration has not been deleted.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `resource.deployment.id is missing`: the payload is incomplete; make sure it comes from a native Railway webhook
+- `unknown type`: a deployment state we do not map yet; contact us to add it
+- `invalid timestamp`: the time field in the payload is malformed
+
+</Accordion>
+</AccordionGroup>
