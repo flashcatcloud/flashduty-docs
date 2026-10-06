@@ -1,0 +1,162 @@
+---
+title: "Hund 告警集成"
+description: "通过 Hund 状态页的 Webhook，把状态页上的事件（Issue）和组件可用性变化同步到 Flashduty On-call。"
+keywords: ["告警集成", "Hund", "状态页", "Webhook", "组件状态"]
+---
+
+通过 Hund 状态页的出站 Webhook（版本 2），把状态页上的变化同步到 Flashduty On-call：
+
+- 在状态页上创建事件（Issue）时触发一条告警，事件被标记为已解决、已结束或已取消时这条告警自动恢复
+- 组件可用性降级（`degraded`）时触发一条告警，恢复（`restored`）时这条告警自动恢复
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Hund**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Hund**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Hund 中
+---
+
+<Steps>
+<Step title="启用 Webhooks 通知方式">
+
+Hund 的 Webhook 属于状态页的订阅（Subscription）：状态页需要先启用 Webhooks 通知方式（Notifier），之后才能在状态页的 **Subscribe** 按钮里添加 Webhook 地址。请在 Hund 控制台中为目标状态页启用 Webhooks 通知方式。
+
+</Step>
+
+<Step title="添加 Webhook 地址">
+
+1. 打开状态页，点击 **Subscribe**，选择 Webhook
+2. 在地址栏粘贴 Flashduty 集成的完整推送地址（包含 `integration_key`）并保存
+
+新建的 Webhook 订阅固定使用版本 2 的推送格式。多个状态页可以推送到同一个集成，也可以各建一个集成，方便按集成设置路由。
+
+</Step>
+
+<Step title="选择接收的通知类型和组件">
+
+Hund 默认订阅除 **Issue Updated** 以外的大部分通知。要让事件的更新（`issue_updated`）也同步到 Flashduty，请把订阅的通知级别调整为包含 Issue Updated。订阅默认包含全部组件，可以只勾选需要的组件。
+
+</Step>
+
+<Step title="验证">
+
+在 Hund 控制台的 Webhooks 通知方式上点击 **Test Notifier**，Hund 发送一条 `notifier_tested` 通知。Flashduty 会为它生成一条独立的 Info 告警，请手动关闭。
+
+也可以用真实事件验证：在状态页上创建一个事件，Flashduty 中出现一条告警；把事件标记为已解决（Resolved），这条告警恢复。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Hund 推送 JSON，`event.kind` 是通知类型：
+
+| `event.kind` | 含义 | 在 Flashduty 中的处理 |
+| :--- | :--- | :--- |
+| `issue_created`、`issue_started` | 事件创建、计划事件开始 | 触发告警 |
+| `issue_upcoming` | 计划事件即将开始的预告 | 触发 Info 告警，开始时更新同一条告警 |
+| `issue_updated`、`issue_addended` | 事件有新的更新、补充说明 | 更新同一条告警；事件已解决时保持恢复状态 |
+| `issue_reopened` | 已解决的事件重新打开 | 重新触发告警 |
+| `issue_resolved`、`issue_ended`、`issue_cancelled` | 事件已解决、计划事件结束或取消 | 恢复告警 |
+| `degraded` | 组件可用性降级 | 触发告警 |
+| `restored` | 组件恢复正常 | 恢复告警 |
+| `notifier_tested` | 点击 Test Notifier | 生成一条独立的 Info 告警 |
+| 其他类型（如 `subscription_edit_link_requested`） | | 返回成功，不生成告警 |
+
+事件（`issue_*`）使用的字段：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `event.eventable.id` | 事件 ID | Alert Key，标签 `issue_id` |
+| `event.eventable.title` | 事件标题 | 告警标题 |
+| `event.contexts.update.body`、`event.eventable.body` | 最新更新内容，没有更新时取事件正文 | 告警描述 |
+| `event.contexts.update.state_override`、`event.eventable.state_override` | 事件对受影响组件状态的覆盖：`-1` 故障、`0` 降级、`1` 正常 | 告警等级，标签 `state_override` |
+| `event.eventable.specialization` | `general`、`maintenance`、`information` | 标签 `specialization` |
+| `event.eventable.resolved` | 事件是否已解决 | 为 `true` 时，除 `issue_reopened` 外的推送都按恢复处理 |
+| `event.contexts.components` | 受影响的组件 | 标签 `components`（组件名，逗号分隔） |
+| `status_page.name` | 状态页名称 | 标签 `status_page` |
+
+组件状态（`degraded`、`restored`）使用的字段：
+
+| 字段 | 说明 | 在 Flashduty 中的用途 |
+| :--- | :--- | :--- |
+| `event.contexts.component.id` | 受影响的组件 ID | Alert Key，标签 `component_id` |
+| `event.contexts.component.name` | 组件名称 | 告警标题，标签 `component` |
+| `event.contexts.component.group.name` | 组件所属分组 | 标签 `group` |
+| `event.eventable.state` | 状态：`-1` 故障、`0` 降级 | 告警等级 |
+
+每条告警还带有标签 `source=hund` 和 `event`（推送的通知类型）。
+
+## Alert Key
+---
+
+- 事件：事件 ID。同一事件从创建、更新到解决的每次推送落在同一条告警上
+- 组件：组件 ID。Hund 在每次状态变化时都会生成新的状态对象（降级和恢复各一个 ID），所以组件告警以组件本身为准，同一组件从 `degraded` 到 `restored` 的推送落在同一条告警上
+
+事件告警和组件告警互不影响：状态页上的事件会影响多个组件，同时可能有多条组件告警，可以用协作空间的[告警聚合](/zh/on-call/channel/noise-reduction)把它们合并到同一个故障。修改事件标题、组件名称不会改变 Alert Key。
+
+## 状态和告警等级
+---
+
+| Hund 推送 | Flashduty 状态或等级 |
+| :--- | :--- |
+| 事件，`state_override` 为 `-1` | Critical |
+| 事件，`state_override` 为 `0` | Warning |
+| 事件，`state_override` 为 `1` | Info |
+| 事件，没有 `state_override`，`specialization` 为 `general` | Warning |
+| 事件，没有 `state_override`，`specialization` 为 `maintenance` 或 `information` | Info |
+| 组件 `degraded`，状态为故障（`-1`） | Critical |
+| 组件 `degraded`，其他状态 | Warning |
+| `issue_resolved`、`issue_ended`、`issue_cancelled`、`restored` | 恢复 |
+
+有 `state_override` 的更新以更新为准，没有时取事件本身的值。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="事件更新没有同步到 Flashduty？">
+
+Hund 订阅默认不推送 Issue Updated。把订阅的通知级别调整为包含 Issue Updated 后，`issue_updated` 才会推送。事件创建和解决不受影响。
+
+</Accordion>
+
+<Accordion title="点击 Test Notifier 后多了一条 Info 告警？">
+
+这是测试通知生成的独立告警，不会与真实事件合并，也没有对应的恢复推送，请手动关闭。
+
+</Accordion>
+
+<Accordion title="一次事件影响多个组件，会产生多条告警吗？">
+
+事件告警只有一条（以事件 ID 为准）。组件的 `degraded` 和 `restored` 各按组件产生告警，由状态页的组件状态监控触发。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：推送内容缺少 `event.eventable.id`（事件）或 `event.contexts.component.id`（组件状态）
+- **事件告警没有恢复**：确认事件已在 Hund 中标记为已解决或已结束，且订阅包含对应通知
+- **没有收到任何推送**：确认状态页已启用 Webhooks 通知方式，订阅地址完整（包含 `integration_key`）

@@ -1,0 +1,120 @@
+---
+title: "Bitbucket 变更集成"
+description: "通过 Bitbucket Cloud 仓库 Webhook 将提交的构建状态（Pipelines 及第三方 CI）同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Bitbucket", "Bitbucket Pipelines", "构建状态", "部署", "Webhook", "CI/CD"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Bitbucket Cloud 的仓库 Webhook，将提交上的构建状态（Build status）同步到 Flashduty On-call。Bitbucket Pipelines 和通过 Bitbucket API 发布构建状态的第三方 CI 都会产生这类事件。每个构建状态对应一条 Flashduty 变更；状态从进行中变为成功、失败或停止时，会更新同一条变更。
+
+Bitbucket 没有独立的部署事件，构建状态是流水线结果的推送来源。建议只为部署类流水线所在的仓库开启推送。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Bitbucket**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `repo`、`build_key`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Bitbucket 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook">
+
+进入仓库的 **Repository settings → Webhooks**，点击 **Add webhook**。需要仓库管理员权限。
+
+</Step>
+
+<Step title="填写推送地址">
+
+1. **Title**：填写便于识别的名称，例如 `Flashduty`
+2. **URL**：粘贴 Flashduty 集成的完整推送地址
+3. **Status**：保持 **Active**
+
+</Step>
+
+<Step title="选择触发事件">
+
+1. 在 **Triggers** 中选择 **Choose from a full list**
+2. 展开 **Repository**，勾选 **Build status created** 和 **Build status updated**
+3. 点击 **Save** 保存
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+Bitbucket 的构建状态没有单独的 ID，它由“仓库 + 提交 + 状态 key”三个值唯一确定（对应 API 路径 `/commit/<hash>/statuses/build/<key>`）。Flashduty 的变更标识（change_key）是 `<仓库 uuid>/<提交哈希>/<状态 key>`，同一构建状态的 created 和 updated 事件更新同一条变更。
+
+- 同一提交上不同 key 的构建状态（例如单测和 lint 两个检查）是两条变更
+- 同一 key 在不同提交上是两条变更；Bitbucket Pipelines 每次运行使用各自的 key
+- 第三方 CI 若在同一提交上反复使用同一个 key（例如重新运行），Bitbucket 会覆盖原状态，Flashduty 中表现为同一条变更重新回到进行中，再次结束时更新为新的最终状态
+
+## 状态映射
+---
+
+Flashduty 按推送内容中的 `commit_status.state` 确定状态：
+
+| Bitbucket 构建状态 | Flashduty 变更状态 |
+|---|---|
+| INPROGRESS | Processing |
+| SUCCESSFUL | Done |
+| FAILED | Failed |
+| STOPPED | Canceled |
+
+Done、Failed 和 Canceled 是结束状态，Flashduty 会记录变更结束时间。STOPPED 出现在 Bitbucket REST API 的状态枚举中，Webhook 文档只列出前三个状态。
+
+以下推送返回成功但不生成变更：`repo:push`、Pull Request、评论等非构建状态事件，以及类型不是 `build` 的状态。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<仓库全名>: <状态名称> (<提交短哈希>)`，没有状态名称时使用状态 key |
+| 描述 | 构建状态的 description，只取该变更的第一个事件 |
+| 链接 | 构建状态的 url（即 CI 中该次构建的页面），没有时为 Bitbucket 中该提交的页面 |
+
+推送内容不包含分支信息，因此没有分支标签。标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `repo` | 仓库全名，格式为 `<工作区>/<仓库>` |
+| `sha` | 构建状态所属的提交哈希 |
+| `actor` | 发布该状态的用户名称 |
+| `build_key` | 构建状态的 key |
+| `state` | 最新的 Bitbucket 构建状态 |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么没有收到构建变更？">
+
+- 确认 Webhook 勾选了 **Build status created** 和 **Build status updated**，只勾选 Push 等事件不会产生变更
+- 在 Webhook 的 **View requests** 中查看最近的推送和 Flashduty 的响应
+- 确认仓库的流水线或 CI 确实在提交上发布了构建状态
+
+</Accordion>
+
+<Accordion title="重复推送会重复记录吗？">
+
+不会。同一状态、同一更新时间的事件只记录一次。Bitbucket 在推送失败时最多再重试两次，重试的内容不会新增事件。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `unsupported commit_status.state`：收到了 Flashduty 尚未支持的构建状态，请联系我们
+- `repository.uuid is missing`、`commit_status.key is missing`、`commit_status.links.commit.href is missing the commit hash`：推送内容不完整，请确认推送来自 Bitbucket Cloud 的仓库 Webhook
+
+</Accordion>
+</AccordionGroup>

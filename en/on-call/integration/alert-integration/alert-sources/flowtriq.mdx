@@ -1,0 +1,114 @@
+---
+title: "Flowtriq alert integration"
+description: "Send DDoS attack events detected by Flowtriq to Flashduty On-call through a Webhook alert channel."
+keywords: ["alert integration", "Flowtriq", "webhook", "DDoS", "DDoS detection", "attack alerts"]
+---
+
+Use a Flowtriq Webhook alert channel to send DDoS attack events to Flashduty On-call. Each attack (a Flowtriq incident) maps to one Flashduty alert: it triggers when an attack is detected, updates while the attack continues and its peak traffic changes, and recovers automatically when the attack ends (resolved automatically or manually).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Flowtriq**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Flowtriq** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Flowtriq
+---
+
+<Steps>
+<Step title="Add a Webhook alert channel">
+
+1. Sign in to the Flowtriq console and go to **Alert Channels**
+2. Add a channel of type **Webhook** (a trial account includes one free alert channel) and enter the full Flashduty push URL in **URL** (HTTPS, including `integration_key`)
+3. Leave **Secret** empty. When a secret is set, Flowtriq adds an HMAC-SHA256 signature in the `X-Flowtriq-Signature` header; Flashduty authenticates the request by the `integration_key` in the URL and does not verify that signature
+
+</Step>
+
+<Step title="Save and test">
+
+1. After saving the channel, click **Test** on it. Flowtriq sends a `test` event; Flashduty returns success and does not create an alert
+2. If you use a Flowtriq escalation policy, add the Webhook channel to the relevant step. Without a policy, all channels fire as soon as an event occurs
+
+</Step>
+
+<Step title="Verify a real event">
+
+Trigger attack detection on a monitored node. Confirm that Flashduty receives an active alert, and that the alert recovers automatically when the attack ends.
+
+</Step>
+</Steps>
+
+Flowtriq retries a failed delivery up to 3 times (after 10 seconds, 60 seconds, and 5 minutes). Each request times out after 10 seconds, and a non-2xx status code counts as a failure.
+
+## Events and recovery
+---
+
+Flowtriq posts to the webhook on every incident event. The event type is in `event_type`:
+
+| `event_type` | Meaning | Effect in Flashduty |
+| :--- | :--- | :--- |
+| `attack_start` | An attack is detected and a new incident opens | Triggers an alert |
+| `attack_update` | The attack is ongoing and its peak PPS/BPS is updated (not observed on real Webhook deliveries so far) | Updates the same alert |
+| `attack_end` | The attack is resolved (automatically or manually) | Recovers the alert |
+| `test` | Manual test from the console | Creates no alert and returns success |
+
+Other event types, including any Flowtriq adds later, create no alert; Flashduty returns success for them.
+
+## Alert Key
+---
+
+Flashduty builds the Alert Key from the incident identity: `incident.uuid` when present, otherwise `incident.id`. Webhook deliveries currently carry the numeric `incident.id` and no `uuid`. The start and end events of one attack share one Alert Key, so the end event recovers the matching alert. An event with neither field is rejected. Changes to the title, severity, or peak traffic do not change the Alert Key.
+
+## Severity mapping
+---
+
+| `incident.severity` | Flashduty severity |
+| :--- | :--- |
+| `critical` | Critical |
+| `high`, `medium` | Warning |
+| `low` | Info |
+| Empty or any other value | Warning |
+
+A recovery event keeps the last severity from the attack.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `event` | Event type of this delivery |
+| `incident_uuid` / `incident_id` | UUID and numeric ID of the incident |
+| `attack_family` | Attack type, such as `udp_flood` |
+| `severity_raw` | Original Flowtriq severity |
+| `peak_pps` / `peak_bps` | Peak packet rate and bit rate |
+| `source_ip_count` | Number of attack source IPs |
+| `host` / `resource` | Name and IP of the attacked node |
+| `url` | Link to the incident in Flowtriq |
+
+The alert description comes from Flowtriq's AI summary (`ai_summary`). The `attack_start` delivery carries no summary, so the description is empty at that point.
+
+## Troubleshooting
+---
+
+- **Flowtriq shows a failed delivery**: confirm the URL is complete, includes `integration_key`, and uses HTTPS. Failed deliveries are listed in the notification log on the incident detail page in Flowtriq
+- **The alert did not recover**: confirm the Flowtriq channel sent an `attack_end` event. Recovery relies on the start and end events carrying the same `incident.id`; if an alert stays open for a long time, close it manually in Flashduty
+- **The test succeeded but no alert appeared**: `test` events create no alert, which is expected
+
+For field details, see the [Flowtriq webhook documentation](https://flowtriq.com/docs?section=webhooks).

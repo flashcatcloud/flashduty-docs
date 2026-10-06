@@ -1,0 +1,123 @@
+---
+title: "LimaCharlie alert integration"
+description: "Send detections from LimaCharlie Detection & Response (D&R) rules to Flashduty On-call through a webhook output."
+keywords: ["alert integration", "LimaCharlie", "EDR", "D&R", "detection", "webhook", "detect_id"]
+---
+
+Use a LimaCharlie webhook output to send detections raised by D&R rules to Flashduty On-call. Each detection maps to one Flashduty alert.
+
+LimaCharlie sends a detection once, when the rule matches, and sends no recovery notification, so these alerts do not recover on their own. Turn on the auto-resolve timeout in the channel, as described in [Alerts do not recover](#alerts-do-not-recover).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Settings** → **Integrations** → **Dedicated integrations**, then click **Add an integration**
+3. Select **LimaCharlie** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert events**
+2. Select **LimaCharlie** and enter an integration name
+3. Configure the default route and choose a channel. You can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure LimaCharlie
+---
+
+<Steps>
+<Step title="Add a webhook output">
+
+1. Sign in to LimaCharlie, select the organization, and go to **Outputs**
+2. Click **Add Output**. Set **Stream** to **Detections** and **Destination** to **Webhook** (one request per detection; do not choose Webhook Bulk)
+3. Set **Name** to `flashduty`
+4. Paste the complete Flashduty Push URL, including the `integration_key` parameter, into **DESTINATION HOST**
+5. Enter any string as **SECRET KEY**. LimaCharlie uses it to compute the `lc-signature` request header. Flashduty does not verify that header
+
+After you save, LimaCharlie sends one POST to this URL for every detection in the organization. The body is the LimaCharlie detection JSON.
+
+</Step>
+
+<Step title="Make sure D&R rules produce detections">
+
+The webhook output forwards detections only. Confirm that the organization has enabled D&R rules that generate them, either your own rules or a managed ruleset. To forward only some detections, set a category or tag filter on the output.
+
+</Step>
+
+<Step title="Verify connectivity">
+
+The stream of an output can only be chosen when the output is created and cannot be changed afterwards. To check that the URL is reachable first, create a separate test output: set **Stream** to **Audit Logs**, **Destination** to **Webhook**, and **DESTINATION HOST** to the same Push URL. Then make a management change in the organization (for example, disable and re-enable a D&R rule) to trigger an audit event. Flashduty returns 200 for requests that are not detections and creates no alert, so this step only proves the URL is reachable. Delete the test output when you are done.
+
+For an end-to-end check, let a D&R rule match once and confirm the alert arrives in Flashduty.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the detection's `detect_id` as the Alert Key. The LimaCharlie documentation defines it as the unique detection identifier. A resent detection keeps its `detect_id` and merges into the same alert, and different detections become separate alerts.
+
+`cat` (the detection name), `priority`, and timestamps are not part of the Alert Key. A request that has `cat` but no `detect_id` is rejected with a parameter error.
+
+## Severity
+---
+
+LimaCharlie provides only an optional integer `priority` (0 to 10) with no defined levels. The Flashduty mapping is:
+
+| `priority` | Flashduty severity |
+| :--- | :--- |
+| 7 to 10 | Critical |
+| 4 to 6 | Warning |
+| 1 to 3 | Info |
+| 0, missing, or not a number | Warning |
+
+## Field mapping
+---
+
+| Flashduty | LimaCharlie field |
+| :--- | :--- |
+| Title | `cat`, followed by ` (routing.hostname)` when a hostname is present |
+| Description | Detection name, sensor hostname, `source_rule`, and `link` (playbook URL) |
+| Labels | `detect_id`, `source` (`rule_source`), `source_rule` (`rule`), `sid`, `oid`, `event_type`, `hostname`, `ext_ip` and `int_ip` from `routing`, plus `namespace`, `priority`, `link`, and `author` |
+
+The matched event (`detect`) and the extracted IOCs (`detect_data`) are not copied into labels.
+
+## Alerts do not recover
+---
+
+A detection is a one-shot event and LimaCharlie sends no recovery. In the channel that receives this integration, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). 24 hours is a reasonable start; adjust it to how quickly your team handles detections.
+
+## Troubleshooting
+---
+
+<AccordionGroup>
+<Accordion title="LimaCharlie reports a failed or temporarily disabled output">
+
+LimaCharlie disables a failing output for a while and re-enables it automatically. Editing the output configuration re-enables it immediately. Check that **DESTINATION HOST** is the complete Push URL, and look at the `outputs/<output name>` entry under Errors in LimaCharlie Platform Logs for details.
+
+</Accordion>
+
+<Accordion title="No alerts arrive">
+
+Confirm that the output stream is **Detections** and that you chose **Webhook**, not Webhook Bulk. Requests from the Audit Logs, Events, and Deployments streams are accepted by Flashduty but create no alert.
+
+</Accordion>
+
+<Accordion title="Flashduty returns a parameter error">
+
+The body must be JSON with a non-empty `detect_id`. If you reshape the body with `custom_transform`, keep the `cat` and `detect_id` fields.
+
+</Accordion>
+</AccordionGroup>
+
+For field details, see the LimaCharlie [webhook output](https://docs.limacharlie.io/5-integrations/outputs/destinations/webhook/) documentation and its output stream structures reference.

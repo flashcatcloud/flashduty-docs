@@ -1,0 +1,157 @@
+---
+title: "Azure DevOps change integration"
+description: "Sync Azure DevOps pipeline runs and classic release stage deployments to Flashduty On-call through Service Hooks, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Azure DevOps", "Pipelines", "Release", "Service Hooks", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use Azure DevOps Service Hooks (Web Hooks) to sync two kinds of objects to Flashduty On-call:
+
+- **Pipeline runs**: each run becomes one Flashduty change, from the run starting to it succeeding, failing, or being canceled.
+- **Classic release stage deployments**: one deployment of a release to one stage becomes one change, from the deployment starting to it completing.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Azure DevOps** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `pipeline`, `project`, or `environment`
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Azure DevOps
+---
+
+<Steps>
+<Step title="Create a service hooks subscription">
+
+1. Open the project and go to **Project settings → Service hooks**
+2. Click **Create subscription**, select the **Web Hooks** service, and click **Next**
+
+You need the Project Administrators role.
+
+</Step>
+
+<Step title="Select the trigger events">
+
+Create one subscription per event as needed:
+
+| Trigger on this type of event | Object recorded |
+|---|---|
+| **Run state changed** | Pipeline run |
+| **Release deployment started** | Release stage deployment (start) |
+| **Release deployment completed** | Release stage deployment (end) |
+
+Use **Filters** to limit a subscription to a pipeline, release definition, or stage. Do not subscribe **Build completed** or **Run stage state changed**; Flashduty ignores them.
+
+</Step>
+
+<Step title="Enter the push URL">
+
+1. **URL**: paste the full push URL of the Flashduty integration
+2. **Basic authentication username / password**: leave empty; Flashduty authenticates with the `integration_key` in the push URL
+3. **Resource details to send**: select **All**. With Minimal or None the delivery lacks the run id, release, and stage name, and Flashduty answers 400
+4. **Messages to send** and **Detailed messages to send**: keep the defaults. Flashduty uses the message Text as the change description and the link in the Markdown message as the link of release events (they have no separate link field); when a format is not sent, the description or link is empty
+5. Click **Test** to verify, then **Finish**
+
+</Step>
+</Steps>
+
+**Test** sends a sample delivery; Flashduty answers success and records no change.
+
+## What one change is
+---
+
+| Azure DevOps object | Change identity (change_key) | Notes |
+|---|---|---|
+| Pipeline run | `run:<run id>` | The run id is the `buildId` in the run page link. The start, canceling, and completion events of one run are one change; a re-run is a new run and a new change |
+| Release stage deployment | `release:<release id>/<stage id>` (the stage's definition id, `definitionEnvironmentId` in the stage link of the event message) | Renaming a stage does not split its change. Redeploying the same release to the same stage stays one change and the later deployment overwrites its status. Different releases, or different stages of one release, are different changes |
+
+<Note>Azure DevOps run ids are unique only within an organization. Create a separate Flashduty integration for each Azure DevOps organization.</Note>
+
+## Status mapping
+---
+
+**Pipeline runs** (Run state changed)
+
+| state | result | Flashduty change status |
+|---|---|---|
+| `inProgress` | - | Processing |
+| `canceling` | - | Processing |
+| `completed` | `succeeded` | Done |
+| `completed` | `failed` | Failed |
+| `completed` | `canceled` | Canceled |
+
+**Release stage deployments**
+
+| Event / deployment status | Flashduty change status |
+|---|---|
+| Deployment started | Processing |
+| Deployment completed, `succeeded` | Done |
+| Deployment completed, `partiallySucceeded` | Done |
+| Deployment completed, `failed` | Failed |
+| Deployment completed, `canceled` | Canceled |
+| Deployment completed, `rejected` (approval refused) | Canceled |
+
+A state value Flashduty does not recognize makes the delivery answer 400 (`unknown run state`, `unknown run result`, `unknown deployment status`). The raw state is kept in the `state` label of the change event.
+
+These deliveries return success and record nothing:
+
+- **Build completed**, **Run stage state changed**, and any other event type
+- The **Test** delivery of Service Hooks
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | Pipeline: `<pipeline name>: run <run id>`; release: `<project name>: deploy <release name> to <stage name>` |
+| Description | The text message of the Azure DevOps event |
+| Link | The pipeline run page; for release events, the stage page from the event message |
+| Change time | The run's finish time when it ends, otherwise the event's creation time |
+
+Labels can be used for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `kind` | `pipeline_run` or `release_deployment` |
+| `pipeline`, `pipeline_id`, `run_id` | Pipeline name, pipeline id, run id (pipeline runs) |
+| `project`, `release`, `release_id`, `environment`, `environment_id` | Project name, release name, release id, stage name, stage definition id (releases) |
+| `state` | The raw Azure DevOps state, for example `completed/succeeded`, `queued`, `succeeded`. It differs per event, so do not route on it |
+
+Run events carry no project name, so pipeline runs have no `project` label.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Does a repeated delivery create a duplicate record?">
+
+No. When Azure DevOps retries a delivery, the content is identical to the original and Flashduty records it once.
+
+</Accordion>
+
+<Accordion title="Why does Build completed produce no change?">
+
+Flashduty records Pipelines run state events (Run state changed) and Release deployment events. Classic build pipelines do not send Run state changed; use YAML pipelines to have them recorded.
+
+</Accordion>
+
+<Accordion title="Why does redeploying a release to the same stage not create a new change?">
+
+Release deployment events carry no deployment id, so Flashduty identifies a deployment by release id and stage id; a redeployment updates the same change.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `resource.run.id is missing`, `resource.release.id is missing`, `resource.environment.name is missing`, `resource.environment.definitionEnvironmentId is missing` (or `resource.deployment.environment.id is missing`, `resource.deployment.environment.name is missing` on completed events): **Resource details to send** is not **All**, or the delivery does not come from Azure DevOps Service Hooks
+- `unknown run state`, `unknown run result`, `unknown deployment status`: a state value Flashduty does not recognize yet
+- `invalid createdDate`: a timestamp field in the delivery is malformed
+
+</Accordion>
+</AccordionGroup>

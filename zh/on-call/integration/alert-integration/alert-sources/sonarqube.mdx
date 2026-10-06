@@ -1,0 +1,115 @@
+---
+title: "SonarQube 告警集成"
+description: "通过 Webhook 将 SonarQube Server 或 SonarQube Cloud 的质量门禁（Quality Gate）结果同步到 Flashduty On-call。"
+keywords: ["告警集成", "SonarQube", "SonarQube Cloud", "Webhook", "质量门禁", "Quality Gate", "代码质量"]
+---
+
+通过 SonarQube 的 Webhook，将每次代码分析后的质量门禁结果同步到 Flashduty On-call。每个项目的每个分支（或 Pull Request）对应一条 Flashduty 告警：质量门禁失败（`ERROR`）时触发，之后同一分支的门禁再次通过（`OK`）时自动恢复。适用于 SonarQube Server（Community Build、Developer、Enterprise、Data Center）和 SonarQube Cloud，两者的 Webhook 内容一致。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **SonarQube**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **SonarQube**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 SonarQube 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+**SonarQube Server**：
+
+1. 以管理员身份登录，进入 **Administration → Configuration → Webhooks** 创建全局 Webhook，对所有项目生效；也可以进入某个项目的 **Project Settings → Webhooks** 只对该项目生效（每个项目最多 10 个）
+2. 点击 **Create**，填写名称
+3. 将 Flashduty 集成的完整推送地址粘贴到 **URL**，地址中需包含 `integration_key`
+4. **Secret** 可以留空。填写后 SonarQube 会在每次请求中带上 `X-Sonar-Webhook-HMAC-SHA256` 请求头，Flashduty 不校验该请求头，认证依靠地址中的 `integration_key`
+
+**SonarQube Cloud**：
+
+1. 进入组织的 **Administration → Webhooks**（需要组织管理员权限）
+2. 点击 **Create**，填写名称，将推送地址粘贴到 **URL**
+
+SonarQube Cloud 的免费方案不会真正发送 Webhook（页面上仍可创建），需要付费方案。
+
+</Step>
+
+<Step title="运行一次分析并验证">
+
+1. 让 CI 对项目运行一次分析（例如 `sonar-scanner`），分析结束后 SonarQube 会推送一次 Webhook
+2. 让质量门禁失败（例如临时调高覆盖率阈值），确认 Flashduty 出现一条告警
+3. 修复后再运行一次分析，门禁通过后确认该告警自动恢复
+
+SonarQube 没有提供 Webhook 的测试按钮，Server 版可在 Webhooks 页面的 **Last delivery** 列查看每次投递的结果。投递超过 10 秒未响应即视为失败，且 SonarQube 不会重试。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Alert Key 由项目 Key（`project.key`）、分支类型（`branch.type`，如 `BRANCH` 或 `PULL_REQUEST`）和分支名（`branch.name`）共同计算，因此：
+
+- 同一项目同一分支的失败和通过共用一个 Alert Key，门禁通过后原告警自动恢复
+- 不同分支、不同 Pull Request、不同项目的告警互不影响
+- 项目名称、质量门禁名称、分析 ID、提交等字段变化不会改变 Alert Key
+- 不带分支信息的分析（不支持分支分析的版本）只按项目 Key 区分
+
+缺少 `project.key` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+SonarQube 的 Webhook 不携带等级，质量门禁失败是代码质量信号而不是服务中断，因此统一使用 Warning。可以在 Flashduty 中通过路由或告警管理调整等级。
+
+| `qualityGate.status` | 状态 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `ERROR` | 触发 | Warning |
+| `WARN`（旧版本） | 触发 | Warning |
+| `OK` | 恢复 | - |
+
+以下推送会被忽略，Flashduty 直接返回成功：分析失败或被取消的推送（`status` 为 `FAILED` 或 `CANCELLED`，不含质量门禁）、不含 `qualityGate` 的推送，以及 `qualityGate.status` 为其他值的推送。
+
+每次门禁通过的分析都会推送一次 `OK`，该事件只用于恢复同一项目和分支的活动告警。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 质量门禁名称 |
+| `resource` / `project_key` | 项目 Key |
+| `project_name` / `project_url` | 项目名称和 SonarQube 中的项目链接 |
+| `branch` / `branch_type` | 分支或 Pull Request 名称和类型 |
+| `quality_gate` | 质量门禁名称 |
+| `revision` | 本次分析的提交 SHA |
+| `failed_metrics` | 未通过的条件对应的指标，逗号分隔 |
+
+告警描述中列出每个未通过的条件：指标、当前值和阈值。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **没有收到告警**：确认分析确实包含质量门禁结果；Server 版在 Webhooks 页面查看 **Last delivery** 的状态码，SonarQube Cloud 需要付费方案
+- **告警没有恢复**：恢复依赖同一项目和分支的下一次分析。合并请求（Pull Request）被关闭后不会再有分析，对应告警需要手动关闭
+- **SonarQube Server 无法访问 Flashduty**：Webhook 由 SonarQube 服务端发出，确认服务端能访问外网，或已配置代理
+
+更多字段含义请参阅 [SonarQube Webhooks](https://docs.sonarsource.com/sonarqube-server/project-administration/integrations/webhooks)。

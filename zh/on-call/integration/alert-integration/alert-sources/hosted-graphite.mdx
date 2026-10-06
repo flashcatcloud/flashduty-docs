@@ -1,0 +1,117 @@
+---
+title: "Hosted Graphite 告警集成"
+description: "通过 Hosted Graphite 告警的 Webhook 通知渠道，将阈值告警的触发和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "Hosted Graphite", "Graphite", "Webhook", "Notification Channel", "指标告警"]
+---
+
+通过 Hosted Graphite 的 Webhook 通知渠道（Notification Channel），把指标告警的触发（`alerting`）和恢复（`recovered`）通知同步到 Flashduty On-call。同一条告警规则在同一个指标上越过阈值时触发，恢复时关闭对应的 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Hosted Graphite**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Hosted Graphite**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Hosted Graphite 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook 通知渠道">
+
+登录 Hosted Graphite，在告警的 Notification Channels 中新建一个类型为 **Webhook** 的渠道，将 Flashduty 集成的完整推送地址粘贴到 URL。
+
+</Step>
+
+<Step title="关联告警">
+
+编辑需要接入的告警，把上一步创建的 Webhook 渠道加入它的通知渠道并保存。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让指标越过告警阈值，确认 Flashduty 收到活动告警；再让指标回到阈值以内，确认原告警恢复。
+
+</Step>
+</Steps>
+
+<Warning>
+Hosted Graphite 的通知里没有告警 ID，Flashduty 用「告警名称 + 指标名」区分告警。名称和指标都相同的两条告警会合并成同一条 Flashduty 告警，请给每条告警起不同的名称。
+</Warning>
+
+## 推送内容
+---
+
+Hosted Graphite 以 `application/json` POST 以下字段，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `name` | 告警名称 | 告警标题，标签 `alert_name`、`check` |
+| `metric` | 触发告警的指标 | 标签 `metric` |
+| `status` | `alerting` 或 `recovered` | 触发或恢复 |
+| `criteria` | 触发条件描述 | 标签 `criteria`，写入描述 |
+| `value` | 当前值 | 标签 `value`，写入描述 |
+| `graph` | 图表链接 | 标签 `graph` |
+| `info` | 附加信息 | 写入描述 |
+| `timestamp`、`backoff_minutes` | 发送时间、退避设置 | 不保存 |
+
+## Alert Key
+---
+
+Flashduty 用告警名称和指标名计算 Alert Key（两者以分隔符拼接后取 MD5）。同一条告警在同一个指标上的触发和恢复通知携带相同的名称和指标，因此落在同一条告警上；名称不同或指标不同的告警互不影响。修改判定条件、当前值不会改变 Alert Key。
+
+Hosted Graphite 未提供告警 ID，这一组合是推断得出的标识：如果两条告警的名称和指标都相同，它们会合并。请求中缺少 `name` 时，Flashduty 返回参数错误。
+
+## 状态和告警等级
+---
+
+Hosted Graphite 的通知不带告警等级，Flashduty 统一按 Warning 处理。
+
+| Hosted Graphite `status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `alerting` | Warning |
+| `recovered` | 恢复，原等级为 Warning |
+
+`status` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Hosted Graphite 重试会产生重复告警吗？">
+
+不会。请求失败时 Hosted Graphite 会在几秒内重试若干次，这些重试携带相同的名称和指标，会合并到同一条告警中。
+
+</Accordion>
+
+<Accordion title="有测试按钮吗？">
+
+本集成未观察到 Webhook 渠道的测试按钮。请用第三步的方式让指标真实越过阈值来验证。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **Hosted Graphite 推送失败**：确认 URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求体是 JSON，且 `name` 非空、`status` 为 `alerting` 或 `recovered`
+- **告警没有恢复**：确认恢复通知与触发通知的告警名称和指标一致；改过告警名称会得到新的 Alert Key
+- **两条告警被合并**：给它们设置不同的名称

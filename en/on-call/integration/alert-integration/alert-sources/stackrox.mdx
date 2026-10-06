@@ -1,0 +1,120 @@
+---
+title: "StackRox Alert Integration"
+description: "Send StackRox (Red Hat Advanced Cluster Security for Kubernetes) policy violation alerts to Flashduty On-call through a Generic Webhook."
+keywords: ["alert integration", "StackRox", "Red Hat ACS", "RHACS", "Kubernetes", "container security", "webhook"]
+---
+
+Send policy violation alerts from StackRox (Red Hat Advanced Cluster Security for Kubernetes, RHACS) to Flashduty On-call through the Generic Webhook notifier integration in Central. Each StackRox alert (`alert.id`) becomes one Flashduty alert. StackRox does not send a "resolved" notification through the generic webhook, so these alerts do not recover automatically. Turn on auto-close in the channel.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **StackRox**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **StackRox** and enter an integration name
+3. Configure the default route and pick a channel. You can add more rules under **Route** after creating it
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure StackRox
+---
+
+You need permission in RHACS to create notifier integrations and edit policies. Central must be able to reach the Flashduty push URL over HTTPS.
+
+<Steps>
+<Step title="Create a Generic Webhook integration">
+
+1. In the RHACS portal, go to **Platform Configuration → Integrations**
+2. Under **Notifier Integrations**, select **Generic Webhook** and click **New integration**
+3. Enter an **Integration name**
+4. Paste the full Flashduty push URL into **Endpoint**. The URL must include `integration_key`
+5. Leave **CA certificate** and **Skip TLS verification** at their defaults. Flashduty uses a public certificate
+6. Do not turn on **Enable audit logging**. Audit notifications use a different body; Flashduty acknowledges them without creating an alert
+7. To tag the source, add key-value pairs under **Extra fields** (for example `source` = `rhacs`). Flashduty ignores them
+8. Click **Test**, then **Create**
+
+</Step>
+
+<Step title="Enable notifications on policies">
+
+1. Go to **Platform Configuration → Policy Management**
+2. Select the policies you want to be notified about and use the bulk action to assign the Generic Webhook as their notifier
+
+Only alerts from policies that have the notifier enabled are sent to Flashduty.
+
+</Step>
+
+<Step title="Turn on auto-close">
+
+The StackRox Generic Webhook sends one notification when an alert is created and none when the violation is resolved, so the Flashduty alert does not recover on its own. In the channel that receives these alerts, turn on [auto-close](/en/on-call/channel/create-edit), set the timer to start from **Incident trigger**, and use a duration of **24 hours**. When a violation on the same deployment is resolved and later returns, StackRox creates a new alert and sends it again, and Flashduty opens a new alert.
+
+</Step>
+
+<Step title="Verify">
+
+The **Test** button on the Generic Webhook integration sends a test alert with ID `testalert`. Flashduty returns success but does not create an alert. To verify the full flow, cause a real violation on a policy that has notifications enabled (for example, deploy a workload that uses an image with the `latest` tag while the **Latest tag** policy is enabled) and confirm Flashduty receives the alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the StackRox alert ID (`alert.id` in the request body) as the Alert Key. The StackRox documentation states that each alert is sent once: a new notification is sent when a violation first occurs in a deployment, or when it occurs again after a previous runtime alert for that policy in that deployment was resolved. Every notification is therefore a separate alert with its own Alert Key. If StackRox sends the same alert again, the deliveries merge into one Flashduty alert.
+
+Changes to the policy name, severity, violation details, or time do not change the Alert Key. Requests without `alert.id` are rejected.
+
+## Status and severity
+---
+
+Flashduty maps the policy severity (`alert.policy.severity`) to the alert severity:
+
+| StackRox severity | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL_SEVERITY` | Critical |
+| `HIGH_SEVERITY` | Warning |
+| `MEDIUM_SEVERITY` | Warning |
+| `LOW_SEVERITY` | Info |
+| Unset or any other value | Warning |
+
+To page on `HIGH_SEVERITY` policies as Critical, adjust the severity in Flashduty with a route or alert processing rule that matches the `policy_severity` label.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `alert_id` | StackRox alert ID, the Alert Key |
+| `policy` | Policy name, also used as the alert title |
+| `policy_severity` | Policy severity |
+| `lifecycle_stage` | Policy lifecycle stage (`BUILD`, `DEPLOY`, `RUNTIME`) |
+| `cluster` | Cluster name |
+| `namespace` | Namespace |
+| `resource` | Name of the deployment, image, resource, or node that triggered the alert |
+| `state` | Alert state (for example `ATTEMPTED`); empty for the default active state |
+| `source` | Always `stackrox` |
+
+Violation details (`alert.violations[].message`) go into the alert description.
+
+## Troubleshooting
+---
+
+- **Central reports a delivery failure**: confirm the Endpoint is complete and includes `integration_key`, and that Central's network can reach Flashduty
+- **Test succeeds but no alert appears**: Test sends `testalert`, which never creates an alert. Confirm the policy has the notifier enabled and cause a real violation
+- **The alert does not recover**: this is expected. Turn on auto-close in the channel, or close the alert manually in Flashduty
+- **Several similar alerts arrive**: each StackRox alert maps to one Flashduty alert. The same policy violated on different deployments produces different alerts
+
+For field details, see [Red Hat: Integrating using generic webhooks](https://docs.redhat.com/en/documentation/red_hat_advanced_cluster_security_for_kubernetes/4.6/html/integrating/integrate-using-generic-webhooks).

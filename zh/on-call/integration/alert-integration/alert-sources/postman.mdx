@@ -1,0 +1,105 @@
+---
+title: "Postman 告警集成"
+description: "通过 Postman 的自定义 Webhook 将 Postman Monitor 的运行结果同步到 Flashduty On-call。"
+keywords: ["告警集成", "Postman", "Monitor", "Webhook", "API 监控", "接口测试"]
+---
+
+通过 Postman 的 Webhook 集成「Post monitoring results」，将 Postman Monitor 每次运行的结果推送到 Flashduty On-call。每个 Monitor 对应一条 Flashduty 告警：运行出现失败的测试或请求错误时触发，之后某次运行全部通过时恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Postman**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Postman**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Postman 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 集成">
+
+1. 登录 Postman，为要监控的集合（Collection）创建 Monitor（工作区的 **Monitors** 面板 → **Create**）。Postman 免费版最短支持每小时运行一次
+2. 打开 **Integrations**，选择 **Custom Webhooks**，进入 **Connections** 标签页，在 **Post monitoring results** 一项右侧点击 **Add integration**
+3. 填写 **Nickname**，选择包含目标 Monitor 的工作区（Workspace），再选择需要推送结果的 Monitor
+4. 将 Flashduty 集成的完整推送地址粘贴到 Webhook URL，地址中需包含 `integration_key`
+5. 选择通知方式：
+   - **Notify for all completed monitor runs**（请选择这一项）：每次运行都推送。失败的运行触发告警，通过的运行恢复告警
+   - **Notify for 3 failures and then first success**：Postman 只按选项名称描述其行为，没有说明具体推送哪些运行，通过的运行是否推送、何时推送无法保证，告警可能无法恢复，也会晚触发
+
+Postman 的推送里没有状态字段，Flashduty 依靠通过的运行来恢复告警，所以只有选择 **Notify for all completed monitor runs**，恢复才能可靠生效。
+6. 点击 **Add Integration**
+
+每个 Monitor 需要单独添加一条 Webhook 集成。
+
+</Step>
+
+<Step title="验证">
+
+1. 让 Monitor 中的一个测试失败（例如修改断言），然后在 Monitor 页面点击 **Run Now**，或等待下一次定时运行
+2. 在 Flashduty 中确认收到活动告警
+3. 还原断言，再次运行 Monitor，确认原告警恢复
+
+Postman 文档未提供 Webhook 的测试推送功能。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用 `monitor_uid`（Monitor 的唯一 ID）作为 Alert Key，同一个 Monitor 的失败和恢复推送使用同一个 Alert Key。修改 Monitor 名称、测试数量、耗时等字段不会改变 Alert Key。缺少 `monitor_uid` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+Postman 的推送内容里没有状态字段，Flashduty 根据 `metrics` 中的计数判断本次运行的结果：
+
+| 条件 | 状态 | Flashduty 等级 |
+| :--- | :--- | :--- |
+| `errorCount` 大于 0（请求出错，如连接失败或超时） | 触发 | Critical |
+| `errorCount` 为 0，`failedTestCount` 大于 0（断言失败） | 触发 | Warning |
+| `errorCount` 和 `failedTestCount` 均为 0 | 恢复 | - |
+
+`metrics` 对象缺失，或 `errorCount`、`failedTestCount` 任一缺失、不是非负整数的请求会被拒绝，不会被当作通过的运行。没有活动告警的 Monitor 收到通过的运行时，不会创建新告警。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` / `monitor_name` | Monitor 名称 |
+| `monitor_uid` | Monitor 的唯一 ID |
+| `resource` / `collection_name` | 集合（Collection）名称 |
+| `environment_name` | 环境名称 |
+| `failed_tests` / `passed_tests` | 失败和通过的测试数 |
+| `errors` / `warnings` | 请求错误数和警告数 |
+| `request_count` | 请求数 |
+| `total_latency_ms` | 本次运行的总耗时（毫秒） |
+
+触发推送的用户信息（`user_id`、`user_name`）不会写入标签。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 URL 完整且包含 `integration_key`
+- **告警没有恢复**：确认 Monitor 之后有一次所有测试都通过且没有请求错误的运行；请确认通知方式选择的是 **Notify for all completed monitor runs**
+- **没有收到推送**：确认 Webhook 集成选择的是正确的工作区和 Monitor；每个 Monitor 需单独添加
+
+更多字段含义请参阅 [Postman Webhooks](https://learning.postman.com/docs/integrations/webhooks/)。

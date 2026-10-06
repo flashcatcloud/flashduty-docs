@@ -1,0 +1,88 @@
+---
+title: "OPNsense 告警集成"
+description: "OPNsense 的 Monit 模块通过邮件发送服务告警，使用 Flashduty 的邮件集成按规则触发和关闭 OPNsense 告警。"
+keywords: ["告警集成", "OPNsense", "Monit", "防火墙", "邮件", "Email"]
+---
+
+OPNsense 的服务监控由 **Monit** 模块（**Services → Monit**）完成，告警通过邮件送出，模块界面里的动作只有发送邮件、重启服务和停止监控，没有 Webhook。Flashduty 的 [邮件集成](/zh/on-call/integration/alert-integration/alert-sources/email) 可以接收这些邮件，并按规则从邮件标题判断是触发还是恢复，因此不需要单独的 OPNsense 集成：在 Flashduty 创建邮件集成，把它的邮件地址填进 Monit 的告警收件人，再按下文配置推送规则。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成邮件地址，任选其一即可。**集成类型都选择邮件 Email**，不是 OPNsense。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **邮件 Email**，点击 **保存**
+4. 打开生成的集成卡片，复制 **邮件地址**，再按下文配置推送规则
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **邮件 Email**，填写集成名称，复制 **邮箱地址**
+3. 按下文配置推送规则
+4. 配置默认路由并选择协作空间，点击 **保存**
+
+</div>
+
+## 在 OPNsense 中配置
+---
+
+1. **SMTP**：进入 **Services → Monit → Settings**，在 **General Settings** 中启用 Monit，填写 SMTP 服务器的地址、端口和凭据
+2. **收件人**：在 **Alert Settings** 中新增一条告警，**Recipient** 填 Flashduty 邮件集成的地址
+3. **邮件格式**：在这条告警的 **Mail format** 中填入下面一行。默认标题里没有主机名，且服务名与事件之间没有固定分隔，规则难以稳定提取 Alert Key，固定成这种格式后才可以按规则处理
+
+```
+Subject: [$HOST] [$SERVICE] $EVENT
+```
+
+4. **恢复通知**：Monit 在服务恢复时会发送同一格式的恢复邮件。**Not on** 保持关闭，使所有事件（包括恢复）都发送邮件
+
+## 在 Flashduty 中配置推送规则
+---
+
+标题 `[$HOST] [$SERVICE] $EVENT` 中，`$HOST` 和 `$SERVICE` 在故障邮件和恢复邮件里相同，只有 `$EVENT` 不同，规则把前两段作为 Alert Key，因此恢复邮件可以关闭对应的告警。
+
+1. **推送模式** 选择 **根据规则触发或关闭告警**
+2. 按顺序添加下面 2 条规则。每条规则的条件都是 **邮件标题** **匹配** 给出的正则，Alert Key **提取自** **邮件标题**
+3. **默认规则** 选择：如果以上规则均不满足，则 **丢弃该邮件**
+
+规则 1：关闭告警
+
+```
+条件：邮件标题 匹配 /^\[.+?\] \[.+?\] (Exists|.* (succeeded|recovery))$/
+正则表达式：/^\[(.+?)\] \[(.+?)\] /
+```
+
+规则 2：触发告警
+
+```
+条件：邮件标题 匹配 /^\[.+?\] \[.+?\] /
+正则表达式：/^\[(.+?)\] \[(.+?)\] /
+```
+
+关闭规则排在触发规则前面。Alert Key 由主机名和服务名组成，同一主机上同一服务的多次故障合并到同一条告警。默认规则选丢弃，是为了让没有按上面格式发出的邮件（例如未设置 **Mail format** 的其他告警）不生成无法自动关闭的告警。
+
+## 邮件标题中的事件
+---
+
+`$EVENT` 是 Monit 对事件的描述，故障和恢复成对出现：
+
+| 事件类型 | 故障 | 恢复 |
+| :--- | :--- | :--- |
+| status | `Status failed` | `Status succeeded` |
+| connection | `Connection failed` | `Connection succeeded` |
+| checksum | `Checksum failed` | `Checksum succeeded` |
+| timeout | `Timeout` | `Timeout recovery` |
+| nonexist | `Does not exist` | `Exists` |
+
+## 限制
+---
+
+- **类型与严重程度**：告警在 Flashduty 中显示的集成类型是邮件 Email；严重程度统一为 Warning，可以通过 [告警处理 Pipeline](/zh/on-call/integration/alert-integration/alert-pipelines) 按标题调整。
+- **其他事件**：上表之外的 Monit 事件会作为触发告警处理；如果某类事件没有对应的恢复邮件，请在接收该集成的协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议 24 小时。
+- **标题格式**：修改 **Mail format** 中的 `Subject` 后，请同步修改规则中的正则。

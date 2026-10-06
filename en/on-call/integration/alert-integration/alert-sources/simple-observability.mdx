@@ -1,0 +1,143 @@
+---
+title: "Simple Observability alert integration"
+description: "Send Simple Observability rule, server, job, and endpoint alerts and their recoveries to Flashduty On-call through a webhook channel."
+keywords: ["alert integration", "Simple Observability", "webhook", "server monitoring", "endpoint monitoring", "cron job monitoring"]
+---
+
+Use a Simple Observability webhook channel to send alerts and recoveries for alert rules, server heartbeats, scheduled jobs, and endpoints to Flashduty On-call. Each monitored object maps to one Flashduty alert: it is created when the object alerts, repeated notifications merge into it, and it is closed when the recovery notification arrives.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Simple Observability** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Simple Observability** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Simple Observability
+---
+
+<Steps>
+<Step title="Add a webhook channel">
+
+1. Log in to Simple Observability, open the **Channels** page, and click **Add Channel**
+2. Select **Webhook** as the channel type
+3. Paste the full Flashduty push URL into **Webhook URL**
+4. Save the channel
+5. Click **Test** on the channel to verify the URL. Flashduty returns success and does not create an alert
+
+</Step>
+
+<Step title="Attach the channel to your alerts">
+
+In the notification settings of your alert rules, servers, scheduled jobs, and endpoints, select the webhook channel you just created.
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Trigger a real alert, for example by making an endpoint unreachable, and confirm that an active alert appears in Flashduty. Then restore the object and confirm that the alert recovers.
+
+</Step>
+</Steps>
+
+<Warning>
+Simple Observability requires your endpoint to return a 2xx status code; otherwise it logs an error, and its documentation does not describe a retry policy. Use the full push URL, including `integration_key`.
+</Warning>
+
+## Payload
+---
+
+The webhook POSTs JSON, which Flashduty parses directly without a template. `event_type` decides which kind of object the alert is about:
+
+| `event_type` | Object | Identity field | Trigger status | Recovery status |
+| :--- | :--- | :--- | :--- | :--- |
+| `RULE_ALERT` | Alert rule | `data.rule.id` | `FIRING` | `RESOLVED` |
+| `SYSTEM_ALERT` | Server | `data.server.id` | `SERVER_DOWN` | `SERVER_UP` |
+| `ENDPOINT_ALERT` | Endpoint | `data.endpoint.id` | `ENDPOINT_DOWN` | `ENDPOINT_UP` |
+| `JOB_ALERT` | Scheduled job | `data.job.id` | `FAIL`, `MISSED`, `TIMEOUT` | `SUCCESS` |
+| `TEST` | Channel test | None | None | None |
+
+How the other fields appear in Flashduty:
+
+| Field | In Flashduty |
+| :--- | :--- |
+| `title` | Alert title |
+| `description` | Alert description |
+| `severity` | Alert severity; the original value is kept in the `vendor_severity` label |
+| `status`, `event_type` | Labels `status` and `event_type` |
+| `url` | Label `dashboard_url` |
+| Object `id` and `name` | Labels `rule_id` / `server_id` / `endpoint_id` / `job_id` and the matching `*_name`; the name is also used as `check` |
+| Rule `threshold` | Label `threshold` |
+| Endpoint `url`, `method`, `last_status` | Labels `endpoint_url`, `endpoint_method`, `last_status` |
+| Job `server`, `schedule` | Labels `job_server`, `job_schedule` |
+
+## Alert Key
+---
+
+Flashduty uses the object type plus the object ID as the Alert Key, for example `endpoint:<data.endpoint.id>`. The trigger and recovery notifications for one rule, server, endpoint, or job land on the same alert. Different objects produce different alerts, and objects of different types never affect each other even if their IDs match. Changing the name, severity, description, or time does not change the Alert Key.
+
+If the object ID is missing, Flashduty returns a parameter error, because the recovery cannot be reliably matched to its alert. An `event_type` or `status` outside the table above is rejected as well.
+
+<Note>
+The Simple Observability documentation shows only the trigger example for each type and does not state that the recovery notification carries the same object ID. Flashduty matches trigger and recovery by the data structure shared within each type. If an alert does not close after recovery, contact us and include the recovery request body.
+</Note>
+
+## Status and severity
+---
+
+| Simple Observability `severity` | Flashduty severity |
+| :--- | :--- |
+| `CRITICAL`, `ERROR` | Critical |
+| `WARNING` | Warning |
+| `INFO`, `SUCCESS` | Info |
+| Empty or any other value | Critical for server and endpoint down; Warning for rule and job alerts |
+
+Rule and job alerts carry a null `severity`, so they are treated as Warning. A recovery notification (`RESOLVED`, `SERVER_UP`, `ENDPOINT_UP`, `SUCCESS`) closes the alert with the same Alert Key.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Is a notification sent for every successful job run?">
+
+That depends on your notification settings in Simple Observability. A `JOB_ALERT` with `SUCCESS` is treated as a recovery: if the job failed earlier, the original alert is closed. If you do not want success notifications, turn them off for the job in Simple Observability.
+
+</Accordion>
+
+<Accordion title="Does the channel test create an alert?">
+
+No. The test request has `event_type` set to `TEST`. Flashduty returns success without creating an alert.
+
+</Accordion>
+
+<Accordion title="What if one rule matches several hosts?">
+
+A rule alert produces one Flashduty alert per rule ID. The matching hosts and values are shown on the alert detail page in Simple Observability, which you can reach through the `dashboard_url` label.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Simple Observability reports an error**: confirm the webhook URL is the full push URL and includes `integration_key`
+- **Flashduty returns a parameter error**: the message names the missing object ID or the unsupported `event_type` or `status`
+- **An alert does not recover**: confirm the recovery is sent through the same webhook channel and that its object ID matches the trigger
+
+For field details, see the Simple Observability documentation: [Webhook](https://simpleobservability.com/docs/alerts/webhook).

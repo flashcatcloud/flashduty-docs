@@ -1,0 +1,208 @@
+---
+title: "Honeycomb alert integration"
+description: "Send Honeycomb Trigger and SLO burn alert trigger and recovery notifications to Flashduty On-call through a webhook recipient with custom payload templates."
+keywords: ["alert integration", "Honeycomb", "Trigger", "SLO", "Burn Alert", "Webhook"]
+---
+
+Use a Honeycomb webhook recipient to send Trigger alerts and SLO burn alerts to Flashduty On-call. Honeycomb identifies one alert firing by `.Alert.InstanceID`, and Flashduty uses it as the Alert Key: the notifications and the recovery of the same firing keep updating one Flashduty alert.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Honeycomb** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Honeycomb** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Route** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Honeycomb
+---
+
+These steps require a Honeycomb account that can edit integrations in **Team Settings**. Triggers are available on every plan; SLOs and burn alerts require the Pro or Enterprise plan.
+
+<Steps>
+<Step title="Create a webhook recipient">
+
+1. Go to **Team Settings** and open the **Integrations** view
+2. Under **Trigger and SLO Recipients**, click **Add Integration** and set **Provider** to **Webhook**
+3. Set **Name** to `Flashduty` and paste the complete Flashduty push URL into **Webhook URL**. **Shared Secret** can be left empty
+
+</Step>
+
+<Step title="Define the severity variable">
+
+Open the **Variables** tab, click **Add variable**, set the name to `severity`, and set the default value to `critical`.
+
+Flashduty uses this variable to set the severity. Supported values are `critical`, `warning`, and `info`. When you select this recipient on a Trigger or burn alert later, you can override the default for that rule.
+
+</Step>
+
+<Step title="Configure the payload templates">
+
+Open the **Payload** tab, click **Enable** for each of the three alert types, and paste the matching template. An alert type without an enabled payload cannot use this recipient.
+
+**Triggers**:
+
+```json
+{
+  "alert_type": "trigger",
+  "id": {{ toJson .ID }},
+  "name": {{ toJson .Name }},
+  "description": {{ toJson .Description }},
+  "url": {{ toJson .URL }},
+  "environment": {{ toJson .Environment }},
+  "datasets": {{ toJson .Datasets }},
+  "severity": {{ toJson .Vars.severity }},
+  "status": {{ toJson .Alert.Status }},
+  "instance_id": {{ toJson .Alert.InstanceID }},
+  "alert_description": {{ toJson .Alert.Description }},
+  "is_test": {{ .Alert.IsTest }},
+  "investigate_url": {{ toJson .Alert.InvestigateURL }},
+  "result_url": {{ toJson .Result.URL }}
+}
+```
+
+**Budget Rate Burn Alerts**:
+
+```json
+{
+  "alert_type": "slo_budget_rate",
+  "id": {{ toJson .ID }},
+  "name": {{ toJson .Name }},
+  "description": {{ toJson .Description }},
+  "url": {{ toJson .URL }},
+  "environment": {{ toJson .Environment }},
+  "datasets": {{ toJson .Datasets }},
+  "severity": {{ toJson .Vars.severity }},
+  "status": {{ toJson .Alert.Status }},
+  "instance_id": {{ toJson .Alert.InstanceID }},
+  "alert_description": {{ toJson .Alert.Description }},
+  "is_test": {{ .Alert.IsTest }},
+  "investigate_url": {{ toJson .Alert.InvestigateURL }},
+  "slo_id": {{ toJson .SLO.ID }},
+  "slo_url": {{ toJson .SLO.URL }}
+}
+```
+
+**Exhaustion Time Burn Alerts**:
+
+```json
+{
+  "alert_type": "slo_exhaustion_time",
+  "id": {{ toJson .ID }},
+  "name": {{ toJson .Name }},
+  "description": {{ toJson .Description }},
+  "url": {{ toJson .URL }},
+  "environment": {{ toJson .Environment }},
+  "datasets": {{ toJson .Datasets }},
+  "severity": {{ toJson .Vars.severity }},
+  "status": {{ toJson .Alert.Status }},
+  "instance_id": {{ toJson .Alert.InstanceID }},
+  "alert_description": {{ toJson .Alert.Description }},
+  "is_test": {{ .Alert.IsTest }},
+  "investigate_url": {{ toJson .Alert.InvestigateURL }},
+  "slo_id": {{ toJson .SLO.ID }},
+  "slo_url": {{ toJson .SLO.URL }}
+}
+```
+
+Then click **Add**.
+
+<Warning>
+Keep `instance_id`, `status`, and `is_test`. Flashduty rejects a request without `instance_id`, because it could not link the recovery to the original alert. `status` accepts only `TRIGGERED` and `OK`. Every string in the templates is written with `toJson`, so the rendered body stays valid JSON when a name or description contains quotes or line breaks.
+</Warning>
+
+</Step>
+
+<Step title="Add the recipient to a Trigger">
+
+1. Open **Triggers**, then edit an existing Trigger or click **New Trigger**
+2. Under **Recipients**, click **Add Recipient** and select the `Flashduty` recipient. To use another severity, override `severity` in the variable row
+3. Set **Frequency of Alerts** to **Limited alerts** (the default) or **Group resolution alerts**, then save the Trigger
+
+**Continuous alerts** sends a notification on every evaluation while the condition holds and never sends a recovery, so you need to close the matching Flashduty alert manually.
+
+</Step>
+
+<Step title="Add the recipient to an SLO burn alert">
+
+1. Open **SLOs**, click **Configure** in the **Burn Alerts** column of the target SLO, then click **New Burn Alert**
+2. Set the Exhaustion Time or Budget Rate condition and select the `Flashduty` recipient under **Notify**. Override `severity` if needed
+3. Click **Create Burn Alert**
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+**Test** on a Trigger or burn alert sends test notifications with `is_test` set to `true` (a Limited alerts Trigger and a burn alert send one `TRIGGERED` and one `OK`; a Continuous alerts Trigger sends only `TRIGGERED`). Flashduty returns success for test notifications without creating an alert, so you can use them to check that the push URL is reachable.
+
+To verify the full flow, let the Trigger condition actually fire and confirm that Flashduty receives an active alert, then let the condition clear and confirm that the original alert recovers.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses `instance_id` (`.Alert.InstanceID`) as the Alert Key. Honeycomb's template variable reference defines it as the unique identifier of one Trigger or burn alert firing, useful for deduplicating and correlating alerts. Honeycomb's official incident.io template also uses it as the `deduplication_key` and resolves the matching alert on `OK`.
+
+- Repeat notifications during one firing (for example, when a new group crosses a Trigger threshold) and the final recovery all update the same Flashduty alert
+- When the same Trigger or burn alert fires again after recovering, it gets a new `InstanceID` and becomes a new Flashduty alert
+- Changes to the name, description, severity, or environment do not change the Alert Key
+
+With **Group resolution alerts**, Flashduty also merges notifications by `instance_id` and recovers the alert when a notification with `status` `OK` arrives. The alert description lists the groups currently over the threshold.
+
+## Status and severity
+---
+
+Flashduty uses `status` to tell triggers from recoveries, and the `severity` variable to set the severity.
+
+| `severity` | Flashduty severity |
+| :--- | :--- |
+| `critical` | Critical |
+| `warning` | Warning |
+| `info` | Info |
+| Empty or any other value | Critical |
+
+When `status` is `OK`, Flashduty recovers the original alert and keeps its last severity. An empty or any other `status` is rejected.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Trigger name or SLO name |
+| `alert_type` | `trigger`, `slo_budget_rate`, or `slo_exhaustion_time` |
+| `alert_id` | Trigger ID or burn alert ID |
+| `instance_id` | `.Alert.InstanceID` |
+| `env` | Honeycomb environment name |
+| `datasets` | Dataset names, comma-separated |
+| `severity` | Raw value of the `severity` variable |
+| `alert_url` | Link to the Trigger or burn alert in Honeycomb |
+| `result_url` | Link to the query result that fired the alert (Triggers only) |
+| `investigate_url` | Honeycomb Canvas investigation link |
+| `slo_id`, `slo_url` | ID and link of the related SLO (burn alerts only) |
+
+## Troubleshooting
+---
+
+- **The Flashduty recipient is not selectable in Honeycomb**: Confirm that the matching alert type is enabled on the **Payload** tab and has a template
+- **Flashduty returns a parameter error**: Confirm that the template matches the one above and that `instance_id` and `status` are not empty. Honeycomb does not retry 4xx responses
+- **Every alert is Critical**: Confirm that the `severity` variable is defined and overridden on the Trigger or burn alert where needed
+- **Alerts do not recover**: Confirm that the Trigger does not use **Continuous alerts**. Test notifications neither create nor recover alerts
+
+For more information, see the Honeycomb documentation: [Send Alerts to Webhooks](https://docs.honeycomb.io/notify/webhooks/), [Custom Webhook Variables](https://docs.honeycomb.io/notify/webhooks/variables/), and [Monitor SLOs](https://docs.honeycomb.io/notify/slos/monitor/).

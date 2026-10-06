@@ -1,0 +1,138 @@
+---
+title: "NUT (Network UPS Tools) Alert Integration"
+description: "Push UPS on-battery, low-battery and communication-loss events to the Flashduty Standard Alert Event integration through a upsmon NOTIFYCMD script; recovery events close the alerts."
+keywords: ["alert integration", "NUT", "Network UPS Tools", "upsmon", "UPS", "power outage", "standard alert event"]
+---
+
+The NUT (Network UPS Tools) `upsmon` daemon can run the script set by `NOTIFYCMD` when a UPS changes state: the environment variable `NOTIFYTYPE` holds the event type (`ONBATT`, `ONLINE`, `COMMBAD` and so on), `UPSNAME` holds the UPS name, and the notification text is passed as the last argument. NUT has no native webhook, so a short script pushes these events to Flashduty in the [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard-alert) format: `ONBATT` triggers an alert and `ONLINE` recovers it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Standard Alert Event integration type** in both, not NUT.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Standard Alert Event** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Standard Alert Event** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in NUT
+---
+
+### Step 1: Create the notification script
+
+On the host that runs `upsmon`, create a script such as `/usr/local/bin/nut-flashduty.sh`, replace `URL` with the push URL copied above, and make it executable (`chmod +x`). The host needs `curl`.
+
+```sh
+#!/bin/sh
+# NUT NOTIFYCMD: forward UPS events to a Flashduty Standard Alert Event integration.
+URL='https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY'
+
+UPS="${UPSNAME:-unknown}"
+MSG="$*"
+
+case "$NOTIFYTYPE" in
+  ONBATT)   KEY=power;   STATUS=Warning; TEXT="on battery" ;;
+  LOWBATT)  KEY=power;   STATUS=Critical; TEXT="on battery, low battery" ;;
+  ONLINE)   KEY=power;   STATUS=Ok;       TEXT="back on line power" ;;
+  NOCOMM|COMMBAD) KEY=comm; STATUS=Critical; TEXT="communication lost" ;;
+  COMMOK)   KEY=comm;    STATUS=Ok;       TEXT="communication restored" ;;
+  REPLBATT) KEY=battery; STATUS=Warning;  TEXT="battery needs replacement" ;;
+  ALARM)    KEY=alarm;   STATUS=Warning;  TEXT="alarm active" ;;
+  NOTALARM) KEY=alarm;   STATUS=Ok;       TEXT="alarm cleared" ;;
+  OVER)     KEY=overload; STATUS=Warning; TEXT="overloaded" ;;
+  NOTOVER)  KEY=overload; STATUS=Ok;      TEXT="no longer overloaded" ;;
+  BYPASS)   KEY=bypass;  STATUS=Warning;  TEXT="on bypass" ;;
+  NOTBYPASS) KEY=bypass; STATUS=Ok;       TEXT="no longer on bypass" ;;
+  *) exit 0 ;;
+esac
+
+esc() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+JSON=$(printf '{"title_rule":"UPS %s: %s","event_status":"%s","alert_key":"nut:%s:%s","description":"%s","labels":{"resource":"%s","check":"%s","notify_type":"%s"}}' \
+  "$(esc "$UPS")" "$TEXT" "$STATUS" "$(esc "$UPS")" "$KEY" "$(esc "$MSG")" "$(esc "$UPS")" "$KEY" "$NOTIFYTYPE")
+
+curl -fsS -m 10 -X POST -H 'Content-Type: application/json' -d "$JSON" "$URL" >/dev/null
+```
+
+The script only handles the event types in the table below and ignores every other type.
+
+| `NOTIFYTYPE` | Meaning (NUT documentation) | Severity | Alert Key |
+| :--- | :--- | :--- | :--- |
+| `ONBATT` | UPS is on battery | Warning | `nut:<UPS name>:power` |
+| `LOWBATT` | UPS is on battery and the battery is low | Critical | `nut:<UPS name>:power` |
+| `ONLINE` | UPS is back online | Recovery | `nut:<UPS name>:power` |
+| `COMMBAD`, `NOCOMM` | Communication with the UPS lost, UPS unavailable | Critical | `nut:<UPS name>:comm` |
+| `COMMOK` | Communication with the UPS re-established | Recovery | `nut:<UPS name>:comm` |
+| `REPLBATT` | The UPS battery needs to be replaced | Warning | `nut:<UPS name>:battery` |
+| `ALARM`, `NOTALARM` | UPS has active alarms, alarms cleared | Warning, recovery | `nut:<UPS name>:alarm` |
+| `OVER`, `NOTOVER` | UPS overloaded, overload cleared | Warning, recovery | `nut:<UPS name>:overload` |
+| `BYPASS`, `NOTBYPASS` | UPS on bypass, back from bypass | Warning, recovery | `nut:<UPS name>:bypass` |
+
+### Step 2: Enable the script in upsmon.conf
+
+Edit `upsmon.conf`, set the notification script, and add the `EXEC` flag for every event type you want to push (`NOTIFYCMD` only runs for events that have `EXEC` set):
+
+```
+NOTIFYCMD /usr/local/bin/nut-flashduty.sh
+
+NOTIFYFLAG ONBATT     SYSLOG+WALL+EXEC
+NOTIFYFLAG LOWBATT    SYSLOG+WALL+EXEC
+NOTIFYFLAG ONLINE     SYSLOG+WALL+EXEC
+NOTIFYFLAG COMMBAD    SYSLOG+WALL+EXEC
+NOTIFYFLAG NOCOMM     SYSLOG+WALL+EXEC
+NOTIFYFLAG COMMOK     SYSLOG+WALL+EXEC
+NOTIFYFLAG REPLBATT   SYSLOG+WALL+EXEC
+```
+
+The first value of `NOTIFYCMD` is interpreted as the full path of the script, quoted if the path contains spaces (NUT 2.8.5 and older releases parsed it differently; see the NUT documentation for upsmon.conf). To also push `ALARM`, `OVER` or `BYPASS`, add a `NOTIFYFLAG` line for each of them and for their recovery types (`NOTALARM`, `NOTOVER`, `NOTBYPASS`) in the same way. Then have `upsmon` re-read its configuration:
+
+```bash
+upsmon -c reload
+```
+
+<Note>
+`upsmon` runs `NOTIFYCMD` in the background, so several instances can run at once when many events happen together; the script above sends exactly one request per call and is safe to run in parallel. Shutdown-related event types (`FSD`, `SHUTDOWN` and so on) are outside the script's scope and it exits when it receives them.
+</Note>
+
+### Step 3: Verify
+
+Run the script by hand on the host, first a trigger and then a recovery:
+
+```bash
+NOTIFYTYPE=ONBATT UPSNAME=ups@localhost /usr/local/bin/nut-flashduty.sh "UPS ups@localhost is on battery"
+NOTIFYTYPE=ONLINE UPSNAME=ups@localhost /usr/local/bin/nut-flashduty.sh "UPS ups@localhost is back online"
+```
+
+In Flashduty you should first see the alert `UPS ups@localhost: on battery` and then see it recover.
+
+## Recovery and deduplication
+---
+
+- `ONBATT`, `LOWBATT` and `ONLINE` share the Alert Key `nut:<UPS name>:power`: `ONBATT` triggers the alert, a following `LOWBATT` raises it to Critical, and `ONLINE` recovers it
+- `COMMBAD`, `NOCOMM` and `COMMOK` share `comm`; `ALARM` and `NOTALARM`, `OVER` and `NOTOVER`, and `BYPASS` and `NOTBYPASS` are also paired
+- `REPLBATT` has no matching recovery event. After replacing the battery, close the alert manually in Flashduty, or enable the [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel, starting with 7 days
+- Alerts of several UPS units do not affect each other: the Alert Key contains `UPSNAME`
+
+## Troubleshooting
+---
+
+- **No alert arrives**: confirm the `NOTIFYFLAG` of the event type in `upsmon.conf` includes `EXEC` and that `upsmon -c reload` was run
+- **The script works by hand but no alert arrives when upsmon triggers it**: `NOTIFYCMD` must be the full path of the script and the user `upsmon` runs as must be able to execute it; `curl -fsS` prints failures to stderr, which `upsmon` may not record, so run the script by hand to see them
+- **The alert does not recover**: confirm recovery types such as `ONLINE` also have `EXEC` set
+- **Flashduty returns a parameter error**: confirm `URL` is the full push URL, including `integration_key`
+
+For more details, see the NUT documentation [upsmon.conf](https://networkupstools.org/docs/man/upsmon.conf.html) and [upsmon](https://networkupstools.org/docs/man/upsmon.html).

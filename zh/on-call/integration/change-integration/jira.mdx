@@ -1,0 +1,137 @@
+---
+title: "Jira 变更集成"
+description: "通过 Jira Webhook 将 Issue 的创建、更新和删除同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Jira", "Issue", "Webhook", "变更单"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+在 Jira 中创建 Webhook，订阅 Issue 的创建、更新和删除，将 Issue 同步到 Flashduty On-call。每个 Issue 对应一条 Flashduty 变更，变更状态随 Issue 的状态（`status.name`）更新。适合用 Jira Issue 管理变更单、发布单的团队。
+
+本集成适用于 Jira Cloud 和 Jira Data Center / Server。
+
+<Note>
+本页把 Jira Issue 作为变更事件接入。如需在 Flashduty 故障发生时自动创建 Jira Issue 并双向同步状态，请使用 [Jira 同步](/zh/on-call/integration/webhooks/jira-sync)。
+</Note>
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Jira**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `project`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Jira 中配置
+---
+
+<Steps>
+<Step title="确认权限与网络">
+
+- 创建 Webhook 需要 Jira 管理员权限（Jira Cloud 为站点管理员，Data Center / Server 为 Jira 系统管理员）
+- Jira Data Center / Server 需要能访问推送地址所在的域名（`api.flashcat.cloud`）
+
+</Step>
+
+<Step title="创建 Webhook">
+
+1. Jira Cloud：进入 **设置（齿轮图标）→ 系统 → WebHooks**；Data Center / Server：进入 **管理 → 系统 → WebHooks**
+2. 点击 **创建 WebHook**，**URL** 填写 Flashduty 集成的完整推送地址
+3. **事件** 中勾选 Issue 的 **已创建（created）**、**已更新（updated）**、**已删除（deleted）**
+4. 可在 JQL 中限定范围，例如 `project = OPS AND issuetype = Change`，只同步变更单
+5. 不要勾选 **排除正文（Exclude body）**，Flashduty 需要读取推送内容
+6. 点击 **创建** 保存
+
+Flashduty 通过推送地址中的 `integration_key` 鉴权，Webhook 的密钥（Secret）不会被校验，留空即可。
+
+</Step>
+
+<Step title="验证">
+
+在 JQL 范围内新建一个 Issue，或修改已有 Issue 的状态，即可在 Flashduty 变更列表中看到对应的变更。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| Jira 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Issue | `issue.key`，例如 `OPS-123` | 同一 Issue 的创建、更新、删除推送属于同一条变更 |
+
+Issue 已更新推送不区分更新类型（`issue_event_type_name`）：状态流转、解决（Resolve）、重新打开（Reopen）、分配、评论等推送都按推送中 Issue 的当前状态更新同一条变更。
+
+以下推送返回成功但不生成变更：Issue 的创建、更新、删除之外的事件，例如评论、工作日志、Sprint、版本、项目事件。
+
+## 状态映射
+---
+
+Flashduty 读取推送中 Issue 的 `status.name`，不区分大小写，按下表转换：
+
+| Jira 状态 | Flashduty 变更状态 |
+|---|---|
+| `Planned`、`To Do`、`Backlog` | Planned（已提单） |
+| `Ready`、`Selected for Development` | Ready（即将开始） |
+| `Processing`、`Open`、`Reopen`、`Reopened`、`In Progress`、`In Review` | Processing（进行中） |
+| `Canceled`、`Aborted` | Canceled（已取消） |
+| `Done`、`Resolved`、`Closed` | Done（已完成） |
+
+状态名称不在上表中时（例如自定义的 `Waiting for Approval`，或中文状态名），推送返回 `InvalidParameter`，该 Issue 的这次推送不会生成或更新变更。如您的工作流使用其他状态名称，请联系我们为集成配置自定义映射。
+
+Issue 被删除时，Flashduty 按推送中 Issue 删除前的状态更新变更，不会自动将变更置为已取消。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `[<Issue Key>/<状态>] <概要>`，例如 `[OPS-123/To Do] 升级订单服务数据库` |
+| 描述 | Issue 的描述（`description`） |
+| 变更时间 | 推送中的 `timestamp`，即 Jira 产生该事件的时间 |
+
+标题和描述取自这条变更的第一次推送，之后不再更新；状态和标签随之后的推送更新，事件时间早于已记录推送的推送（延迟或重发）不会覆盖它们。
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `project` | 项目名称 |
+| `issuetype` | Issue 类型，例如 `Task`、`Change` |
+| `priority` | 优先级 |
+| `creator` | 创建人显示名 |
+| `reporter` | 报告人显示名 |
+| `assignee` | 经办人显示名 |
+| `changelog` | 本次更新修改的字段，格式为 `字段: '原值' -> '新值'`，多项以逗号分隔 |
+| `<Jira 标签>` | Issue 的每个标签（labels）各生成一个标签，值为 `true` |
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="修改 Issue 状态后没有看到变更更新？">
+
+1. 确认 Issue 在 Webhook 的 JQL 范围内，且 Webhook 勾选了 **已更新** 事件
+2. 确认新状态名称在状态映射表中。状态名称不在表中时推送返回 `InvalidParameter`，可在 Jira Webhook 的投递记录中看到该错误
+3. 确认 Webhook 没有勾选 **排除正文**
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `issue status "<名称>" is not mapped to a change status`：Issue 的状态名称不在映射表中，请联系我们配置自定义映射
+- `issue is empty` / `issue.key is empty` / `issue.fields is empty` / `issue.fields.status is empty`：推送内容不完整，请确认推送来自 Jira 原生 Webhook，且未勾选排除正文
+- `request payload is empty` 或 JSON 解析错误：推送内容为空或不是合法 JSON
+
+</Accordion>
+
+<Accordion title="评论 Issue 会生成变更吗？">
+
+单独订阅的评论事件（comment created 等）不生成变更。Jira 在 Issue 被评论时也会发送一条 Issue 已更新推送，这条推送会刷新变更的状态和标签，不会新建变更。
+
+</Accordion>
+</AccordionGroup>

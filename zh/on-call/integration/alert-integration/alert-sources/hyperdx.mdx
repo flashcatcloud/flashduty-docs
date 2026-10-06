@@ -1,0 +1,147 @@
+---
+title: "HyperDX 告警集成"
+description: "通过 Generic Webhook 和固定的 Body 模板，将 HyperDX（ClickStack）搜索告警和图表告警的触发与恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "HyperDX", "ClickStack", "ClickHouse", "Webhook"]
+---
+
+通过 HyperDX（ClickStack 的界面层）的 Generic Webhook 将搜索告警和仪表盘图表告警同步到 Flashduty On-call。HyperDX 用 `{{eventId}}` 标识一条告警（分组告警中的一个分组），Flashduty 用它作为 Alert Key：同一条告警的触发通知和恢复通知会更新同一条 Flashduty 告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **HyperDX**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **HyperDX**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 HyperDX 中配置
+---
+
+开源版 HyperDX 和 ClickHouse Cloud 中的托管 ClickStack 都支持 Generic Webhook。自建 HyperDX 需要能访问 Flashduty 推送地址所在的公网域名。
+
+<Steps>
+<Step title="创建 Generic Webhook">
+
+1. 打开 **Team Settings** → **Integrations**，在 **Webhooks** 中点击 **Add Webhook**；也可以在创建告警时点击 **Add New Incoming Webhook**
+2. **Service Type** 选择 **Generic**
+3. **Webhook Name** 填写 `Flashduty`，**Webhook URL** 粘贴 Flashduty 集成的完整推送地址
+4. **Webhook Headers** 留空即可，HyperDX 默认发送 `Content-Type: application/json`
+5. **Webhook Body** 粘贴下面的模板
+
+```json
+{
+  "event_id": "{{eventId}}",
+  "state": "{{state}}",
+  "severity": "Warning",
+  "title": "{{title}}",
+  "body": "{{body}}",
+  "link": "{{link}}",
+  "alert_id": "{{alertId}}",
+  "group": "{{groupKey}}"
+}
+```
+
+6. 点击 **Test Webhook** 确认推送地址可达，再点击 **Add Webhook** 保存
+
+<Warning>
+请保留 `event_id` 和 `state`。缺少 `event_id` 时 Flashduty 会拒绝请求，因为无法把恢复关联到原告警；`state` 只接受 `ALERT` 和 `OK`。HyperDX 会对 `title`、`body`、`link` 等字符串变量做 JSON 转义，请保留外层双引号。
+</Warning>
+
+`severity` 是写在模板里的固定值，决定这个 Webhook 发出的告警在 Flashduty 中的等级，可选值为 `Critical`、`Warning`、`Info`。需要不同等级时，可以再创建一个使用 `Critical` 的 Webhook（例如命名为 `Flashduty Critical`），在重要告警中选择它。
+
+较早的 HyperDX 版本没有 `{{alertId}}` 和 `{{groupKey}}` 变量，渲染结果为空字符串，不影响告警的触发和恢复。
+
+</Step>
+
+<Step title="在告警中选择 Webhook">
+
+**搜索告警**：
+
+1. 在 **Search** 页面执行查询，点击右上角的 **Alerts**
+2. 设置阈值、时间窗口，按需在 **Advanced Settings** 中填写 **grouped by**
+3. 在 **Send to** 中选择 `Flashduty` Webhook，点击 **Save Search with Alert**
+
+**仪表盘图表告警**：
+
+1. 打开仪表盘，编辑图表，切换到告警设置并点击 **Add Alert**
+2. 设置条件、阈值和时间窗口
+3. 选择 `Flashduty` Webhook，保存图表和仪表盘
+
+</Step>
+
+<Step title="验证生命周期">
+
+**Test Webhook** 发送的是固定的示例数据（`eventId` 为 `test-event-id`）。Flashduty 对它返回成功，但不会生成告警，只能用来确认推送地址可达。
+
+要验证完整流程，请让告警条件真正满足，确认 Flashduty 收到活动告警；再让条件恢复，确认原告警恢复。HyperDX 按告警的时间窗口评估，从条件满足到收到通知最多需要一个窗口。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 直接使用 `event_id`（`{{eventId}}`）作为 Alert Key。HyperDX 在 Webhook 模板变量文档中说明，`{{eventId}}` 对同一条告警、同一个分组和同一个 Webhook 保持不变，覆盖从触发到恢复的全过程，官方的 incident.io 模板也用它作为去重键。
+
+- 告警持续满足条件时，HyperDX 每个评估窗口都会再发送一次 `ALERT` 通知，它们都更新同一条 Flashduty 告警
+- 分组告警（设置了 **grouped by**）的每个分组有各自的 `event_id`，在 Flashduty 中是各自独立的告警，分别触发和恢复
+- 标题、正文、数值和告警等级的变化都不会改变 Alert Key
+- 修改告警的 **grouped by**，或删除后重新创建 Webhook，会产生新的 `event_id`。修改前已在 Flashduty 中触发的告警不会再收到恢复通知，需要手动关闭
+
+## 状态和告警等级
+---
+
+Flashduty 根据 `state` 判断触发或恢复，根据 `severity` 确定告警等级。
+
+| `state` | Flashduty 处理 |
+| :--- | :--- |
+| `ALERT` | 触发或更新告警 |
+| `OK` | 恢复原告警，保留最后一次的告警等级 |
+| 空值或其他值 | 拒绝请求 |
+
+| `severity` | Flashduty 告警等级 |
+| :--- | :--- |
+| `Critical` | Critical |
+| `Warning` | Warning |
+| `Info` | Info |
+| 空值或其他值 | Warning |
+
+`severity` 不区分大小写。HyperDX 只在告警之前发送过触发通知时才发送恢复通知；告警处于静默期间既不发送触发通知，也不发送恢复通知。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `event_id` | `{{eventId}}`，即 Alert Key |
+| `alert_id` | `{{alertId}}`，HyperDX 告警 ID |
+| `group` | `{{groupKey}}`，分组告警的分组，格式为 `<列>:<值>`，例如 `ServiceName:checkout` |
+| `severity` | 模板中 `severity` 的原始值 |
+| `link` | `{{link}}`，HyperDX 中对应搜索或图表的链接 |
+
+告警标题取自 `{{title}}`，去掉 HyperDX 添加的 🚨 和 ✅ 前缀；告警描述取自 `{{body}}`。
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 Webhook Body 与上文模板一致，`event_id` 和 `state` 非空，字符串变量外层保留了双引号
+- **Test Webhook 成功但没有告警**：这是预期行为，测试数据不会生成告警
+- **告警没有恢复**：确认告警在触发后没有修改 **grouped by**、没有重新创建 Webhook，也没有处于静默状态
+- **告警等级都是 Warning**：模板中的 `severity` 默认是 `Warning`，需要其他等级时请修改模板或另建一个 Webhook
+
+更多信息请参阅 ClickStack 文档 [Alerts](https://clickhouse.com/docs/use-cases/observability/clickstack/alerts) 和 HyperDX 仓库中的 [Alert webhook template variables](https://github.com/hyperdxio/hyperdx/blob/main/docs/alert-webhook-template-variables.md)。

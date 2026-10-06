@@ -1,0 +1,115 @@
+---
+title: "Catchpoint alert integration"
+description: "Send Catchpoint test alert, escalation, and recovery events to Flashduty On-call through a custom Alert Webhook template."
+keywords: ["alert integration", "Catchpoint", "Alert Webhook", "template", "TestId"]
+---
+
+Use Catchpoint's Alert Webhook to send test alerts to Flashduty On-call. Each Catchpoint alert maps to one Flashduty alert. Warning, Critical, and Improved (recovery) notifications in the same lifecycle continue updating that alert.
+
+Catchpoint's [default JSON Alert Webhook format](https://docs.catchpoint.com/docs/alert-webhook-json-result) nests fields under a `Setting` object and carries no single field that identifies one alert lifecycle on its own. Flashduty requires the **Template** format instead: paste the JSON template below, and Catchpoint substitutes its macros with the values of the alert that triggered it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Create either a dedicated or shared **Catchpoint** alert integration and copy its complete Push URL.
+
+</div>
+
+## Configure Catchpoint
+---
+
+<Steps>
+<Step title="Create an Alert Webhook">
+
+1. In the Catchpoint portal, open **Integrations** in the left navigation
+2. Find **Webhook**, then click **Add URL → Alert Webhook**
+3. Name it `Flashduty` and set the status to **Active**
+4. Paste the complete Flashduty integration Push URL into **Endpoint URL**
+
+<Warning>
+By default, Catchpoint allows only 3 Alert Webhook endpoints per division/client. If you have already used all 3, contact your Catchpoint CSM to raise the limit.
+</Warning>
+
+</Step>
+
+<Step title="Switch Format to Template and paste the JSON">
+
+Set **Format** to **Template**, click **New Template**, and paste the following JSON:
+
+```json
+{
+  "test_id": "${testId}",
+  "test_name": "${testName}",
+  "test_url": "${testUrl}",
+  "test_link": "${testLink}",
+  "test_path": "${testPath}",
+  "description": "${TestDescription}",
+  "alert_group_item_id": "${alertGroupItemId}",
+  "alert_initial_trigger_epoch": "${alertInitialTriggerDateLocalEpoch}",
+  "notification_level_id": "${notificationLevelId}",
+  "alert_type_id": "${alertTypeId}",
+  "alert_sub_type_id": "${alertSubTypeId}",
+  "alert_threshold": "${alertThreshold}",
+  "alert_trigger_total": "${alertTriggerTotal}",
+  "product_name": "${productName}",
+  "division_name": "${divisionName}",
+  "client_name": "${clientName}"
+}
+```
+
+<Warning>
+Keep `test_id`, `alert_group_item_id`, and `alert_initial_trigger_epoch`, and do not change the macros they map to. Together the three fields form the identity Flashduty uses to correlate one alert lifecycle; if any of them is missing, Flashduty rejects the request.
+</Warning>
+
+</Step>
+
+<Step title="Assign the endpoint to your alerts">
+
+An Alert Webhook endpoint only receives pushes for alerts it is assigned to:
+
+- Enable **Apply to All Alerts** on the endpoint to push every alert in the division/client to it, or
+- Open the **Alerts** settings of a Test, Folder, Product, or RUM, and select the endpoint under **API Endpoints**
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Let a test actually trigger a Warning or Critical alert, and confirm Flashduty receives an active alert. Then let the test recover, and confirm Flashduty receives the Improved notification and closes the original alert.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty derives the Alert Key from `test_id`, `alert_group_item_id`, and `alert_initial_trigger_epoch` combined.
+
+Catchpoint's own [PagerDuty Events API v2 integration template](https://docs.catchpoint.com/docs/pagerduty-integration-guide) sets `dedup_key` to `${AlertInitialTriggerDateLocalEpoch}` alone, and that single macro is enough to group the full Warning → Critical → Improved lifecycle into one PagerDuty incident. The [macro index](https://docs.catchpoint.com/docs/alert-webhook-macro-index) describes it as "The Alert-Initial-Trigger-Date-Local-Epoch timestamp, local time" — the local timestamp of when the alert **first** triggered, which stays the same for as long as that alert stays open. Flashduty adds `test_id` (the test ID) and `alert_group_item_id` (the alert rule item ID) on top, to reduce the chance of two different tests colliding on the same trigger second.
+
+Changes to the title, description, severity, number of triggered nodes, or threshold never change the Alert Key.
+
+## Status and alert severity
+---
+
+Catchpoint's `notification_level_id` has 4 documented values:
+
+| `notification_level_id` | Meaning | Flashduty status or severity |
+| :--- | :--- | :--- |
+| `0` | Warning | Warning |
+| `1` | Critical | Critical |
+| `2` | (System Internal; Catchpoint's docs do not explain what this carries) | Dropped, no alert created |
+| `3` | Improved | Recovery |
+
+A request with an empty or unsupported `notification_level_id` is rejected. The Improved notification does not say which level the alert recovered from, so Flashduty shows it at Critical severity; the actual state is the recovery (Ok) status.
+
+## Troubleshooting
+---
+
+- **Flashduty returns a parameter error**: confirm **Format** is set to **Template** and the template is valid JSON; confirm `test_id`, `alert_group_item_id`, and `alert_initial_trigger_epoch` are still in the template and their macros were not removed or swapped for another macro
+- **No alert is created**: confirm the endpoint is selected under **API Endpoints** in the **Alerts** settings of the Test/Folder/Product, or that **Apply to All Alerts** is enabled on the endpoint
+- **The alert never recovers**: the Improved notification goes through the same endpoint, no extra configuration is needed — confirm the test actually returned to a normal state rather than staying at Warning/Critical
+- **No deliveries show up at all**: Catchpoint sends alerts from the Las Vegas datacenter range `64.147.163.0/24`, over standard ports 443/80/8080 only; allow this range if a firewall or proxy sits in front of the push URL
+
+For more on the fields, see the [Alert Webhook Guide](https://docs.catchpoint.com/docs/alert-webhook-guide), [Alert Webhook Templates](https://docs.catchpoint.com/docs/alert-webhook-templates), and [Alert Webhook Macro Index](https://docs.catchpoint.com/docs/alert-webhook-macro-index).

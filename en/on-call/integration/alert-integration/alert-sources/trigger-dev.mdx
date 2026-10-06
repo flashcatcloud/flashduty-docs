@@ -1,0 +1,124 @@
+---
+title: "Trigger.dev alert integration"
+description: "Send failed task runs, error groups, and deployment failures from Trigger.dev to Flashduty On-call through the webhook alert channel."
+keywords: ["alert integration", "Trigger.dev", "webhook", "background jobs", "deployment failure"]
+---
+
+Use the webhook alert channel of Trigger.dev to send failed task runs, error groups, and deployment results to Flashduty On-call. Trigger.dev cloud and self-hosted deployments use the same alert channel.
+
+- **Run failed** (`alert.run.failed`): each run that fails after its retries are exhausted creates one alert. Trigger.dev sends no recovery notification, so the alert does not recover on its own. Turn on auto-close in the channel, see [Failed runs and error groups do not recover](#failed-runs-and-error-groups-do-not-recover).
+- **Error group** (`alert.error`): sent once when a new error appears, when a resolved error occurs again, or when an ignored error breaches its ignore condition. It does not recover on its own either.
+- **Deployment failed / succeeded** (`alert.deployment.failed`, `alert.deployment.success`): a failed deployment triggers an alert, and the next successful deployment of the same environment recovers it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Select **Settings** → **Integration data** → **Dedicated integration**, then click **Add an integration**
+3. Select **Trigger.dev** and click **Save**
+4. Open the generated integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert events**
+2. Select **Trigger.dev** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after the integration is created
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## In Trigger.dev
+---
+
+Webhook channels are created per project and environment. On Trigger.dev cloud, the free plan includes 1 alert channel (webhook, email, and Slack combined). Once the plan's quota is used, upgrade or delete an existing channel.
+
+<Steps>
+<Step title="Create the run and deployment alert">
+
+1. In the Trigger.dev project, switch to the environment you want to alert on (for example Production), click **Alerts** in the left menu, then click **New alert**
+2. Select **Webhook** as the **Alert method**
+3. Paste the full Flashduty push URL into **URL**. The URL must include `integration_key`
+4. Select the alert types you need: **Task runs fail**, **Deployments fail**, **Deployments succeed**. Leave **Dashboard agent watches** unchecked: its events are not handled by this integration, and a request whose type is not recognized is rejected with HTTP 400
+5. Save the alert
+
+A webhook channel only applies to the environment it was created in. To cover several environments, create one in each. Select both **Deployments fail** and **Deployments succeed**, otherwise a deployment failure alert never recovers.
+
+</Step>
+
+<Step title="Create the error group alert (optional)">
+
+Error group alerts are created on the **Errors** page: click **Configure alerts…**, choose Webhook, and paste the same push URL. Once created, it appears in the **Alerts** list with the type Error group.
+
+</Step>
+
+<Step title="Verify">
+
+The Trigger.dev alert channel has no test button. Trigger a task run that fails (the alert is sent only after retries are exhausted) and confirm Flashduty receives the alert. To verify deployments, deploy a version whose build fails, then deploy a working version and confirm the alert recovers.
+
+</Step>
+</Steps>
+
+Trigger.dev generates a signing secret for each webhook channel and sends the signature in the `x-trigger-signature-hmacsha256` header. Flashduty does not verify this signature; access is controlled by the `integration_key` in the push URL.
+
+## Failed runs and error groups do not recover
+---
+
+These two alert types have no recovery notification. In the channel that receives this integration, turn on [auto-close](/en/on-call/channel/create-edit). We suggest 12 hours for failed runs and 24 hours for error groups; adjust to how quickly your team handles failed tasks. Each failed run is a separate alert. When an error group is pushed again after being marked resolved (or after its ignore condition is breached), it updates the same alert; if that alert was closed, a new alert is created.
+
+Trigger.dev sends an error group alert only when its status changes: a group that is Unresolved is not pushed again. To be told about every failed run, use the run failure alert.
+
+## Alert Key
+---
+
+| Event type | Alert Key |
+| :--- | :--- |
+| `alert.run.failed` | Run ID `object.run.id` |
+| `alert.error` | Environment ID `object.environment.id` + error fingerprint `object.error.fingerprint` |
+| `alert.deployment.failed` / `alert.deployment.success` | Environment ID `object.environment.id` |
+
+The top-level `id` of the request is a per-delivery ID and is not part of the Alert Key. A deployment's `deployment.id` is different for every deployment, so failures and successes are tied together by environment: a successful deployment recovers the deployment failure alert of the same environment. Changes to the title, error message, occurrence count, or `classification` never change the Alert Key. Events missing these fields are rejected, and so is a `type` outside the table above.
+
+## Status and severity
+---
+
+| Event type | Status | Flashduty severity |
+| :--- | :--- | :--- |
+| `alert.run.failed` | Trigger | Critical |
+| `alert.error` | Trigger | Critical |
+| `alert.deployment.failed` | Trigger | Critical |
+| `alert.deployment.success` | Recovery | Info |
+
+Trigger.dev alerts carry no severity, so every failure event is treated as Critical.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `source` | Always `trigger-dev` |
+| `event_type` | Event type |
+| `check` / `task_id` | Task identifier |
+| `run_id` / `run_number` / `run_status` / `run_url` | Run ID, number, status, and console link |
+| `machine` / `tags` | Machine preset and run tags (sorted, comma-joined) |
+| `file_path` / `task_version` | File that defines the task and the task version |
+| `deployment_id` / `deployment_status` / `version` / `short_code` | Deployment details |
+| `git_branch` / `git_commit` | Git branch and commit linked to the deployment |
+| `classification` / `fingerprint` / `error_type` / `occurrences` / `dashboard_url` | Error group details |
+| `env` / `env_id` / `environment_type` / `branch` | Environment slug (the name when the slug is empty), ID, type, and preview branch |
+| `organization` / `project` / `project_ref` | Organization name, project name, and project reference |
+
+## Troubleshooting
+---
+
+- **Flashduty receives no events**: a run failure alert is sent only after the task's retries are exhausted. Make sure the channel was created in the environment where the failure happened and has the matching alert type selected. Trigger.dev requires a webhook URL that is reachable from the public internet
+- **Flashduty returns an invalid parameter error**: make sure the request body contains `type` and `object` (in real deliveries `webhookVersion` is `v1` for run and deployment events and `2025-01-01` for error group events) and that only the supported alert types above are selected. The legacy webhook channel posts a body without `type` and `object`, which is not supported; delete it and create the channel again
+- **A deployment failure alert does not recover**: make sure the channel of that environment has **Deployments succeed** selected, and that the successful deployment is in the same environment
+- **Trigger.dev says the alert channel quota is used up**: delete a channel you no longer need, or upgrade the plan
+
+For more field details, see [Trigger.dev Alerts](https://trigger.dev/docs/troubleshooting-alerts).

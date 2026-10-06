@@ -1,0 +1,191 @@
+---
+title: "PRTG 告警集成"
+description: "通过 Execute HTTP Action 通知模板将 PRTG Network Monitor 传感器的告警和恢复同步到 Flashduty On-call。"
+keywords: ["告警集成", "PRTG", "Paessler", "PRTG Network Monitor", "PRTG Hosted Monitor", "Execute HTTP Action", "通知模板", "sensorid"]
+---
+
+通过 PRTG 通知模板的 **Execute HTTP Action**，把传感器（Sensor）的状态告警和恢复同步到 Flashduty On-call。每个 PRTG 传感器对应一条 Flashduty 告警：状态触发器（State Trigger）触发时产生告警，重复通知合并到同一条告警，传感器离开该状态时关闭告警。PRTG Network Monitor（本地部署）和 PRTG Hosted Monitor 都可以按本文配置。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **PRTG**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **PRTG**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 PRTG 中配置
+---
+
+PRTG 需要两个通知模板：一个在传感器进入告警状态时发送（`event=trigger`），一个在传感器离开该状态时发送（`event=resolve`）。两个模板的推送地址和字段完全相同，只有开头的 `event` 不同。
+
+<Steps>
+<Step title="创建告警通知模板">
+
+1. 以管理员身份登录 PRTG，进入 **Setup → Account Settings → Notification Templates**，点击 **Add Notification Template**
+2. **Template Name** 填写 `Flashduty 告警`
+3. 勾选 **Execute HTTP Action**，按下表填写：
+
+| 设置项 | 值 |
+| :--- | :--- |
+| **URL** | Flashduty 集成的完整推送地址 |
+| **SNI Handling** | **Send SNI** |
+| **SNI Name** | 推送地址中的域名，例如 `api.flashcat.cloud` |
+| **HTTP Method** | **POST** |
+| **Payload** | 下方的告警模板，保持为一行 |
+
+告警模板：
+
+```text
+event=trigger&sensorid=%sensorid&laststatus=%laststatus&sensor=%sensor&device=%device&deviceid=%deviceid&group=%group&probe=%probe&host=%host&priority=%priority&linksensor=%linksensor&tags=%tags&sitename=%sitename&lastvalue=%lastvalue&message=%message
+```
+
+4. 点击 **Create** 保存
+
+</Step>
+
+<Step title="创建恢复通知模板">
+
+按上一步再创建一个模板，**Template Name** 填写 `Flashduty 恢复`，**Payload** 使用下方的恢复模板，其余设置相同：
+
+```text
+event=resolve&sensorid=%sensorid&laststatus=%laststatus&sensor=%sensor&device=%device&deviceid=%deviceid&group=%group&probe=%probe&host=%host&priority=%priority&linksensor=%linksensor&tags=%tags&sitename=%sitename&lastvalue=%lastvalue&message=%message
+```
+
+可以在 **Notification Templates** 列表中对模板发送测试通知来验证地址。PRTG 的测试通知不会替换占位符，Flashduty 识别后直接返回成功，不会创建告警。
+
+</Step>
+
+<Step title="添加状态触发器">
+
+1. 打开要接入的对象（根组 Root、某个组、设备或传感器），进入 **Notification Triggers** 标签页，选择 **Add State Trigger**
+2. 按下表填写：
+
+| 设置项 | 值 |
+| :--- | :--- |
+| **When sensor status is** | **Down**，**for at least** `60` **seconds** |
+| **perform** | `Flashduty 告警` |
+| **When sensor status is no longer Down, perform** | `Flashduty 恢复` |
+
+3. 保存触发器。下级的组、设备和传感器会继承这个触发器
+
+如需同时接收 **Warning** 或 **Unusual** 状态的告警，为每个状态各添加一个状态触发器，`perform` 和 `no longer ... perform` 的选择与上表相同。可选的升级通知（第二行 **When sensor status is ... for at least ... seconds**）也选 `Flashduty 告警`，会合并到同一条告警。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个传感器真正进入 Down 状态（例如对一个 Ping 传感器指向的地址临时断网），等待触发器的延迟时间，确认 Flashduty 收到活动告警；恢复后确认原告警关闭。
+
+</Step>
+</Steps>
+
+<Warning>
+`sensorid` 和 `event` 是必填字段。请完整粘贴模板，不要删除或改名；缺少 `sensorid` 或 `event` 时 Flashduty 返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+</Warning>
+
+## 推送内容
+---
+
+PRTG 以 `application/x-www-form-urlencoded` 表单格式 POST 模板中的字段，每个字段名对应同名的 PRTG 占位符：
+
+| 字段 | 占位符含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `event` | 模板中的固定值 `trigger` 或 `resolve` | 触发或恢复 |
+| `sensorid` | 传感器 ID | Alert Key，标签 `sensor_id` |
+| `laststatus` | 传感器当前状态 | 告警等级，标签 `status` |
+| `sensor` | 传感器名称（含传感器类型） | 告警标题，标签 `check` |
+| `device` | 设备名称 | 告警标题，标签 `resource` |
+| `deviceid` | 设备 ID | 标签 `device_id` |
+| `group` | 所属组 | 标签 `group` |
+| `probe` | 所属探针 | 标签 `probe` |
+| `host` | 设备的 IP 或 DNS 名称 | 标签 `host` |
+| `priority` | 传感器优先级（1 到 5 星） | 标签 `priority` |
+| `linksensor` | 传感器页面链接 | 告警描述，标签 `sensor_url` |
+| `tags` | 传感器及其上级对象的标签 | 标签 `tags` |
+| `sitename` | PRTG Web 服务器名称 | 标签 `site` |
+| `lastvalue` | 传感器最近一次的值 | 告警描述，标签 `last_value` |
+| `message` | 传感器最近一次的消息 | 告警描述 |
+
+告警标题为 `<设备名称>: <传感器名称>`；设备名称为空时只用传感器名称，两者都为空时使用 `PRTG sensor <sensorid>`。
+
+## Alert Key
+---
+
+Flashduty 使用 `sensorid` 作为 Alert Key。同一个传感器的告警、升级通知和恢复通知携带相同的传感器 ID，因此会落在同一条告警上；同一设备上名称相同的两个传感器 ID 不同，会生成不同的告警。修改传感器名称、设备名称、状态或消息不会改变 Alert Key。
+
+传感器 ID 只在一台 PRTG 服务器内唯一。多台 PRTG 服务器请分别使用不同的 Flashduty 集成，避免不同服务器上相同 ID 的传感器合并到同一条告警。
+
+## 状态和告警等级
+---
+
+`event` 决定告警触发还是恢复，`laststatus` 决定告警等级：
+
+| `event` | `laststatus` | Flashduty 状态或等级 |
+| :--- | :--- | :--- |
+| `trigger` | `Down`、`Down (Partial)`、`Down (Acknowledged)` | Critical |
+| `trigger` | `Warning` | Warning |
+| `trigger` | `Unusual` | Info |
+| `trigger` | 其他值（如 `Unknown`） | Warning |
+| `resolve` | 任意值 | 恢复，保留原告警等级 |
+
+`event` 为空或为其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="为什么需要两个通知模板？">
+
+PRTG 没有占位符能区分一条通知来自状态触发器的触发还是 **no longer** 恢复，只能由模板中的固定值 `event` 说明。`laststatus` 只描述传感器当前状态：传感器从 Down 转为 Warning 时，Down 触发器的恢复通知里 `laststatus` 是 `Warning`。用 `event` 判断恢复，每个触发器的告警都能按时关闭。
+
+</Accordion>
+
+<Accordion title="传感器从 Down 转为 Warning 会怎样？">
+
+Down 触发器发送恢复通知，关闭 Down 告警。如果配置了 Warning 状态触发器，它会在延迟时间后发送告警通知，重新打开这个传感器的告警，等级为 Warning。
+
+</Accordion>
+
+<Accordion title="PRTG 界面不是英文，告警等级不对？">
+
+PRTG 输出的 `laststatus` 会随 PRTG 的语言设置翻译。Flashduty 只识别英文状态名，其他语言的状态名一律按 Warning 处理；告警触发和恢复由 `event` 决定，不受语言影响。
+
+</Accordion>
+
+<Accordion title="PRTG 显示通知发送成功，但 Flashduty 没有收到？">
+
+确认 **SNI Handling** 选择了 **Send SNI**，**SNI Name** 与推送地址中的域名一致。不发送 SNI 时请求可能到达不了 Flashduty，而 PRTG 仍然显示发送成功。
+
+</Accordion>
+
+<Accordion title="标签里出现 %tags 这样的原样文本？">
+
+PRTG 不认识的占位符会原样发送。`%laststatus` 需要 PRTG 20.1.57 及以上版本，`%tags` 需要 20.1.56 及以上版本。旧版本中 `laststatus` 为原样文本时告警按 Warning 处理，其余字段只影响标签，不影响告警的触发和恢复。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **PRTG 推送失败**：确认 URL 是完整的推送地址，且包含 `integration_key`；HTTP Method 为 POST
+- **Flashduty 返回参数错误**：确认 Payload 完整粘贴了模板，`event` 和 `sensorid` 都在，且模板保持为一行
+- **告警没有恢复**：确认状态触发器的 **no longer ... perform** 选择了 `Flashduty 恢复` 模板，恢复通知与告警通知来自同一个传感器
+
+占位符说明请参阅 PRTG 官方手册 [List of Placeholders for Notifications](https://www.paessler.com/manuals/prtg/list_of_placeholders_for_notifications) 和 [Notification Templates](https://www.paessler.com/manuals/prtg/notification_templates)。

@@ -1,0 +1,125 @@
+---
+title: "Vigil 告警集成"
+description: "通过 Vigil 的 Webhook 通知器将状态页的整体状态变化（异常、降级、恢复）同步到 Flashduty On-call。"
+keywords: ["告警集成", "Vigil", "Webhook", "状态页", "监控", "自托管"]
+---
+
+Vigil 是开源的微服务状态页和探测系统。通过 Vigil 的 Webhook 通知器（`[notify.webhook]`），可以把状态页的整体状态变化同步到 Flashduty On-call：状态变为 `dead`（异常）或 `sick`（降级）时在 Flashduty 触发告警，恢复为 `healthy` 时自动恢复。
+
+Vigil 的 Webhook 请求体是固定格式，无需编写模板。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Vigil**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Vigil**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Vigil 中配置
+---
+
+需要 Vigil 1.29.x，并能修改 Vigil 的配置文件（`config.cfg`）。Vigil 所在的服务器需要能访问 Flashduty 的推送地址。
+
+<Steps>
+<Step title="配置 Webhook 通知器">
+
+在 `config.cfg` 中添加（或修改）`[notify.webhook]`，`hook_url` 填 Flashduty 集成的完整推送地址，地址中需包含 `integration_key`：
+
+```toml
+[notify]
+reminder_interval = 300
+
+[notify.webhook]
+hook_url = "https://api.flashcat.cloud/event/push/alert/vigil?integration_key=<your_integration_key>"
+```
+
+Flashduty 通过地址中的 `integration_key` 认证，无需额外的请求头。`reminder_interval` 是状态持续异常时 Vigil 重复通知的间隔（秒），可按需调整。保存后重启 Vigil 使配置生效。
+
+</Step>
+
+<Step title="配置探测目标">
+
+在 `[[probe.service]]` 下配置要监控的服务和节点，Vigil 会把所有节点的状态汇总成状态页的整体状态。通知器本身不需要其他设置。
+
+</Step>
+
+<Step title="验证">
+
+Vigil 没有测试按钮。验证方法：
+
+1. 让一个被探测的节点失败，等待 Vigil 判定为异常，确认 Flashduty 出现 Critical 告警，且告警描述中列出了失败的节点
+2. 让该节点恢复，确认 Flashduty 中的告警自动恢复（`sick` 的情况见下文说明）
+
+如果在 `[notify]` 中开启了 `startup_notification = true`，Vigil 启动时会发送一条 `startup` 通知，Flashduty 返回成功但不产生告警，可用来确认地址和网络连通。
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty 使用状态页地址 `page.url` 作为 Alert Key。Vigil 的通知只描述整个状态页的聚合状态，没有单个告警的 ID，因此一个 Vigil 状态页对应一条 Flashduty 告警：状态变为 `dead` 或 `sick` 时创建或更新，变为 `healthy` 时恢复。
+
+- 多个节点同时异常时，一次通知列出全部异常节点；其中一个节点恢复而另一个仍异常时，状态仍为 `dead`，告警保持打开，描述里的节点列表随之缩短，直到整体变为 `healthy`
+- 恢复通知的 `replicas` 为空，无法指出恢复的是哪个节点
+- 状态页标题、状态、节点列表和通知时间变化不会改变 Alert Key。请求中缺少 `page.url` 会被拒绝
+- `page.url` 来自 `config.cfg` 的 `[branding]` `page_url`，只在同一个 Vigil 实例内唯一。请不要让多个 Vigil 实例使用相同的 `page_url`，一个 Flashduty 集成也请只接收一个 Vigil 实例的推送
+
+## 状态和告警等级
+---
+
+| 通知 `type` | Flashduty 处理 |
+| :--- | :--- |
+| `changed`（状态变化） | 按下表的 `status` 处理 |
+| `reminder`（持续异常的重复提醒） | 按下表的 `status` 处理，刷新同一条告警 |
+| `startup`（Vigil 启动） | 返回成功，不产生告警 |
+
+| `status` | Flashduty 状态 | 等级 |
+| :--- | :--- | :--- |
+| `dead` | 触发 | Critical |
+| `sick` | 触发 | Warning |
+| `healthy` | 恢复 | Info |
+
+Vigil 只在状态变为 `dead`、离开 `dead`（变为 `sick` 或 `healthy`）以及保持 `dead` 期间的提醒时发送通知；`healthy` 变为 `sick`，或 `sick` 变为 `healthy`，都不发送通知。因此 `sick` 通知只会出现在 `dead` 之后，`replicas` 始终为空，并把同一条告警更新为 Warning。之后状态从 `sick` 变为 `healthy` 时 Vigil 不发送恢复通知，告警会一直保持打开，直到状态页再次经历 `dead` 并恢复为 `healthy`，或在 Flashduty 中手动关闭。
+
+`status` 为其他值时请求被拒绝。Vigil 的通知时间只有时分秒，没有日期，Flashduty 使用收到请求的时间作为事件时间。
+
+告警标题形如 `Vigil: Example Status is dead`，由状态页标题（为空时用状态页地址）和状态拼成；告警描述按字母序列出异常节点，格式为 `服务ID:节点ID:探测地址`。
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 状态页标题，为空时为状态页地址 |
+| `resource` / `page_url` | 状态页地址 `page.url` |
+| `page_title` | 状态页标题 `page.title` |
+| `vigil_status` | Vigil 原始状态：`dead`、`sick` 或 `healthy` |
+| `notification_type` | 通知类型：`changed` 或 `reminder` |
+| `replicas` | 异常节点列表，按字母序用逗号连接 |
+
+## 排查问题
+---
+
+- **Flashduty 返回参数错误**：确认 `hook_url` 完整且包含 `integration_key`；响应信息会指出缺少的字段或不支持的状态
+- **没有收到告警**：确认已重启 Vigil，`[notify.webhook]` 的 `hook_url` 正确，并且 Vigil 判定的整体状态确实变为 `dead` 或 `sick`；Vigil 只在状态变化和提醒间隔到期时发送通知
+- **告警没有恢复**：只有整个状态页从 `dead` 直接恢复为 `healthy` 才会发送恢复；仍有节点异常时状态保持 `dead` 或 `sick`，`sick` 变为 `healthy` 不会通知，此时请手动关闭告警
+- **同一状态页重复通知**：这是 `reminder_interval` 触发的重复提醒，Flashduty 会合并到同一条告警
+
+更多说明请参阅 [Vigil 项目主页](https://github.com/valeriansaliou/vigil)。

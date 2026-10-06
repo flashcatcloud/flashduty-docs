@@ -1,0 +1,92 @@
+---
+title: "Azure Service Health Alert Integration"
+description: "Receive Azure service events through a Service Health alert rule and an action group webhook using the Flashduty Azure Monitor integration; alerts recover automatically when the event is resolved."
+keywords: ["alert integration", "Azure Service Health", "action group", "webhook", "Azure Monitor"]
+---
+
+Azure writes service issues, planned maintenance, health advisories and security advisories to the activity log as Service Health notifications, and a Service Health alert rule can send them out through an action group webhook. The Flashduty [Azure Monitor integration](/en/on-call/integration/alert-integration/alert-sources/azure-monitor) parses Service Health notifications and merges every notification of the same event (same subscription and tracking ID) into one alert, so no separate Azure Service Health integration is needed: create an Azure Monitor integration in Flashduty and paste its push URL into the action group.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Azure Monitor integration type** in both, not Azure Service Health.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Azure Monitor** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Azure Monitor** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in Azure
+---
+
+### Step 1: Create an action group with a webhook
+
+1. In the Azure portal, open **Monitor**, go to **Alerts** → **Action groups**, and create an action group
+2. Under **Actions**, add an action of type **Webhook** and enter the push URL copied above as the `URI`
+3. Enable the common alert schema and save. Flashduty also parses the legacy Service Health payload when the schema is off; the difference is described under "Title and description" below
+
+<Note>
+Azure requires that the action group used by a Service Health alert has its region set to **Global**; Service Health alerts are only supported in public clouds within the global region.
+</Note>
+
+### Step 2: Create a Service Health alert rule
+
+1. In the Azure portal, select **Service Health** and, in the **Service Issues** panel, click **Create service health alert**
+2. Under **Scope**, choose the scope by subscription
+3. Under **Condition**, select **Services**, **Regions** and **Event types** (service issues, planned maintenance, health advisories, security advisories). Azure recommends selecting all services and all regions: Service Health only triggers alerts for events that affect the regions where your services run, so nothing fires for services you do not use
+4. Under **Details**, select the resource group and enter an alert rule name
+5. Click **Advanced options**, select the action group from Step 1 on the **Actions** tab, and create the rule
+
+## Field mapping
+---
+
+| Service Health field | Flashduty |
+| :--- | :--- |
+| Subscription ID + `properties.trackingId` | Alert Key. Later notifications of the same Azure event in the same subscription merge into one alert |
+| `properties.stage` | The alert recovers when the stage is `Resolved`, `RCA`, `Complete`, `Completed` or `Canceled`; other stages (for example `Active`, `Planned`) trigger or update it |
+| `essentials.severity` (common schema) | `Sev0` → Critical; `Sev1`, `Sev2` → Warning; `Sev3`, `Sev4` → Info. Always Info when the common schema is off |
+| `properties.service`, `region`, `incidentType` | Labels `service`, `region`, `incident_type` |
+| `properties.impactedServices` | Labels `impacted_services`, `impacted_regions` |
+| `properties.stage`, `trackingId` | Labels `stage`, `tracking_id` |
+| Subscription ID + `trackingId` | Label `service_health_url`, which links to the event's Service Health page |
+
+## Title and description
+---
+
+| | Common alert schema on | Off (legacy `Microsoft.Insights/activityLogs`) |
+| :--- | :--- | :--- |
+| Alert title | The alert rule name (a subscription-level rule has no resource, so only the rule name is shown) | The event title (`properties.title`, or `defaultLanguageTitle` if missing) |
+| Alert description | None | The Azure notice text (`properties.communication`, or `defaultLanguageContent` if missing, with HTML tags removed) |
+| Alert Key and recovery | Same | Same |
+
+With the common schema, the event title and text stay in the JSON of the `alertContext` label. If you want the event title directly in notifications, use the legacy payload (leave the common alert schema off).
+
+## Recovery and deduplication
+---
+
+- Azure sends several notifications for one Tracking ID as the event progresses, and Flashduty merges them through the Alert Key; the alert recovers when the event reaches a resolved stage
+- Legacy notifications without `properties.trackingId` are rejected (HTTP 400); with the common schema, a notification without a Tracking ID becomes its own alert and does not recover automatically
+- Planned maintenance recovers in the `Complete` or `Canceled` stage; until then, the alert stays triggered
+
+## Troubleshooting
+---
+
+- **The action group does not fire**: confirm the action group's region is **Global** and that the alert rule's **Actions** tab has this action group selected
+- **The alert does not recover**: confirm the alert rule is still enabled and wait for Azure to send the notification for the resolved stage
+- **Azure shows the webhook call failed**: confirm the `URI` is the full push URL, including `integration_key`
+- **Several alerts appear**: different Azure events have different Tracking IDs and each gets its own alert; progress notifications of one event merge
+
+For field details, see the Azure documentation [Create Service Health alerts](https://learn.microsoft.com/azure/service-health/alerts-activity-log-service-notifications-portal), [Activity log alert webhook schema](https://learn.microsoft.com/azure/azure-monitor/alerts/activity-log-alerts-webhook) and [Common alert schema](https://learn.microsoft.com/azure/azure-monitor/alerts/alerts-common-schema).

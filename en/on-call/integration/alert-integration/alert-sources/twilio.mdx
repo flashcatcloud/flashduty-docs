@@ -1,0 +1,135 @@
+---
+title: "Twilio alert integration"
+description: "Send Error-level events from the Twilio Debugger to Flashduty On-call through the Error webhook. Events with the same error code on the same account merge into one alert."
+keywords: ["alert integration", "Twilio", "Debugger", "Error webhook", "error code", "webhook"]
+---
+
+When Twilio runs into a problem while handling an SMS, voice, or other request, it logs an event in the Debugger at one of two levels: Error (Twilio could not process the request) or Warning (Twilio could still process it). Use the **Error webhook** in the Twilio Console to send Error-level events to Flashduty On-call:
+
+- Events with the same error code on the same Twilio account merge into one alert, for example a run of `11200` errors caused by your application URL returning 404
+- Warning-level events do not create alerts
+
+The Error webhook is available in every Twilio region (US1, IE, and AU).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Twilio** and click **Save**
+4. Open the new integration card and copy the **push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Twilio** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **push URL**
+
+</div>
+
+## Configure Twilio
+---
+
+<Steps>
+<Step title="Set the Error webhook">
+
+1. Sign in to the [Twilio Console](https://console.twilio.com) and go to **Monitor** → **Error webhook**
+2. Enter the full push URL of the Flashduty integration as the webhook URL and save
+
+</Step>
+
+<Step title="Test">
+
+The Error webhook has no "send test notification" button. To produce a real Error event:
+
+1. Under **Phone Numbers**, open a number and set the **A call comes in** URL to an address that returns 404, such as `https://example.com/not-found`
+2. Call the number. Twilio fails to fetch the URL and logs error `11200` in the Debugger
+3. After a few seconds, an alert titled `Twilio error 11200: ...` appears in Flashduty
+
+Restore the number's original URL when you are done.
+
+</Step>
+
+<Step title="Turn on the auto-resolve timeout">
+
+Debugger events are one-time log entries. Twilio sends nothing when an error stops occurring, so these alerts never recover on their own. In the channel that receives these alerts, turn on the [auto-resolve timeout](/en/on-call/channel/create-edit). We suggest a timeout of **2 hours**, counted from **Incident trigger**. Closing the incident also closes its alerts; if the error is still occurring, the next event opens the alert again.
+
+</Step>
+</Steps>
+
+## Payload
+---
+
+Twilio sends one Debugger event per request. The body is `application/x-www-form-urlencoded`, and `Payload` is JSON:
+
+| Field | Description | Use in Flashduty |
+| :--- | :--- | :--- |
+| `AccountSid` | Account that produced the event | Alert Key, label `account_sid` |
+| `ParentAccountSid` | Parent account (subaccount events only) | Label `parent_account_sid` |
+| `Level` | Event level: `ERROR` or `WARNING` | Whether an alert is created, label `level` |
+| `Sid` | Debugger event ID | Alert description |
+| `Timestamp` | When the event occurred | Alert description |
+| `Payload.error_code` | Error code | Alert Key, alert title, label `error_code` |
+| `Payload.resource_sid` | Resource that failed, such as a call or message SID | Alert description, label `resource_sid` |
+| `Payload.service_sid` | SID of the service that failed | Label `service_sid` |
+| `Payload.more_info.msg` | Error message | Alert title and description |
+| `Payload.more_info.url` | URL that Twilio failed to request | Label `url` |
+| `Payload.more_info.httpResponse` | HTTP status code that URL returned | Label `http_response` |
+
+Every alert also carries the label `source=twilio`, and its description links to the error code in the Twilio error dictionary (`https://www.twilio.com/docs/errors/<error code>`). Example title: `Twilio error 11200: An attempt to retrieve content from https://app.example.com/voice returned the HTTP status code 404`.
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from `AccountSid` and `Payload.error_code`, not from the event ID `Sid`:
+
+- Events with the same error code on the same account merge into one alert. The alert's title, description, and labels show the latest event
+- Different error codes, and different accounts (including different subaccounts), are different alerts
+- This matches how Twilio [Alarms](https://www.twilio.com/docs/usage/troubleshooting/alarms) count errors per account and per error code
+
+## Status and severity
+---
+
+| Twilio event level | Flashduty status or severity |
+| :--- | :--- |
+| `ERROR` | Critical |
+| `WARNING` and other levels | No alert |
+
+An Error event is rejected if it lacks `AccountSid` or `Payload.error_code`, or if `Payload` is not valid JSON.
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Why don't Warning events create alerts?">
+
+Twilio logs problems it could still process as warnings, such as TwiML validation warnings. They are frequent and rarely need the on-call engineer right away, so Flashduty accepts them without creating an alert. You can still see them in the Twilio Debugger.
+
+</Accordion>
+
+<Accordion title="The same error keeps occurring. Why is there only one alert?">
+
+Events with the same error code on the same account merge into one alert, whose event count grows instead of a new alert opening for each failure. With the auto-resolve timeout on, the incident closes after the timeout; if the error is still occurring, the next event opens a new alert.
+
+</Accordion>
+
+<Accordion title="Do I need to verify X-Twilio-Signature?">
+
+No. Flashduty identifies the integration by the `integration_key` in the push URL and does not verify the `X-Twilio-Signature` header. Keep the push URL as secret as a key.
+
+</Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+---
+
+- **Errors appear in the Twilio Debugger but not in Flashduty**: make sure the URL under **Monitor** → **Error webhook** is complete (including `integration_key`) and that the event level is Error
+- **Requests are rejected (4xx)**: make sure the push URL belongs to a Twilio integration, not another integration
+- **Alerts never close**: turn on the auto-resolve timeout in the channel

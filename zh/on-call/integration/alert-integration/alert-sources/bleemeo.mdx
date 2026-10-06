@@ -1,0 +1,123 @@
+---
+title: "Bleemeo 告警集成"
+description: "通过 Webhook 集成将 Bleemeo 的指标状态变化（告警与恢复）同步到 Flashduty On-call。"
+keywords: ["告警集成", "Bleemeo", "监控", "Webhook", "状态变化"]
+---
+
+通过 Bleemeo 的 Webhook 集成，把指标（Metric）的状态变化同步到 Flashduty On-call。指标进入警告（Warning）、严重（Critical）或未知（Unknown）状态时触发告警，状态回到正常（OK）时关闭同一条告警。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Bleemeo**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Bleemeo**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Bleemeo 中配置
+---
+
+<Steps>
+<Step title="添加 Webhook 通知目标">
+
+1. 登录 Bleemeo，进入 **Notifications → Notification Targets**，点击 **+**
+2. 类型选择 **webhook**，填写显示名称，并把 Flashduty 集成的完整推送地址填入 **Target**（Bleemeo 要求接收端可从公网访问，并返回 2xx 状态码表示收到）
+3. 在 **Advanced settings** 中，**Notify on** 列出 OK、Warning、Critical；保持选中 OK，才会发送恢复通知
+4. 如需测试，保留 **Send test notification after saving** 的勾选，然后点击 **Save**。测试会在 Flashduty 中产生一条独立的 Info 告警，请手动关闭
+
+</Step>
+
+<Step title="在通知规则中选择该目标">
+
+进入 **Notifications → Notification Rules**，点击 **+**，保持范围和问题类型，目标类型选择 **Notification Targets**，再选中刚创建的目标。Bleemeo 会在指标状态变化时向该地址发送通知，状态恢复时发送恢复通知。
+
+</Step>
+
+<Step title="验证生命周期">
+
+让一个指标越过阈值（例如临时调低某个 CPU 使用率阈值），确认 Flashduty 收到活动告警；再恢复阈值，确认原告警恢复。
+
+</Step>
+</Steps>
+
+## 推送内容
+---
+
+Bleemeo 以 JSON 格式 POST 通知，Flashduty 直接解析，无需配置模板：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `metric` | 指标 ID | Alert Key，标签 `metric_id` |
+| `status` | 状态：`0` OK、`1` Warning、`2` Critical、`3` Unknown | 告警状态或等级 |
+| `title` | 摘要，包含主机和指标 | 告警标题，标签 `check` |
+| `text` | 补充说明，例如当前值 | 告警描述 |
+| `agent` | 主机上的 Agent ID | 标签 `agent_id`、`resource` |
+| `status_text` | 状态文本 | 标签 `status_text` |
+
+## Alert Key
+---
+
+使用 `metric` 作为 Alert Key。同一个指标的告警通知和恢复通知携带相同的 `metric`，落在同一条告警上；不同指标会生成不同的告警。顶层 `id` 不参与 Alert Key，标题、数值和时间的变化也不会改变 Alert Key。
+
+请求中缺少 `metric` 时，Flashduty 会返回参数错误，因为无法可靠地把恢复通知关联到原告警。
+
+## 状态和告警等级
+---
+
+| Bleemeo `status` | Flashduty 状态或等级 |
+| :--- | :--- |
+| `0`（OK） | 恢复 |
+| `1`（Warning） | Warning |
+| `2`（Critical） | Critical |
+| `3`（Unknown） | Warning |
+
+`status` 为空或其他值的请求会被拒绝，避免把无法判断状态的请求写入错误的告警生命周期。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Bleemeo 的 Webhook 需要什么套餐？">
+
+以 Bleemeo 当前的套餐说明为准。Webhook 可能属于较高级别的套餐，试用期内通常可以使用。
+
+</Accordion>
+
+<Accordion title="重复的通知会产生多条告警吗？">
+
+不会。Bleemeo 可能重试失败的投递，同一个指标的通知携带相同的 `metric`，会合并到同一条告警中。
+
+</Accordion>
+
+<Accordion title="状态为 Unknown 时会恢复告警吗？">
+
+不会。`3`（Unknown）按 Warning 处理，只有 `0`（OK）会关闭告警。
+
+</Accordion>
+</AccordionGroup>
+
+## 排查问题
+---
+
+- **测试通知产生了一条 Info 告警**：保存目标后发送的测试通知不带指标，Flashduty 按其固定内容（status 为 `10`、title 为 `Test`）识别，并产生一条独立的 Info 告警，不会自动恢复，请手动关闭
+
+- **Bleemeo 推送失败**：确认 Webhook URL 是完整的推送地址，且包含 `integration_key`
+- **Flashduty 返回参数错误**：确认请求为 Bleemeo 的 JSON 通知，且 `metric` 非空、`status` 为 0 到 3
+- **告警没有恢复**：确认恢复通知使用同一个 Webhook 集成发送；恢复通知与告警通知的 `metric` 必须相同
+
+字段说明请参阅 Bleemeo 官方文档 [Webhook](https://docs.bleemeo.com/alerting/integrations/webhook/)。
