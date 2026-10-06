@@ -1,0 +1,115 @@
+---
+title: "SonarQube alert integration"
+description: "Send SonarQube Server and SonarQube Cloud quality gate results to Flashduty On-call through a webhook."
+keywords: ["alert integration", "SonarQube", "SonarQube Cloud", "webhook", "quality gate", "code quality"]
+---
+
+Use a SonarQube webhook to send the quality gate result of every code analysis to Flashduty On-call. Each branch (or pull request) of each project maps to one Flashduty alert: it triggers when the quality gate fails (`ERROR`) and recovers automatically when the gate passes (`OK`) on the same branch. It works with SonarQube Server (Community Build, Developer, Enterprise, Data Center) and SonarQube Cloud, which send the same webhook body.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **SonarQube** and click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **SonarQube** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In SonarQube
+---
+
+<Steps>
+<Step title="Create the webhook">
+
+**SonarQube Server**:
+
+1. Sign in as an administrator. Go to **Administration → Configuration → Webhooks** for a global webhook that applies to every project, or open a project's **Project Settings → Webhooks** for that project only (up to 10 per project)
+2. Click **Create** and enter a name
+3. Paste the full Flashduty push URL into **URL**; it must include `integration_key`
+4. **Secret** is optional. When set, SonarQube adds an `X-Sonar-Webhook-HMAC-SHA256` header to each request. Flashduty does not verify it; requests are authenticated by the `integration_key` in the URL
+
+**SonarQube Cloud**:
+
+1. Go to **Administration → Webhooks** of the organization (organization admin required)
+2. Click **Create**, enter a name, and paste the push URL into **URL**
+
+SonarQube Cloud does not send webhooks on its free plan (they can still be created in the UI); a paid plan is required.
+
+</Step>
+
+<Step title="Run an analysis and verify">
+
+1. Run an analysis of the project from CI (for example `sonar-scanner`). SonarQube posts the webhook when the analysis finishes
+2. Make the quality gate fail (for example by raising a coverage threshold temporarily) and confirm an alert appears in Flashduty
+3. Fix it, run another analysis, and confirm the alert recovers once the gate passes
+
+SonarQube has no test button for webhooks. On SonarQube Server, the **Last delivery** column of the Webhooks page shows the result of each delivery. A delivery that gets no response within 10 seconds is marked failed, and SonarQube does not retry it.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+The Alert Key is computed from the project key (`project.key`), the branch type (`branch.type`, such as `BRANCH` or `PULL_REQUEST`), and the branch name (`branch.name`). As a result:
+
+- A failure and a later pass on the same branch of the same project share one Alert Key, so the alert recovers when the gate passes
+- Different branches, pull requests, and projects never affect each other's alerts
+- Changes to the project name, quality gate name, analysis ID, or commit do not change the Alert Key
+- Analyses without branch information (editions without branch analysis) are told apart by project key alone
+
+A request without `project.key` is rejected.
+
+## Status and severity
+---
+
+SonarQube webhooks carry no severity, and a failed quality gate is a code quality signal rather than an outage, so every alert is Warning. Adjust it with routing or alert management in Flashduty if needed.
+
+| `qualityGate.status` | Status | Flashduty severity |
+| :--- | :--- | :--- |
+| `ERROR` | Trigger | Warning |
+| `WARN` (older versions) | Trigger | Warning |
+| `OK` | Recover | - |
+
+These deliveries are ignored, and Flashduty returns success: failed or cancelled analyses (`status` is `FAILED` or `CANCELLED`, no quality gate), bodies without `qualityGate`, and any other `qualityGate.status` value.
+
+Every passing analysis sends an `OK`; it is used only to recover the active alert of the same project and branch.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Quality gate name |
+| `resource` / `project_key` | Project key |
+| `project_name` / `project_url` | Project name and its SonarQube link |
+| `branch` / `branch_type` | Branch or pull request name and type |
+| `quality_gate` | Quality gate name |
+| `revision` | Commit SHA of the analysis |
+| `failed_metrics` | Metrics of the failed conditions, comma separated |
+
+The alert description lists each failed condition with its metric, current value, and threshold.
+
+## Troubleshooting
+---
+
+- **Flashduty returns an invalid parameter error**: check that the URL is complete and includes `integration_key`
+- **No alert arrives**: confirm the analysis produced a quality gate result. On SonarQube Server, check the status code under **Last delivery** on the Webhooks page; SonarQube Cloud needs a paid plan
+- **The alert does not recover**: recovery depends on the next analysis of the same project and branch. After a pull request is closed there are no further analyses, so close its alert manually
+- **SonarQube Server cannot reach Flashduty**: the webhook is sent by the SonarQube server itself; make sure it has outbound internet access or a configured proxy
+
+For field details, see [SonarQube Webhooks](https://docs.sonarsource.com/sonarqube-server/project-administration/integrations/webhooks).

@@ -10,12 +10,9 @@ const distRoot = path.join(packageRoot, 'dist');
 const docsBaseUrl = 'https://docs.flashduty.com';
 
 function readSource(locale, entry) {
-  const source = typeof entry === 'string' ? entry : entry[locale];
-  const absolute = entry?.legacy
-    ? path.resolve(packageRoot, source)
-    : path.resolve(repoRoot, locale, source);
+  const absolute = path.resolve(repoRoot, locale, entry);
   if (!fs.existsSync(absolute)) {
-    throw new Error(`Missing ${locale} source: ${source}`);
+    throw new Error(`Missing ${locale} source: ${entry}`);
   }
   return fs.readFileSync(absolute, 'utf8');
 }
@@ -334,15 +331,13 @@ function mdxToMarkdown(content) {
 
 function buildLocale(locale) {
   const docs = {};
-  const legacyKeys = [];
 
   for (const [key, entry] of Object.entries(docMap)) {
     const raw = readSource(locale, entry);
     docs[key] = mdxToMarkdown(raw);
-    if (entry?.legacy) legacyKeys.push(key);
   }
 
-  return { docs, legacyKeys };
+  return docs;
 }
 
 function writeLocale(locale, globalName, docs) {
@@ -374,8 +369,8 @@ fs.rmSync(distRoot, { recursive: true, force: true });
 
 const zh = buildLocale('zh');
 const en = buildLocale('en');
-writeLocale('zh', 'FlashDocsZh', zh.docs);
-writeLocale('en', 'FlashDocsEn', en.docs);
+writeLocale('zh', 'FlashDocsZh', zh);
+writeLocale('en', 'FlashDocsEn', en);
 writeTypes();
 
 const keys = Object.keys(docMap);
@@ -383,13 +378,9 @@ const report = {
   generatedAt: new Date().toISOString(),
   totalKeys: keys.length,
   keys,
-  optionalMissingKeys,
-  legacyFallbackKeys: [...new Set([...zh.legacyKeys, ...en.legacyKeys])]
+  optionalMissingKeys
 };
 
 fs.writeFileSync(path.join(distRoot, 'build-report.json'), `${JSON.stringify(report, null, 2)}\n`, 'utf8');
 
 console.log(`Built ${keys.length} documentation keys for zh/en.`);
-if (report.legacyFallbackKeys.length > 0) {
-  console.log(`Legacy fallback keys: ${report.legacyFallbackKeys.join(', ')}`);
-}

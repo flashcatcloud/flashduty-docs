@@ -1,0 +1,111 @@
+---
+title: "Cisco Intersight 告警集成"
+description: "通过 Webhook 订阅，将 Cisco Intersight 中服务器、存储和超融合设备的告警（Alarm）同步到 Flashduty On-call。"
+keywords: ["告警集成", "Cisco Intersight", "Intersight", "Webhook", "UCS", "HyperFlex", "基础设施"]
+---
+
+Cisco Intersight 是 Cisco 的云端基础设施管理平台，管理 UCS、HyperFlex 等设备。在 Intersight 中为告警对象（`cond.Alarm`）创建 Webhook 订阅后，告警的创建、变更和清除都会同步到 Flashduty On-call。每个 Intersight 告警对应一条 Flashduty 告警：告警创建时触发，严重程度变化时更新，Intersight 将其清除（`Cleared`）时自动恢复。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+3. 选择 **Cisco Intersight**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **Cisco Intersight**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Cisco Intersight 中配置
+---
+
+<Steps>
+<Step title="创建 Webhook">
+
+1. 登录 [Cisco Intersight](https://intersight.com)，进入 **Settings** → **Webhooks**
+2. 新建 Webhook，填写名称，并把 Flashduty 集成的完整推送地址粘贴到 Webhook URL，地址中需包含 `integration_key`
+3. **Secret** 字段由您自行定义一个字符串。Intersight 用它对请求签名，Flashduty 不校验签名，填写任意值即可
+
+</Step>
+
+<Step title="订阅告警对象">
+
+在该 Webhook 中添加订阅，对象类型选择告警 `cond.Alarm`，事件类型选择创建（Created）和更新（Modified）。必须订阅更新事件：告警严重程度变化和清除都是对同一个告警的更新，漏掉更新会导致告警无法自动恢复。
+
+只订阅 `cond.Alarm`。其他对象类型（例如 `workflow.WorkflowInfo`）的推送会被 Flashduty 拒绝并返回对象类型错误。
+
+</Step>
+
+<Step title="保存并验证">
+
+1. Intersight 可能发送一条不带告警的请求（`EventObjectType` 为空、`Event` 为 null、`Operation` 为 `None`），即 Cisco Webhook 校验指南中给出的请求形态；Cisco 没有说明它的具体发送时机。Flashduty 收到这种请求会创建一条 Info 级别的测试告警，标题为 `Cisco Intersight test notification`，它不会自动恢复，请手动关闭
+2. 等待设备产生告警（或在测试环境中制造一个故障），确认 Flashduty 收到对应告警；告警清除后确认 Flashduty 告警变为已恢复
+
+</Step>
+</Steps>
+
+## 事件类型
+---
+
+| 推送内容 | 在 Flashduty 中的效果 |
+| :--- | :--- |
+| 告警创建或更新（`Severity` 为 `Critical`、`Warning`、`Info`） | 触发或更新告警，严重程度随 `Severity` 变化 |
+| 告警清除（`Severity` 为 `Cleared`） | 恢复告警，保留告警原有的严重程度 |
+| 不带告警的请求（`Operation` 为 `None`、`Event` 为 null） | 创建一条独立的 Info 告警，不会恢复 |
+
+## Alert Key
+---
+
+Flashduty 使用告警对象的 `Moid`（Intersight 为每个告警分配的固定编号）作为 Alert Key。同一个告警的创建、更新、清除使用相同的 Alert Key；名称、描述、严重程度、时间的变化不会改变它，缺少 `Moid` 的请求会被拒绝。
+
+## 状态和告警等级
+---
+
+| Intersight `Severity` | Flashduty 等级 |
+| :--- | :--- |
+| Critical | Critical |
+| Warning | Warning |
+| Info、None 或其他值 | Info |
+| Cleared | 恢复（等级取 `OrigSeverity`，无有效值时为 Info） |
+
+## 标签
+---
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警名称（`Name`，如 `UCS-F1404`） |
+| `resource` | 受影响对象的显示名（`AffectedMoDisplayName`） |
+| `alarm_moid` | 告警 `Moid` |
+| `alarm_code` | 告警代码（`Code`） |
+| `severity` | Intersight 原始严重程度 |
+| `affected_mo_type` / `affected_mo_id` | 受影响对象的类型和编号 |
+| `ancestor_mo_type` | 上级对象类型，如 `compute.Blade` |
+| `create_time` / `last_transition` | 告警创建时间和最近一次严重程度变化时间 |
+
+## 关于签名
+---
+
+Intersight 使用您设置的 Secret 对请求做 HMAC 签名（`Authorization` 和 `Digest` 请求头）。Flashduty 不校验签名，推送地址中的 `integration_key` 是唯一的凭证，请妥善保管。
+
+## 排查问题
+---
+
+- **Flashduty 没有收到推送**：确认 Webhook URL 完整且包含 `integration_key`，并且 Intersight 能访问公网
+- **返回参数错误**：提示对象类型不支持时，说明订阅了 `cond.Alarm` 以外的对象；提示缺少 `Moid` 时，说明推送的不是告警对象
+- **告警没有恢复**：确认订阅中包含更新（Modified）事件，告警清除是以更新事件推送的
+- **测试告警没有关闭**：测试请求产生的 Info 告警需要手动关闭
+
+更多信息请参阅 [Cisco 官方的 Intersight Webhook 验证文档](https://www.cisco.com/c/en/us/support/docs/cloud-systems-management/intersight/225593-validate-the-cisco-intersight-webhooks.html)。

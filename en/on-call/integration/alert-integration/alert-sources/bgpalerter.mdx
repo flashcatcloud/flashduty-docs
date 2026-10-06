@@ -1,0 +1,146 @@
+---
+title: "BGPalerter alert integration"
+description: "Send BGP hijacks, prefix visibility loss, RPKI-invalid announcements, and other BGPalerter events to Flashduty On-call through the reportHTTP report module."
+keywords: ["alert integration", "BGPalerter", "BGP", "BGP hijack", "RPKI", "prefix monitoring", "webhook"]
+---
+
+BGPalerter is NTT's open-source BGP monitor. It detects hijacked prefixes, new sub-prefixes, lost visibility, AS path anomalies, and RPKI-invalid announcements. Its `reportHTTP` report module sends these events to Flashduty On-call.
+
+BGPalerter sends each event once and never sends a recovery notification. Close every alert by hand, or turn on the channel's auto-resolve timeout (see [Events and recovery](#events-and-recovery)).
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **BGPalerter** and click **Save**
+4. Open the new integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **BGPalerter** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure BGPalerter
+---
+
+BGPalerter has no fixed webhook format: the request body comes from the `reportHTTP` template in `config.yml`. Flashduty parses only the JSON that the template below produces, so use it as is.
+
+<Steps>
+<Step title="Edit config.yml">
+
+Add `reportHTTP` under `reports` (uncomment the example block) and set `hooks.default` to the full push URL of the Flashduty integration, including `integration_key`:
+
+```yaml
+reports:
+  - file: reportHTTP
+    channels:
+      - hijack
+      - newprefix
+      - visibility
+      - path
+      - misconfiguration
+      - rpki
+      - roa
+    params:
+      method: post
+      isTemplateJSON: true
+      showPaths: 0
+      headers:
+      templates:
+        default: '{"summary": "${summary}", "channel": "${channel}", "type": "${type}", "prefix": "${prefix}", "asn": "${asn}", "description": "${description}", "neworigin": "${neworigin}", "newprefix": "${newprefix}", "peers": "${peers}", "earliest": "${earliest}", "latest": "${latest}", "bgplay": "${bgplay}", "rpkiLink": "${rpkiLink}", "paths": "${paths}"}'
+      hooks:
+        default: https://api.flashcat.cloud/event/push/alert/bgpalerter?integration_key=YOUR_INTEGRATION_KEY
+```
+
+Notes:
+
+- `isTemplateJSON: true` makes BGPalerter send the body as `Content-Type: application/json`
+- Keep only the channels you need in `channels`. For example, keep `hijack` and `visibility` if those are the only events you care about
+- The `${...}` tags are BGPalerter's [report context tags](https://github.com/nttgin/BGPalerter/blob/main/docs/context.md). A tag that an event type does not have renders as the text `undefined`, and Flashduty treats it as empty
+- The `description` of each prefix in `prefixes.yml` is written into the template. Do not put double quotes in it, or BGPalerter cannot parse the JSON it generates
+- If you use [user groups](https://github.com/nttgin/BGPalerter/blob/main/docs/usergroups.md), set a push URL per group under `hooks`
+
+</Step>
+
+<Step title="Restart BGPalerter">
+
+Restart BGPalerter to apply the configuration. A `sending report to: ...` line in its log means it is posting to that URL.
+
+</Step>
+
+<Step title="Verify">
+
+BGPalerter has no "send test notification" button. Running `bgpalerter -t` (in Docker, append `-t` to the start command) replays fake BGP updates on the `hijack` channel. Those alerts look the same as real hijack alerts, so Flashduty creates ordinary Critical alerts. Close them by hand afterwards, and remove `-t` before production use.
+
+</Step>
+</Steps>
+
+## Events and recovery
+---
+
+Each channel in `channels` is one kind of event:
+
+| `channel` | Meaning | Flashduty severity |
+| :--- | :--- | :--- |
+| `hijack` | A monitored prefix is announced by another AS | Critical |
+| `visibility` | A monitored prefix lost visibility (withdrawn or unreachable) | Critical |
+| `newprefix` | A monitored AS announced a prefix that is not configured | Warning |
+| `path` | A user-defined AS path rule matched | Warning |
+| `misconfiguration` | A likely misconfiguration, such as announcing a prefix the AS does not own | Warning |
+| `rpki` | An announcement of a monitored prefix is RPKI-invalid | Warning |
+| `roa` | A ROA changed or is about to expire | Warning |
+| `software-update` | A new BGPalerter version is available | Info |
+| Any other value | | Warning |
+
+BGPalerter sends no recovery notification, so Flashduty never closes these alerts automatically. Turn on the channel's [auto-resolve timeout](/en/on-call/channel/create-edit) (24 hours suggested). Hijack events usually need a human check, so you can also close them by hand once handled.
+
+## Alert Key
+---
+
+Flashduty computes the Alert Key from the routing facts of the event: the channel (`channel`), the monitored prefix (`prefix`), the monitored AS (`asn`), the new origin AS (`neworigin`), and the prefix actually announced (`newprefix`). BGPalerter itself groups hijack events by origin AS and prefix.
+
+- Repeated alerts from the same hijacker on the same prefix merge into one Flashduty alert
+- A different hijacker or a different, more specific prefix opens a separate alert
+- Events on the `path` channel carry no prefix or AS, so the event summary (`summary`) is used instead, and events with the same summary merge
+- Content that changes between deliveries, such as the peer count and timestamps, is not part of the key
+
+A request without `channel`, or without any of prefix, AS, and summary, is rejected with an error.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `channel` / `type` | The channel and the name of the monitor that raised the alert (for example `monitorHijack`) |
+| `check` | The monitor name, or the channel name when there is none |
+| `prefix` / `resource` | The monitored prefix |
+| `asn` | The monitored AS |
+| `neworigin` / `newprefix` | The new origin AS and the announced prefix (hijack, new prefix, RPKI) |
+| `peers` | Number of peers that saw the event |
+| `prefix_description` | The prefix description from `prefixes.yml` |
+| `earliest` / `latest` | First and last event time (UTC) |
+| `bgplay` / `rpki_link` | Links to BGPlay and the RPKI validator |
+| `paths` | AS paths (when `showPaths` is greater than 0) |
+
+The alert title is BGPalerter's event summary, and the description is the prefix description.
+
+## Troubleshooting
+---
+
+- **Flashduty receives no alerts**: check that `hooks.default` is the full HTTPS push URL with `integration_key`. BGPalerter only writes a failed post to its own log and does not retry
+- **BGPalerter logs a JSON parse error**: check the prefix descriptions in `prefixes.yml` for double quotes or line breaks
+- **An alert never closes**: BGPalerter sends no recovery notification. Turn on the channel's auto-resolve timeout or close the alert by hand
+- **Requests return 400**: the request has no `channel`, usually because the template was changed. Restore the template above
+
+For more options, see the [BGPalerter documentation](https://github.com/nttgin/BGPalerter/blob/main/docs/report-http.md).

@@ -174,7 +174,7 @@ string to preserve verbatim when generating Chinese translations.
 Style rule: when a DNT term appears mid-sentence in Chinese, surround it with
 a single half-width space on either side (e.g., `管理你的 Routines`, not
 `管理你的Routines`). For multi-word terms, keep them together verbatim
-(e.g., `创建 Knowledge Pack`).
+(e.g., `创建 A2A Agent`).
 
 | Term | Notes |
 |------|-------|
@@ -186,12 +186,10 @@ a single half-width space on either side (e.g., `管理你的 Routines`, not
 | Automation | User-defined automation trigger + action |
 | Runner | Agent execution backend (e.g., `flashduty-runner`) |
 | A2A | Agent-to-Agent protocol |
-| Knowledge Pack | A curated knowledge bundle attached to an Agent |
 | Tool call | A single tool invocation inside an Agent turn |
 | Slash command | UI slash-prefixed command (e.g., `/help`) |
 | Reasoning | The reasoning / chain-of-thought block of a model response |
 | Connector | Integration with an external system (Slack, GitHub, etc.) |
-| Environment | Execution environment for runners (env vars, credentials) |
 | Todo | The Todo list shown in agent UI |
 | Mermaid | Mermaid diagram syntax |
 | Prompt | System or user prompt sent to a model |
@@ -201,6 +199,14 @@ Translatable companions (do NOT belong in DNT — translate to Chinese):
 | English | Chinese |
 |---------|---------|
 | Artifact / Artifacts | 产物 |
+| Knowledge | 知识 — the DUTY.md-rooted file tree an account or team maintains for AI SRE. Formerly "Knowledge Pack"; do not use that name in copy. Running text uses lowercase "knowledge" (e.g., "team knowledge"); API identifiers such as `pack_id` and `knowledge-pack-*` CLI commands stay unchanged |
+| Memory | 记忆 |
+| Context | 上下文 — the Customize group holding Knowledge and Memory |
+| Customize | 自定义 — the AI SRE sidebar entry that opens Context, Plugins, and Environments |
+| Plugins | 插件 |
+| Environment / Environments | 环境 |
+| Self-hosted | 自托管 |
+| Cloud | 云端 |
 
 ## Intentional Variants (per-context wording)
 
@@ -217,7 +223,6 @@ Translators: pick the variant whose context matches.
 | 成功 | Succeeded (run-status filter) / OK (compact badge) |
 | 对话 | Chat (singular) / Chats (section header, plural) |
 | 环境 | Environment (field label) / Environments (nav or page title, plural) |
-| 知识库 | Knowledge Pack (singular) / Knowledge Packs (page title, plural) |
 | 产物 | Artifact (singular) / Artifacts (plural) |
 | 文档 | Document (artifact kind) / Documentation (docs link) |
 | 邮件 | Email (channel label, pairs with "SMS") / Email us (CTA, pairs with "Call us") |

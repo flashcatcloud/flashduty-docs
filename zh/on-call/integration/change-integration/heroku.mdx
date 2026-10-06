@@ -1,0 +1,138 @@
+---
+title: "Heroku 变更集成"
+description: "通过 Heroku 应用 Webhook 将应用的发布（Release）同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
+keywords: ["变更集成", "Heroku", "发布", "Release", "Webhook"]
+---
+
+<Tip>**版本要求**：此功能需要 On-call 标准版及以上订阅。[了解更多](https://flashcat.cloud/flashduty/price/)</Tip>
+
+通过 Heroku 应用 Webhook 订阅 `api:release`，将应用的发布（Release）同步到 Flashduty On-call。每个 Release 对应一条 Flashduty 变更，随 Release 从进行中到成功或失败更新状态。代码部署、配置变量修改、Add-on 变更和回滚都会在 Heroku 中产生新的 Release，因此都会被记录。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+---
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
+2. 选择 **Heroku**，填写集成名称
+3. 如需把变更分派到指定协作空间，在集成的 **路由** 中按标签（例如 `app`）配置规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 Heroku 中配置
+---
+
+<Steps>
+<Step title="创建应用 Webhook">
+
+使用 Heroku CLI 为目标应用创建订阅，`<推送地址>` 替换为 Flashduty 集成的完整推送地址：
+
+```bash
+heroku webhooks:add -a <应用名> -i api:release -l sync -u "<推送地址>"
+```
+
+- `-i api:release`：只订阅 Release 事件。其他事件（构建、Dyno、域名等）不会生成变更，无需订阅
+- `-l sync`：推送失败时 Heroku 自动重试，最长 72 小时；`notify` 级别不重试
+- 不需要 `-s`（签名密钥）和 `-t`（Authorization 请求头）
+
+也可以在应用 Dashboard 的 **More → View Webhooks** 中创建，Event Types 选择 `api:release`。Heroku 的 Webhook 按应用配置，Pipeline 内的多个应用需要分别创建。
+
+Flashduty 通过推送地址中的 `integration_key` 鉴权。Heroku 在请求中附带的 `Heroku-Webhook-Hmac-SHA256` 签名头不会被校验。
+
+</Step>
+
+<Step title="触发一次发布">
+
+Heroku 没有测试推送。执行一次 `git push heroku main`，或修改一个配置变量（`heroku config:set KEY=value`），即可在 Flashduty 变更列表中看到该应用的 Release。
+
+</Step>
+</Steps>
+
+## 一条变更是什么
+---
+
+| Heroku 对象 | 变更标识（change_key） | 说明 |
+|---|---|---|
+| Release | `data.id`（Release 的 UUID） | Release 创建和状态变化的推送都带有同一个 `data.id`，属于同一条变更；同一应用的两次发布是两条变更 |
+
+Release 的版本号（`v12`）只在应用内唯一，不作为标识，仅出现在标题和 `version` 标签中。
+
+## 状态映射
+---
+
+| Heroku `data.status` | Flashduty 变更状态 |
+|---|---|
+| `pending` | Processing |
+| `succeeded` | Done |
+| `failed` | Failed |
+
+以下推送返回成功但不生成变更：
+
+- `resource` 不是 `release` 的推送：构建（`api:build`）、应用、Dyno、Formation、域名、协作者、Add-on、SNI endpoint
+- Release 的 `create`、`update` 之外的动作
+
+构建不单独记录：构建成功后 Heroku 会创建对应的 Release，Release 才是真正生效的部署，同时记录两者会让一次部署出现两条变更。构建失败不会产生 Release，应用的运行版本没有变化，因此不记录。
+
+`data.status` 为上表之外的值时，推送返回 `InvalidParameter`（见常见问题）。
+
+## 变更内容
+---
+
+| 字段 | 内容 |
+|---|---|
+| 标题 | `<应用名>: release v<版本号>`，例如 `my-app: release v12` |
+| 描述 | Release 的 `description`，例如 `Deploy 3a2f9c1`、`Set FOO config vars`（只含变量名，不含变量值），超过 1024 字节会被截断 |
+| 链接 | Heroku Dashboard 中该应用的 Activity 页面 |
+| 变更时间 | Release 的 `updated_at`，即该状态发生的时间 |
+
+标题和描述取自这条变更的第一次推送，之后不再更新。
+
+标签可用于路由和在变更列表中筛选：
+
+| 标签 | 说明 |
+|---|---|
+| `app` | 应用名称 |
+| `app_id` | 应用 ID |
+| `release_id` | Release ID |
+| `version` | Release 版本号 |
+| `heroku_state` | `data.status` 原值 |
+
+Heroku 推送只用邮箱标识触发 Release 的用户，邮箱不会写入标签，因此没有 `actor` 标签。
+
+## 常见问题
+---
+
+<AccordionGroup>
+<Accordion title="Heroku 重试推送会重复记录吗？">
+
+不会。重试的内容相同，Flashduty 以推送中的时间和状态去重；较早的状态晚到，也不会覆盖已经结束的变更。
+
+</Accordion>
+
+<Accordion title="为什么 git push 后没有看到构建的变更？">
+
+构建不生成变更，见上文。构建成功后产生的 Release 会生成变更；构建失败时没有 Release，也就没有变更，请在 Heroku 的构建日志中排查。
+
+</Accordion>
+
+<Accordion title="为什么配置变量修改也出现了变更？">
+
+在 Heroku 中修改配置变量会创建新的 Release，应用会用新配置重启，这是一次真实的变更。变更描述只包含变量名，Flashduty 不会收到变量值。
+
+</Accordion>
+
+<Accordion title="Heroku 提示推送失败或停止推送？">
+
+Heroku 连续一周推送失败会发邮件通知并可能停用该 Webhook。请确认推送地址完整，且集成未被删除。可在 `heroku webhooks:deliveries -a <应用名>` 查看投递状态。
+
+</Accordion>
+
+<Accordion title="推送返回 InvalidParameter 错误？">
+
+- `data.id is missing`：推送内容不完整，请确认推送来自 Heroku 原生 Webhook，且订阅的是 `api:release`
+- `data.status is missing` / `unknown release status`：出现了未收录的 Release 状态，请联系我们补充映射
+- `invalid timestamp`：推送中的时间字段格式不正确
+
+</Accordion>
+</AccordionGroup>

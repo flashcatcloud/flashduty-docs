@@ -1,0 +1,141 @@
+---
+title: "Zadig change integration"
+description: "Sync Zadig workflow task starts and results to Flashduty On-call through Zadig's system hook or a workflow webhook notification, as change events you can correlate with alerts and incidents."
+keywords: ["change integration", "Zadig", "workflow", "CI/CD", "Webhook"]
+---
+
+<Tip>**Plan requirement**: This feature requires an On-call Standard or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+Use a Zadig v5 webhook to sync workflow task executions to Flashduty On-call. Each workflow execution becomes one Flashduty change: created when the execution starts, updated as its status changes, and closed with its final status.
+
+Zadig offers two webhooks with the same payload:
+
+- **System hook**: configured once at system level by an administrator, applies to every workflow, and sends one delivery when a task starts and one when it completes. Recommended
+- **Workflow webhook notification**: added to a single workflow, and sends a delivery for each workflow status you select
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+1. In the Flashduty console, go to **Integration Center → Change Events**
+2. Select **Zadig** and enter an integration name
+3. To assign changes to specific channels, add rules under the integration's **Routes** that match labels such as `project` or `workflow`
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure Zadig
+---
+
+### Option 1: System hook
+
+<Steps>
+<Step title="Open the system hook">
+
+A system administrator goes to **System Settings → System Configuration → System Hook** (the labels are 系统设置 → 系统配置 → 系统钩子 in the Chinese UI).
+
+</Step>
+
+<Step title="Enter the push URL and trigger events">
+
+1. Turn on the system hook
+2. **Hook address**: paste the full Flashduty push URL
+3. **Secret Token**: leave empty. Flashduty authenticates with the `integration_key` in the push URL and does not check `X-Zadig-Token`
+4. **Trigger events**: select both start of execution and completion of execution
+
+</Step>
+
+<Step title="Run a workflow">
+
+Run a workflow once and the change appears in the Flashduty change list.
+
+</Step>
+</Steps>
+
+### Option 2: Workflow webhook notification
+
+Edit the workflow and add a notification of type **Webhook**. Set the webhook address to the Flashduty push URL and select the workflow statuses to sync (for example succeeded, failed, canceled, timed out). A delivery is sent only when one of the selected statuses occurs, so unselected statuses do not appear on the change.
+
+Configuring both options does not create duplicate changes: one task records a given status only once.
+
+## What one change is
+---
+
+| Zadig object | Change key (change_key) | Notes |
+|---|---|---|
+| Workflow task | `<project name>/<workflow name>/<task id>` | The task id increases within each workflow, so two executions of one workflow are two changes. The project and workflow names are the identifiers fixed at creation, not the display names |
+
+Clicking **Retry** on an existing task restarts the same task (the task id does not change), so a retry reopens the original change: its status returns to Ready and is then updated again.
+
+## Status mapping
+---
+
+| Zadig `workflow.status` | Flashduty change status |
+|---|---|
+| `created`, `queued`, `pending`, `prepare` | Ready |
+| `running`, `debug_before`, `debug_after` | Processing |
+| `pause`, `wait_for_approval`, `waiting`, `blocked`, `wait_for_manual_error_handling` | Planned |
+| `passed`, `unstable` | Done |
+| `failed`, `timeout`, `reject` | Failed |
+| `cancelled` | Canceled |
+
+The system hook sends only `created` (start of execution) and the end statuses (`passed`, `failed`, `timeout`, `cancelled`). Intermediate statuses such as waiting for manual execution can only come from a workflow webhook notification.
+
+These deliveries return success and create no change:
+
+- Release plan deliveries (`object_kind` is `release_plan`). A release plan sends only at planning finished, execution started, and all jobs done; it does not send on cancel, rejection, or timeout, so a change built from it could stay open forever. Workflow tasks started by a release plan are still recorded, with a `release_plan` label
+- Test, code scan, and delivery version tasks (`task_type` is `test`, `scan`, or `delivery`)
+- Deliveries with any other `object_kind`
+
+## Change content
+---
+
+| Field | Content |
+|---|---|
+| Title | `<project display name>: <workflow display name> #<task id>`, for example `K8sYAML-1: Cache Test #300` |
+| Description | The remark entered when the task was run (`remark`), taken from the first delivery only |
+| Link | The task's detail page in Zadig (`detail_url`) |
+| Change time | The time of that state: the end time when present, otherwise the end time of the last finished stage, otherwise the start time |
+
+Labels are available for routing and for filtering the change list:
+
+| Label | Description |
+|---|---|
+| `project` | Project name (identifier) |
+| `workflow` | Workflow name (identifier) |
+| `task_id` | Task id |
+| `actor` | Name of the task creator |
+| `zadig_state` | The raw Zadig task status |
+| `release_plan` | Release plan name (when started by a release plan) |
+| `release_plan_id` | Release plan id (when started by a release plan) |
+
+## FAQ
+---
+
+<AccordionGroup>
+<Accordion title="Do workflows that only build and do not deploy create changes?">
+
+Yes. Zadig's delivery does not say whether a workflow contains deploy jobs, so every workflow task is recorded. Use the integration's **Routes** to match the `workflow` label for the workflows you care about.
+
+</Accordion>
+
+<Accordion title="Why don't I see waiting-for-approval or waiting-for-manual-execution statuses?">
+
+The system hook does not send intermediate statuses. To get them, add a Webhook notification to the workflow and select the matching notification events.
+
+</Accordion>
+
+<Accordion title="Does Zadig retry a failed delivery?">
+
+Zadig only logs a failed delivery and does not retry it. Flashduty deduplicates by change time and status, so a repeated delivery of the same status is recorded once.
+
+</Accordion>
+
+<Accordion title="The delivery returns an InvalidParameter error?">
+
+- `workflow is missing`, `workflow.project_name is missing`, `workflow.workflow_name is missing`, `workflow.task_id is missing`: the payload is incomplete; make sure it comes from Zadig's native webhook
+- `unknown workflow.status`: a task status that is not mapped yet appeared; contact us to add it
+
+</Accordion>
+</AccordionGroup>

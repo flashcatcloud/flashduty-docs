@@ -1,0 +1,131 @@
+---
+title: "apcupsd Alert Integration"
+description: "Push APC UPS on-battery, battery-failure and communication-loss events to the Flashduty Standard Alert Event integration through apcupsd event scripts; recovery events close the alerts."
+keywords: ["alert integration", "apcupsd", "APC UPS", "UPS", "power outage", "apccontrol", "standard alert event"]
+---
+
+When apcupsd detects a UPS state change it calls `apccontrol`, which runs the executable in `/etc/apcupsd` that has the same name as the event and passes the UPS name as the first argument. apcupsd has no native webhook, so an event script pushes the events to Flashduty in the [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard-alert) format: `onbattery` triggers an alert and `offbattery` recovers it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+Get an integration push URL in either of the two ways below. **Choose the Standard Alert Event integration type** in both, not apcupsd.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, go to **Channels** and open a channel
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+3. Select **Standard Alert Event** and click **Save**
+4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<integration key>`
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **Standard Alert Event** and enter an integration name
+3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure in apcupsd
+---
+
+### Step 1: Create the push script
+
+On the host that runs `apcupsd`, create `/etc/apcupsd/flashduty-notify.sh`, replace `URL` with the push URL copied above, and make it executable (`chmod +x`). The host needs `curl`.
+
+```sh
+#!/bin/sh
+# apcupsd event hook: forward a UPS event to a Flashduty Standard Alert Event integration.
+# Usage: flashduty-notify.sh <event> <ups-name>
+URL='https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY'
+
+EVENT="$1"
+UPS="${2:-unknown}"
+
+case "$EVENT" in
+  onbattery)  KEY=power;   STATUS=Warning;  TEXT="on battery" ;;
+  failing|timeout|loadlimit|runlimit)
+              KEY=power;   STATUS=Critical; TEXT="battery limit reached ($EVENT)" ;;
+  offbattery|mainsback)
+              KEY=power;   STATUS=Ok;       TEXT="utility power restored" ;;
+  commfailure) KEY=comm;   STATUS=Critical; TEXT="communication lost" ;;
+  commok)     KEY=comm;    STATUS=Ok;       TEXT="communication restored" ;;
+  changeme|emergency)
+              KEY=battery; STATUS=Critical; TEXT="battery failure ($EVENT)" ;;
+  battdetach) KEY=battconn; STATUS=Warning; TEXT="battery disconnected" ;;
+  battattach) KEY=battconn; STATUS=Ok;      TEXT="battery reconnected" ;;
+  *) exit 0 ;;
+esac
+
+esc() { printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
+JSON=$(printf '{"title_rule":"UPS %s: %s","event_status":"%s","alert_key":"apcupsd:%s:%s","description":"apcupsd event %s on UPS %s","labels":{"resource":"%s","check":"%s","apcupsd_event":"%s"}}' \
+  "$(esc "$UPS")" "$TEXT" "$STATUS" "$(esc "$UPS")" "$KEY" "$(esc "$EVENT")" "$(esc "$UPS")" "$(esc "$UPS")" "$KEY" "$(esc "$EVENT")")
+
+curl -fsS -m 10 -X POST -H 'Content-Type: application/json' -d "$JSON" "$URL" >/dev/null
+exit 0
+```
+
+### Step 2: Hook the script into the events
+
+apcupsd's customization mechanism (see the `apccontrol` manual): create an executable file named after the event in `/etc/apcupsd`. `apccontrol` runs it first when the event occurs; if it exits with status 0, `apccontrol` continues with the event's default action, and exit status 99 skips the default action. The script above always exits with 0, so it does not change apcupsd's default behavior (including the shutdown sequence).
+
+The command below creates one event file per event that only calls the push script. Events that already have a file in the directory (the `onbattery`, `offbattery`, `commfailure`, `commok` and `changeme` sample scripts installed by apcupsd are such files) are not overwritten; the command tells you to add the call line near the top of the file yourself:
+
+```sh
+for e in onbattery offbattery mainsback failing timeout loadlimit runlimit commfailure commok changeme emergency battdetach battattach; do
+  f="/etc/apcupsd/$e"
+  if [ -e "$f" ]; then
+    echo "$f already exists: add the line  /etc/apcupsd/flashduty-notify.sh $e \"\$1\"  near its top"
+  else
+    printf '#!/bin/sh\n/etc/apcupsd/flashduty-notify.sh %s "$1"\nexit 0\n' "$e" > "$f"
+    chmod +x "$f"
+  fi
+done
+```
+
+How events map to alerts:
+
+| apcupsd event | Meaning (apcupsd manual) | Severity | Alert Key |
+| :--- | :--- | :--- | :--- |
+| `onbattery` | After a power failure, the UPS is still on battery when `ONBATTERYDELAY` expires | Warning | `apcupsd:<UPS name>:power` |
+| `failing`, `timeout`, `loadlimit`, `runlimit` | Battery exhausted or a time, charge or remaining-runtime limit reached; a shutdown follows | Critical | `apcupsd:<UPS name>:power` |
+| `offbattery`, `mainsback` | Utility power is back | Recovery | `apcupsd:<UPS name>:power` |
+| `commfailure` | Communication with the UPS lost | Critical | `apcupsd:<UPS name>:comm` |
+| `commok` | Communication with the UPS re-established | Recovery | `apcupsd:<UPS name>:comm` |
+| `changeme`, `emergency` | Battery failure (utility power on but the battery is not working, or low battery while utility power is on) | Critical | `apcupsd:<UPS name>:battery` |
+| `battdetach` | The UPS battery was disconnected | Warning | `apcupsd:<UPS name>:battconn` |
+| `battattach` | The battery was reconnected | Recovery | `apcupsd:<UPS name>:battconn` |
+
+`powerout` (generated as soon as the UPS switches to battery) is not hooked: `onbattery` only fires when the outage lasts longer than `ONBATTERYDELAY`, which avoids alerts for momentary power dips.
+
+### Step 3: Verify
+
+Run the event scripts by hand on the host, first a trigger and then a recovery:
+
+```bash
+/etc/apcupsd/onbattery myups
+/etc/apcupsd/offbattery myups
+```
+
+In Flashduty you should first see the alert `UPS myups: on battery` and then see it recover. Running `onbattery` by hand also runs whatever else the event file already contains; to test only the push, run `/etc/apcupsd/flashduty-notify.sh onbattery myups` directly.
+
+## Recovery and deduplication
+---
+
+- `onbattery`, the failure events (`failing`, `timeout`, `loadlimit`, `runlimit`), `offbattery` and `mainsback` share the Alert Key `apcupsd:<UPS name>:power`: `onbattery` triggers the alert, a following failure event raises it to Critical, and it recovers when utility power returns
+- `commfailure` and `commok`, and `battdetach` and `battattach`, are paired
+- `changeme` and `emergency` have no matching recovery event. While a battery fault persists, apcupsd repeats `changeme` every 9 hours. After replacing the battery, close the alert manually in Flashduty, or enable the [auto-resolve timeout](/en/on-call/channel/create-edit) on the channel, starting with 24 hours; if the battery has not been replaced, the next `changeme` triggers the alert again
+- Alerts of several UPS units do not affect each other: the Alert Key contains the UPS name (the name configured in `apcupsd.conf`)
+
+## Troubleshooting
+---
+
+- **No alert arrives**: confirm the file named after the event exists in `/etc/apcupsd` and is executable, and that `URL` in `flashduty-notify.sh` is correct; run the event file by hand and check the output
+- **The alert does not recover**: confirm the recovery events (`offbattery`, `mainsback`, `commok`, `battattach`) are hooked too
+- **Flashduty returns a parameter error**: confirm `URL` is the full push URL, including `integration_key`
+
+For more details, see the apcupsd [apccontrol manual](https://svn.code.sf.net/p/apcupsd/svn/trunk/doc/apccontrol.8).

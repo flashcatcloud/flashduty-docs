@@ -7,7 +7,7 @@ keywords: ["告警集成", "Statuspal", "状态页", "Webhook", "服务监控"]
 通过 Statuspal 的出站 Webhook，把状态页上的变化同步到 Flashduty On-call：
 
 - 在 Statuspal 状态页上创建事件（Incident）时触发一条告警，事件结束或被删除时这条告警自动恢复
-- 开启了 Statuspal 内置监控的服务变为 `down` 时触发一条告警，变回 `up` 时这条告警自动恢复
+- 开启了 Statuspal 内置监控的服务变为 `down` 时触发一条告警。Statuspal 不一定会推送 `up`，请为这条告警开启协作空间的超时自动关闭（见下文）
 
 <div className="hide">
 
@@ -63,6 +63,8 @@ keywords: ["告警集成", "Statuspal", "状态页", "Webhook", "服务监控"]
 
 也可以用真实事件验证：在状态页上创建一个事件，Flashduty 中出现一条 Warning 告警；把事件标记为已解决（Resolve），这条告警恢复。
 
+服务监控告警：服务下线约 5 分钟后，Statuspal 推送 `down`，Flashduty 出现 Critical 告警。实测服务恢复后，Statuspal 的页面显示服务已恢复，但在 70 多分钟内没有推送 `up`，所以请开启协作空间的[超时自动关闭](/zh/on-call/channel/create-edit)（从故障触发开始计时），避免服务告警一直处于触发状态。
+
 </Step>
 </Steps>
 
@@ -76,7 +78,8 @@ Statuspal 推送 JSON，`event` 字段是事件类型，`data.object` 是对应�
 | 字段 | 说明 | 在 Flashduty 中的用途 |
 | :--- | :--- | :--- |
 | `data.object.id` | 事件 ID | Alert Key，标签 `incident_id` |
-| `data.object.l_title` | 各语言的事件标题 | 告警标题（优先取英文，没有英文时取第一个；两者都没有时取 `data.object.title`） |
+| `data.object.title` | 事件标题（字符串） | 告警标题 |
+| `data.object.l_title` | 各语言的事件标题（部分版本的推送带有） | 没有 `data.object.title` 时作为告警标题（优先取英文，没有英文时取第一个） |
 | `data.object.ends_at` | 事件结束时间 | 有值时恢复告警，标签 `ends_at` |
 | `data.object.starts_at` | 事件开始时间 | 标签 `starts_at` |
 | `data.object.service_ids` | 受影响的服务 ID | 标签 `service_ids`（逗号分隔） |
@@ -97,9 +100,9 @@ Statuspal 推送 JSON，`event` 字段是事件类型，`data.object` 是对应�
 ---
 
 - 事件：事件 ID。同一事件从创建、更新到结束的每次推送落在同一条告警上
-- 服务：服务 ID。同一服务从 `down` 到 `up` 的推送落在同一条告警上
+- 服务：服务 ID。同一服务的 `down` 和 `up` 推送落在同一条告警上，重复的 `down` 推送也合并到这条告警
 
-事件告警和服务告警互不影响：服务下线后 Statuspal 自动创建事件时，会同时产生一条服务告警和一条事件告警，可以用协作空间的[告警聚合](/zh/on-call/channel/noise-reduction)把它们合并到同一个故障。修改事件标题或服务名称不会改变 Alert Key。
+事件告警和服务告警互不影响：服务设置里开启 **Automatically create incident** 后，服务下线时 Statuspal 会创建一个事件（`incident.created`，标题形如 `Service API seems to be down`），它是一条独立的 Warning 告警，服务恢复后不会自动结束；需要在 Statuspal 中把该事件标记为已解决（`incident.updated`，`ends_at` 有值），这条告警才会恢复。服务下线时会同时产生一条服务告警和一条事件告警，可以用协作空间的[告警聚合](/zh/on-call/channel/noise-reduction)把它们合并到同一个故障。修改事件标题或服务名称不会改变 Alert Key。
 
 ## 状态和告警等级
 ---
@@ -112,7 +115,7 @@ Statuspal 的推送内容不包含事件的类型（major、minor）或严重程
 | `incident.updated`，`ends_at` 有值 | 恢复 |
 | `incident.deleted` | 恢复 |
 | `service.monitored_status.updated`，`down` | 触发告警，Critical |
-| `service.monitored_status.updated`，`up` | 恢复 |
+| `service.monitored_status.updated`，`up` | 恢复（Statuspal 不一定会推送，见下方说明） |
 | `monitored_status` 为其他值 | 返回参数错误 |
 | 其他事件类型 | 返回成功，不生成告警 |
 
@@ -147,4 +150,5 @@ Statuspal 的 Webhook 不推送事件类型和严重程度。如需按服务调�
 - **Send test request 显示错误**：确认推送地址完整（包含 `integration_key`），且集成没有被删除
 - **Flashduty 返回参数错误**：推送内容缺少 `data.object.id`，或 `monitored_status` 不是 `up`、`down`
 - **事件告警没有恢复**：确认事件已在 Statuspal 中标记为已解决，且 Webhook 勾选了 `incident.updated`
-- **服务告警没有恢复**：确认 Webhook 勾选了 `service.monitored_status.updated`，且服务监控已恢复为 `up`
+- **服务告警没有恢复**：确认 Webhook 勾选了 `service.monitored_status.updated`。服务恢复后 Statuspal 可能不会推送 `up`，请开启协作空间的超时自动关闭
+- **服务下线时自动创建的事件告警没有恢复**：它不会随服务恢复自动结束，需要在 Statuspal 中把事件标记为已解决

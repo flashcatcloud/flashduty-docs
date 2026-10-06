@@ -1,0 +1,135 @@
+---
+title: "Fivetran alert integration"
+description: "Send failed syncs, failed connection tests, and their recoveries from Fivetran to Flashduty On-call through a webhook."
+keywords: ["alert integration", "Fivetran", "data pipeline", "sync failure", "webhook"]
+---
+
+Use Fivetran webhooks to send sync results and connection test results of a connection to Flashduty On-call. Each connection maps to two kinds of alerts: a sync alert and a connection test alert. A failed sync triggers the sync alert, and the next successful sync recovers it. A failed connection test triggers the connection test alert, and a passing connection test recovers it.
+
+<div className="hide">
+
+## In Flashduty On-call
+---
+
+You can obtain an integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+3. Select **Fivetran**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, select **Integration Center → Alert Events**
+2. Select **Fivetran** and enter an integration name
+3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## In Fivetran
+---
+
+Fivetran webhooks are created through the [Webhook REST API](https://fivetran.com/docs/developer-resources/webhooks), authenticated with a Fivetran API key and secret using Basic authentication. A webhook is either account-level (covers every connection in the account) or group-level (covers the connections in one group).
+
+<Steps>
+<Step title="Create the webhook">
+
+Replace `<push URL>` with the full Flashduty push URL (including `integration_key`) and `<API_KEY>:<API_SECRET>` with your Fivetran API credentials. Account-level webhook:
+
+```bash
+curl -X POST https://api.fivetran.com/v1/webhooks/account \
+  -u '<API_KEY>:<API_SECRET>' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "url": "<push URL>",
+    "events": ["sync_end", "connection_failure", "connection_successful"],
+    "active": true
+  }'
+```
+
+To cover one group only, use `POST https://api.fivetran.com/v1/webhooks/group/<groupId>` with the same body.
+
+Fivetran requires an HTTPS webhook URL. When you create or activate a webhook, Fivetran first sends one test request (`event` is `test_event`) to the URL, and the creation fails if the response is not 2xx.
+
+</Step>
+
+<Step title="Choose events">
+
+| Fivetran event | Effect in Flashduty |
+| :--- | :--- |
+| `sync_end` | A sync finished: a failure triggers the sync alert, a success recovers it |
+| `connection_failure` | A connection test failed; triggers the connection test alert |
+| `connection_successful` | A connection test passed; recovers the connection test alert |
+
+Subscribe to both `sync_end` and `connection_successful`, or alerts will not recover on their own. For `sync_start`, transformation events, and management events such as `create_connector` and `pause_connector`, Flashduty returns success without creating an alert, so there is no need to subscribe.
+
+<Warning>
+Fivetran has deprecated the `status` event. Do not subscribe to it.
+</Warning>
+
+</Step>
+
+<Step title="Verify the lifecycle">
+
+Make a connection's sync fail in Fivetran (for example, temporarily revoke the source credentials and trigger a sync) and confirm that Flashduty receives an active alert. Restore the credentials, run a successful sync, and confirm the alert recovers.
+
+Fivetran's **Test a Webhook** call (`POST /v1/webhooks/{webhookId}/test` with body `{"event": "sync_end"}`) and the test request sent when a webhook is created or activated both post a dummy event that carries only `event`, `created`, `connector_type`, `connector_id` and `destination_group_id`, with `connector_id` `_connector_1`, `connector_type` `_connector_type` and `destination_group_id` `_destination_1`. When all three match, Flashduty opens a separate Info alert (it never touches a real connection's alert; close it by hand); if any one differs, the delivery is handled as a real event.
+
+</Step>
+</Steps>
+
+## Alert Key
+---
+
+Flashduty uses the connection ID (`connector_id` in the webhook) plus the event family (sync or connection test) as the Alert Key. Fivetran documents `connector_id` as "the ID of the connection for which the webhooks are sent", and every sync and connection test of one connection carries the same value. Sync and connection test use separate Alert Keys, so a successful sync does not close a connection test alert that is still unresolved.
+
+Changes in the per-sync `sync_id`, the failure reason, or the time do not change the Alert Key. A sync or connection test event without `connector_id` is rejected.
+
+## Status and severity
+---
+
+| Event | `data.status` | Status | Flashduty severity |
+| :--- | :--- | :--- | :--- |
+| `sync_end` | `FAILURE` | Trigger | Critical |
+| `sync_end` | `FAILURE_WITH_TASK` (an error that needs user action) | Trigger | Warning |
+| `sync_end` | `RESCHEDULED`, `isRoutine` is not `true` | Trigger | Warning |
+| `sync_end` | `RESCHEDULED`, `isRoutine` is `true` (expected reschedule) | Ignored | - |
+| `sync_end` | `SUCCESSFUL` | Recovery | Info |
+| `sync_end` | `CANCELED` or any other value | Ignored | - |
+| `connection_failure` | - | Trigger | Critical |
+| `connection_successful` | - | Recovery | Info |
+
+For an ignored delivery, Flashduty returns success without creating an alert or closing an existing one.
+
+Each `sync_end` is an independent delivery with no progress updates: a triggered alert stays active until the next `SUCCESSFUL` sync of the same connection. If the connection is paused or deleted, the triggered alert does not recover on its own. Close it manually in Flashduty, or configure automatic closing after a timeout for the channel.
+
+## Labels
+---
+
+| Label | Source |
+| :--- | :--- |
+| `connector_id` | Connection ID, part of the Alert Key |
+| `connector_name` | Connection name, also used as `check` |
+| `connector_type` | Connector type, such as `postgres` |
+| `destination_group_id` | Destination group ID |
+| `sync_id` | ID of this sync |
+| `sync_status` | `data.status` of `sync_end` |
+| `sync_type` | `HISTORICAL` or `INCREMENTAL` |
+| `task_type` | Error type behind a failure or reschedule (for example `reconnect`) |
+| `test_name` | Name of the failed connection test |
+| `event` | Event name of this delivery |
+
+The alert description comes from the failure reason (`data.reason`) or the connection test message (`data.message`).
+
+## Troubleshooting
+---
+
+- **Fivetran returns 400 when creating the webhook**: make sure the URL is HTTPS and reachable by Fivetran. Fivetran sends a test request on both creation and activation, and it must return 2xx. Flashduty answers that test request with 200 and opens a separate Info alert as described above
+- **An alert does not recover**: make sure the webhook subscribes to `sync_end` and `connection_successful`. An expected reschedule and `CANCELED` do not produce a recovery
+- **The webhook was deactivated**: Fivetran deactivates a webhook that returns only non-2xx responses for more than three days. Fix the URL, then re-enable it through the API with `"active": true`
+- **The same event arrives more than once**: Fivetran retries a failed delivery up to five times within 24 hours, and events with the same Alert Key are merged
+
+When creating a webhook you can set a `secret` so Fivetran signs the payload with HMAC-SHA256. Flashduty neither requires nor verifies the signature. For field details, see [Fivetran Webhooks](https://fivetran.com/docs/developer-resources/webhooks) and [Fivetran Logs](https://fivetran.com/docs/logs).
