@@ -595,6 +595,33 @@ flashduty monit datasource-delete --id <datasource-id>  # 删除数据源（引�
 - `kafka`：`sasl_mechanism`（`none` 默认 / `plain` / `scram-sha-256` / `scram-sha-512`，后三者需用户名与密码）、`username` / `password`、`timeout_ms`（默认 5000）、TLS 字段（`tls_min_version` 默认 1.2，最高 1.3）。
 - 密码与 `kafka.tls_key` 支持 `${env:NAME}` 引用（在 Edge 上解析）；字面值不会出现在响应中，仅 `${env:...}` 引用会回显。**更新时省略这些字段以保留已存密钥，显式传空字符串表示清除**。
 
+#### 仪表盘与规则分组（dashboard-* / folder-list）
+
+`monit dashboard-*` 命令族管理监控仪表盘（由 OpenAPI 生成命令提供）。仪表盘本身是一份 `dashboard.v1` 文档，创建与更新时通过 `--data` 传入 `definition`；`update` / `delete` / `move` / `restore` 都要求 `--expected-revision`——传入的版本不是当前版本时以 `DashboardRevisionConflict` 拒绝，需要重新读取后再提交。
+
+```bash
+flashduty monit folder-list                                       # 列出全部监控规则分组，用于取 folder-id（返回顶层数组，用 jq '.[]'）
+flashduty monit dashboard-list <folder-id>                        # 列出某个分组下的仪表盘（分页信封，用 jq '.items[]'）
+flashduty monit dashboard-search --query "支付"                    # 按标题与描述搜索仪表盘（至少一个词）
+flashduty monit dashboard-get <dashboard-id>                      # 读取仪表盘详情，含 definition 与当前 revision
+flashduty monit dashboard-outline <dashboard-id>                  # 读取页签 / 分组 / 面板大纲；--target-id 只看包含该 ID 的分支
+flashduty monit dashboard-create [flags]                          # 新建：--dashboard-id（UUIDv7）、--folder-id、--schema-version、--data 里的 definition
+flashduty monit dashboard-update <dashboard-id> [flags]           # 更新，可用 --message 写一条版本说明
+flashduty monit dashboard-move [flags]                            # 移动到其它分组，不改 definition
+flashduty monit dashboard-delete <dashboard-id> [flags]           # 删除：移入回收站，不是物理删除
+flashduty monit dashboard-trash-list                              # 列出回收站中的仪表盘（保留 30 天）
+flashduty monit dashboard-restore <dashboard-id> [flags]          # 从回收站恢复；省略 --folder-id 还原到原分组，原分组已不可写时必须显式指定
+flashduty monit dashboard-revisions-list <dashboard-id>           # 列出版本历史
+flashduty monit dashboard-revisions-get <dashboard-id> --revision <n>   # 读取某个版本保存的 definition
+flashduty monit dashboard-panel-run [flags]                       # 运行单个面板：--dashboard-id、--panel-id，time 与 variables 走 --data
+flashduty monit dashboard-panel-preview                           # 预览尚未保存的草稿面板
+flashduty monit dashboard-runtime-variables-resolve <dashboard-id>      # 解析仪表盘变量（返回候选与生效选择）
+flashduty monit dashboard-runtime-variables-preview               # 预览草稿变量
+flashduty monit dashboard-runtime-queries-resolve <panel-id> [<id2>...]  # 解析面板查询：变量替换后的表达式与绑定到的数据源
+```
+
+面板运行时与变量解析的时间窗口、变量选择都以 JSON 对象放在 `--data` 里（时间用 `from_ms` / `to_ms` 的毫秒时间戳）。`dashboard-panel-preview` 与 `dashboard-runtime-variables-preview` 需要一个 `context`：`kind: existing` 配 `dashboard_id` 指向已存仪表盘，`kind: new` 配 `folder_id` 指向尚未落库的分组。
+
 #### `prometheus-api-v1-label-{label_name}-values` — 查询 Prometheus 标签值
 
 `GET /monit/prometheus/api/v1/label/{label_name}/values`（operationId `monit-prometheus-read-label-values`）带路径参数，因此不参与代码生成，由手工实现命令提供。命令名沿用生成命令的路径派生写法（`monit` 组 + 路径剩余段连字符拼接），因此在 `flashduty monit --help` 下可见、但无法按直觉猜到，需要按本节的写法使用：
@@ -691,14 +718,14 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。CLI 生成器读取的 OpenAPI 规范含 **338 个 API 操作**，CLI 为其中 **334 个** 生成对应命令，其余 4 个以手工实现命令提供——流式导出的 `session-read-export`（`session export`）、multipart 表单上传的 `mapping-data-write-upload` 与 `skill-write-upload`（`enrichment mapping-data-upload`、`safari skill-upload`）、带路径参数的 `monit-prometheus-read-label-values`（`monit prometheus-api-v1-label-{label_name}-values`，见下文「查询 Prometheus 标签值」）——并与生成命令一并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。CLI 生成器读取的 OpenAPI 规范含 **365 个 API 操作**，CLI 为其中 **361 个** 生成对应命令，其余 4 个以手工实现命令提供——流式导出的 `session-read-export`（`session export`）、multipart 表单上传的 `mapping-data-write-upload` 与 `skill-write-upload`（`enrichment mapping-data-upload`、`safari skill-upload`）、带路径参数的 `monit-prometheus-read-label-values`（`monit prometheus-api-v1-label-{label_name}-values`，见下文「查询 Prometheus 标签值」）——并与生成命令一并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
 - **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
 - **监控与 RUM**：monit、rum、sourcemap
-- **集成与 Webhook**：datasource（IM 集成）、webhook（integrations）
+- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换）、webhook（integrations）
 
 这些生成命令的叶子名称采用「资源-动作」形式（如 `flashduty safari a2a-agent-get`、`flashduty safari session-list`），其入参与返回字段直接映射到对应 API。鼓励用 `flashduty <资源> --help` 逐层探索：
 
