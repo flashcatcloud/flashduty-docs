@@ -38,9 +38,24 @@ Flashduty MCP Server 提供三种部署方式，您可以根据 MCP 客户端的
 
 <Tabs>
   <Tab title="远程服务（推荐）">
-    无需本地安装，直接连接官方远程实例 `https://mcp.flashcat.cloud/mcp`，使用 `Authorization: Bearer` 携带您的 APP Key 进行认证。这是最快的接入方式。
+    无需本地安装，直接连接官方远程实例 `https://mcp.flashcat.cloud/mcp`，这是最快的接入方式。远程服务支持两种认证方式，按客户端能力二选一：
 
-    以 Cursor 为例，在 MCP 配置中添加：
+    - **OAuth 登录**：客户端支持 MCP OAuth（如 claude.ai、Claude Desktop、ChatGPT connectors）时，新建一个自定义连接器，地址填 `https://mcp.flashcat.cloud/mcp`，不要填写任何凭据。客户端会自动发现 Flashduty 授权服务器并在浏览器打开授权页，您完成授权后即以自己的身份调用 Flashduty 开放 API，权限与 APP Key 相同。
+    - **APP Key**：客户端不支持 OAuth 时，改用 `Authorization: Bearer` 请求头携带您的 APP Key。
+
+    OAuth 登录只需要一个地址：
+
+    ```json
+    {
+      "mcpServers": {
+        "flashduty": {
+          "url": "https://mcp.flashcat.cloud/mcp"
+        }
+      }
+    }
+    ```
+
+    使用 APP Key 时，以 Cursor 为例，在 MCP 配置中添加：
 
     ```json
     {
@@ -121,13 +136,28 @@ Flashduty MCP Server 提供三种部署方式，您可以根据 MCP 客户端的
 | 项目 | 说明 |
 | --- | --- |
 | 认证（本地） | 通过 `FLASHDUTY_APP_KEY` 环境变量或 `--app-key` 命令行参数提供 Flashduty APP Key。 |
-| 认证（远程） | 通过请求头 `Authorization: Bearer <your_flashduty_app_key>` 提供 APP Key。 |
+| 认证（远程，OAuth） | 支持 MCP OAuth 的客户端无需提供凭据，在浏览器完成 Flashduty 授权即可。OAuth 只适用于远程服务，没有对应的环境变量或命令行参数。 |
+| 认证（远程，APP Key） | 通过请求头 `Authorization: Bearer <your_flashduty_app_key>` 提供 APP Key。 |
 | Streamable HTTP | `flashduty-mcp-server http`，端点为 `POST /mcp`。官方远程实例为 `https://mcp.flashcat.cloud/mcp`。 |
 | stdio | `flashduty-mcp-server stdio`，用于 Cursor、Claude Desktop 等本地客户端。 |
 
 <Warning>
   服务端不支持旧版独立 SSE 传输（单独的 `GET /sse` 端点），对 `GET` 请求会返回 `405 Method Not Allowed`。Streamable HTTP 已按 MCP 规范在 `POST` 上完成流式响应，请直接使用它；若客户端仅支持旧版 SSE，请升级客户端或在本地改用 stdio。
 </Warning>
+
+### OAuth 授权与发现
+
+远程服务同时接受 MCP OAuth 访问令牌与 APP Key：凭据以 `oauth:` 开头时按访问令牌处理，其余 Bearer 凭据一律按 APP Key 处理，两者权限相同。
+
+未携带任何凭据的请求会返回 `401`，并在 `WWW-Authenticate` 响应头中给出受保护资源元数据地址 `Bearer resource_metadata="<请求源>/.well-known/oauth-protected-resource<MCP 路径>"`。客户端据此发现元数据、进而发起 OAuth 授权流程。服务端提供以下元数据地址：
+
+| 元数据地址 | 说明 |
+| --- | --- |
+| `/.well-known/oauth-protected-resource` | 根路径，描述 `/mcp`。 |
+| `/.well-known/oauth-protected-resource/mcp` | 描述 `/mcp`。 |
+| `/.well-known/oauth-protected-resource/flashduty` | 描述兼容保留的 `/flashduty` 路径。 |
+
+元数据中的 `resource` 是请求源加上对应路径，`authorization_servers` 是 Flashduty API 地址，即本地通过 `FLASHDUTY_BASE_URL` 或 `--base-url` 配置的地址（默认 `https://api.flashcat.cloud`）——该地址同时充当授权服务器。访问令牌只在签发它的那个 API 地址上有效，因此远程 URL 上的 `base_url` 对 OAuth 令牌不生效，对 APP Key 仍然生效。
 
 ## 配置项
 
@@ -184,7 +214,7 @@ docker run -i --rm \
 
 ### 远程服务配置
 
-使用官方远程实例时，可在 URL 上追加查询参数动态配置工具集与只读模式：
+使用官方远程实例时，可在 URL 上追加查询参数动态配置工具集、只读模式与 Flashduty API 地址：
 
 ```json
 {
@@ -198,6 +228,12 @@ docker run -i --rm \
   }
 }
 ```
+
+| 查询参数 | 说明 |
+| --- | --- |
+| `toolsets` | 以逗号分隔的启用工具集列表（如 `incidents,users,channels`）。 |
+| `read_only` | 设为 `true` 开启只读模式。 |
+| `base_url` | 覆盖 Flashduty API 地址，只对 APP Key 请求生效；OAuth 访问令牌只在签发它的 API 地址上有效，会忽略该参数。 |
 
 ### 输出格式（TOON）
 

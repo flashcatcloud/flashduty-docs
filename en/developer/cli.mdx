@@ -42,6 +42,9 @@ Read the latest version from the [CDN latest version pointer](https://static.fla
 | `FLASHDUTY_INSTALL_DIR` | Custom install directory | `/usr/local/bin` (shell), `~\.flashduty\bin` (PowerShell) |
 | `MIRROR_URL` | Override the release asset download mirror prefix used by the installer script; must use `https://` | `https://static.flashcat.cloud/flashduty-cli` |
 | `FLASHDUTY_UPDATE_BASE_URL` | Override the base URL used by `flashduty update` and the automatic update check | `https://static.flashcat.cloud/flashduty-cli` |
+| `INSTALLED_NAME` | Command name to install as, e.g. `fduty` | `flashduty` |
+
+A copy installed under another command name uses that name in help output, error messages, and shell completion scripts; `flashduty update` replaces the running binary in place, under its own name and directory, instead of installing a default-named copy elsewhere.
 
 ## Authentication
 
@@ -60,6 +63,17 @@ The CLI resolves credentials in the following order (highest priority first):
 1. `--app-key` command-line flag (hidden, for scripting)
 2. `FLASHDUTY_APP_KEY` environment variable
 3. Config file `~/.flashduty/config.yaml` (written by `flashduty login`)
+
+### Environment variables
+
+The CLI reads the following environment variables at runtime (variables understood by the installer scripts are listed above under "Installer options"):
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FLASHDUTY_APP_KEY` | APP Key, overriding `app_key` in the config file | - |
+| `FLASHDUTY_BASE_URL` | API endpoint, overriding `base_url` in the config file | `https://api.flashcat.cloud` |
+| `FLASHDUTY_UPDATE_BASE_URL` | Override the base URL used by `flashduty update` and the automatic update check | `https://static.flashcat.cloud/flashduty-cli` |
+| `FLASHDUTY_NO_UPDATE_CHECK` | Set to `1` to disable the daily background update check; the CLI also skips the check in CI environments (`CI`, `GITHUB_ACTIONS`, `JENKINS_URL`, `GITLAB_CI`) | - |
 
 ### Config file
 
@@ -104,6 +118,7 @@ flashduty incident merge <target-id> --source <ids> # Merge incidents into a tar
 flashduty incident timeline <id>         # View an incident timeline
 flashduty incident alerts <id>           # List alerts associated with an incident
 flashduty incident similar <id>          # Find similar historical incidents
+flashduty incident feed <id> [flags]    # View an incident's paginated feed (timeline entries)
 ```
 
 Common filter flags for `incident list`:
@@ -133,6 +148,8 @@ Common filter flags for `incident list`:
 | `--page` | Page number | `1` |
 
 Time format examples: `5m`, `1h`, `24h`, `168h`, `2026-04-01`, `2026-04-01 10:00:00`, `1712000000`.
+
+`incident feed <id>` reads an incident's feed (timeline entries) page by page: `--asc` puts the oldest entries first (newest first by default), `--types` filters by comma-separated entry types (e.g. `i_comm,i_assign`; the `type` field of each entry gives the actual type), and `--limit` (max 100) and `--page` paginate the result.
 
 #### Create, update, and merge
 
@@ -201,6 +218,8 @@ flashduty incident comment-type-update <comment-type-id>      # Update name/colo
 flashduty incident comment-type-delete <comment-type-id>      # Delete
 flashduty incident comment-type-reorder <id> [<id2>...]       # Reorder — pass every comment type ID in the account, in the desired order
 ```
+
+To tag a comment with an account-level comment type, pass `--comment-type-id`: `flashduty incident comment <id> [<id2>...] --comment-file <path> --comment-type-id <comment-type-id>`. The comment type ID comes from `flashduty incident comment-type-list`; omit the flag to write the comment without a type.
 
 ### change — Change records
 
@@ -668,6 +687,8 @@ flashduty alert-event list [flags]  # List alert events (default: last 1h)
 
 Common filter flags for both `list` commands: `--severity` (`Critical,Warning,Info`), `--channel` (comma-separated channel IDs), `--integration` (comma-separated integration IDs), `--since`/`--until`, `--limit` (max 100), `--page`. `alert-event list` also takes `--integration-type`, which filters by comma-separated **plugin keys** (e.g. `AliCloud,Prometheus`) — note these are plugin keys, not integration IDs; use `--integration` to filter by integration ID.
 
+`alert list` also takes `--alert-ids` (comma-separated alert IDs), `--alert-keys` (comma-separated alert deduplication keys), `--asc` (sort oldest first by start time; newest first by default), and `--by-updated-at` (apply `--since`/`--until` to the last-updated time instead of the start time). `alert-event list` also supports `--asc` (oldest first; newest first by default), but has no `--by-updated-at` counterpart.
+
 ### automation — AI SRE automation rules
 
 The `automation` command group manages AI SRE automation rules — create, query, update, delete, run history, and triggering. See [Automations](/en/ai-sre/automations) for the console workflow.
@@ -693,18 +714,19 @@ Common `create` flags:
 | `--at` | `HH:MM` local time (in the rule's timezone); for `hourly` only the minute is used (default 0), for `daily`/`weekly` both hour and minute (default 09:00) |
 | `--weekday` | Weekday for `weekly`: `sun`–`sat` or `0`–`7` (`0` and `7` both mean Sunday; defaults to Monday) |
 | `--cron-expr` | Exact 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers |
+| `--timezone` | IANA timezone name (e.g. `Asia/Shanghai`) that `--at` and `--cron-expr` are interpreted in; when omitted the server uses the caller's member timezone, then the account timezone, then `Asia/Shanghai`. A timezone the server cannot load is rejected |
 | `--disabled` | Create the rule disabled (enabled by default) |
 | `--schedule-enabled` | Whether the schedule trigger is enabled (default `true`) |
 | `--http-post-trigger` | Create and enable an HTTP POST trigger; when passed alone without any schedule flags, the CLI writes a placeholder cron and disables the schedule trigger |
 | `--prompt` / `--prompt-file` | Task prompt, exactly one required; `--prompt-file` reads from a file (`-` for stdin) |
 | `--environment-kind` / `--environment-id` | Runtime environment: `cloud` or `byoc` (`byoc` requires `--environment-id`); empty means automatic |
 
-`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope is immutable after creation, so `update` exposes no scope flag.
+`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope is immutable after creation, so `update` exposes no scope flag.
 
 `runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (`schedule`/`debug`/`http_post`), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
 
 <Warning>
-**Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**, which defaults at creation to the caller's member timezone, falling back to the account timezone when the member has none. Pass the user's local time directly — do **not** convert it to UTC. Neither `create` nor `update` has a `--timezone` flag: to pin a different timezone at creation, use the generated command `flashduty safari automation-rule-create --timezone`; a created rule's timezone cannot be changed via `update`.
+**Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**. When `create` omits `--timezone`, the server picks the rule's timezone: the caller's member timezone, then the account timezone, then `Asia/Shanghai`. Pass an IANA name to pin another one (e.g. `--timezone Asia/Shanghai`); a timezone the server cannot load is rejected. When `update` omits `--timezone`, the stored timezone stays, including a legacy empty string; an explicit empty `--timezone ""` is sent and stored as UTC, not the account default. Pass the user's local time directly — do **not** convert it to UTC. `update` recalculates the next fire immediately, so read `schedule_next_fire_at_ms` from the response.
 </Warning>
 
 ### insight — Insight queries

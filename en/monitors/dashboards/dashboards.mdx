@@ -96,7 +96,7 @@ The **query type** follows from the data source and the visualization and is not
 
 | Setting | Description |
 |---------|-------------|
-| **Query expression** | Supports `${variable}` templates; PromQL data sources prompt for a PromQL query, other types prompt by type |
+| **Query expression** | Prometheus and Loki panels support `${variable}` templates (the braces are optional — `$variable` works too) as well as built-in time variables such as `$__interval`, see [Built-in time variables](#built-in-time-variables); MySQL panels support no variable interpolation; PromQL data sources prompt for a PromQL query, other types prompt by type |
 | **Multiple queries** | Queries are labelled `A`~`Z`; only time series support more than one. Switching to any other visualization forces you to pick which one to keep, and the rest are removed |
 | **Series name** | Shown for time series only. Sets the display name used by the legend, tooltip and data links; `{{instance}}` is replaced with that series' `instance` label value, and leaving it empty shows all labels. If both the legend and the tooltip are hidden, the editor tells you the setting is invisible |
 | **Min step** | Shown for Prometheus range queries only. A lower bound for the query step, 15s by default (matching Prometheus' default scrape interval); it is dropped when you switch to a data source or query type that does not accept it |
@@ -121,6 +121,29 @@ Durations are always written as a number plus a unit (`s` / `m` / `h` / `d` / `w
 
 Previewing happens live inside the panel editor: editing the query itself runs it on Enter (or `⌘/Ctrl + Enter`), while changing the datasource, visualization or time re-runs it automatically; display settings (unit, thresholds, alias and so on) apply immediately without re-querying. **Saving does not require a successful preview.** On a new dashboard with no folder selected yet, the preview area shows "Select a folder before previewing".
 
+### Built-in time variables
+
+A panel query expression can reference built-in time variables directly; they render the seconds computed from that panel's own execution window and step, so `$__range` spares you from maintaining a hand-written variable for how long the window is.
+
+| Variable | What it renders |
+|----------|-----------------|
+| `$__interval` | The panel's query step in seconds, such as `30s`; the step follows from the time range and the **Max data points**, bounded by the **Min step** |
+| `$__rate_interval` | The larger of `step + 15s` and `60s` (15s is the assumed scrape interval) — the value to hand straight to `rate()` |
+| `$__range` | The length of the panel's execution window in seconds, e.g. `86400s` for a 24-hour window |
+| `$__auto` | In a Loki instant query, the duration of the whole window in the largest unit that divides it — `1h`, `5m`, `90s` or `90500ms`; in a Loki range query it is the step in seconds, like `$__interval` |
+
+The reference syntax matches variables: both `${__interval}` and `$__interval` are accepted (the braces are optional), but a built-in takes no formatter — `${__interval:raw}` and the like are rejected.
+
+Which ones you can use follows from the datasource and the query type; every combination outside the table below (MySQL included) is unavailable, and such a definition fails validation on save — the dialog lists the offending JSON Pointer and the reason — while the panel itself queries nothing at run time:
+
+| Datasource · query type | Available built-in time variables |
+|-------------------------|-----------------------------------|
+| Prometheus · range | `$__interval`, `$__rate_interval`, `$__range` |
+| Loki · range | `$__auto`, `$__interval`, `$__range` |
+| Loki · instant | `$__auto`, `$__range` |
+
+Built-in time variables exist only in a **panel query expression**: neither a template variable's candidate query nor a panel query's `args` can resolve them, and the definition is rejected on save.
+
 ## Template variables
 
 The variable bar sits above the canvas and uses the same filter control as the rest of the product: each variable is a permanent filter field, single- or multi-select according to its configuration. In edit mode the bar has a **Manage variables** button at the end, opening a drawer where every variable can be added, edited or deleted.
@@ -133,9 +156,9 @@ There are three **variable kinds**:
 | **Custom** | A hand-written candidate list | Options (one per line, `text=value` or a bare value) |
 | **Query** | Candidates fetched by querying a data source | Datasource (fixed or a datasource variable) + query definition + when to refresh candidates |
 
-A **Query variable's candidate query** has three flavours by data source type: Prometheus needs `label` (required) and `metric` (optional) plus any number of **label filters** using `= / != / =~ / !~`; SQL data sources take an expression and a value field; Loki takes an expression and a field. **Preview candidates** in the drawer fetches candidates once with the current configuration to confirm the datasource and query are right, and shows the failure reason next to the variable when they are not.
+A **Query variable's candidate query** has three flavours by data source type: Prometheus needs `label` (required) and `metric` (optional) plus any number of **label filters** using `= / != / =~ / !~`; SQL data sources take an expression and a value field; Loki takes an expression and a field, where the field must be a stream label name (`^[A-Za-z_][A-Za-z0-9_]*$` — dotted or JSON field names do not work), and the candidates are that label's values on the streams the expression selects **within the dashboard's time range**, with an empty expression meaning every stream; the expression may reference dashboard variables but not built-in time variables (those exist only in panel query expressions, see [Built-in time variables](#built-in-time-variables)). **Preview candidates** in the drawer fetches candidates once with the current configuration to confirm the datasource and query are right, and shows the failure reason next to the variable when they are not.
 
-**Names and references**: a variable name must match `^[A-Za-z_][A-Za-z0-9_]{0,63}$`, and a name already in use is rejected. Renaming is an atomic frontend refactor — every `${oldName}` reference (query expressions, query args, datasource variable references and the variable's own candidate query) is rewritten, and the editor warns "N references will be rewritten" before doing it. A variable that is still referenced cannot be deleted: "Variable x is referenced in N places; remove the references first." A dashboard holds at most 20 variables.
+**Names and references**: a variable name must match `^[A-Za-z_][A-Za-z0-9_]{0,63}$` and must not start with `__` (that prefix is reserved for built-in time variables), and a name already in use is rejected. Renaming is an atomic frontend refactor — every `${oldName}` reference (query expressions, query args, datasource variable references and the variable's own candidate query) is rewritten, and the editor warns "N references will be rewritten" before doing it. A variable that is still referenced cannot be deleted: "Variable x is referenced in N places; remove the references first." A dashboard holds at most 20 variables.
 
 **Selection mode and the 「All」 option**:
 
@@ -151,6 +174,15 @@ The URL is the single source of truth for variable selections: a single value is
 
 - The **time range** comes from the URL's `from` / `to`, either absolute milliseconds or a `now-*` relative expression; with no URL parameters the stored **default time range** applies (the last hour for a new dashboard, and one of eight presets — 15m / 30m / 1h / 3h / 6h / 12h / 24h / 7d — when saved, always ending at "now").
 - **Auto-refresh**: the interval stored on the dashboard is one of Off / 30s / 1m / 5m; the viewer's refresh picker offers finer steps (Off / 10s / 30s / 1m / 5m / 15m / 30m / 1h). Picking one writes the `refresh` URL parameter and refreshes immediately rather than waiting a full interval. Relative ranges roll forward with "now" on each refresh, and the refresh button on the left runs a manual refresh at any time, spinning while queries are still running.
+- **Display time zone**: the bottom of the time picker's dialog holds a time zone row — the current zone (city plus abbreviation) and its UTC offset on the left, and a **Change time zone** button on the right that opens a searchable city list (search by city name, abbreviation or IANA name), grouped by continent, whose first group **Common** holds the three special entries in the table below. It applies to dashboards only (viewer, edit mode, panel editor and panel fullscreen) and decides how the time picker displays and parses times, the time series x-axis and tooltip times, and the time range label; what actually renders in the zone is absolute instants, while a relative range (such as the last hour) is a duration and does not shift with the zone. When the display zone differs from your personal effective zone, the time picker carries that zone's abbreviation as a reminder.
+
+| Common entry | Meaning |
+|--------------|---------|
+| **Default** | Follow your personal effective time zone |
+| **Browser time** | Follow the current browser's time zone |
+| **Coordinated Universal Time** | Always UTC |
+
+The choice is stored in this browser (the localStorage key `monit.dashboards.timeZone`) and reused when you come back; picking **Default** clears that record and returns to your personal effective zone.
 
 ## Period-over-period comparison
 
