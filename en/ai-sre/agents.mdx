@@ -20,44 +20,19 @@ sidebarTitle: Agent
   </Card>
 </CardGroup>
 
-Delegation does not make you wait: after AI SRE hands a task to a remote agent, the conversation continues immediately, so you can keep working or delegate several tasks at once. When the remote agent finishes, its result appears in the conversation as a new message. Each A2A delegation appears in the conversation stream as a **task card** carrying an `A2A` badge, showing the remote agent name, task intent, run status (initializing / in progress / awaiting input / awaiting authorization / completed / failed (including orphaned) / interrupted / killed), and usage metrics such as tool call count, tokens, and elapsed time. Click the card to view the full delegation trace in the right-hand panel.
+Delegation does not make you wait: after AI SRE hands a task to a remote agent, the conversation continues immediately, so you can keep working or delegate several tasks at once. When the remote agent finishes, its result appears in the conversation as a new message.
+
+Each A2A delegation appears in the conversation stream as a **task card** carrying an `A2A` badge, showing the remote agent name, task intent, run status (initializing / in progress / awaiting input / awaiting authorization / completed / failed (including orphaned) / interrupted / killed), and usage metrics such as tool call count, tokens, and elapsed time. Click the card to view the full delegation trace in the right-hand panel.
 
 <Tip>
-**The instructions decide whether AI SRE picks this agent.** Before delegating, AI SRE sees only one `name: summary` line per agent (the summary comes from the `summary:` line at the top of the instructions) and uses it to decide whether to delegate. The body is delivered in full only on the first delegation, so it can be long and detailed. See "[Writing Instructions](#writing-instructions)".
+**The instructions decide whether AI SRE picks this agent.** Before delegating, AI SRE sees only one `name: summary` line per agent (the summary comes from the `summary:` line at the top of the instructions) and uses it to decide whether to delegate. The body is delivered in full only on the first delegation, so it can be long and detailed. See [Writing Instructions](#writing-instructions).
 </Tip>
 
-The A2A agent list and management entry point are on the **Customize → Plugins → Agents** page (menu tab labeled **Agents**).
+The A2A agent list and management entry point are on the **Customize → Plugins → Agents** page.
 
 <Note>
-**Agents covers two distinct concepts.** This page (Agents) currently manages **A2A Agents** (external agent-to-agent calls). The other concept is the **Subagent** — a platform-built-in task executor that AI SRE dispatches on demand within a session. Subagents have no create / edit entry point; you only observe their behavior in sessions. See "[Subagent](#subagent)" below.
+**Agents covers two distinct concepts.** This page (Agents) currently manages **A2A Agents** (external agent-to-agent calls). The other concept is the **Subagent** — a platform-built-in task executor that AI SRE dispatches on demand within a session. Subagents have no create / edit entry point; you only observe their behavior in sessions. See [Subagent](#subagent) below.
 </Note>
-
-## Subagent
-
-A **Subagent** is a platform **built-in** task executor. During an investigation, AI SRE can **dispatch** a self-contained subtask to a Subagent that completes it independently (via the `agent_dispatch` tool).
-
-The platform ships several **bootstrap Subagents** that work out of the box:
-
-| Name | Role |
-| --- | --- |
-| `general` | General-purpose worker with full tool access. Use it to offload work whose intermediate steps would otherwise pollute the parent's context (long reports, multi-file edits, end-to-end builds, repeated probing). Dispatch several in parallel for independent units of work |
-| `explore` | Read-only investigator restricted to `grep` / `glob` / `read`; it cannot write or execute. Returns a compact summary rather than raw search output — ideal for locating evidence inside a codebase or knowledge dump |
-
-**In the conversation**: each dispatch also appears as a **task card** in the conversation stream with the same statuses as an A2A delegation, but with an `Agent` badge (A2A delegations show `A2A`). The card also shows the **execution environment** of the dispatch (the cloud environment or the BYOC Runner's name) — see "Dispatch target environment" below.
-
-**Runtime limits**:
-
-- **Concurrency cap**: a session runs **at most 20 Subagents at the same time**. Total dispatches are unlimited — each completion frees a slot; at the cap, AI SRE waits for running ones to finish before dispatching the rest.
-- **Nesting depth**: a dispatch chain nests **at most 3 levels deep**, preventing a Subagent from spawning itself indefinitely.
-
-**Dispatch target environment**: `agent_dispatch` also takes an optional `environment` argument that decides **which execution environment** the subtask runs in. Its values are:
-
-- **Omitted (the default)**: the subagent runs in the **same** environment as the current session and **shares its filesystem** — it can read your workspace's files directly. Naming the environment the session is *already* in (say, passing `cloud` from a cloud session) has the same result: an inheritance, not a second sandbox.
-- **`cloud`**: runs in a **fresh cloud environment** — an ephemeral container with its own filesystem and the account's default egress policy.
-- **A BYOC Runner's environment_id**: runs on **that Runner**. The selectable targets are **account-scope Runners** plus the Runners of the **team the session is bound to**, and online ones only; naming an unusable Runner (offline, nonexistent, or belonging to another team) makes the dispatch fail with the reason; it is never re-routed elsewhere.
-- **Subagents only**: passing `environment` for an A2A Agent is rejected — a remote agent executes in its own environment and has no placement to choose; to move work to another environment, dispatch a Subagent.
-
-**A cross-environment dispatch cannot read the parent's files**: a child session shares the parent's sandbox / workspace only when its execution environment is **exactly the same**; dispatched to another environment, it gets **its own** sandbox or Runner scratch directory and **cannot see your (the parent's) files**. So put everything it needs **in the prompt** (file contents, paths, parameters, constraints) instead of writing "read file x in the workspace", and expect results back as **text** or through an external system (git, a ticket). See [Environments (BYOC)](/en/ai-sre/environments) for how the environments themselves differ and how to pick one.
 
 ## Registering an Outbound A2A Agent
 
@@ -68,11 +43,11 @@ On the A2A Agents list page, click **Add A2A Agent** and fill in the form:
 | Name | string | — | A2A agent identifier (e.g., `metrics-analyzer`). Required |
 | Scope | Shared / Team | — | Scope: **Shared** (i.e., account level — visible account-wide) or a specific **Team** (visible and editable only to members of that team). Required — see "Scope" below |
 | Execution Environment | Cloud / BYOC Runners (multiple) | All environments | Controls where this A2A agent is available. Select Cloud and one or more visible BYOC Runners; leave empty to make it available everywhere. It does not route delegated calls: an A2A call still runs in the current AI SRE session's environment. For a remote agent available only on a private network, select only the Runner(s) that can reach it |
-| Instructions | string | — | The agent-selection signal shown to AI SRE, as **a single document**: an optional `summary:` frontmatter block plus a body. The summary appears in the available-agent list; the body is delivered in full only on first delegation. Required; the whole document is at most 50 KB, and `summary` is at most 1,024 characters and must not contain `<` or `>`. See "[Writing Instructions](#writing-instructions)" below for the format |
-| Card URL | string | — | The Agent Card URL of the remote A2A agent, or just the service origin for agents that follow the default well-known location (for example, `https://agents.example.com`). If the URL includes a path, the platform reads that exact URL; if only an origin is provided, it resolves `/.well-known/agent-card.json` by A2A convention. Required; must be an http/https URL. Whether it is reachable depends on the execution environment of the session that delegates. The remote agent must implement A2A Protocol 1.0 — see "[Protocol Version and Agent Card Requirements](#protocol-version-and-agent-card-requirements)" below |
-| Service authorization | enum | `none` | The identity AI SRE uses when calling the remote agent **as a service** (field `auth_type`): `none` / `bearer` (Bearer Token) / `api_key` (custom Header + Key). Marked **Recommended** in the form. See "[Authorization Modes](#authorization-modes)" below |
+| Instructions | string | — | The agent-selection signal shown to AI SRE, as **a single document**: an optional `summary:` frontmatter block plus a body. The summary appears in the available-agent list; the body is delivered in full only on first delegation. Required; the whole document is at most 50 KB, and `summary` is at most 1,024 characters and must not contain `<` or `>`. See [Writing Instructions](#writing-instructions) below for the format |
+| Card URL | string | — | The Agent Card URL of the remote A2A agent, or just the service origin for agents that follow the default well-known location (for example, `https://agents.example.com`). If the URL includes a path, the platform reads that exact URL; if only an origin is provided, it resolves `/.well-known/agent-card.json` by A2A convention. Required; must be an http/https URL. Whether it is reachable depends on the execution environment of the session that delegates. The remote agent must implement A2A Protocol 1.0 — see [Protocol Version and Agent Card Requirements](#protocol-version-and-agent-card-requirements) below |
+| Service authorization | enum | `none` | The identity AI SRE uses when calling the remote agent **as a service** (field `auth_type`): `none` / `bearer` (Bearer Token) / `api_key` (custom Header + Key). Marked **Recommended** in the form. See [Authorization Modes](#authorization-modes) below |
 | Streaming | bool | on | Whether to communicate with the remote agent in streaming mode |
-| Member authorization | enum | `shared` (none) | The identity each member holds individually (field `auth_mode`): `shared` (none) / `per_user_secret` (Secret (Header)) / `per_user_oauth` (OAuth 2.1). See "[Authorization Modes](#authorization-modes)" below |
+| Member authorization | enum | `shared` (none) | The identity each member holds individually (field `auth_mode`): `shared` (none) / `per_user_secret` (Secret (Header)) / `per_user_oauth` (OAuth 2.1). See [Authorization Modes](#authorization-modes) below |
 | Skip TLS certificate verification | bool | off | Shown only when the Card URL uses HTTPS. Enable only when the remote endpoint uses a self-signed certificate inside a controlled network; this skips certificate-chain and hostname verification |
 | Allow fetching OAuth configuration over HTTP (testing only) | bool | off | Required only when **Member authorization** is set to "OAuth 2.1" and the Card URL is a non-local HTTP URL. Use only in controlled test environments; after you enable it, the AI SRE service can fetch OAuth metadata from that host |
 
@@ -135,7 +110,7 @@ Body: detailed instructions for the agent…
 - **Hard limits**: the whole document (frontmatter + body) is at most **50 KB**; `summary` is at most **1,024 characters** and must not contain `<` or `>`; the body must be non-empty.
 - If the document starts with `---`, that frontmatter block must be closed with another `---` line, or saving fails.
 
-The instructions used by "[Using the FlashAI Template](#using-the-flashai-template)" below are a working example — see its structure for reference.
+The instructions used by [Using the FlashAI Template](#using-the-flashai-template) below are a working example — see its structure for reference.
 
 ### Using the FlashAI Template
 
@@ -240,36 +215,6 @@ Saved sensitive fields (such as tokens, API keys and client secrets) are shown *
 Use HTTPS for member authorization (OAuth 2.1) discovery whenever possible. Enable "Allow fetching OAuth configuration over HTTP (testing only)" for a non-local HTTP Card URL only in controlled test environments. If an HTTPS endpoint uses a self-signed certificate, enable "Skip TLS certificate verification" only temporarily and only inside a trusted network.
 </Warning>
 
-## Inbound: Letting External Agents Call AI SRE
-
-Expand the "**Let External Agents Call Flashduty's AI SRE**" panel at the top of the A2A Agents page to get the **Agent Card** URL for this account's AI SRE:
-
-```
-https://api.flashcat.cloud/safari/a2a/ai-sre/agent-card
-```
-
-Add that URL to any A2A client to call Flashduty's AI SRE agent via the A2A protocol.
-
-**Authentication**: add `Fd-App-Key: <your app_key>` in the request header (or use the `?app_key=` query parameter). The capabilities declared on the Agent Card include:
-
-| Capability (Skill) | Description |
-| --- | --- |
-| `investigate_incident` | End-to-end root-cause analysis for a Flashduty incident, correlating logs, metrics, and recent changes |
-| `analyze_logs` | Query and summarize logs for a target service within a specified time window |
-| `analyze_metrics` | Query and summarize metrics for a target service within a specified time window |
-
-<Tip>
-The Agent Card also declares Flashduty's "run options" A2A extension: callers can override `incognito` (whether to hide the session from the session list; hidden by default), `visibility` (`private` / `account`), and the environment (`cloud` / `byoc` and a specific `environment_id`) in `message.metadata`. This extension is optional — plain A2A clients can ignore it and call normally.
-</Tip>
-
-### Incident and War-Room Integration
-
-When a session **enters via an incident route** (e.g., AI SRE is triggered from an incident or war room), the platform binds the corresponding incident to the session and brings it in as context, anchoring troubleshooting to the correct incident from the start. Based on this, AI SRE can use built-in skills during the conversation to further act on the incident — reading incident details, querying the timeline, creating / viewing war rooms, linking changes, and more. For automatic war-room diagnosis on the IM side, see [IM Integration](/en/ai-sre/im).
-
-<Warning>
-**Automatic incident integration** for A2A is still under development: automatic incident binding is not yet fully available, and bidirectional event streams across agents will be completed over upcoming releases. Rely only on features that are actually enabled.
-</Warning>
-
 ## Creating and Managing
 
 The full lifecycle of A2A agents is managed on the **Customize → Plugins → Agents** page.
@@ -306,6 +251,63 @@ A2A agents share the same **two-level scope** model as other resources (skills, 
 **Create and reassign**: to create a new team-level agent, you must belong to the target team; account-level creation is limited to the account owner or admins. When editing an existing agent, the account owner or admins can move it to any team to recover resources left behind by empty teams or departed members; regular members can move it only to teams they belong to.
 
 **Runtime visibility**: at session start, AI SRE's available-agent list shows only **account-level** resources plus resources belonging to the **team bound to the current session** (e.g., the team carried in by an incident / war room, or explicitly selected in the UI). A team's skills, MCP servers, and A2A agents are only mounted into the current session on demand after the agent reads that team's knowledge during an investigation. **The account is the only security perimeter at runtime; team is simply an ownership and editing tag.**
+
+## Inbound: Letting External Agents Call AI SRE
+
+Expand the "**Let External Agents Call Flashduty's AI SRE**" panel at the top of the A2A Agents page to get the **Agent Card** URL for this account's AI SRE:
+
+```
+https://api.flashcat.cloud/safari/a2a/ai-sre/agent-card
+```
+
+Add that URL to any A2A client to call Flashduty's AI SRE agent via the A2A protocol.
+
+**Authentication**: add `Fd-App-Key: <your app_key>` in the request header (or use the `?app_key=` query parameter). The capabilities declared on the Agent Card include:
+
+| Capability (Skill) | Description |
+| --- | --- |
+| `investigate_incident` | End-to-end root-cause analysis for a Flashduty incident, correlating logs, metrics, and recent changes |
+| `analyze_logs` | Query and summarize logs for a target service within a specified time window |
+| `analyze_metrics` | Query and summarize metrics for a target service within a specified time window |
+
+<Tip>
+The Agent Card also declares Flashduty's "run options" A2A extension: callers can override `incognito` (whether to hide the session from the session list; hidden by default), `visibility` (`private` / `account`), and the environment (`cloud` / `byoc` and a specific `environment_id`) in `message.metadata`. This extension is optional — plain A2A clients can ignore it and call normally.
+</Tip>
+
+### Incident and War-Room Integration
+
+When a session **enters via an incident route** (e.g., AI SRE is triggered from an incident or war room), the platform binds the corresponding incident to the session and brings it in as context, anchoring troubleshooting to the correct incident from the start. Based on this, AI SRE can use built-in skills during the conversation to further act on the incident — reading incident details, querying the timeline, creating / viewing war rooms, linking changes, and more. For automatic war-room diagnosis on the IM side, see [IM Integration](/en/ai-sre/im).
+
+<Warning>
+**Automatic incident integration** for A2A is still under development: automatic incident binding is not yet fully available, and bidirectional event streams across agents will be completed over upcoming releases. Rely only on features that are actually enabled.
+</Warning>
+
+## Subagent
+
+A **Subagent** is a platform **built-in** task executor. During an investigation, AI SRE can **dispatch** a self-contained subtask to a Subagent that completes it independently (via the `agent_dispatch` tool).
+
+The platform ships several **bootstrap Subagents** that work out of the box:
+
+| Name | Role |
+| --- | --- |
+| `general` | General-purpose worker with full tool access. Use it to offload work whose intermediate steps would otherwise pollute the parent's context (long reports, multi-file edits, end-to-end builds, repeated probing). Dispatch several in parallel for independent units of work |
+| `explore` | Read-only investigator restricted to `grep` / `glob` / `read`; it cannot write or execute. Returns a compact summary rather than raw search output — ideal for locating evidence inside a codebase or knowledge dump |
+
+**In the conversation**: each dispatch also appears as a **task card** in the conversation stream with the same statuses as an A2A delegation, but with an `Agent` badge (A2A delegations show `A2A`). The card also shows the **execution environment** of the dispatch (the cloud environment or the BYOC Runner's name) — see "Dispatch target environment" below.
+
+**Runtime limits**:
+
+- **Concurrency cap**: a session runs **at most 20 Subagents at the same time**. Total dispatches are unlimited — each completion frees a slot; at the cap, AI SRE waits for running ones to finish before dispatching the rest.
+- **Nesting depth**: a dispatch chain nests **at most 3 levels deep**, preventing a Subagent from spawning itself indefinitely.
+
+**Dispatch target environment**: `agent_dispatch` also takes an optional `environment` argument that decides **which execution environment** the subtask runs in. Its values are:
+
+- **Omitted (the default)**: the subagent runs in the **same** environment as the current session and **shares its filesystem** — it can read your workspace's files directly. Naming the environment the session is *already* in (say, passing `cloud` from a cloud session) has the same result: an inheritance, not a second sandbox.
+- **`cloud`**: runs in a **fresh cloud environment** — an ephemeral container with its own filesystem and the account's default egress policy.
+- **A BYOC Runner's environment_id**: runs on **that Runner**. The selectable targets are **account-scope Runners** plus the Runners of the **team the session is bound to**, and online ones only; naming an unusable Runner (offline, nonexistent, or belonging to another team) makes the dispatch fail with the reason; it is never re-routed elsewhere.
+- **Subagents only**: passing `environment` for an A2A Agent is rejected — a remote agent executes in its own environment and has no placement to choose; to move work to another environment, dispatch a Subagent.
+
+**A cross-environment dispatch cannot read the parent's files**: a child session shares the parent's sandbox / workspace only when its execution environment is **exactly the same**; dispatched to another environment, it gets **its own** sandbox or Runner scratch directory and **cannot see your (the parent's) files**. So put everything it needs **in the prompt** (file contents, paths, parameters, constraints) instead of writing "read file x in the workspace", and expect results back as **text** or through an external system (git, a ticket). See [Environments (BYOC)](/en/ai-sre/environments) for how the environments themselves differ and how to pick one.
 
 ## Related Pages
 
