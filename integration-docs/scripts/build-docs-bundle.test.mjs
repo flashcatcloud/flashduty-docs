@@ -41,7 +41,7 @@ test('derivePublicUrl prefers frontmatter url, else derives from the path', () =
     'https://docs.flashduty.com/zh/on-call/integration/instant-messaging/lark'
   );
   assert.equal(
-    derivePublicUrl('zh/stsatuspage.mdx', { url: 'https://status.flashcat.cloud' }),
+    derivePublicUrl('zh/statuspage.mdx', { url: 'https://status.flashcat.cloud' }),
     'https://status.flashcat.cloud'
   );
 });
