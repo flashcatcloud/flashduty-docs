@@ -94,16 +94,54 @@ These principles are adapted from Steve Krug's *Don't Make Me Think* (usability)
 | Alignment | Every element should line up with something. | Indent images, code, and tables inside numbered steps (3 spaces) so lists don't break. |
 | Proximity | Related things belong together. | Keep a rule next to the step it affects. Put FAQ at the end, not in the middle. |
 
-### Basics
+### Language style
 
-- Use the second person (您 / "you"), active voice, and present tense.
-- Use sentence case for English titles (capitalize only the first word and proper nouns).
+Paraphrased from 阮一峰《[中文技术文档的写作规范](https://github.com/ruanyf/document-style-guide)》 (zh) and the [Google developer documentation style guide](https://developers.google.com/style) (en; the [Microsoft Writing Style Guide](https://learn.microsoft.com/style-guide/welcome/) breaks ties). Read the sources for edge cases. The rules below override them where they differ.
+
+**Both languages**
+
+- Address the reader directly: **您** in zh docs (never 你), **you** in en. (The blog in `flashduty-website` uses impersonal phrasing or 用户 instead. Don't copy blog voice here, or docs voice there.)
+- Use active voice and present tense. Prefer affirmative sentences, and never use double negatives ("不是不能" → "可以").
+- Keep sentences short: zh about 20 characters per clause, and split anything over 40; en under about 25 words. Put one idea in each sentence and one topic in each paragraph.
+- Make every pronoun's referent obvious (该 / 其 / 此 / it / this). If it's ambiguous, repeat the noun.
+- Don't stack adjectives before a noun, and drop hype words (see the AI-voice list below).
+
+**中文**
+
+- Titles: no H1 → H3 skips, no lone child heading (a single H3 under an H2), a child heading shouldn't repeat its parent's words, avoid H4, and don't put end punctuation on titles.
+- Use a formal register. No colloquialisms (东西、搞、弄、挺、啥、咱们、就行、其实、反正), and no rare, made-up, or classical-Chinese wording.
+- Use 的 / 地 / 得 correctly: adjective + 的 + noun, adverb + 地 + verb, verb + 得 + complement.
+- Put a half-width space between Chinese and Latin letters or digits (`使用 API`、`5 分钟`). Don't put a space next to full-width punctuation.
+- Use full-width punctuation in Chinese sentences (，。：；？（）“”), with `、` between list items and 和 before the last one. Use half-width `:` in times and half-width punctuation in all-English sentences. Avoid ！, and never chain one comma after another to the end of a paragraph.
+- On first use, give the English term a Chinese gloss, e.g. 服务等级目标（SLO）, or SLO（服务等级目标）when the English is better known. After that use one form only. Use singular nouns when translating plurals.
+- Numbers: use half-width Arabic digits, and add a unit space when the unit is English (`64 KB`). Don't use 等 after a list that ends in ⋯⋯.
+
+**English**
+
+- Use a friendly, direct, and plain tone. Contractions are fine (don't, it's). Avoid "please" in instructions, "simply"/"just"/"easy", and Latin abbreviations (write "for example", not "e.g.").
+- Use sentence case for titles and headings. Use the serial (Oxford) comma.
+- Write numbers zero to nine as words in prose and 10+ as digits. Always use digits with units, versions, and UI values.
+- Spell out an abbreviation on first use unless it's better known than the expansion (API, URL, SSO).
+- Link text names the destination (the target page's title), never "click here" or "this page".
+- Use UI labels exactly as shown, in bold. Use "select", not "click on".
+
+**AI voice and filler: don't**
+
+- Inflated significance: 标志着、至关重要、深远影响、赋能、助力、打造、全方位、一站式、无缝、强大 / crucial, pivotal, seamless, robust, leverage, empower, unlock, game-changing.
+- Vague attribution: 业界普遍认为、越来越多的团队 / "many teams", "experts say", with no named source.
+- Formulaic scaffolding: 不仅⋯⋯更⋯⋯、不是⋯⋯而是⋯⋯、值得注意的是、总而言之、a summary line closing every section, padded lists of three, and sentences that end in 从而⋯⋯ / "thereby".
+- Dramatic devices: 答案是——、结果呢？ / "The answer?".
+- Over-formatting: bold everywhere and "**Term**: explanation" lists where a sentence works.
+
+The blog's Vale rules ([flashduty-website#253](https://github.com/flashcatcloud/flashduty-website/pull/253)) encode most of this list. Docs don't run Vale yet, so check by hand.
+
+### Components
+
 - Prefer Mintlify components where they fit: `<Steps>`, `<Tabs>`, `<Note>`, `<Tip>`, `<Warning>`, `<Frame>`, `<CodeGroup>`, `<Accordion>`. See `.agents/skills/polish-document/components.md`.
 
 ### Dos
 
 - **State the rule and its outcome in 1–3 lines**, then add a relative link to the details (`/zh/...`, never an absolute docs URL).
-- **Address the reader as 您** consistently in zh, and as "you" in en.
 - **Write UI paths with →**, for example **配置中心 → 自定义表单**.
 - **Use tables for parameter or option matrices** (field / required / description; mode × capability).
 - **Follow the integration page template**: overview → get the push URL in Flashduty (dedicated/shared) → configure in the tool → payload / alert key / severity mapping → verify → FAQ → troubleshooting.
@@ -168,5 +206,6 @@ Best-practice cards → list:
 - [ ] Headings and anchors diffed before/after: no section lost, and every `#anchor` link still resolves.
 - [ ] Renamed or removed pages have redirects in `docs.json`, and new pages are in the nav for both languages.
 - [ ] zh and en are updated together, with matching sections and numbers.
+- [ ] Changed prose passes the [language style](#language-style) rules: 您/you, no AI-voice words, spaces between Chinese and Latin text, and no clause over 40 characters.
 - [ ] Facts and numbers are checked against product code or the owner. Unverified items are listed in the PR description.
 - [ ] Commits are pulled with `git pull --rebase` and grouped logically (one area per commit).
