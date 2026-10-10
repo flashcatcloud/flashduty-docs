@@ -46,7 +46,7 @@ This means that after you change the sampling rate, **new sessions immediately f
 
 ### 3. It is a probability, not an exact quota
 
-Each session's draw is independent, with no global coordination. A 20% sampling rate is an **expected value**: the more traffic you have, the closer the actual collection ratio gets to 20% (law of large numbers); with low traffic, fluctuation is noticeable — collecting 13 or 28 out of 100 sessions is perfectly normal.
+Each session's draw is independent, with no global coordination. A 20% sampling rate is an **expected value**. The more traffic you have, the closer the actual ratio gets to 20% (law of large numbers). With low traffic, it fluctuates: collecting 13 or 28 out of 100 sessions is normal.
 
 ### 4. The sampling rate is frozen at initialization
 
@@ -64,7 +64,7 @@ Each session's draw is independent, with no global coordination. A 20% sampling 
 | Production incident investigation | Temporarily raise to 100 to capture as much evidence as possible |
 
 <Tip>
-Errors are low-frequency events. If your primary goal is error monitoring rather than performance statistics, lean toward a higher sampling rate — a 20% sample is plenty representative for performance metrics, but an error affecting only 1% of users may take a long time to show up under 20% sampling.
+Errors are low-frequency events. If your main goal is error monitoring rather than performance statistics, use a higher sampling rate. A 20% sample represents performance metrics well, but an error that affects only 1% of users can take a long time to show up.
 </Tip>
 
 ## Best practice 1: make the sampling rate dynamically adjustable
@@ -148,7 +148,7 @@ URLSession.shared.dataTask(with: configURL) { data, _, _ in
 Three key points:
 
 1. **Never block initialization waiting for configuration.** Synchronously waiting for a config API loses early page data, and config service jitter would delay RUM startup. The right pattern is "initialize immediately with the cached value + refresh the cache asynchronously for next time" — the new rate taking effect one page load later is perfectly acceptable.
-2. **Call `stopSession()` when the rate changes (web / Mini Program only).** Because the decision is sticky within a session (rule 2), a user who lost the draw under 20% will stay silent even after a new page initializes at 100% — for up to 4 hours — because the existing session keeps its old decision. `stopSession()` expires the current session immediately; the user's next interaction starts a new session and re-draws under the new rate. Note that this trick does not work on mobile: the sampling rate is frozen into the sampler at initialization, so a new session after `stopSession()` still draws under the old rate. By default the new value takes effect at the next cold start; if you need it immediately, see the [advanced approach for mobile](#advanced-for-mobile-applying-a-new-sampling-rate-immediately) below.
+2. **Call `stopSession()` when the rate changes (web / Mini Program only).** The decision is sticky within a session (rule 2). A user who wasn't sampled at 20% stays silent for up to 4 hours, even after a new page initializes at 100%, because the existing session keeps its old decision. `stopSession()` expires the current session immediately; the user's next interaction starts a new session and re-draws under the new rate. This doesn't work on mobile. The sampling rate is fixed at initialization, so a new session after `stopSession()` still uses the old rate. By default the new value takes effect at the next cold start; if you need it immediately, see the [advanced approach for mobile](#advanced-for-mobile-applying-a-new-sampling-rate-immediately) below.
 3. **Always have a fallback for fetch failures.** When the config API is unavailable, fall back to the cached or built-in default value so collection is never interrupted.
 
 <Warning>
@@ -157,7 +157,7 @@ Three key points:
 
 ### Advanced for mobile: applying a new sampling rate immediately
 
-A mobile app process can stay alive for days, so "takes effect at the next cold start" may not be enough for scenarios like incident investigation, where you need **full collection right now**. In that case, use the full rebuild path: call `stopInstance()` to stop the current SDK instance, then re-initialize with the new sampling rate. The key discipline: **when a new config arrives, only record it — don't rebuild immediately. Wait for a quiet lifecycle moment, such as the app returning to the foreground** — rebuilding in the middle of user activity cuts off the current view and session context.
+A mobile app process can live for days. "Takes effect at the next cold start" may be too slow when you investigate an incident and need **full collection right now**. In that case, use the full rebuild path: call `stopInstance()` to stop the current SDK instance, then re-initialize with the new sampling rate. The key discipline: **when a new config arrives, only record it — don't rebuild immediately. Wait for a quiet lifecycle moment, such as the app returning to the foreground** — rebuilding in the middle of user activity cuts off the current view and session context.
 
 <Tabs>
 <Tab title="Android">
@@ -224,7 +224,7 @@ Rebuilding is an advanced operation with real costs. Confirm these risks before 
 
 ## Best practice 2: business-defined custom sampling
 
-The default random draw treats every user equally, but businesses often want differentiation: collect all VIP users, watch canary users closely, always sample users who recently hit errors. You can achieve this by **moving the draw from the SDK into your business code**: your code decides whether the current session is sampled, and passes only `0` or `100` as `sessionSampleRate`, reducing it to an on/off switch.
+The default random draw treats every user equally, but businesses often want differentiation: collect all VIP users, watch canary users closely, always sample users who recently hit errors. To do this, **move the draw from the SDK into your business code**. Your code decides whether the session is sampled and passes only `0` or `100` as `sessionSampleRate`, so it acts as an on/off switch.
 
 <Tabs>
 <Tab title="Web">
@@ -297,20 +297,20 @@ RUM.enable(with: rumConfig)
 
 The base rule uses `hash(userId) % 100` instead of `Math.random()`, which brings two properties the default draw lacks:
 
-- **User-level stability**: the same user always gets the same decision, so you can answer "does user A have data?" — all sessions of a sampled user are present, and an unsampled user definitively has none.
-- **Monotonic rollout**: when the rate goes from 20% to 100%, every previously sampled user stays sampled, and the newly added users are a pure increment, keeping the data continuous and comparable. Changing the `salt` reshuffles all buckets.
+- **User-level stability**: the same user always gets the same decision, so you can answer "does user A have data?". A sampled user has all sessions, and an unsampled user has none.
+- **Monotonic rollout**: when the rate goes from 20% to 100%, every sampled user stays sampled and new users are only added. The data stays continuous and comparable. Changing the `salt` reshuffles all buckets.
 
 ### Caveats
 
-- **The decision must be stable within a session.** If you draw with `Math.random()` on every page load, different pages within the same session may reach different conclusions, while the SDK only honors the session's first decision — the symptom is "configured 100 but nothing gets reported", which is very hard to debug. Deterministic hashing avoids this by construction.
-- **Rule changes also require switching sessions.** When a user moves from the "not sampled" bucket to the "sampled" bucket, follow best practice 1: on web / Mini Program, call `stopSession()` once when the current decision differs from the previously cached one; on mobile, the change takes effect at the next cold start by default, or rebuild the instance following the advanced approach.
-- **Use `sessionSampleRate: 0` instead of skipping `init()`.** Skipping initialization breaks `addAction` / `addError` calls scattered through your code, forcing null checks everywhere; passing 0 initializes the SDK into a silent state with a unified code path.
-- **Platform-side data reflects what was actually collected.** With custom sampling, the platform cannot know your true sampling ratio; the session volume you see is the collected volume, and cannot be extrapolated to total traffic. If you need full-traffic estimates, compute them on your side based on your own sampling rules.
+- **The decision must be stable within a session.** If you draw with `Math.random()` on every page load, pages in the same session can disagree, and the SDK honors only the session's first decision. The symptom is "configured 100 but nothing gets reported", which is hard to debug. Deterministic hashing avoids this by construction.
+- **Rule changes also require switching sessions.** When a user moves from "not sampled" to "sampled", follow best practice 1. On web / Mini Program, call `stopSession()` once when the decision differs from the cached one. On mobile, the change takes effect at the next cold start, or you can rebuild the instance with the advanced approach.
+- **Use `sessionSampleRate: 0` instead of skipping `init()`.** Skipping initialization breaks `addAction` / `addError` calls across your code and forces null checks everywhere. Passing 0 initializes a silent SDK and keeps one code path.
+- **Platform-side data reflects what was actually collected.** With custom sampling, the platform can't know your true sampling ratio. The session volume you see is what was collected, and you can't extrapolate it to total traffic. If you need full-traffic estimates, compute them on your side based on your own sampling rules.
 
 ## Best practice 3: full error capture with proportional sampling for the rest
 
 <Note>
-Starting with Web SDK **0.3.0**, enable `sessionOnError` (and `sessionReplayOnError` if you need error replays) to capture error sessions without writing your own `beforeSend`; see [on-error session capture](/en/rum/sdk/web/advanced-config#on-error-session-capture) for configuration, billing, and limitations. The recipe below remains available for older versions or custom event filtering. Its failed-request filtering differs from the new options: a failed resource event alone does not trigger on-error capture.
+Starting with Web SDK **0.3.0**, enable `sessionOnError` to capture error sessions without your own `beforeSend`. Add `sessionReplayOnError` if you need error replays. See [on-error session capture](/en/rum/sdk/web/advanced-config#on-error-session-capture) for configuration, billing, and limitations. The recipe below remains available for older versions or custom event filtering. Its failed-request filtering differs from the new options: a failed resource event alone does not trigger on-error capture.
 </Note>
 
 A common requirement is "cut data volume to 20%, but never miss an error". Setting `sessionSampleRate` to 20 will not do it: sampling works per session, and a session that loses the draw reports nothing at all — errors included (rule 1). You would lose roughly four fifths of your errors along with the volume. The custom filtering recipe below collects every session so no error is lost, then buckets on a stable key inside `beforeSend` so only the winning share keeps full data:
@@ -328,7 +328,7 @@ Pick one bucketing style — each tab below is a complete, copy-pasteable recipe
 | Experience consistency | The same user may land in different buckets across sessions | A given user is always consistent; scaling up is monotonic — raising 20% to 100% keeps the original cohort, so before/after data stays comparable |
 | Replay alignment | Manual recording (~10 lines) | One line at `init()`, but the key must be available before initialization |
 
-One more thing if you use Session Replay: it needs an alignment step. Natively, replay is a **second-stage sample on top of collected sessions** — but this recipe sets `sessionSampleRate` to 100, so the SDK believes every session is collected in full and draws replay across all of them; some land outside the detail bucket and show up as "has a replay, but no behavior data". Each tab gives the matching fix — skip it if you do not use replay.
+One more thing if you use Session Replay: it needs an alignment step. Natively, replay is a **second-stage sample on top of collected sessions**. This recipe sets `sessionSampleRate` to 100, so the SDK treats every session as fully collected and samples replay across all of them. Some replays land outside the detail bucket and show up as "has a replay, but no behavior data". Each tab gives the matching fix — skip it if you do not use replay.
 
 <Tabs>
   <Tab title="Session bucketing">
@@ -382,7 +382,7 @@ One more thing if you use Session Replay: it needs an alignment step. Natively, 
     });
     ```
 
-    Replay alignment: the session ID does not exist yet at `init()`, and the replay rate is frozen at initialization, so turn the automatic draw off, switch to manual recording, and perform the second draw yourself once initialization completes. Merge the two options below into the `init()` above and run the decision once after `init()`:
+    Replay alignment: the session ID doesn't exist yet at `init()`, and the replay rate is fixed at initialization. Turn off the automatic draw, switch to manual recording, and do the second draw yourself after initialization. Merge the two options below into the `init()` above and run the decision once after `init()`:
 
     ```js
     const REPLAY_SAMPLE_RATE = 10; // share of detail sessions that get recorded
@@ -409,11 +409,11 @@ One more thing if you use Session Replay: it needs an alignment step. Natively, 
     ```
 
     <Note>
-    The manual approach has one known boundary: when a session expires and renews while the page stays open (15 minutes of inactivity or 4 hours total), the new session has a new ID and falls into a new bucket, and the SDK exposes no session-renewal event. Pages with very long dwell times need to poll `getInternalContext().session_id` for changes to stay strictly aligned.
+    The manual approach has one known limit. When a session expires and renews while the page stays open (15 minutes idle or 4 hours total), the new session gets a new ID and bucket. The SDK exposes no session-renewal event. Pages with very long dwell times need to poll `getInternalContext().session_id` for changes to stay strictly aligned.
     </Note>
   </Tab>
   <Tab title="User bucketing">
-    The bucket key must come from a source available before `init()`: a signed-in user ID, or an anonymous ID you maintain yourself (generate one and store it in localStorage). The SDK does backfill a cross-session anonymous ID into `event.usr.id` (`trackAnonymousUser` is enabled by default), but it only comes into being during initialization — too late for the replay decision — so both `init()` and `beforeSend` use a key your own code holds, in one self-contained configuration:
+    The bucket key must come from a source available before `init()`: a signed-in user ID, or an anonymous ID you maintain yourself (generate one and store it in localStorage). The SDK backfills a cross-session anonymous ID into `event.usr.id` (`trackAnonymousUser` is on by default). That ID appears only during initialization, too late for the replay decision. So both `init()` and `beforeSend` use a key your own code holds, in one self-contained configuration:
 
     ```js
     // Share of users that keep full data
@@ -499,10 +499,10 @@ Bucketing on a stable key leaves only two states: sampled sessions carry the ful
 ### Three things to know before adopting this
 
 - **Volume will not land exactly on 20%.** View events are the skeleton of a session and cannot be dismissed, so they still report at 100%. How far volume actually falls depends on the share of resource and action events in your data.
-- **Absolute counts need to be scaled.** The platform still shows 100% of sessions, but only about 20% carry full data. Ratios and percentiles such as error rate and P75 are unaffected (a random sample still represents the whole), but absolute counts such as total resource requests or total clicks must be scaled by `1 / 20%`.
+- **Absolute counts need to be scaled.** The platform still shows 100% of sessions, but only about 20% carry full data. Ratios and percentiles such as error rate and P75 are unaffected, because a random sample still represents the whole. Scale absolute counts, such as total resource requests or clicks, by `1 / 20%`.
 - **Session Replay needs one explicit alignment step.** This recipe sets `sessionSampleRate` to 100, so the SDK assumes every session is collected in full and draws replay across all of them. Skip the alignment step in the matching tab above and replay lands on sessions outside the bucket — you get the recording, but the session behind it holds no behavior data.
 
-How this differs from the "report only errors" configuration: that one **turns non-error data off entirely**, which suits teams that only care about errors and do no performance analysis; this one **keeps one fifth of the full picture**, which suits teams that want no missed errors while retaining performance and behavior analysis.
+Compare it with the "report only errors" configuration. That one **turns non-error data off entirely** and suits teams that only care about errors. This one **keeps one fifth of the full picture** and suits teams that want every error plus performance and behavior analysis.
 
 ## Platform support
 
@@ -513,7 +513,7 @@ How this differs from the "report only errors" configuration: that one **turns n
 | iOS / Android | At initialization on app cold start | Next cold start by default; immediate through `stopInstance()` rebuild (see the [advanced approach](#advanced-for-mobile-applying-a-new-sampling-rate-immediately)) |
 | React Native | At initialization on app cold start | Not supported; takes effect on next launch |
 
-For mobile platforms, the default recommendation is the "initialize with the cached value at startup + fetch and cache the latest value asynchronously" strategy, with the new rate taking effect on the next cold start. For scenarios that truly need immediate effect (such as incident investigation), follow the advanced approach and rebuild the SDK instance at a quiet lifecycle moment.
+On mobile, we recommend initializing with the cached value at startup and fetching the latest value asynchronously. The new rate takes effect at the next cold start. For scenarios that truly need immediate effect (such as incident investigation), follow the advanced approach and rebuild the SDK instance at a quiet lifecycle moment.
 
 ## FAQ
 
@@ -563,9 +563,9 @@ Understand the three costs before adopting this setup:
 
 - **View events are still reported.** At least one per page, plus throttled updates whenever metrics or event counts change, plus a keep-alive update every 5 minutes while the session is active. This baseline cannot be removed, and `beforeSend` cannot discard view events either.
 - **Error evidence is reduced to a stack trace.** With `trackUserInteractions` off, you no longer know what the user clicked before the error, which makes investigation noticeably harder.
-- **Traced requests are not affected by the resource switch.** Requests matching `allowedTracingUrls` are still reported even with resource collection off (flagged as not indexed, so they do not count toward volume), so traffic does not drop to zero.
+- **Traced requests are not affected by the resource switch.** Requests matching `allowedTracingUrls` are still reported with resource collection off. They're flagged as not indexed and don't count toward volume, but traffic doesn't drop to zero.
 
-If your goal is "errors first, but keep the evidence", use [best practice 3](#best-practice-3-full-error-capture-with-proportional-sampling-for-the-rest) instead: errors and failed requests are kept in full while everything else converges proportionally, holding volume down without losing the evidence you need.
+If your goal is "errors first, but keep the evidence", use [best practice 3](#best-practice-3-full-error-capture-with-proportional-sampling-for-the-rest) instead. It keeps all errors and failed requests and samples everything else proportionally, so volume stays low without losing evidence.
 </Accordion>
 
 <Accordion title="I want to cut data volume to 20% but still capture every error — how do I configure that?">
