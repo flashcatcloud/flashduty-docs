@@ -77,6 +77,8 @@ description: "Concise explanation of page purpose"
 - Use sentence case for English titles (capitalize only first word)
 - Leverage Mintlify components: `<Steps>`, `<Tabs>`, `<Note>`, `<Tip>`, `<Warning>`, `<Frame>`, `<CodeGroup>`
 
+The complete writing, page-design and pre-merge rules are in [AGENTS.md](AGENTS.md).
+
 ---
 
 ## Directory Structure

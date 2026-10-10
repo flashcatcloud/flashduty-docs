@@ -6,7 +6,7 @@ description: Notification templates control the content format of incident notif
 
 <Tip>**Plan requirement**: This feature requires an On-call Pro or higher subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
 
-## Use Cases
+## Use cases
 
 The system uses templates when assigning incidents in the following scenarios:
 
@@ -23,7 +23,7 @@ The system uses [Golang template syntax](https://pkg.go.dev/html/template@go1.18
 </Note>
 
 <Warning>
-For security reasons, the following sprig functions are disabled. Using them in a template causes a `function "xxx" not defined` parse error:
+For security, Flashduty disables the following sprig functions. Using them in a template causes a `function "xxx" not defined` parse error:
 
 | Category | Disabled functions |
 | :--- | :--- |
@@ -34,10 +34,10 @@ For security reasons, the following sprig functions are disabled. Using them in 
 | Randomness | `randBytes`, `uuidv4`, `randAlphaNum`, `randAlpha`, `randAscii`, `randNumeric`, `randInt`, `shuffle` |
 | Error raising | `fail` |
 
-If you need a unique identifier inside a template, use incident variables such as `{{.IncidentID}}` or `{{.LabelsMD5}}`. If you need environment-specific values, pass them in via alert labels or field mappings instead of reading host environment variables from the template.
+If you need a unique identifier inside a template, use incident variables such as `{{.IncidentID}}` or `{{.LabelsMD5}}`. If you need environment-specific values, pass them in with alert labels or field mappings instead of reading host environment variables from the template.
 </Warning>
 
-## Configuring Templates
+## Configuring templates
 
 <Steps>
 <Step title="Create Custom Template">
@@ -51,7 +51,7 @@ Click **Save** to complete creation
 </Step>
 </Steps>
 
-### Apply Template
+### Apply template
 
 <Steps>
 <Step title="Enter Escalation Rules">
@@ -65,9 +65,9 @@ Click **Save** to complete configuration. See [Configure Escalation Rules](/en/o
 </Step>
 </Steps>
 
-## Variable Reference
+## Variable reference
 
-### Reference Examples
+### Reference examples
 
 ```go
 // Reference incident title
@@ -83,7 +83,7 @@ Click **Save** to complete configuration. See [Configure Escalation Rules](/en/o
 {{index .Labels "A.B"}}
 ```
 
-### Incident Variables
+### Incident variables
 
 Complete variable list for incident objects:
 
@@ -119,7 +119,7 @@ Complete variable list for incident objects:
 | RootCause | string | | Incident root cause, filled after closure |
 | Resolution | string | | Resolution, filled after closure |
 
-### Related Objects
+### Related objects
 
 <AccordionGroup>
 <Accordion title="Person - Personnel Info">
@@ -163,6 +163,404 @@ Complete variable list for incident objects:
 | Labels | map | | Label KV |
 </Accordion>
 </AccordionGroup>
+
+## Channel templates
+
+Different notification channels support different template formats and limitations.
+
+<Tabs>
+<Tab title="Feishu/Lark App">
+Requires [Feishu/Lark integration](/en/on-call/integration/instant-messaging/lark) configured first. Supports message card format; system auto-removes empty render lines caused by non-existent labels.
+
+**Default Template** (render all labels):
+
+```go
+{{if .Labels.body_text}}{{.Labels.body_text}}{{else if .Description}}{{.Description}}{{end}}
+{{if .Labels.resource}}**resource** : {{(joinAlertLabels . "resource" ", ")}}{{end}}
+{{range $k, $v := .Labels}}
+{{if not (in $k "resource" "body_text" "body_text_with_table")}}**{{$k}}** : {{$v}}{{end}}{{end}}
+{{ $root := . }}
+{{ range $i, $v := .Images }}
+  {{ $transferURL := transferImage $root $v.Src }}
+  {{ if $transferURL }}![]({{$transferURL}}){{ end }}
+{{ end }}
+```
+
+<Frame caption="Feishu/Lark App Notification Effect">
+<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/feishu_app_render.png" alt="Feishu/Lark App Notification" />
+</Frame>
+
+**Minimal Template** (show key labels only):
+
+```go
+{{if (index .Labels "resource")}}resource：{{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
+{{if (index .Labels "check")}}check：{{toHtml (index .Labels "check")}}{{end}}
+{{if (index .Labels "metric")}}metric：{{index .Labels "metric"}}{{end}}
+{{if (index .Labels "trigger_value")}}trigger_value：{{index .Labels "trigger_value"}}{{end}}
+{{if (index .Labels "region")}}region：{{index .Labels "region"}}{{end}}
+{{if (index .Labels "cluster")}}cluster：{{index .Labels "cluster"}}{{end}}
+{{if (index .Labels "service")}}service：{{index .Labels "service"}}{{end}}
+{{if (index .Labels "env")}}env：{{index .Labels "env"}}{{end}}
+```
+
+### Card fields and bottom action buttons
+
+The **Additional info** tab next to **Content** controls which system content appears at the bottom of the card. Switches available per channel:
+
+| Switch | Feishu/Lark app | Dingtalk app | Slack app | Microsoft Teams | WeCom app |
+| --- | --- | --- | --- | --- | --- |
+| Channel, snooze deadline, severity, aggregated alert count, responders, details button | ✓ | ✓ | ✓ | ✓ | ✓ |
+| AI analysis | ✓ | ✓ | ✓ | — | — |
+| Create war room | ✓ | ✓ | ✓ | — | — |
+| Keep custom actions after incident closure | ✓ | ✓ | ✓ | ✓ | — |
+
+- **Create war room** (off by default): When it's on, the card shows a **👥 Create War Room** button. The button appears if the incident is open, has responders, and has no war room yet. Click it to create the group.
+- **Keep custom actions after incident closure** (off by default): when it's on, you can run custom actions from the message card for 3 days after the incident closes. Otherwise, or after 3 days, run them from the incident details page.
+
+Save the template for switch changes to take effect.
+
+On Feishu/Lark app cards, **More Actions** at the bottom is a dropdown menu with custom actions, snooze durations, and unacknowledge; the **👥 Create War Room** button sits outside that menu.
+</Tab>
+
+<Tab title="Dingtalk App">
+Requires [Dingtalk integration](/en/on-call/integration/instant-messaging/dingtalk) configured first. Supports message card format; system auto-removes empty render lines.
+
+**Default Template**:
+
+```go
+{{if .Description}}**description** :{{toHtml .Labels.body_text .Description}}{{end}}
+{{if .Labels.resource}}**resource** : {{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
+{{range $k, $v := .Labels}}
+{{if not (in $k "resource" "body_text")}}**{{$k}}** : {{toHtml $v}}{{end}}{{end}}
+{{ $root := . }}
+{{ range $i, $v := .Images }}
+{{ $imageURL := imageSrcToURL $root $v.Src }}
+{{ if $imageURL }}![]({{$imageURL}}){{ end }}{{ end }}
+```
+
+<Frame caption="Dingtalk App Notification Effect">
+<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/dingtalk_app_render.png" alt="Dingtalk App Notification" />
+</Frame>
+
+For the switches on the **Additional info** tab, see [Card Fields and Bottom Action Buttons](#card-fields-and-bottom-action-buttons).
+</Tab>
+
+<Tab title="WeCom App">
+Requires [WeCom integration](/en/on-call/integration/instant-messaging/wecom) configured first. Supports message card format.
+
+<Warning>
+WeCom limits card length: the template area shows at most **8 lines** and hides the rest.
+</Warning>
+
+**Default Template**:
+
+```go
+{{if (index .Labels "resource")}}resource：{{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
+{{if (index .Labels "metric")}}metric：{{index .Labels "metric"}}{{end}}
+{{if (index .Labels "trigger_value")}}trigger_value：{{index .Labels "trigger_value"}}{{end}}
+{{if (index .Labels "region")}}region：{{index .Labels "region"}}{{end}}
+{{if (index .Labels "cluster")}}cluster：{{index .Labels "cluster"}}{{end}}
+{{if (index .Labels "service")}}service：{{index .Labels "service"}}{{end}}
+{{if (index .Labels "env")}}env：{{index .Labels "env"}}{{end}}
+```
+
+<Frame caption="WeCom App Notification Effect">
+<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/wecom_app_render.png" alt="WeCom App Notification" />
+</Frame>
+
+For the switches on the **Additional info** tab, see [Card Fields and Bottom Action Buttons](#card-fields-and-bottom-action-buttons).
+</Tab>
+
+<Tab title="Slack App">
+Requires [Slack integration](/en/on-call/integration/instant-messaging/slack) configured first. Max message length ~15000 characters, truncated if exceeded.
+
+<Tip>
+When displaying images, separate images from other content with `---`, format starts with `![`.
+</Tip>
+
+**Default Template**:
+
+```go
+{{if .Labels.body_text}}{{.Labels.body_text}}{{else if .Description}}{{.Description}}{{end}}
+{{if .Labels.resource}}*resource* : {{(joinAlertLabels . "resource" ", ")}}{{end}}
+{{range $k, $v := .Labels}}
+{{if not (in $k "resource" "body_text" "body_text_with_table")}}*{{$k}}* : {{$v}}{{end}}{{end}}
+{{ $root := . }}
+{{ range $i, $v := .Images }}
+ {{ $imageURL := imageSrcToURL $root $v.Src }}
+ {{ if $imageURL }}
+  ---
+  ![{{$v.Alt}}]({{$imageURL}})
+ {{ end }}
+{{ end }}
+```
+
+<Frame caption="Slack App Notification Effect">
+<img src="https://download.flashcat.cloud/flashduty/integration/slack/slack_app_message.png" alt="Slack App Notification" />
+</Frame>
+
+For the switches on the **Additional info** tab, see [Card Fields and Bottom Action Buttons](#card-fields-and-bottom-action-buttons).
+</Tab>
+
+<Tab title="Microsoft Teams">
+Requires [Teams integration](/en/on-call/integration/instant-messaging/microsoft-teams) configured first. Max message ~28KB, errors if exceeded.
+
+**Default Template**:
+
+```go
+{{if .Description}}**description** :{{toHtml .Labels.body_text .Description}}{{end}}
+{{if .Labels.resource}}**resource** : {{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
+{{range $k, $v := .Labels}}
+{{if not (in $k "resource" "body_text" "body_text_with_table")}}**{{$k}}** : {{toHtml $v}}{{end}}{{end}}
+```
+
+<Frame caption="Teams App Notification Effect">
+<img src="https://download.flashcat.cloud/flashduty/integration/microsoft-teams/teams_app_message.png" alt="Teams App Notification" />
+</Frame>
+
+For the switches on the **Additional info** tab, see [Card Fields and Bottom Action Buttons](#card-fields-and-bottom-action-buttons).
+</Tab>
+</Tabs>
+
+## Bot templates
+
+Template formats supported by group chat bots.
+
+<Tabs>
+<Tab title="Feishu/Lark Bot">
+Supports message card, rich text, and plain text formats. Max message 4000 bytes, truncated if exceeded.
+
+<AccordionGroup>
+<Accordion title="Message Card (msg_type: interactive)">
+```json
+{
+  "msg_type": "interactive",
+  "card": {
+    "config": {
+      "wide_screen_mode": true,
+      "enable_forward": true
+    },
+    "header": {
+      "template": "{{if eq .IncidentSeverity \"Critical\"}}red{{else if eq .IncidentSeverity \"Warning\"}}orange{{else}}yellow{{end}}",
+      "title": {
+        "content": "{{fireReason .}}INC #{{.Num}} {{toHtml .Title}}",
+        "tag": "plain_text"
+      }
+    },
+    "elements": [{
+      "tag": "div",
+      "fields": [{
+        "text": {
+          "tag": "lark_md",
+          "content": "**🏢 Channel:**{{.ChannelName}}"
+        }
+      },
+      {
+        "text": {
+          "tag": "lark_md",
+          "content": "**⏰ Trigger Time:**{{date \"2006-01-02 15:04:05\" .StartTime}}"
+        }
+      }]
+    },
+    {
+      "tag": "action",
+      "actions": [{
+        "tag": "button",
+        "text": { "tag": "plain_text", "content": "Details" },
+        "type": "primary",
+        "url": "{{.DetailUrl}}"
+      },
+      {
+        "tag": "button",
+        "text": { "tag": "plain_text", "content": "Acknowledge" },
+        "type": "primary",
+        "url": "{{.DetailUrl}}?ack=1"
+      }]
+    }]
+  }
+}
+```
+</Accordion>
+
+<Accordion title="Rich Text (msg_type: post)">
+```json
+{
+  "msg_type": "post",
+  "post": {
+    "zh_cn": {
+      "title": "{{if eq .IncidentSeverity \"Critical\"}}🔴{{else if eq .IncidentSeverity \"Warning\"}}⚠️{{else}}ℹ️{{end}} {{fireReason .}}INC #{{.Num}} {{toHtml .Title}}",
+      "content": [
+        [{"tag": "text", "text": "🏢 "}, {"tag": "text", "text": "Channel: ", "style": ["bold"]}, {"tag": "text", "text": "{{.ChannelName}}"}],
+        [{"tag": "text", "text": "⏰ "}, {"tag": "text", "text": "Trigger Time: ", "style": ["bold"]}, {"tag": "text", "text": "{{date \"2006-01-02 15:04:05\" .StartTime}}"}],
+        [{"tag": "a", "href": "{{.DetailUrl}}", "text": "Details"}, {"tag": "text", "text": "  "}, {"tag": "a", "href": "{{.DetailUrl}}?ack=1", "text": "Acknowledge"}]
+      ]
+    }
+  }
+}
+```
+</Accordion>
+
+<Accordion title="Plain Text">
+```go
+{{fireReason .}}INC #{{.Num}} {{toHtml .Title}}
+-----
+Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
+Severity: {{.IncidentSeverity}}
+Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
+Duration: {{ago .StartTime}}
+<br />Details: {{.DetailUrl}}
+```
+</Accordion>
+</AccordionGroup>
+</Tab>
+
+<Tab title="Dingtalk Bot">
+Only supports Markdown messages ([syntax limitations](https://open.dingtalk.com/document/robots/custom-robot-access#title-7ur-3ok-s1a)). Max message 4000 bytes.
+
+<Note>
+If text contains `<br />`, empty lines are removed first during rendering, then replaced with newlines.
+</Note>
+
+**Default Template**:
+
+```go
+{{fireReason .}}INC [#{{.Num}}]({{.DetailUrl}}) {{toHtml .Title}}
+
+---
+- Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
+- Severity: {{$s := colorSeverity .IncidentSeverity}}{{toHtml $s}}
+- Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
+- Duration: {{ago .StartTime}}{{if gt .AlertCnt 1}}
+- Grouped Alerts: {{.AlertCnt}}{{end}}{{if .Labels.resource}}
+- Resource: {{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
+---
+<br />[Details]({{.DetailUrl}})|[Acknowledge]({{.DetailUrl}}?ack=1)
+```
+</Tab>
+
+<Tab title="WeCom Bot">
+WeCom bots support both Markdown v1 and Markdown v2. Existing templates continue to use v1 by default. You can enable v2 per template without affecting other templates.
+
+| Comparison | Markdown v1 | Markdown v2 |
+| :--- | :--- | :--- |
+| Enablement | Default format; no setup required | Enable **Use Markdown v2** in the WeCom bot template |
+| Markdown support | Uses WeCom's legacy Markdown syntax ([syntax limitations](https://developer.work.weixin.qq.com/document/path/91770#markdown%E7%B1%BB%E5%9E%8B)) | Supports standard Markdown, including headings, lists, and tables |
+| Link behavior | Links usually open in WeCom's built-in browser | Links usually open in the system default browser; the final behavior depends on the WeCom client version and settings |
+| Message length | Up to 4000 bytes; excess content is truncated while preserving the details link | Up to 4096 bytes; an oversized runtime message is replaced with a compact message |
+| @ mentions | Uses the bot @ mention settings in the escalation rule | Uses the same settings; the @ mention is sent only after the message body succeeds |
+
+### Enable Markdown v2
+
+<Steps>
+<Step title="Open template management">
+Open **Template Management**, then create a custom template or copy an existing template.
+</Step>
+<Step title="Select the WeCom bot template">
+Select **WeCom Bot** under template content and enable **Use Markdown v2**.
+</Step>
+<Step title="Edit and save the template">
+Edit the content using standard Markdown and save it. Flashduty stores the setting with this template, and it affects only notifications that use it.
+</Step>
+</Steps>
+
+<Note>
+Disabling the toggle switches the template back to Markdown v1. Existing v1 template content and delivery behavior remain unchanged.
+</Note>
+
+<Warning>
+Markdown v2 uses the UTF-8 byte length and allows up to **4096 bytes**. Dynamic fields can cause the final notification to exceed this limit. In that case, Flashduty sends a compact message marked “The original message was too long and has been shortened” instead of dropping the notification. The compact message retains the incident number, title, channel, severity, trigger time, resource, responders, details link, and acknowledge link.
+</Warning>
+
+**Markdown v1 default template**:
+
+```go
+{{fireReason .}}**INC [#{{.Num}}]({{.DetailUrl}}) {{toHtml .Title}}**
+> Channel: <font color="warning">{{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}</font>
+> Severity: <font color="warning">{{.IncidentSeverity}}</font>
+> Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
+> Duration: {{ago .StartTime}}{{if gt .AlertCnt 1}}
+> Grouped Alerts: {{.AlertCnt}}{{end}}
+<br />[Details]({{.DetailUrl}})|[Acknowledge]({{.DetailUrl}}?ack=1)
+```
+
+**Markdown v2 default template**:
+
+```go
+{{fireReason .}}## INC [#{{.Num}}]({{.DetailUrl}}) {{.Title}}
+> **Channel:** {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
+> **Severity:** {{.IncidentSeverity}}
+> **Triggered at:** {{date "2006-01-02 15:04:05" .StartTime}}{{if gt .AlertCnt 1}}
+> **Grouped alerts:** {{.AlertCnt}}{{end}}{{if .Labels.resource}}
+> **Resource:** {{(joinAlertLabels . "resource" ", ")}}{{end}}{{if .Labels.body_text}}
+> **Description:** {{.Labels.body_text}}{{else if .Description}}
+> **Description:** {{.Description}}{{end}}{{if gt (len .Responders) 0}}
+> **Responders:** {{range .Responders}}@{{.PersonName}} {{end}}{{end}}
+
+[Details]({{.DetailUrl}}) | [Ack]({{.DetailUrl}}?ack=1)
+```
+</Tab>
+
+<Tab title="Slack Bot">
+Max message ~15000 characters, truncated if exceeded.
+
+**Default Template**:
+
+```go
+{{fireReason .}}INC <{{.DetailUrl}}|#{{.Num}}> {{toHtml .Title}}
+-----
+Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
+Severity: {{.IncidentSeverity}}
+Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
+Duration: {{ago .StartTime}}{{if gt .AlertCnt 1}}
+Grouped Alerts: {{.AlertCnt}}{{end}}
+-----
+<br /><{{.DetailUrl}}|Details>|<{{.DetailUrl}}?ack=1|Acknowledge>
+```
+</Tab>
+
+<Tab title="Telegram Bot">
+Max message 4096 characters, won't send if exceeded. Requires configuring a Telegram service address accessible from your region.
+
+**Default Template**:
+
+```go
+{{fireReason .}}INC [#{{.Num}}]({{.DetailUrl}}) {{toHtml .Title}}
+-----
+Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
+Severity: {{.IncidentSeverity}}
+Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
+Duration: {{ago .StartTime}}
+<br />[Details]({{.DetailUrl}})|[Acknowledge]({{.DetailUrl}}?ack=1)
+```
+</Tab>
+</Tabs>
+
+## Other channels
+
+<Tabs>
+<Tab title="SMS">
+**Default Template**:
+
+```go
+You have a pending incident: {{toHtml .Title}}, Channel: {{.ChannelName}}, Severity: {{.IncidentSeverity}}{{if gt .AlertCnt 1}}, {{.AlertCnt}} alerts grouped{{end}}
+```
+</Tab>
+<Tab title="Voice">
+**Default Template**:
+
+```go
+You have a pending incident: {{toHtml .Title}}, Channel: {{.ChannelName}}, Severity: {{.IncidentSeverity}}{{if gt .AlertCnt 1}}, {{.AlertCnt}} alerts grouped{{end}}
+```
+</Tab>
+
+<Tab title="Email">
+Supports full HTML format. Default template provides professional email layout including incident title, severity, channel, trigger time, responders, plus "Acknowledge Now" and "View Details" buttons.
+
+<Frame caption="Email Notification Effect">
+<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/email_render.png" alt="Email Notification" />
+</Frame>
+</Tab>
+</Tabs>
 
 ## FAQ
 
@@ -320,409 +718,11 @@ Image size cannot exceed 10 MB, supports JPG, PNG, WEBP, GIF, BMP formats.
 
 <Accordion title="How to find more functions?">
 - Function list: [functions.go](https://github.com/flashcatcloud/sprig/blob/master/functions.go#L97)
-- Usage examples: Check corresponding `_test.go` files, e.g., [date_test.go](https://github.com/flashcatcloud/sprig/blob/master/date_test.go)
+- Usage examples: Check corresponding `_test.go` files, for example, [date_test.go](https://github.com/flashcatcloud/sprig/blob/master/date_test.go)
 </Accordion>
 </AccordionGroup>
 
-## Channel Templates
-
-Different notification channels support different template formats and limitations.
-
-<Tabs>
-<Tab title="Feishu/Lark App">
-Requires [Feishu/Lark integration](/en/on-call/integration/instant-messaging/lark) configured first. Supports message card format; system auto-removes empty render lines caused by non-existent labels.
-
-**Default Template** (render all labels):
-
-```go
-{{if .Labels.body_text}}{{.Labels.body_text}}{{else if .Description}}{{.Description}}{{end}}
-{{if .Labels.resource}}**resource** : {{(joinAlertLabels . "resource" ", ")}}{{end}}
-{{range $k, $v := .Labels}}
-{{if not (in $k "resource" "body_text" "body_text_with_table")}}**{{$k}}** : {{$v}}{{end}}{{end}}
-{{ $root := . }}
-{{ range $i, $v := .Images }}
-  {{ $transferURL := transferImage $root $v.Src }}
-  {{ if $transferURL }}![]({{$transferURL}}){{ end }}
-{{ end }}
-```
-
-<Frame caption="Feishu/Lark App Notification Effect">
-<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/feishu_app_render.png" alt="Feishu/Lark App Notification" />
-</Frame>
-
-**Minimal Template** (show key labels only):
-
-```go
-{{if (index .Labels "resource")}}resource：{{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
-{{if (index .Labels "check")}}check：{{toHtml (index .Labels "check")}}{{end}}
-{{if (index .Labels "metric")}}metric：{{index .Labels "metric"}}{{end}}
-{{if (index .Labels "trigger_value")}}trigger_value：{{index .Labels "trigger_value"}}{{end}}
-{{if (index .Labels "region")}}region：{{index .Labels "region"}}{{end}}
-{{if (index .Labels "cluster")}}cluster：{{index .Labels "cluster"}}{{end}}
-{{if (index .Labels "service")}}service：{{index .Labels "service"}}{{end}}
-{{if (index .Labels "env")}}env：{{index .Labels "env"}}{{end}}
-```
-
-### Card Fields and Bottom Action Buttons
-
-When editing a Feishu/Lark app template, the **Additional info** tab next to the **Content** tab provides a card-fields switch panel ("These fields are rendered by the system. Use the switches to show or hide them at the bottom of the message."), which controls whether 7 system fields — channel, snooze deadline, severity, aggregated alert count, responders, the details button, and AI analysis — are rendered at the bottom of the card.
-
-**Create war room** can be configured on Feishu/Lark app, Dingtalk app, and Slack app templates (backed respectively by the `feishu_app_war_room_enabled`, `dingtalk_app_war_room_enabled`, and `slack_app_war_room_enabled` fields, **off** by default; save the template to apply the change). The switch itself is labelled **Create war room**, and the panel describes it as "Once enabled, a dedicated Create War Room button is shown at the bottom of the card when the group-creation conditions are met."
-
-- **On**: when the incident is not closed, has no war room yet, and has responders, the card for that channel shows a dedicated **👥 Create War Room** button at the bottom; clicking it starts group creation
-- **Off**: no such button is shown
-
-**Keep custom actions after incident closure** is offered on Feishu/Lark app, Dingtalk app, Slack app, and Microsoft Teams templates; the WeCom app template does not offer it (the panel does not render the switch for that channel). It is backed by the `incident_card_closed_action_apps` field — an array of the channel keys for which the capability is enabled (e.g. `["feishu_app"]`), **off** by default (an empty array means off); save the template to apply the change.
-
-- **On** (panel description: "Enabled. Configured custom actions can be run from the message card for 3 days after the incident is closed. After that, run them from the incident details."): configured custom actions can still be run directly from the message card for 3 days after the incident is closed; after that, run them from the incident details page
-- **Off** (panel description: "Disabled. Custom actions are hidden from the message card after the incident is closed. You can still run them from the incident details."): the message card no longer shows the custom actions entry once the incident is closed; they can still be run from the incident details page
-
-Together with the 7 card-field switches above, the **Additional info** panel holds **9 switches** on Feishu/Lark app, Dingtalk app, and Slack app templates, **7** on Microsoft Teams, and **6** on WeCom app (see the channel template tabs below).
-
-The card's bottom action area has changed as well: **More Actions** (that placeholder is its label) is now a dropdown select menu holding custom actions, snooze durations, and unacknowledge — the war room button is no longer one of its entries.
-</Tab>
-
-<Tab title="Dingtalk App">
-Requires [Dingtalk integration](/en/on-call/integration/instant-messaging/dingtalk) configured first. Supports message card format; system auto-removes empty render lines.
-
-**Default Template**:
-
-```go
-{{if .Description}}**description** :{{toHtml .Labels.body_text .Description}}{{end}}
-{{if .Labels.resource}}**resource** : {{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
-{{range $k, $v := .Labels}}
-{{if not (in $k "resource" "body_text")}}**{{$k}}** : {{toHtml $v}}{{end}}{{end}}
-{{ $root := . }}
-{{ range $i, $v := .Images }}
-{{ $imageURL := imageSrcToURL $root $v.Src }}
-{{ if $imageURL }}![]({{$imageURL}}){{ end }}{{ end }}
-```
-
-<Frame caption="Dingtalk App Notification Effect">
-<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/dingtalk_app_render.png" alt="Dingtalk App Notification" />
-</Frame>
-
-As with the Feishu/Lark app, the **Additional info** tab next to the **Content** tab provides a card-fields switch panel ("These fields are rendered by the system. Use the switches to show or hide them at the bottom of the message."), controlling whether 7 system fields — channel, snooze deadline, severity, aggregated alert count, responders, the details button, and AI analysis — are rendered at the bottom of the card; the Dingtalk app template also offers the **Create war room** switch (backed by the `dingtalk_app_war_room_enabled` field, **off** by default; save the template to apply the change) and the **Keep custom actions after incident closure** switch (recorded in the `incident_card_closed_action_apps` channel-key array, **off** by default), so the **Additional info** panel holds **9 switches**.
-</Tab>
-
-<Tab title="WeCom App">
-Requires [WeCom integration](/en/on-call/integration/instant-messaging/wecom) configured first. Supports message card format.
-
-<Warning>
-WeCom limits card length, template render area max **8 lines**, excess will be hidden.
-</Warning>
-
-**Default Template**:
-
-```go
-{{if (index .Labels "resource")}}resource：{{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
-{{if (index .Labels "metric")}}metric：{{index .Labels "metric"}}{{end}}
-{{if (index .Labels "trigger_value")}}trigger_value：{{index .Labels "trigger_value"}}{{end}}
-{{if (index .Labels "region")}}region：{{index .Labels "region"}}{{end}}
-{{if (index .Labels "cluster")}}cluster：{{index .Labels "cluster"}}{{end}}
-{{if (index .Labels "service")}}service：{{index .Labels "service"}}{{end}}
-{{if (index .Labels "env")}}env：{{index .Labels "env"}}{{end}}
-```
-
-<Frame caption="WeCom App Notification Effect">
-<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/wecom_app_render.png" alt="WeCom App Notification" />
-</Frame>
-
-As with the Feishu/Lark app, the **Additional info** tab next to the **Content** tab provides a card-fields switch panel ("These fields are rendered by the system. Use the switches to show or hide them at the bottom of the message."), controlling whether 6 system fields — channel, snooze deadline, severity, aggregated alert count, responders, and the details button — are rendered at the bottom of the card. The WeCom app template does not offer the **AI Analysis**, **Create war room**, or **Keep custom actions after incident closure** switches, so its **Additional info** panel holds **6 switches**.
-</Tab>
-
-<Tab title="Slack App">
-Requires [Slack integration](/en/on-call/integration/instant-messaging/slack) configured first. Max message length ~15000 characters, truncated if exceeded.
-
-<Tip>
-When displaying images, separate images from other content with `---`, format starts with `![`.
-</Tip>
-
-**Default Template**:
-
-```go
-{{if .Labels.body_text}}{{.Labels.body_text}}{{else if .Description}}{{.Description}}{{end}}
-{{if .Labels.resource}}*resource* : {{(joinAlertLabels . "resource" ", ")}}{{end}}
-{{range $k, $v := .Labels}}
-{{if not (in $k "resource" "body_text" "body_text_with_table")}}*{{$k}}* : {{$v}}{{end}}{{end}}
-{{ $root := . }}
-{{ range $i, $v := .Images }}
- {{ $imageURL := imageSrcToURL $root $v.Src }}
- {{ if $imageURL }}
-  ---
-  ![{{$v.Alt}}]({{$imageURL}})
- {{ end }}
-{{ end }}
-```
-
-<Frame caption="Slack App Notification Effect">
-<img src="https://download.flashcat.cloud/flashduty/integration/slack/slack_app_message.png" alt="Slack App Notification" />
-</Frame>
-
-As with the Feishu/Lark app, the **Additional info** tab next to the **Content** tab provides a card-fields switch panel ("These fields are rendered by the system. Use the switches to show or hide them at the bottom of the message."), controlling whether 7 system fields — channel, snooze deadline, severity, aggregated alert count, responders, the details button, and AI analysis — are rendered at the bottom of the card; the Slack app template also offers the **Create war room** switch (backed by the `slack_app_war_room_enabled` field, **off** by default; save the template to apply the change) and the **Keep custom actions after incident closure** switch (recorded in the `incident_card_closed_action_apps` channel-key array, **off** by default), so the **Additional info** panel holds **9 switches**.
-</Tab>
-
-<Tab title="Microsoft Teams">
-Requires [Teams integration](/en/on-call/integration/instant-messaging/microsoft-teams) configured first. Max message ~28KB, errors if exceeded.
-
-**Default Template**:
-
-```go
-{{if .Description}}**description** :{{toHtml .Labels.body_text .Description}}{{end}}
-{{if .Labels.resource}}**resource** : {{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
-{{range $k, $v := .Labels}}
-{{if not (in $k "resource" "body_text" "body_text_with_table")}}**{{$k}}** : {{toHtml $v}}{{end}}{{end}}
-```
-
-<Frame caption="Teams App Notification Effect">
-<img src="https://download.flashcat.cloud/flashduty/integration/microsoft-teams/teams_app_message.png" alt="Teams App Notification" />
-</Frame>
-
-As with the Feishu/Lark app, the **Additional info** tab next to the **Content** tab provides a card-fields switch panel ("These fields are rendered by the system. Use the switches to show or hide them at the bottom of the message."), controlling whether 6 system fields — channel, snooze deadline, severity, aggregated alert count, responders, and the details button — are rendered at the bottom of the card, plus a **Keep custom actions after incident closure** switch (recorded in the `incident_card_closed_action_apps` channel-key array, **off** by default), so its **Additional info** panel holds **7 switches**. The Microsoft Teams template does not offer the **AI Analysis** or **Create war room** switches.
-</Tab>
-</Tabs>
-
-## Bot Templates
-
-Template formats supported by group chat bots.
-
-<Tabs>
-<Tab title="Feishu/Lark Bot">
-Supports message card, rich text, and plain text formats. Max message 4000 bytes, truncated if exceeded.
-
-<AccordionGroup>
-<Accordion title="Message Card (msg_type: interactive)">
-```json
-{
-  "msg_type": "interactive",
-  "card": {
-    "config": {
-      "wide_screen_mode": true,
-      "enable_forward": true
-    },
-    "header": {
-      "template": "{{if eq .IncidentSeverity \"Critical\"}}red{{else if eq .IncidentSeverity \"Warning\"}}orange{{else}}yellow{{end}}",
-      "title": {
-        "content": "{{fireReason .}}INC #{{.Num}} {{toHtml .Title}}",
-        "tag": "plain_text"
-      }
-    },
-    "elements": [{
-      "tag": "div",
-      "fields": [{
-        "text": {
-          "tag": "lark_md",
-          "content": "**🏢 Channel:**{{.ChannelName}}"
-        }
-      },
-      {
-        "text": {
-          "tag": "lark_md",
-          "content": "**⏰ Trigger Time:**{{date \"2006-01-02 15:04:05\" .StartTime}}"
-        }
-      }]
-    },
-    {
-      "tag": "action",
-      "actions": [{
-        "tag": "button",
-        "text": { "tag": "plain_text", "content": "Details" },
-        "type": "primary",
-        "url": "{{.DetailUrl}}"
-      },
-      {
-        "tag": "button",
-        "text": { "tag": "plain_text", "content": "Acknowledge" },
-        "type": "primary",
-        "url": "{{.DetailUrl}}?ack=1"
-      }]
-    }]
-  }
-}
-```
-</Accordion>
-
-<Accordion title="Rich Text (msg_type: post)">
-```json
-{
-  "msg_type": "post",
-  "post": {
-    "zh_cn": {
-      "title": "{{if eq .IncidentSeverity \"Critical\"}}🔴{{else if eq .IncidentSeverity \"Warning\"}}⚠️{{else}}ℹ️{{end}} {{fireReason .}}INC #{{.Num}} {{toHtml .Title}}",
-      "content": [
-        [{"tag": "text", "text": "🏢 "}, {"tag": "text", "text": "Channel: ", "style": ["bold"]}, {"tag": "text", "text": "{{.ChannelName}}"}],
-        [{"tag": "text", "text": "⏰ "}, {"tag": "text", "text": "Trigger Time: ", "style": ["bold"]}, {"tag": "text", "text": "{{date \"2006-01-02 15:04:05\" .StartTime}}"}],
-        [{"tag": "a", "href": "{{.DetailUrl}}", "text": "Details"}, {"tag": "text", "text": "  "}, {"tag": "a", "href": "{{.DetailUrl}}?ack=1", "text": "Acknowledge"}]
-      ]
-    }
-  }
-}
-```
-</Accordion>
-
-<Accordion title="Plain Text">
-```go
-{{fireReason .}}INC #{{.Num}} {{toHtml .Title}}
------
-Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
-Severity: {{.IncidentSeverity}}
-Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
-Duration: {{ago .StartTime}}
-<br />Details: {{.DetailUrl}}
-```
-</Accordion>
-</AccordionGroup>
-</Tab>
-
-<Tab title="Dingtalk Bot">
-Only supports Markdown messages ([syntax limitations](https://open.dingtalk.com/document/robots/custom-robot-access#title-7ur-3ok-s1a)). Max message 4000 bytes.
-
-<Note>
-If text contains `<br />`, empty lines are removed first during rendering, then replaced with newlines.
-</Note>
-
-**Default Template**:
-
-```go
-{{fireReason .}}INC [#{{.Num}}]({{.DetailUrl}}) {{toHtml .Title}}
-
----
-- Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
-- Severity: {{$s := colorSeverity .IncidentSeverity}}{{toHtml $s}}
-- Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
-- Duration: {{ago .StartTime}}{{if gt .AlertCnt 1}}
-- Grouped Alerts: {{.AlertCnt}}{{end}}{{if .Labels.resource}}
-- Resource: {{toHtml (joinAlertLabels . "resource" ", ")}}{{end}}
----
-<br />[Details]({{.DetailUrl}})|[Acknowledge]({{.DetailUrl}}?ack=1)
-```
-</Tab>
-
-<Tab title="WeCom Bot">
-WeCom bots support both Markdown v1 and Markdown v2. Existing templates continue to use v1 by default. You can enable v2 per template without affecting other templates.
-
-| Comparison | Markdown v1 | Markdown v2 |
-| :--- | :--- | :--- |
-| Enablement | Default format; no setup required | Enable **Use Markdown v2** in the WeCom bot template |
-| Markdown support | Uses WeCom's legacy Markdown syntax ([syntax limitations](https://developer.work.weixin.qq.com/document/path/91770#markdown%E7%B1%BB%E5%9E%8B)) | Supports standard Markdown, including headings, lists, and tables |
-| Link behavior | Links usually open in WeCom's built-in browser | Links usually open in the system default browser; the final behavior depends on the WeCom client version and settings |
-| Message length | Up to 4000 bytes; excess content is truncated while preserving the details link | Up to 4096 bytes; an oversized runtime message is replaced with a compact message |
-| @ mentions | Uses the bot @ mention settings in the escalation rule | Uses the same settings; the @ mention is sent only after the message body succeeds |
-
-### Enable Markdown v2
-
-<Steps>
-<Step title="Open template management">
-Open **Template Management**, then create a custom template or copy an existing template.
-</Step>
-<Step title="Select the WeCom bot template">
-Select **WeCom Bot** under template content and enable **Use Markdown v2**.
-</Step>
-<Step title="Edit and save the template">
-Edit the content using standard Markdown and save it. The setting is stored with this template and affects only notifications that use it.
-</Step>
-</Steps>
-
-<Note>
-Disabling the toggle switches the template back to Markdown v1. Existing v1 template content and delivery behavior remain unchanged.
-</Note>
-
-<Warning>
-Markdown v2 uses the UTF-8 byte length and allows up to **4096 bytes**. Dynamic fields can cause the final notification to exceed this limit. In that case, Flashduty sends a compact message marked “The original message was too long and has been shortened” instead of dropping the notification. The compact message retains the incident number, title, channel, severity, trigger time, resource, responders, details link, and acknowledge link.
-</Warning>
-
-**Markdown v1 default template**:
-
-```go
-{{fireReason .}}**INC [#{{.Num}}]({{.DetailUrl}}) {{toHtml .Title}}**
-> Channel: <font color="warning">{{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}</font>
-> Severity: <font color="warning">{{.IncidentSeverity}}</font>
-> Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
-> Duration: {{ago .StartTime}}{{if gt .AlertCnt 1}}
-> Grouped Alerts: {{.AlertCnt}}{{end}}
-<br />[Details]({{.DetailUrl}})|[Acknowledge]({{.DetailUrl}}?ack=1)
-```
-
-**Markdown v2 default template**:
-
-```go
-{{fireReason .}}## INC [#{{.Num}}]({{.DetailUrl}}) {{.Title}}
-> **Channel:** {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
-> **Severity:** {{.IncidentSeverity}}
-> **Triggered at:** {{date "2006-01-02 15:04:05" .StartTime}}{{if gt .AlertCnt 1}}
-> **Grouped alerts:** {{.AlertCnt}}{{end}}{{if .Labels.resource}}
-> **Resource:** {{(joinAlertLabels . "resource" ", ")}}{{end}}{{if .Labels.body_text}}
-> **Description:** {{.Labels.body_text}}{{else if .Description}}
-> **Description:** {{.Description}}{{end}}{{if gt (len .Responders) 0}}
-> **Responders:** {{range .Responders}}@{{.PersonName}} {{end}}{{end}}
-
-[Details]({{.DetailUrl}}) | [Ack]({{.DetailUrl}}?ack=1)
-```
-</Tab>
-
-<Tab title="Slack Bot">
-Max message ~15000 characters, truncated if exceeded.
-
-**Default Template**:
-
-```go
-{{fireReason .}}INC <{{.DetailUrl}}|#{{.Num}}> {{toHtml .Title}}
------
-Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
-Severity: {{.IncidentSeverity}}
-Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
-Duration: {{ago .StartTime}}{{if gt .AlertCnt 1}}
-Grouped Alerts: {{.AlertCnt}}{{end}}
------
-<br /><{{.DetailUrl}}|Details>|<{{.DetailUrl}}?ack=1|Acknowledge>
-```
-</Tab>
-
-<Tab title="Telegram Bot">
-Max message 4096 characters, won't send if exceeded. Requires configuring a Telegram service address accessible from your region.
-
-**Default Template**:
-
-```go
-{{fireReason .}}INC [#{{.Num}}]({{.DetailUrl}}) {{toHtml .Title}}
------
-Channel: {{if .ChannelName}}{{.ChannelName}}{{else}}None{{end}}
-Severity: {{.IncidentSeverity}}
-Trigger Time: {{date "2006-01-02 15:04:05" .StartTime}}
-Duration: {{ago .StartTime}}
-<br />[Details]({{.DetailUrl}})|[Acknowledge]({{.DetailUrl}}?ack=1)
-```
-</Tab>
-</Tabs>
-
-## Other Channels
-
-<Tabs>
-<Tab title="SMS">
-**Default Template**:
-
-```go
-You have a pending incident: {{toHtml .Title}}, Channel: {{.ChannelName}}, Severity: {{.IncidentSeverity}}{{if gt .AlertCnt 1}}, {{.AlertCnt}} alerts grouped{{end}}
-```
-</Tab>
-<Tab title="Voice">
-**Default Template**:
-
-```go
-You have a pending incident: {{toHtml .Title}}, Channel: {{.ChannelName}}, Severity: {{.IncidentSeverity}}{{if gt .AlertCnt 1}}, {{.AlertCnt}} alerts grouped{{end}}
-```
-</Tab>
-
-<Tab title="Email">
-Supports full HTML format. Default template provides professional email layout including incident title, severity, channel, trigger time, responders, plus "Acknowledge Now" and "View Details" buttons.
-
-<Frame caption="Email Notification Effect">
-<img src="https://download.flashcat.cloud/flashduty/changelog/20230720/email_render.png" alt="Email Notification" />
-</Frame>
-</Tab>
-</Tabs>
-
-## Related Topics
+## Related topics
 
 <CardGroup cols={2}>
 <Card title="Configure Escalation Rules" icon="route" href="/en/on-call/channel/escalation-rule">
