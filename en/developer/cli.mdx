@@ -94,14 +94,16 @@ flashduty config set base_url URL  # Override the API endpoint
 
 ## Global flags
 
-All subcommands accept these flags:
+These flags are registered on the root command, and every subcommand accepts them:
 
 | Flag | Description |
 |------|-------------|
 | `--output-format` | Output format: `table` (default), `json`, or `toon` (compact, token-efficient) |
 | `--json` | Alias for `--output-format json`; emit JSON for parsing with `jq` or similar tools |
 | `--no-trunc` | Disable column truncation in table output |
+| `--fields` | In `json`/`toon` output, keep only the named top-level fields (comma-separated): each row of a list, or the keys of a single record. Table output ignores it and a stderr note says so; a name that matches no key is reported on stderr together with the keys the output does carry, and output that is neither an object nor a list of objects fails the command. See "Field projections for structured output" below |
 | `--base-url` | Override the API endpoint (for private deployments) |
+| `--version` | Print the version — the same single line as `flashduty version`. That meaning exists only on the root command; a command that defines its own `--version` (for example the optimistic-locking version on mutating verbs) follows its own description |
 
 ## Command catalog
 
@@ -116,7 +118,7 @@ flashduty incident ack <id> [<id2>...]   # Acknowledge incidents
 flashduty incident close <id> [<id2>...] # Close (resolve) incidents
 flashduty incident merge <target-id> --source <ids> # Merge incidents into a target incident
 flashduty incident timeline <id>         # View an incident timeline
-flashduty incident alerts <id>           # List alerts associated with an incident
+flashduty incident alerts <id>           # List alerts associated with an incident (--limit default 10, --page)
 flashduty incident similar <id>          # Find similar historical incidents
 flashduty incident feed <id> [flags]    # View an incident's paginated feed (timeline entries)
 ```
@@ -141,7 +143,7 @@ Common filter flags for `incident list`:
 | `--is-rare` | Only outlier incidents | `false` |
 | `--is-snoozed` | Only snoozed incidents | `false` |
 | `--ever-muted` | Only incidents that were ever silenced | `false` |
-| `--since` | Start time (duration, date, datetime, or unix timestamp); the `--since` to `--until` window must be under 31 days | `24h` |
+| `--since` | Start time (duration, date, datetime, or unix timestamp); the `--since` to `--until` window must be under 31 days | `24h` (`30d` when `--progress` lists only `Triggered,Processing`) |
 | `--until` | End time | `now` |
 | `--asc` | Sort ascending (oldest first) | `false` (newest first) |
 | `--limit` | Max results (max 100) | `20` |
@@ -150,6 +152,8 @@ Common filter flags for `incident list`:
 Time format examples: `5m`, `1h`, `24h`, `168h`, `2026-04-01`, `2026-04-01 10:00:00`, `1712000000`.
 
 `incident feed <id>` reads an incident's feed (timeline entries) page by page. `--asc` lists the oldest entries first (the default is newest first). `--types` filters by comma-separated entry types, for example `i_comm,i_assign`; each entry's `type` field gives its actual type. `--limit` (max 100) and `--page` paginate the result.
+
+`incident alerts <id>` lists the alerts attached to that incident; `--limit` defaults to `10` and `--page` starts at `1`.
 
 #### Create, update, and merge
 
@@ -685,8 +689,9 @@ This command only reads the value set of one label; to fetch time series from an
 ### alert — Alert and alert-event queries
 
 ```bash
-flashduty alert list [flags]        # List alerts (default: last 24h)
+flashduty alert list [flags]        # List alerts (default: last 24h; 30d with --active)
 flashduty alert get <alert_id>      # Get full detail of one alert; detail is an alias
+flashduty alert events <alert_id>   # List the raw events that make up one alert (--limit, --page)
 flashduty alert-event list [flags]  # List alert events (default: last 1h)
 ```
 
@@ -698,6 +703,10 @@ Common filter flags for both `list` commands: `--severity` (`Critical,Warning,In
 - `--alert-keys`: comma-separated alert deduplication keys.
 - `--asc`: sort oldest first by start time (the default is newest first).
 - `--by-updated-at`: apply `--since`/`--until` to the last-updated time instead of the start time. `alert-event list` also supports `--asc` (oldest first; newest first by default), but has no `--by-updated-at` counterpart.
+
+`alert list` also filters by state through `--active` (active alerts only) and `--recovered` (recovered alerts only). They are mutually exclusive — passing both is an error — and passing neither applies no state filter. Active alerts can be older than a day, so with `--active` and no `--since` the window widens to 30 days by default (the window actually sent is reported by the stderr note).
+
+`alert events <alert_id>` lists the raw events that make up one alert: leave `--limit` unset to take the server default of 20 (max 100), and `--page` starts at 1. It reads events for a single alert; for a time-window query across alerts use `alert-event list`.
 
 ### automation — AI SRE automation rules
 
@@ -908,6 +917,14 @@ Table view with no column truncation — useful for copy-paste or wide terminals
 </Tab>
 </Tabs>
 
+### Time-window note
+
+Commands that query a time range print the window they actually sent to stderr in the local timezone, for example `note: window 2026-10-08T14:00:00+08:00..2026-10-09T14:00:00+08:00 (1d, ended now)`. The parenthesised part carries the span and where the end sits relative to now (`ended 3m ago` / `ends in 2h`); when the window comes from a default rather than from `--since`/`--until` you typed, the note names that default (an `--progress` filter of open states only, or `--active`).
+
+This covers `incident list`, `alert list`, `alert-event list`, `change list`, `audit search`, `insight`, `oncall`, `monit-query` (when its tool params carry an execution window), and every generated command whose `--start-time`/`--end-time` resolve. A command that leaves one side to `--data` or to the server default prints no note, because the window was never fully resolved by the CLI. A query with a single evaluation timestamp reads `note: instant <time> (…)` instead.
+
+Use it to catch a window you did not intend: a default wider than you expected (`--active` widens it to 30 days), or an epoch read in the wrong timezone, which lands the window in the future and reads `ends in 7h`. The note goes only to stderr, so stdout stays byte-identical for `jq` and toon consumers.
+
 ### Generated-command output bound
 
 Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply a 16 KiB bound to **list-shaped** responses in `json`/`toon` mode. The reduction has three tiers, plus a machine-readable marker:
@@ -923,11 +940,13 @@ Generated commands (the ones covering the OpenAPI through the code generator, su
 
 **Bare top-level arrays** (such as the curated `incident list` and `insight incidents`) have nowhere to carry the marker, so a reduction is announced on stderr only.
 
-**Detail-shaped single objects** (for example, `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Most generated commands have no flag that narrows their output. An occasional `--fields` selects request-body fields, not output fields. For complete JSON, lower `--limit` and page through with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
+**Detail-shaped single objects** (for example, `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands can narrow their output fields with the global `--fields` (see "Global flags" and "Field projections for structured output" below; where an occasional command spells `--fields` as a request-body field selector, such as `monit rule-update-fields`, it does not apply to the output). For complete JSON, lower `--limit` and page through with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
 
 ### Field projections for structured output
 
-The following commands support `--fields` with `json` or `toon` output. Supply comma-separated top-level response fields; an unknown field fails immediately, and table output ignores this flag.
+`--fields` is a global flag (see "Global flags"): every command accepts it in `json` or `toon` output, and it takes a comma-separated list of top-level fields to keep, applied to each row of a list or to the keys of a single record. The projection runs on the response: for a list envelope (row array named `items`, `docs`, or `list`, with only scalar paging fields beside it) it narrows that row array and leaves the paging fields intact; a field no row of the response carries is left out and stderr reports it as matching no key, listing the keys the output does carry; output that is neither an object nor a list of objects fails the command and tells you to drop `--fields`. Table output ignores `--fields`, and stderr says so.
+
+The curated commands in the table below fall back to a default compact projection when `--fields` is omitted, and are size-bounded; each of them defines its own `--fields` (same meaning as the global one), so a misspelled field name fails immediately and lists the names that are valid. Every other command — all the generated ones included — has no default projection: on those, `--fields` applies to the raw fields of the API response, and a name that matches no key only produces the stderr note above.
 
 | Command | Structured output when `--fields` is omitted | Limit |
 | --- | --- | --- |

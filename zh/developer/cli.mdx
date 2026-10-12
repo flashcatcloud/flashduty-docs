@@ -94,14 +94,16 @@ flashduty config set base_url URL  # 覆盖 API 地址
 
 ## 全局参数
 
-所有子命令均支持以下参数：
+以下参数注册在根命令上，所有子命令均可使用：
 
 | 参数 | 说明 |
 |------|------|
 | `--output-format` | 输出格式：`table`（默认）、`json` 或 `toon`（紧凑、更省 token） |
 | `--json` | 以 JSON 格式输出，是 `--output-format json` 的别名，便于通过 `jq` 等工具解析 |
 | `--no-trunc` | 表格输出时不截断长字段 |
+| `--fields` | `json`/`toon` 输出时只保留指定的顶层字段（逗号分隔），作用于列表的每一行或单个记录；表格输出忽略该参数，并在 stderr 提示它未生效。字段名未命中时 stderr 会列出实际可用的键；输出不是对象或对象列表时命令直接报错。详见下文「结构化输出的字段投影」 |
 | `--base-url` | 覆盖 API 地址（私有部署场景） |
+| `--version` | 打印版本信息，与 `flashduty version` 输出相同的一行。这个含义只在根命令上有；个别命令自己定义了 `--version`（例如变更类命令的乐观锁版本号），那些命令按自己的说明生效 |
 
 ## 命令清单
 
@@ -116,7 +118,7 @@ flashduty incident ack <id> [<id2>...]  # 认领故障
 flashduty incident close <id> [<id2>...] # 关闭（解决）故障
 flashduty incident merge <target-id> --source <ids> # 将多个故障合并到目标故障
 flashduty incident timeline <id>        # 查看故障时间线
-flashduty incident alerts <id>          # 查看故障关联的告警
+flashduty incident alerts <id>          # 查看故障关联的告警（--limit 默认 10、--page）
 flashduty incident similar <id>         # 查找相似的历史故障
 flashduty incident feed <id> [flags]   # 查看故障的分页动态流（时间线条目）
 ```
@@ -141,7 +143,7 @@ flashduty incident feed <id> [flags]   # 查看故障的分页动态流（时间
 | `--is-rare` | 仅看新奇故障 | `false` |
 | `--is-snoozed` | 仅看已暂缓的故障 | `false` |
 | `--ever-muted` | 仅看曾被静默的故障 | `false` |
-| `--since` | 起始时间（时长、日期、日期时间或 Unix 时间戳），与 `--until` 的窗口须小于 31 天 | `24h` |
+| `--since` | 起始时间（时长、日期、日期时间或 Unix 时间戳），与 `--until` 的窗口须小于 31 天 | `24h`；`--progress` 只含 `Triggered,Processing` 时为 `30d` |
 | `--until` | 截止时间 | `now` |
 | `--asc` | 按时间升序（最早的在前） | `false`（最新在前） |
 | `--limit` | 最大结果数（上限 100） | `20` |
@@ -150,6 +152,8 @@ flashduty incident feed <id> [flags]   # 查看故障的分页动态流（时间
 时间格式示例：`5m`、`1h`、`24h`、`168h`、`2026-04-01`、`2026-04-01 10:00:00`、`1712000000`。
 
 `incident feed <id>` 按页读取故障的动态流（时间线条目）：`--asc` 让最旧的条目在前（默认最新在前），`--types` 按逗号分隔的条目类型过滤（如 `i_comm,i_assign`，条目的 `type` 字段给出实际类型），另有 `--limit`（最大 100）与 `--page`。
+
+`incident alerts <id>` 列出该故障关联的告警，支持 `--limit`（默认 `10`）与 `--page`（默认 `1`）。
 
 #### 创建、更新与合并
 
@@ -680,14 +684,19 @@ flashduty monit prometheus-api-v1-label-{label_name}-values job --data-source-id
 ### alert — 告警与告警事件查询
 
 ```bash
-flashduty alert list [flags]        # 列出告警（默认最近 24 小时）
+flashduty alert list [flags]        # 列出告警（默认最近 24 小时；--active 时为 30 天）
 flashduty alert get <alert_id>      # 查看单条告警详情；detail 是同一命令的别名
+flashduty alert events <alert_id>   # 列出组成该告警的原始事件（--limit、--page）
 flashduty alert-event list [flags]  # 列出告警事件（默认最近 1 小时）
 ```
 
 两个 `list` 命令常用过滤参数：`--severity`（`Critical,Warning,Info`）、`--channel`（逗号分隔协作空间 ID）、`--integration`（逗号分隔的集成 ID）、`--since`/`--until`、`--limit`（最大 100）、`--page`。`alert-event list` 另有 `--integration-type`，按逗号分隔的**插件键**过滤（如 `AliCloud,Prometheus`）——注意它取插件键而非集成 ID，按集成 ID 过滤请使用 `--integration`。
 
 `alert list` 另有 `--alert-ids`（逗号分隔的告警 ID）、`--alert-keys`（逗号分隔的告警去重键）、`--asc`（按开始时间升序，默认最新在前）、`--by-updated-at`（把 `--since`/`--until` 应用到最近更新时间，而不是开始时间）；`alert-event list` 也支持 `--asc`（升序，默认最新在前），但没有 `--by-updated-at`。
+
+`alert list` 还用 `--active`（只看活跃告警）与 `--recovered`（只看已恢复告警）筛选状态：二者互斥，同时传入会报错；只传其中一个时，`--active` 对应活跃、`--recovered` 对应已恢复，都不传则不加状态过滤。活跃告警可能早于一天，因此 `--active` 且未指定 `--since` 时默认窗口放宽到 30 天（实际生效的窗口见 stderr 的窗口提示）。
+
+`alert events <alert_id>` 列出组成该告警的原始事件：`--limit` 默认取服务端默认的 20 条（上限 100），`--page` 从 1 开始。它按单个告警取事件，跨告警的时间窗查询用 `alert-event list`。
 
 ### automation — AI SRE 自动化规则
 
@@ -892,6 +901,14 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 </Tab>
 </Tabs>
 
+### 时间窗口提示
+
+查询时间范围的命令会把本次实际发送的窗口按本地时区写到 stderr，例如 `note: window 2026-10-08T14:00:00+08:00..2026-10-09T14:00:00+08:00 (1d, ended now)`。括号里是窗口跨度与结束时间相对当前的位置（`ended 3m ago` / `ends in 2h`）；若窗口来自某个默认值而非你显式传入的 `--since`/`--until`，还会说明是哪个默认值（如 `--progress` 只含开放状态、`--active`）。
+
+覆盖范围包括 `incident list`、`alert list`、`alert-event list`、`change list`、`audit search`、`insight`、`oncall`、`monit-query`（工具参数带执行窗口时），以及所有解析出 `--start-time`/`--end-time` 的生成命令（只给出一侧、另一侧交给 `--data` 或服务端默认的命令不输出该提示，因为窗口没有被完整确定）。只有一个时间点的查询写成 `note: instant <时刻> (…)`。
+
+它用来核对窗口是否就是你要的那个：默认值可能比你预期的宽（例如 `--active` 会把默认窗口放宽到 30 天），把时间戳按错误时区解读会让窗口落到未来，此时提示形如 `ends in 7h`。提示只写 stderr，stdout 保持原样，`jq` 与 toon 消费方不受影响。
+
 ### 生成命令的输出上限
 
 由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari session-list`、`monit datasource-list`、`safari a2a-agent-list` 等），其 `json` / `toon` 输出对**列表形态**的响应按 16 KiB 上限处理。缩减分三级，另外会有一个机读标记：
@@ -907,11 +924,13 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 
 **顶层数组形态**的响应（如精选命令 `incident list`、`insight incidents`）没有信封可承载标记，缩减仍只写 stderr。
 
-**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令大多没有可收窄输出的标志（个别命令的 `--fields` 是请求体的字段选择器，不作用于输出）；需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
+**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令可以用全局 `--fields` 收窄输出的字段（见「全局参数」与下文「结构化输出的字段投影」；个别命令的 `--fields` 是请求体的字段选择器，如 `monit rule-update-fields`，不作用于输出）；需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
 
 ### 结构化输出的字段投影
 
-以下命令在 `json` 或 `toon` 输出时支持 `--fields`。用逗号分隔顶层响应字段；未知字段会直接报错，表格输出会忽略此参数。
+`--fields` 是全局参数（见「全局参数」）：任意命令在 `json` 或 `toon` 输出时都能用它，逗号分隔要保留的顶层字段，作用于列表的每一行或单个记录。投影在返回结果上执行：列表信封（行数组为 `items`、`docs` 或 `list`，同级只有标量分页字段）只收窄其中的行数组，分页字段原样保留；某个字段在整个响应里都不存在时不会被写入输出，stderr 会提示该字段未匹配到任何键、并列出实际存在的键；输出既不是对象也不是对象列表时，命令报错并要求去掉 `--fields`。表格输出忽略 `--fields`，此时 stderr 会提示它未生效。
+
+下表列出的精选命令在省略 `--fields` 时按默认紧凑投影输出，并受大小上限约束；它们各自定义了自己的 `--fields`（含义与全局一致），字段名写错会直接报错并列出具名可用的字段。其它命令——包括全部生成命令——不带默认投影，`--fields` 直接作用在接口返回的原始字段上，字段名未命中只会得到上面那条 stderr 提示。
 
 | 命令 | 未指定 `--fields` 时的结构化输出 | 上限 |
 | --- | --- | --- |
