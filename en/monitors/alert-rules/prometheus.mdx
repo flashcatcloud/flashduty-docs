@@ -193,10 +193,45 @@ up{instance="${instance}", job="${job}"} == 1
 
 When the alert engine executes, it will replace `${instance}` with `host-1` and `${job}` with `node`, that is, the specific values in the alert event labels.
 
+#### Go template variables
+
+Besides `${label_name}`, the expressions of **Recovery Query** and **Related Query** also accept the Go template syntax `{{ $labels.<label_name> }}`. A single expression can only use one of the two: if an expression contains both `${...}` and `{{...}`, saving is rejected with `query expression mixes ${label} placeholders with Go template; use {{ $labels.name }} only`. Different expressions are independent of each other and may each pick a different syntax.
+
+Templates are supported in the following three field kinds, and **not in main queries** — the alert engine never renders labels in main queries, so a `{{ ... }}` written there is treated as query text itself (in PromQL it fails save-time validation as invalid syntax):
+
+- **Related Queries**: every related query statement configured on the rule.
+- **Threshold recovery query**: in threshold mode, the recovery query used when the recovery method is "query statement".
+- **Data exists / data missing recovery query**: in those modes, the recovery query used when the recovery method is "query statement".
+
+The template context is only `$labels` (the labels of the current alert instance): recovery and related queries run before the alert event is assembled, so `$values`, `$relates` and friends are not available there. The only available functions are `len`, `index`, `regexQuoteMeta`, `replace`, `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `and`, `or` and `not`, plus the `if`/`else` control structure; formatting functions such as `printf`, the Sprig function set, `range` loops, `define`/`block` and the `.`/`.Field` form are all rejected (the `.` form fails with `use $labels to access instance labels`).
+
+A label name that itself contains a dot (such as `service.name`) cannot be written as `$labels.service.name`; use `index $labels "service.name"` instead.
+
+Assuming an alert instance carries `host="host-1"`, the recovery query can be written like this:
+
+```
+up{host=~"{{ regexQuoteMeta $labels.host }}"} == 1
+```
+
+which renders to `up{host=~"host-1"} == 1`. The value a template produces must be quoted by the expression itself: in the example the `"` characters belong to PromQL strings and `{{ ... }}` only produces the value.
+
+<Warning>
+Go templates require monit-edge `v0.75.4` or later. Save-time validation checks **every** registered monit-edge instance in the clusters of the data sources matched by the rule: if any instance is older than `v0.75.4`, saving is rejected, with an error that starts with `Go template relate or recovery queries require` and names `v0.75.4` as the required version. The `${label_name}` syntax is not subject to this version requirement.
+</Warning>
+
+#### Rendering timing and failure handling
+
+monit-edge renders templates **per alert instance**: each instance is rendered once with its own labels, so the same rule yields different query statements for different instances.
+
+**The expression owns its quoting and escaping.** Template output is inserted verbatim and is not escaped — `{{ $labels.host }}` produces the label value alone, so the quotes must be written by the expression itself (as in the `host=~"{{ ... }}"` above); when a label value may contain quotes or other special characters, handle it yourself with `regexQuoteMeta` or `replace`. This differs from `${label_name}`: in a recovery query the engine escapes `${label_name}` and places it inside the query's string literal, while in a related query `${label_name}` is substituted verbatim and an unmatched placeholder is left as is.
+
+**Render failures**: when a related query fails to render (for example it references a label that is not present on the alert event, or the template syntax is invalid), that related query is skipped while the remaining related queries still run, and the engine records a `render related query` rule-context error carrying `query_ref="<related query name>"`. A recovery query expression that contains `{{` is treated as "has variables" and rendered per instance instead of being executed once as a static expression.
+
 ### Related query (enrichment)
 
 To enrich alert notification content, you can configure "Related Query". Related queries don't participate in alert evaluation, only used to get additional information.
 
 - **Scenario**: During CPU alert, simultaneously query that machine's `mem_usage_percent` load situation, displaying it in alert details to assist troubleshooting.
-- **Variables**: Related queries support `${label_name}` variables for querying specific alert objects.
+- **Variables**: Related queries support `${label_name}` variables and the Go template `{{ $labels.<label_name> }}` (requires monit-edge `v0.75.4` or later) for querying specific alert objects; see "Labels and variables" above for the restrictions and rendering rules of both syntaxes.
+- **Render failure**: when a related query expression fails to render, that query is skipped, the remaining related queries still run, and a `render related query` rule-context error is recorded.
 - **Result Display**: Related query results can be referenced in the alert rule's notes description using the `$relates` variable. You can check the detailed usage instructions for **Notes Description**.

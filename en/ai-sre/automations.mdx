@@ -1,7 +1,7 @@
 ---
 title: Automations
-description: Have AI SRE run a hidden session automatically on a cron schedule, through an HTTP API, or from an On-call incident event, driven by a task prompt, to produce inspection, insight, or post-mortem results. This page covers creating automation rules, configuration fields, triggers, run history, and permissions.
-keywords: ["AI SRE", "Automation", "inspection", "scheduled task", "cron", "HTTP trigger", "On-call incident trigger", "manual run", "run history", "hidden session"]
+description: Have AI SRE run a task automatically on a cron schedule, through an HTTP API, from an On-call incident event, or when a war room is created, driven by a task prompt, to produce inspection, insight, or post-mortem results. This page covers creating automation rules, configuration fields, triggers, run history, and permissions.
+keywords: ["AI SRE", "Automation", "inspection", "scheduled task", "cron", "HTTP trigger", "On-call incident trigger", "war room created trigger", "manual run", "run history", "hidden session"]
 sidebarTitle: Automations
 ---
 
@@ -16,13 +16,14 @@ Each automation is a **rule**. A rule carries at least one trigger:
 - **Schedule (cron)**: set the cadence with a 4-field or 5-field cron expression (for example, every Monday morning or every day at 09:15); it runs automatically when the time comes.
 - **Call via API**: generate a trigger URL with a Bearer token. An external system triggers the rule on demand with a `POST` and passes the context for the run in the request body.
 - **On-call incident trigger**: select the On-call channels and severities to watch, then start a diagnostic run when a matching incident appears.
+- **War room created**: select the channels and severities to watch, then start a diagnostic run when a matching incident gets a war room. This run's session lives in the war room's IM group chat, not in the console.
 
 When to use it: hand recurring routine inspections (such as a daily health check) and periodic insight / post-mortem reports to AI SRE to run automatically. Or wire AI SRE into your existing pipeline, change system, or On-call incident flow so an event kicks off a diagnosis.
 
 Entry point: **AI SRE → Automations** in the left navigation, route `/ai-sre/automations`.
 
 <Note>
-Every run produced by an automation is, at its core, still an AI SRE session — it is marked as hidden and not mixed into your everyday session list. You can always click into it from the run history to see the full conversation, tool calls, and artifacts of that run.
+Every run produced by an automation is, at its core, still an AI SRE session — it is marked as hidden and not mixed into your everyday session list. You can always click into it from the run history to see the full conversation, tool calls, and artifacts of that run (except for a **War room created** run, which runs in the IM group — see "War room created" below).
 </Note>
 
 ## Creating an automation
@@ -58,7 +59,7 @@ For **Environment**, "Auto" has the system pick the best available environment a
 
 ## Triggers
 
-A rule must have **at least one trigger** configured. The current console form exposes **Schedule**, **Call via API**, and **On-call incident** in the "Triggers" section, and all three can be enabled at the same time.
+A rule must have **at least one trigger** configured. The current console form exposes **Schedule**, **Call via API**, **On-call incident**, and **War room created** in the "Triggers" section, and all four can be enabled at the same time.
 
 ### Schedule (cron)
 
@@ -192,9 +193,43 @@ Two platform limits are fixed and not configurable:
 The similarity comparison requires the account's AIOps capability and a Pro or higher subscription. If AIOps is off or the edition doesn't qualify, no comparison runs, and every incident starts its own run.
 </Note>
 
+### War room created
+
+Add the **War room created** trigger when you want AI SRE in the room as soon as an incident gets a war room. The trigger registers a subscription with the On-call side, and only war-room creation events matching the selected channels and severities start a run.
+
+<Steps>
+  <Step title="Add the trigger">
+    Click the **War room created** card in "Triggers". The form expands channel and severity conditions; severity is preselected as `Critical`.
+  </Step>
+  <Step title="Select channels">
+    Select the channels to watch in the **Channel** dropdown. Personal-scope rules can select visible account channels; team-scope rules narrow the channel list to the selected team. When this trigger is enabled, at least one channel is required.
+  </Step>
+  <Step title="Select severities">
+    Select one or more severities from `Critical`, `Warning`, and `Info`. When this trigger is enabled, at least one severity is required.
+  </Step>
+</Steps>
+
+<Note>
+This run's session is created in the war room's **IM group chat**, not in the console — the trigger card states "The session is created in the IM group chat." and adds a platform caveat: due to platform limits, this may not apply to WeCom and DingTalk integrations.
+</Note>
+
+If you create or update a rule through the API, use these fields:
+
+| Field | Type | Notes |
+|---|---|---|
+| `war_room_trigger_enabled` | boolean | Whether the war-room-created trigger is enabled. |
+| `war_room_channel_ids` | int64[] | Channel IDs to watch. Creating or enabling this trigger requires at least one valid ID. |
+| `war_room_severities` | string[] | Severities to watch. Supported values are `Critical`, `Warning`, and `Info`; creating or enabling this trigger requires at least one value. |
+
+When a matching war room is created, the system creates a run with `trigger_kind: "war_room_created"` and passes context such as `incident_id`, `channel_id`, and `severity` into the session. This run does not open a new console session: it runs an analysis directly in the war-room group, and the conclusion is posted back into that group. Under one trigger, a single incident starts only one run — a repeated event does not open a second session.
+
+**Environment**: this trigger does not use the rule's **Environment** — an analysis in the war room uses the execution environment already chosen for that group. When the war room is a rule's only trigger, the form hides the environment picker and only says "Analysis in the war room uses the execution environment already chosen for that group. This rule does not pick one." When the rule also enables the schedule / API / incident triggers, the picker stays and shows "Schedule, API, and incident triggers use the execution environment chosen here. The war room trigger uses the group's execution environment and does not change that choice."
+
+The preset template **War room initial analysis** (template key `war_room_initial_analysis`, category **Incident Response**) prefills this trigger and the `Critical` severity; the channels are not prefilled, so you pick them yourself.
+
 ## Run history
 
-Every rule keeps its run history. Click a rule row to open its detail page (`/ai-sre/automations/:ruleId`): the left column shows **Configuration** and the right column shows **Run History**. The **Run now** button at the top of the right column triggers a run directly.
+Every rule keeps its run history. Click a rule row to open its detail page (`/ai-sre/automations/:ruleId`): the left column shows **Configuration** and the right column shows **Run History**. The **Run now** button at the top of the right column triggers a run directly. That button does not appear when **War room created** is the rule's only trigger — those runs happen in the IM group, so the rule has no console run.
 
 Run history is shown as a table with these columns:
 
@@ -203,7 +238,8 @@ Run history is shown as a table with these columns:
 | Name | The title of the run's hidden session (`session_name`), or the session ID (`session_id`) if it can't be resolved. A run merged into another analysis has no session of its own, so this shows its incident (`#<num> <title>`) and, on the line below, the analysis it joined |
 | Started at | The start time of the run |
 | Duration | How long the run took |
-| Triggers | The trigger type of the run, such as `Schedule`, `HTTP POST`, `On-call incident`, or `Run manually` |
+| Triggers | The trigger type of the run, such as `Schedule`, `HTTP POST`, `On-call incident`, `Run manually`, or `War room created` (war_room_created) |
+| Where it ran | Where the run happened: `IM` (the session is in the IM group, as for a war-room-created run) or `Web console` (a hidden session in the console). The API field is `execution_place`, with values `im` / `web_console`; when a record does not carry it, a war-room-created run reads `IM` and every other run reads `Web console` |
 | Status | The status of the run (see the table below) |
 
 Run status values:
@@ -223,11 +259,11 @@ Three filters are available above the table:
 
 - **Time range**: defaults to the **last 30 days**, adjustable, with a maximum span of **180 days**.
 - **Status**: filter by the run statuses above, or choose **All statuses**.
-- **Trigger type**: choose from `All trigger types` / `Run manually` / `Schedule` / `HTTP POST` / `On-call incident`.
+- **Trigger type**: choose from `All trigger types` / `Run manually` / `Schedule` / `HTTP POST` / `On-call incident` / `War room created`.
 
-Run records returned by the API also include `trigger_kind`, which can be `schedule`, `manual`, `http_post`, `oncall_incident`, or `debug`. `manual` means the run was started through the run-now API, and `oncall_incident` means it was started by a matching On-call incident event. A run merged into another analysis has no `session_id` of its own. Instead, `joined_session_id` holds that analysis's session ID and `joined_session_name` holds its session name. If both are empty, the run has its own hidden session.
+Run records returned by the API also include `trigger_kind`, which can be `schedule`, `manual`, `http_post`, `oncall_incident`, `war_room_created`, or `debug`. `manual` means the run was started through the run-now API, `oncall_incident` means it was started by a matching On-call incident event, and `war_room_created` means it was started by the war-room-created trigger (its session is in the IM group). A run merged into another analysis has no `session_id` of its own. Instead, `joined_session_id` holds that analysis's session ID and `joined_session_name` holds its session name. If both are empty, the run has its own hidden session.
 
-Click a row to jump to the chat page of the hidden session for that run, where you can view the full messages, tool calls, and artifacts of that run. A run merged into another analysis has no session of its own, so clicking it opens the analysis that took over the incident.
+Click a row to jump to the chat page of the hidden session for that run, where you can view the full messages, tool calls, and artifacts of that run. A run that happened in IM (`execution_place=im`, or one started by `war_room_created`) does not navigate; it shows the message **This analysis is in IM. Open IM to view it.** — you read that analysis in the IM group. A run merged into another analysis has no session of its own, so clicking it opens the analysis that took over the incident.
 
 ### The reason line on an unsuccessful run
 
@@ -257,7 +293,7 @@ Each rule offers a set of actions in the **Actions** column:
 | Action | Notes |
 |---|---|
 | Enable / Disable | An inline switch. When disabled, the rule is kept but no longer triggers; disabling does not delete existing run history. |
-| Run now | Starts one real run manually from the rule row. The action performs preflight checks first, then creates a hidden session for the run. Manual runs are limited to one per rule per minute. |
+| Run now | Starts one real run manually from the rule row. The action performs preflight checks first, then creates a hidden session for the run. Manual runs are limited to one per rule per minute. When **War room created** is the rule's only trigger, neither the list nor the detail page offers this action — such a rule produces no console run, and calling the run-now API returns an error. |
 
 Clicking anywhere on the rule row opens its detail page, where you can edit the configuration, delete the rule, and view its run history (see "Run History" above).
 
@@ -277,6 +313,7 @@ Automation rules share the same two-level scope model as the other resources und
 | Edit / manage (personal rules) | Only the creator can view and manage a personal rule. Account Owners and admins cannot view or manage other members' personal rules. |
 | HTTP POST trigger | When initiating a real run through the trigger URL, authorization is only the trigger's Bearer Token. Any external system holding that Token can trigger the rule, and the run creates a hidden session under the rule's personal or team scope. |
 | On-call incident trigger | Started by a registered incident subscription, not by an HTTP POST Bearer token. The run still creates a hidden session under the rule's personal or team scope. |
+| War room created trigger | Started by a registered war-room-created subscription, not by an HTTP POST Bearer token. The session is created in the war room's IM group rather than the console, and the run still belongs to the rule's personal or team scope. |
 
 <Note>
 The account Owner / admins can see other members' personal rules in the list (see "Visibility / list" above), but they can't open the detail page. The "Edit / manage" permission has no Owner / admin exemption on personal rules, the same as on team rules.
