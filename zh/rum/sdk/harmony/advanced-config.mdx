@@ -1,10 +1,10 @@
 ---
 title: "HarmonyOS SDK 高级配置"
-description: "配置 HarmonyOS RUM SDK 的采样、隐私同意、事件过滤、Trace、崩溃采集和符号上传"
-keywords: ["RUM", "HarmonyOS SDK", "高级配置", "Trace", "Crash", "Sourcemap"]
+description: "配置 HarmonyOS RUM SDK 的采样率与远程配置、隐私同意、事件过滤、Trace、崩溃采集和符号上传"
+keywords: ["RUM", "HarmonyOS SDK", "高级配置", "远程配置", "Trace", "Crash", "Sourcemap"]
 ---
 
-本文介绍 HarmonyOS SDK 的核心配置、RUM 配置、隐私控制、Trace 关联、崩溃采集和符号上传。所有配置均来自当前 ArkTS SDK 公开 API。
+本文介绍 HarmonyOS SDK 的核心配置、RUM 配置、远程配置、隐私控制、Trace 关联、崩溃采集和符号上传。所有配置均来自当前 ArkTS SDK 公开 API。
 
 ## 核心配置
 
@@ -204,6 +204,51 @@ const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
 <Warning>
 事件过滤函数运行在 SDK 写入路径上，应保持快速、同步且不抛异常。SDK 会兜底处理异常并保留原始事件，但复杂逻辑会增加端侧开销。
 </Warning>
+
+## 远程配置
+
+会话采样率可以在控制台 **应用管理 → 远程配置** 页签在线调整，无需改代码、重新发版。该功能默认关闭，需要在初始化时开启：
+
+```ts
+import { FlashcatRum, RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+FlashcatRum.enable(
+  new RumConfigurationBuilder('<APPLICATION_ID>')
+    .setSessionSampleRate(100)             // 控制台未下发时使用的采样率
+    .setRemoteConfigurationEnabled(true)   // 允许控制台调整采样率与异常补采
+    .build()
+);
+```
+
+开启后的行为：
+
+- SDK 在启动时与每次新建会话时各请求一次配置，拿到的配置对**下一个新会话**生效，进行中的会话不受影响；请求不会阻塞会话创建。
+- 采样率**跨过 0**（由 0 调为非 0，或由非 0 调为 0）时当前会话会立即结束，由新配置重新抽样，紧急关停或重新开启不必等会话自然轮换；其余变化都等到下一个新会话。（协议预留的「立即生效」也会提前结束会话，但当前控制台版本尚不支持选择它。）
+- 下发的值会持久化到本地，冷启动后的第一个会话即按上次下发的配置抽样；从未成功拿到过配置、或控制台停用了远程配置时，恢复使用初始化时的 `setSessionSampleRate`。
+- 请求失败、超时或响应无法识别时，沿用已生效的值，不会清空；SDK 约 5 秒后重试一次、再约 60 秒后重试一次（两次都带 ±20% 抖动），之后等到下一个新会话或下次启动才再请求。
+- HarmonyOS SDK 只读取**会话采样率**、**异常会话补采**（`sessionOnError`）与**自定义配置项**三项，其余配置项不生效。没有 Session Replay，回放与 Trace 相关的开关不会在 HarmonyOS 应用里出现。
+- 异常补采与初始化时的 `setSessionOnError` 是同一个开关：控制台下发的值覆盖初始化值，对之后抽样的会话生效；不识别该字段的 SDK 会忽略它，补采仍由初始化决定。
+
+被异常补采保留的会话上报的会话采样率为 `0`，并带 `session.sampled_for_error: true` 标记；没有报错的候选会话不会上传、不产生费用。筛选方式见[数据查询语法指南](/zh/rum/explorer/data-query)中的 `session_sampled_for_error`。
+
+<Note>
+私有化部署时配置接口位于 RUM 上报地址旁的 `/api/v2/rum/config` 路径（如上报地址是 `https://host/api/v2/rum`，配置接口就是 `https://host/api/v2/rum/config`）。使用 `setCustomEndpoint()` 时，请确认网关放行了该路径。
+</Note>
+
+自定义配置项通过 `GlobalRumMonitor.get().getRemoteConfig()` 读取，返回已解析好的对象；未开启远程配置、控制台未设置该项，或尚未拿到配置时返回 `null`：
+
+```ts
+import { GlobalRumMonitor } from '@flashcatcloud/rum';
+
+const custom = GlobalRumMonitor.get().getRemoteConfig();
+const debugUsers = custom?.['debugUsers'] as string[] | undefined;
+```
+
+<Warning>
+自定义配置项会下发到客户端，任何持有 Client Token 的人都能读到。请勿在其中存放密钥、访问令牌或个人敏感信息。
+</Warning>
+
+控制台侧的配置项、发布与生效方式见 [应用管理 · 远程配置](/zh/rum/quickstart/app-management#远程配置)。
 
 ## 全局属性和用户信息
 

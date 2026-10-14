@@ -1,10 +1,10 @@
 ---
 title: "HarmonyOS SDK advanced configuration"
-description: "Configure HarmonyOS RUM SDK sampling, tracking consent, event mapping, Trace, crash reporting, and symbol upload"
-keywords: ["RUM", "HarmonyOS SDK", "advanced configuration", "Trace", "Crash", "Sourcemap"]
+description: "Configure HarmonyOS RUM SDK sampling and remote configuration, tracking consent, event mapping, Trace, crash reporting, and symbol upload"
+keywords: ["RUM", "HarmonyOS SDK", "advanced configuration", "remote configuration", "Trace", "Crash", "Sourcemap"]
 ---
 
-This page describes core configuration, RUM configuration, privacy controls, Trace correlation, crash reporting, and symbol upload for the HarmonyOS SDK. All options come from the current ArkTS SDK public API.
+This page describes core configuration, RUM configuration, remote configuration, privacy controls, Trace correlation, crash reporting, and symbol upload for the HarmonyOS SDK. All options come from the current ArkTS SDK public API.
 
 ## Core configuration
 
@@ -204,6 +204,51 @@ const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
 <Warning>
 The event mapper runs on the SDK write path. Keep it fast, synchronous, and non-throwing. The SDK catches mapper errors and preserves the original event, but expensive logic increases client overhead.
 </Warning>
+
+## Remote configuration
+
+The session sample rate can be adjusted online in the console under **Application Management → Remote Configuration**, with no code change and no new release. The feature is off by default and has to be enabled at initialization:
+
+```ts
+import { FlashcatRum, RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+FlashcatRum.enable(
+  new RumConfigurationBuilder('<APPLICATION_ID>')
+    .setSessionSampleRate(100)             // the rate used until the console publishes one
+    .setRemoteConfigurationEnabled(true)   // let the console adjust the sample rate and on-error capture
+    .build()
+);
+```
+
+Once enabled:
+
+- The SDK requests the configuration once at start-up and once whenever a new session begins. What it receives applies to the **next new session**; a session already running is unaffected, and the request never blocks session creation.
+- A sample rate **crossing zero** (from 0 to a non-zero rate, or the other way round) ends the current session immediately so the new rate redraws it — an emergency stop or restart does not have to wait for the session to rotate. Any other change waits for the next new session. (The protocol's reserved "immediate" activation also ends the session early, but the console cannot select it yet.)
+- Fetched values are persisted locally, so the first session after a cold start is drawn under what was last published. When nothing has ever been fetched, or the console switched remote configuration off, the value set at initialization with `setSessionSampleRate` applies.
+- A request that fails, times out or comes back unreadable keeps the values already in force; nothing is wiped. The SDK retries about 5 seconds later and once more about 60 seconds after that (both with ±20% jitter), then waits for the next session or the next launch.
+- The HarmonyOS SDK reads only the **session sample rate**, **on-error session capture** (`sessionOnError`) and **custom configuration keys**; the other fields have no effect. There is no Session Replay, so the replay and Trace switches never appear for a HarmonyOS application.
+- On-error capture is the same switch as `setSessionOnError` at initialization: a value published from the console overrides the init value for the sessions drawn afterwards. An SDK that does not recognise the field ignores it, and on-error capture stays whatever initialization set.
+
+Sessions kept by on-error capture report a session sample rate of `0` and carry `session.sampled_for_error: true`; candidate sessions that never report an error are not uploaded and are not billed. See `session_sampled_for_error` in [Data query syntax guide](/en/rum/explorer/data-query) for how to filter them.
+
+<Note>
+On a private deployment the configuration endpoint sits beside the RUM intake address at the `/api/v2/rum/config` path (if the intake address is `https://host/api/v2/rum`, the configuration endpoint is `https://host/api/v2/rum/config`). With `setCustomEndpoint()`, make sure your gateway lets that path through.
+</Note>
+
+Custom configuration keys are read with `GlobalRumMonitor.get().getRemoteConfig()`, which returns a decoded object; it returns `null` when remote configuration is off, when the console has not set the field, or before a configuration has arrived:
+
+```ts
+import { GlobalRumMonitor } from '@flashcatcloud/rum';
+
+const custom = GlobalRumMonitor.get().getRemoteConfig();
+const debugUsers = custom?.['debugUsers'] as string[] | undefined;
+```
+
+<Warning>
+Custom entries are delivered to clients and are readable by anyone holding the client token. Never put secrets, access tokens, or personally sensitive information in them.
+</Warning>
+
+The console-side fields, publishing, and activation are covered in [Application Management · Remote Configuration](/en/rum/quickstart/app-management#remote-configuration).
 
 ## Global attributes and user information
 

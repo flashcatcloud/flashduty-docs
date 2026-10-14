@@ -1,0 +1,200 @@
+---
+title: "Investigation entries"
+description: "Configure investigation entries on a Monitors alert rule: jump from an alert straight to a dashboard or to an initial query in the Query Workbench, including entry fields, template variables, validation limits and snapshot semantics."
+keywords: ["investigation entries", "alert rules", "dashboard entry", "query entry", "Go Template", "snapshot"]
+---
+
+An alert rule can carry a set of **investigation entries**. Each entry is a pre-configured jump target: open a dashboard, or open an initial query — already written, and rendered with the alert's labels — in the Query Workbench. A responder starting from one alert sees the chart or the data they need without writing a query.
+
+Entries are configured in the rule form's **sixth section, "Investigation entries"** and are saved with the rule. They are rendered into a snapshot **at the moment the alert event is produced** and travel with the event; changing the rule afterwards does not affect alerts already accepted.
+
+<Warning>
+Saving investigation entries requires monit-edge `v0.75.3` or later. Saving checks **every** active instance in the clusters of the data sources the rule matches: if any instance is older than `v0.75.3`, saving is rejected. See [Edge version requirement at save time](#edge-version-requirement-at-save-time).
+</Warning>
+
+## How it works
+
+A rule can hold many investigation entries. Each entry has three parts: the entry type (dashboard or query), the configuration for that type, and a time range relative to the alert event time.
+
+- **An entry is a weak navigation reference.** Saving the configuration and rendering the snapshot never run a query and never read the dashboard. Entries do not participate in alert evaluation, alert identity, instance identity or lifecycle, and they trigger no automatic investigation task.
+- **An entry follows the event's data source.** A rule can match several data sources by type plus name pattern, but each alert event comes from exactly one of them. A query entry runs on the **event's own data source** by default, so the jump lands on the data source that fired the alert rather than on a fixed or default one. You can also name a different data source explicitly (for example to drill into a log data source).
+- **Rendering happens when the alert is ingested.** When monit-webapi accepts an event, it renders the entries configured on the rule at that moment — using the final event time, the event's raw data labels and the event data source — into a snapshot (the Investigation Context), which is stored and delivered with the event. The investigation block in the **active alert** detail drawer, the **Investigation** block in an incident's comprehensive info panel (see [Incident details](/en/on-call/incident/search-view-incident#investigation-entries)) and AI SRE all read that same snapshot.
+- **The block has a different name on each side**: it is called **Investigation entries** in Monitors and **Investigation** in incident details, but both render the same event snapshot.
+- **Order affects display only.** Entries can be dragged into any order, but the first one carries no default, primary or recommended meaning, and the order never reaches alert evaluation or lifecycle.
+
+## Entry types
+
+| Entry type | Button | Jumps to | Notes |
+|---------|------|--------|------|
+| **Dashboard entry** | Add dashboard entry | The dashboard viewer | Can target the whole dashboard, a tab, a section or a panel, and sets the values of that dashboard's template variables |
+| **Query entry** | Add query entry | The Query Workbench | Stores one editable initial query (query type + query + query parameters) and optionally the data source it runs on |
+
+Neither type supports runbooks, tickets or arbitrary URLs.
+
+## Adding and editing entries
+
+**Menu path**: the alert rule form → section 6, "Investigation entries".
+
+1. Click **Add dashboard entry** or **Add query entry** to open the entry dialog. The dialog title distinguishes new from existing entries (Add dashboard link / Edit dashboard link / Add query link / Edit query link).
+2. Fill in **Purpose** and **Time range** (shared by both types), then the fields for that type.
+3. Click **OK** to add the entry to the form. **OK only adds it to the form; the entry takes effect when you save the rule.**
+4. Each row offers three actions: **Preview investigation entry** (eye icon), **Edit** (pencil icon) and **Delete** (trash icon). When you view a saved rule's details, the edit action becomes **Details** and the dialog footer offers only **Close**.
+
+Added entries are listed with a drag handle on the left for reordering. The row title is the **Purpose**; when no purpose is set, a dashboard entry shows the dashboard title (or the dashboard ID when it cannot be read) and a query entry shows the query.
+
+The limit is **20 entries**: once you reach 20 the two add buttons become disabled and show `Up to 20 investigation entries` (see [Validation and limits](#validation-and-limits)).
+
+## Shared fields
+
+| Field | Required | Notes |
+|------|------|------|
+| **Purpose** | No | One sentence on what this entry helps confirm. Single-line plain text; line breaks are replaced with spaces. The console caps the input at 200 characters and the backend also enforces **≤512 bytes**. The purpose is **not** rendered as a template and is **not** part of duplicate identity (two entries that differ only in purpose are still duplicates). It is shown to responders and read by AI SRE to judge each entry's intent |
+| **Time range** | Yes | "**From** N **min before the alert to** M **min after**". A new entry defaults to 60 minutes before and 0 minutes after. Both directions must be non-negative and at least one must be greater than 0 |
+
+Time range semantics:
+
+- The anchor is the **alert event time**: start = event time − before, end = event time + after.
+- The window is written into the snapshot exactly as configured, and it never drifts with the current time when you open it later. You can adjust the time range after opening the dashboard or the workbench, but adjustments made in the page are not written back to the rule or to snapshots already produced.
+- An end time in the future is allowed (that is what a non-zero "after" produces): the entry is available as soon as the alert fires, without waiting for later data.
+- The system does not infer, warn about or validate whether the entry's window covers the alert's evaluation window.
+
+## Dashboard entry fields
+
+| Field | Notes |
+|------|------|
+| **Dashboard** | Search by title or description and pick a dashboard; the folder path of the selection is shown below the picker. **Changing the dashboard clears the target object and the variable values**, because both belong to the previous dashboard |
+| **Open at** | `Whole dashboard`, or a tab / section / panel inside the dashboard; each option shows its full breadcrumb path. A whole-dashboard entry opens the dashboard itself |
+| **Variable values** | One input per template variable of that dashboard. Leave it empty to use the dashboard's own default |
+
+**Open at** failure handling: if the target object no longer exists in the dashboard (deleted or renamed), the field shows `Missing object (<id>)` together with the warning `The selected object no longer exists in the dashboard. The dashboard will open on its default tab.` — the jump opens the dashboard's default tab instead of failing. When the dashboard itself cannot be loaded (deleted, or you have no access), the field area shows `Failed to load the dashboard. It may have been deleted or you may not have access.` and **Open at** is not selectable.
+
+**Variable values** rules:
+
+- A dashboard with no variables shows `This dashboard has no variables`.
+- Variable values are rendered as **Go templates**; see [Template variables](#template-variables). Datasource variables are marked `(datasource)` and their placeholder is `{{ $datasource.id }}`; other variables are prompted with `Leave empty to use the dashboard default, e.g. {{ $labels.<variable name> }}`.
+- Empty means not configured, and the dashboard applies its own rule for the default. Configured but failing to render, or rendering to an empty string, leaves the variable `unresolved` (it does not fall back to the default) and shows an error on the entry.
+- A variable that is configured but no longer exists in the dashboard (or was renamed) is still listed and marked `No longer in dashboard`, so you can clean it up — otherwise it would affect the dashboard's variable resolution invisibly.
+- Deleting, renaming or changing the type of a variable, or invalidating its candidates, never updates the rule.
+
+## Query entry fields
+
+| Field | Notes |
+|------|------|
+| **Data source** | Defaults to `Alert event datasource` (the query is written against the rule's data source type); you can also pick a specific data source. When the rule's data source type is not queryable in the workbench, the `Alert event datasource` option is disabled and labelled `Alert event datasource (not supported for this rule type)`, so the entry must name a data source explicitly. **Changing the data source resets the query**, because the query language changed |
+| **Query type** | Only shown for data sources with more than one query type (Prometheus: Graph only / Raw only; Loki: Range / Instant; VictoriaLogs: Raw logs / Instant stats / Range stats). Prometheus "Graph + Raw" is not offered here because it is two executions and cannot be stored as one query. SQL-type data sources, SLS and Tencent CLS each have a single query mode and therefore no such row |
+| **Initial query** | The query editor, with the same syntax and completion as the Query Workbench. The whole expression is rendered as a Go template and inserted **verbatim — no automatic quoting or escaping** |
+| **Query parameters** | The data source's named parameters, per data source type (Limit, Direction, Min step (s), the SLS project / logstore, the Tencent CLS region / topic / syntax). Parameter values are **not templated** |
+
+With the event data source selected, a rule type that the workbench does not support shows `Choose a datasource type under "Datasource and query" first, or pick a datasource for this entry`; an explicitly selected data source that was deleted or that you cannot use shows `The selected datasource is unavailable`. The data source's real type, permissions and provider-specific restrictions are re-checked by the workbench as the current user when the entry is opened or run.
+
+## Template variables
+
+The template context for investigation entries has **exactly two variables**:
+
+| Variable | Type | Notes |
+|------|------|------|
+| `$labels` | `map[string]string` | The alert event's **raw data labels**. Rule-appended labels are not merged in, labels returned by label enrichment are not merged in, and label names are not filtered |
+| `$datasource` | `map[string]string` | The data source the event came from, with fixed keys: `id` (decimal data source ID), `name`, `type`, `address` |
+
+- Read a simple label directly: `{{ $labels.service }}`. For label names containing dots or other special characters, use `{{ index $labels "service.name" }}`.
+- **Accessing a missing label or a key that `$datasource` does not have fails explicitly** (including through `index`) instead of silently producing an empty string, which would turn into an unfiltered query.
+- The dot (`.`) only means a local data context such as `range` / `with`; it is not the full alert event. Variables available in the [Description template](/en/monitors/alert-rules/description-template) such as `$values`, `$value`, `$annotations` and `$appendLabels` are **not** available here, and the root object cannot be used to bypass that restriction.
+- Conditionals, loops, local variables and built-in functions of Go templates are supported. The template is rendered **once**: a `{{ }}` produced by the rendering is not executed again.
+
+Dashboard variable examples:
+
+```gotemplate
+{{ $labels.service_name }}
+{{ $datasource.id }}
+```
+
+Query example (VictoriaLogs):
+
+```text
+event_name:="webhook.attempt.completed"
+service:="{{ $labels.service_name }}"
+outcome:="failure"
+```
+
+**The query expression owns its quoting and escaping.** A template only produces the value itself: the quotes in `service:="{{ ... }}"` are part of LogsQL syntax and must be written by the expression. When you need escaping, use a function with fixed semantics explicitly — `replace` (literal replacement), `regexQuoteMeta` (regex metacharacters), `urlquery` / `html` / `js` — because the system does not infer escaping from the data source dialect. If rendering fails, or the rendered result does not satisfy the query payload requirements, the entry keeps its initial template and the error, and **no executable query is produced or run**.
+
+## Previewing an entry
+
+Click the eye icon on an entry to open the **Preview investigation entry** dialog, which renders that entry from a real event snapshot so you can confirm the jump before relying on it.
+
+- Prerequisites: the **rule must be saved** (otherwise it says `Save the rule first, then preview once it has an alert.`) and the rule must **currently have an active alert** (otherwise `This rule has no active alerts. Preview will be available once an alert fires.`). The dialog picks a sample from the rule's active alerts, with paging above 20.
+- The preview uses the selected alert's **event snapshot** and **does not include unsaved changes in the form**, so save the rule and wait for it to fire before previewing a new configuration.
+- Clicking an entry in the dialog opens the target in a new tab. If that alert has no snapshot matching this entry, it says `This alert has no matching snapshot for this entry. Select an alert generated after the configuration took effect.`; if the alert has no snapshot at all, it says `This alert has no investigation links. Select an alert generated after the configuration took effect.`
+
+## Validation and limits
+
+| Limit | Value | Notes |
+|------|-----|------|
+| Number of entries | At most **20** | The console says `At most 20 investigation entries are allowed`; the API error is `investigation_targets must not contain more than 20 items` |
+| Total size | At most **32 KiB** | Measured on the serialized entry list. The console says `Investigation entries exceed 32 KiB in total; shorten the queries or variable templates`; the API error is `investigation_targets must not exceed 32768 bytes` |
+| Dashboard entry | A dashboard must be selected | `Investigation entry #N has no dashboard selected` |
+| Query entry | A query must be filled in | `Investigation entry #N has no query` |
+| Query entry | When the rule's type is not queryable in the workbench, a data source must be named | `Investigation entry #N needs a datasource: this rule's datasource type is not supported by the query workbench` |
+| Time range | Both directions non-negative, length greater than 0 | `Investigation entry #N needs a time range longer than 0` |
+| Purpose | 200 characters in the console input, **≤512 bytes** on the backend | `The purpose of investigation entry #N is too long`. 200 CJK characters can exceed 512 bytes, in which case it is rejected as well |
+| Duplicates | Not allowed | `Investigation entry #N duplicates entry #first` |
+
+Duplicate identity:
+
+- **Dashboard entries**: the same dashboard plus the same target object is a duplicate, **regardless of variable values and time range**. Duplicates cannot be used to express a variable fallback or multiple instances.
+- **Query entries**: de-duplicated by the normalized data source, query (mode, expression, arguments, minimum step) and time range; the event data source (no data source named) counts as its own distinct value. Several **different** queries may be configured on the same data source.
+
+These checks run in two places: in the entry dialog (only the entry being edited, so it can be fixed item by item) and when the rule is saved (the whole set, with the error shown under the section). The API additionally validates that dashboard IDs and target objects are canonical UUIDv7, that variable names are legal and that templates parse, and it rejects unknown fields.
+
+## Edge version requirement at save time
+
+Investigation entries require monit-edge **`v0.75.3` or later**. To drive the upgrade, the version gate is enforced **at save time**; event handling never checks the version:
+
+- **When it applies**: the saved rule carries non-empty entries and the request either submitted non-empty entries explicitly, or kept existing entries while changing the data source scope (data source type, name patterns or exact bindings). A rule with no entries, an explicit empty array, and requests that only change other fields are not checked.
+- **What it checks**: every data source the rule currently matches, and the **active instances** of the Edge clusters those data sources belong to. Data sources without any active instance are skipped; a rule that matches no data source at all is allowed to save.
+- **To pass**: every checked instance must be at version `v0.75.3` or later. An unrecognizable version counts as failing.
+- **On rejection**: no field is saved, and the request returns an upgrade error listing the minimum version and the failing data sources, Edge clusters, instance IPs and versions (bounded in number). The message looks like: `investigation_targets require monit-edge v0.75.3 or later on every active instance serving the rule's datasources; upgrade cluster "<cluster>" <instance IP>:<port> (v0.75.2)`.
+- The gate covers every write path: create, update, batch field updates that can change entries or the data source scope, and native-bundle and legacy JSON imports. Rules imported from external formats (Prometheus, Nightingale and so on) always have an empty entry list and are unaffected.
+- After a successful save, a newly added or downgraded low-version instance does **not** invalidate the saved rule; the check runs again only when you next submit entries or change the data source scope.
+
+## Snapshot semantics and failures
+
+**Entries come from the event snapshot, not from the rule's current configuration.** They are rendered once when the alert is accepted, and afterwards:
+
+- If you change the entries on the rule, alerts **already accepted** (active alert details, the Investigation block on an incident) keep showing the old snapshot;
+- Repeat notifications and terminal events reuse the same snapshot, shifting each entry's window by the difference in event time; the rule is not read again;
+- Deleting the rule does not remove historical snapshots — the incident side then shows `The alert rule was deleted, so no investigation entries were generated`.
+
+**Alerts accepted before the configuration took effect have no snapshot.** An alert produced before you saved the entries shows `This alert has no investigation links. Select an alert generated after the configuration took effect.` in its details. Verify with alerts produced after the configuration took effect.
+
+**When the whole event fails to render, no snapshot is produced** and a bounded error code is delivered instead:
+
+| Error code | Meaning | Message in the UI |
+|--------|------|---------|
+| `rule_missing` | The rule no longer exists | The alert rule no longer exists, so no investigation entries were generated |
+| `edge_upgrade_required` | The event came from an older protocol that carries no data source ID (Alert Rule Event v1 and earlier) | The Edge that reported this event is too old to generate investigation entries. Please upgrade Edge. |
+| `invalid_config` | The configuration is structurally invalid, the event time is invalid, or the window computed from the event time exceeds the representable range | Investigation entries were not generated because the configuration or event time is invalid |
+| `payload_limit` | The rendered result exceeds the size limit (the snapshot itself exceeds 64 KiB) | Investigation entries were not generated because the rendered result exceeds the size limit |
+
+**A single entry failing to render does not drop it.** When a dashboard variable fails to render, that variable stays unresolved and shows `Variable <name> failed to render: <reason>`; when a query fails to render, the entry produces no executable query and is not run, and shows `Query failed to render and was not run: <reason>`. Such entries are still listed, carry a red `Entry error` label, and give no link. The remaining entries work normally.
+
+**Permissions are re-checked at the destination.** A snapshot's visibility follows the alert event itself and is not filtered by dashboard folder or data source permissions when it is generated; opening the dashboard or the workbench re-authorizes as the **current user**, and a target that no longer exists or that you cannot access reports the destination's own error rather than falling back to another resource.
+
+**A snapshot delivered to On-call has a separate 8 KiB limit.** The full snapshot travels with the alert event as the `__alert_rule_investigation_context` label; when the label value exceeds 8 KiB it is degraded as a whole to `payload_limit` (the incident shows a notice, not a truncated snapshot), and the full snapshot remains available in the active alert details in Monitors.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Active alerts" icon="bell" href="/en/monitors/alert-rules/active-alerts">
+    The investigation block in the active alert detail drawer renders entries from the event snapshot.
+  </Card>
+  <Card title="Incident details · Investigation" icon="file-magnifying-glass" href="/en/on-call/incident/search-view-incident#investigation-entries">
+    How the Investigation block renders the snapshot in an incident's comprehensive info panel.
+  </Card>
+  <Card title="Description template" icon="text" href="/en/monitors/alert-rules/description-template">
+    Go Template variables for alert descriptions, whose context differs from investigation entries.
+  </Card>
+  <Card title="Monitors quickstart" icon="rocket" href="/en/monitors/quickstart/quickstart">
+    An overview of the alert rule form's six sections.
+  </Card>
+</CardGroup>
