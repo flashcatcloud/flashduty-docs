@@ -2471,7 +2471,7 @@
       "post": {
         "operationId": "calEventUpsert",
         "summary": "Upsert calendar event",
-        "description": "Create or update a calendar event (holiday or workday override). Omit event_id to create a new event.",
+        "description": "Create or update an event the calendar owns (a day off or a working-day override) over the days [start_at, end_at). Omit event_id to create a new event; a given event_id must be an existing event of this calendar. The write clears the calendar's other own events off the same days: an event fully inside the range is deleted, one partly inside is shortened, and one spanning the range is split in two, so the latest write decides those days. end_at must be later than start_at.",
         "tags": [
           "On-call/Calendars"
         ],
@@ -7843,7 +7843,7 @@
       "post": {
         "operationId": "calEventDelete",
         "summary": "Delete calendar event",
-        "description": "Delete a calendar event by calendar ID and event ID.",
+        "description": "Delete one event of a personal calendar by event_id, or clear the calendar's own events off the days [start_at, end_at). Pass either event_id or both start_at and end_at. Cleared days fall back to the linked holiday calendars and the weekly workdays.",
         "tags": [
           "On-call/Calendars"
         ],
@@ -8132,7 +8132,7 @@
       "post": {
         "operationId": "calEventList",
         "summary": "List calendar events",
-        "description": "Return events for a personal calendar within a year/month/day scope. When month and day are both omitted the whole year is returned.",
+        "description": "Return events for a personal calendar within a year/month/day scope. When month and day are both omitted the whole year is returned. The response also carries days, the resolved state of every day in the scope.",
         "tags": [
           "On-call/Calendars"
         ],
@@ -8194,7 +8194,27 @@
                         "updated_at": 0
                       }
                     ],
-                    "total": 11
+                    "total": 11,
+                    "days": {
+                      "2026-05-01": {
+                        "is_off": true,
+                        "event_id": "cale.KyG9XWTCU5CucbwukEVBQ4",
+                        "layer": "custom"
+                      },
+                      "2026-05-02": {
+                        "is_off": true,
+                        "event_id": "non_work.20260502",
+                        "layer": "weekly"
+                      },
+                      "2026-05-09": {
+                        "is_off": false,
+                        "event_id": "zh-cn.china.official.c234057c-fd90-380e-889c-3e3254dd5b01",
+                        "layer": "holiday"
+                      },
+                      "2026-05-11": {
+                        "is_off": false
+                      }
+                    }
                   }
                 }
               }
@@ -19847,10 +19867,9 @@
       },
       "CalEventIDRequest": {
         "type": "object",
-        "description": "Calendar event delete request.",
+        "description": "Calendar event delete request. Provide event_id, or both start_at and end_at.",
         "required": [
-          "cal_id",
-          "event_id"
+          "cal_id"
         ],
         "properties": {
           "cal_id": {
@@ -19859,7 +19878,15 @@
           },
           "event_id": {
             "type": "string",
-            "description": "Event ID."
+            "description": "ID of the event to delete. Omit when clearing a date range."
+          },
+          "start_at": {
+            "type": "string",
+            "description": "Start date of the range to clear, in YYYY-MM-DD. Pass together with end_at instead of event_id."
+          },
+          "end_at": {
+            "type": "string",
+            "description": "End date of the range to clear, in YYYY-MM-DD (exclusive). Must be later than start_at."
           }
         }
       },
@@ -19963,7 +19990,8 @@
         "description": "Calendar event list response.",
         "required": [
           "items",
-          "total"
+          "total",
+          "days"
         ],
         "properties": {
           "items": {
@@ -19977,6 +20005,39 @@
             "type": "integer",
             "description": "Total number of events returned.",
             "format": "int64"
+          },
+          "days": {
+            "type": "object",
+            "description": "Resolved state of every day in the requested scope, keyed by date (YYYY-MM-DD). The highest layer holding any event decides a day: the calendar's own events (custom), then the linked holiday calendars (holiday), then the weekly workdays (weekly). Inside one layer a working-day event beats a day off, so a make-up workday from a holiday calendar wins over holiday rest days. A day no event covers is a working day.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CalDay"
+            }
+          }
+        }
+      },
+      "CalDay": {
+        "type": "object",
+        "description": "Resolved state of one calendar day.",
+        "required": [
+          "is_off"
+        ],
+        "properties": {
+          "is_off": {
+            "type": "boolean",
+            "description": "Whether the day is a day off."
+          },
+          "event_id": {
+            "type": "string",
+            "description": "ID of the event that decided the day. Absent when no event covers the day."
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "custom",
+              "holiday",
+              "weekly"
+            ],
+            "description": "Layer that decided the day: custom = the calendar's own events, holiday = a linked holiday calendar, weekly = the weekly workdays. Absent when no event covers the day."
           }
         }
       },
@@ -19985,7 +20046,6 @@
         "description": "Calendar event upsert request. Provide event_id to update an existing event; omit it to create a new one.",
         "required": [
           "cal_id",
-          "summary",
           "start_at",
           "end_at",
           "is_off"
@@ -20002,8 +20062,7 @@
           },
           "summary": {
             "type": "string",
-            "description": "Event summary.",
-            "minLength": 1,
+            "description": "Event summary. Optional.",
             "maxLength": 39
           },
           "description": {

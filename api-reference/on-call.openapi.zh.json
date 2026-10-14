@@ -2471,7 +2471,7 @@
       "post": {
         "operationId": "calEventUpsert",
         "summary": "创建或更新日历事件",
-        "description": "创建或更新日历事件（节假日或工作日覆盖）。不传 event_id 时会创建新事件。",
+        "description": "创建或更新日历自己的事件（休息日或工作日覆盖），作用于 [start_at, end_at) 这些日期。不传 event_id 时创建新事件；传入的 event_id 必须是该日历已有的事件。写入时会把该日历自己的其他事件从这些日期上移除：完全落在范围内的事件被删除，部分重叠的被截短，跨越整个范围的被拆成两段，因此这些日期以最后一次写入为准。end_at 必须晚于 start_at。",
         "tags": [
           "On-call/日历管理"
         ],
@@ -7843,7 +7843,7 @@
       "post": {
         "operationId": "calEventDelete",
         "summary": "删除日历事件",
-        "description": "根据日历 ID 与事件 ID 删除日历事件。",
+        "description": "按 event_id 删除个人日历的一个事件，或清除该日历自己在 [start_at, end_at) 这些日期上的事件。event_id 与 start_at/end_at 二选一，start_at 和 end_at 须同时传入。清除后这些日期回到关联节假日日历和每周工作日设置的判定。",
         "tags": [
           "On-call/日历管理"
         ],
@@ -8132,7 +8132,7 @@
       "post": {
         "operationId": "calEventList",
         "summary": "查询日历事件列表",
-        "description": "返回个人日历在指定年/月/日范围内的事件列表。未同时传入 month 和 day 时返回整年数据。",
+        "description": "返回个人日历在指定年/月/日范围内的事件列表。未同时传入 month 和 day 时返回整年数据。响应中的 days 给出范围内每一天的判定结果。",
         "tags": [
           "On-call/日历管理"
         ],
@@ -8194,7 +8194,27 @@
                         "updated_at": 0
                       }
                     ],
-                    "total": 11
+                    "total": 11,
+                    "days": {
+                      "2026-05-01": {
+                        "is_off": true,
+                        "event_id": "cale.KyG9XWTCU5CucbwukEVBQ4",
+                        "layer": "custom"
+                      },
+                      "2026-05-02": {
+                        "is_off": true,
+                        "event_id": "non_work.20260502",
+                        "layer": "weekly"
+                      },
+                      "2026-05-09": {
+                        "is_off": false,
+                        "event_id": "zh-cn.china.official.c234057c-fd90-380e-889c-3e3254dd5b01",
+                        "layer": "holiday"
+                      },
+                      "2026-05-11": {
+                        "is_off": false
+                      }
+                    }
                   }
                 }
               }
@@ -19847,10 +19867,9 @@
       },
       "CalEventIDRequest": {
         "type": "object",
-        "description": "日历事件删除请求。",
+        "description": "日历事件删除请求。传入 event_id，或同时传入 start_at 和 end_at。",
         "required": [
-          "cal_id",
-          "event_id"
+          "cal_id"
         ],
         "properties": {
           "cal_id": {
@@ -19859,7 +19878,15 @@
           },
           "event_id": {
             "type": "string",
-            "description": "事件 ID。"
+            "description": "要删除的事件 ID。按日期范围清除时不传。"
+          },
+          "start_at": {
+            "type": "string",
+            "description": "要清除的日期范围的开始日期，格式 YYYY-MM-DD。与 end_at 一起传入，代替 event_id。"
+          },
+          "end_at": {
+            "type": "string",
+            "description": "要清除的日期范围的结束日期（不含），格式 YYYY-MM-DD。必须晚于 start_at。"
           }
         }
       },
@@ -19963,7 +19990,8 @@
         "description": "日历事件列表响应。",
         "required": [
           "items",
-          "total"
+          "total",
+          "days"
         ],
         "properties": {
           "items": {
@@ -19977,6 +20005,39 @@
             "type": "integer",
             "description": "返回的事件总数。",
             "format": "int64"
+          },
+          "days": {
+            "type": "object",
+            "description": "请求范围内每一天的判定结果，键为日期（YYYY-MM-DD）。每天由有事件的最高一层决定：日历自己的事件（custom）优先，其次是关联的节假日日历（holiday），最后是每周工作日设置（weekly）。同一层内工作日事件优先于休息日事件，因此节假日日历中的调休补班日会覆盖节假日休息日。没有任何事件覆盖的日期为工作日。",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/CalDay"
+            }
+          }
+        }
+      },
+      "CalDay": {
+        "type": "object",
+        "description": "单个日期的判定结果。",
+        "required": [
+          "is_off"
+        ],
+        "properties": {
+          "is_off": {
+            "type": "boolean",
+            "description": "该日期是否为休息日。"
+          },
+          "event_id": {
+            "type": "string",
+            "description": "决定该日期的事件 ID。没有事件覆盖该日期时不返回。"
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "custom",
+              "holiday",
+              "weekly"
+            ],
+            "description": "决定该日期的层：custom = 日历自己的事件，holiday = 关联的节假日日历，weekly = 每周工作日设置。没有事件覆盖该日期时不返回。"
           }
         }
       },
@@ -19985,7 +20046,6 @@
         "description": "日历事件创建/更新请求。传入 event_id 表示更新，留空表示创建。",
         "required": [
           "cal_id",
-          "summary",
           "start_at",
           "end_at",
           "is_off"
@@ -20002,8 +20062,7 @@
           },
           "summary": {
             "type": "string",
-            "description": "事件摘要。",
-            "minLength": 1,
+            "description": "事件摘要，选填。",
             "maxLength": 39
           },
           "description": {
