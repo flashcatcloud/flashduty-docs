@@ -185,6 +185,8 @@ flashduty incident work-item-post-mortem-bind [flags]            # 将已转换�
 
 `work-item-create` 关键参数：`--item-type`（必填，`action` 或 `follow_up`）、`--title`（必填，最多 512 字符）、`--idempotency-key`（必填幂等键，最多 128 字符）、`--post-mortem-id`（`follow_up` 必填，`action` 禁止）、`--assignee-ids`（初始负责人，旧别名）。更新类操作（`update`/`complete`/`convert`/`delete`/`assignees-reset`）均需传 `--version`（乐观锁，必须与当前存储版本一致）。
 
+工作项状态只接受 `open` / `in_progress` / `done` / `cancelled` 四个取值：`work-item-create --status` 省略或留空时默认 `open`，`work-item-update --status` 只能改成这四个值之一，`work-item-complete --target-status` 只接受 `done`（其它取值会被拒绝），`work-item-convert --target-status` 可传这四个值之一。
+
 工作项的负责人可以是成员，也可以是**本账户的 AI SRE**：
 
 - `work-item-create` 与 `work-item-assignees-reset` 接受 `assignees` 字段（每项形如 `{type, id?}`，`type` 取 `person` 或 `ai_sre`；`ai_sre` 项不带 `id`，最多 20 项），该字段只能通过 `--data` 传 JSON。`--assignee-ids` 是等价的旧别名（相当于全部为 `person`），两者互斥，同时传会报错。
@@ -492,7 +494,25 @@ flashduty rum resource-info [--no-cache]   # 查看 RUM 套餐版本、配额与
 flashduty oncall license-list # 列出当前账户中持有有效 On-call 许可证的成员
 ```
 
-该命令只读，返回成员 ID、名称及许可证类型：`fixed` 表示固定分配，`temporary` 表示当前临时许可证窗口内生效。
+该命令只读，返回成员 ID、名称及许可证类型：`fixed` 表示固定分配，`temporary` 表示当前临时许可证窗口内生效。响应还带 `release_limited`：本账户在本计费周期内的 License 释放次数已用尽时为 `true`，此时释放成员席位会以错误码 `NoLicense` 失败；该额度即[每个计费周期的释放次数上限](/zh/platform/pricing)。
+
+### calendar — 服务日历
+
+服务日历是分派策略与静默规则判断工作日/休息日的依据，控制台侧的配置与层级优先级见[服务日历](/zh/on-call/configuration/service-calendar)。该命令组由 OpenAPI 生成（见下文「全量命令覆盖」）：`<cal-id>`（形如 `cal.<uuid>`）为位置参数，取自 `calendar list` 响应 `items[]` 里的 `cal_id`；`list` 默认只列账户自有日历，列公共节假日日历要加 `--kind region.official.holiday`（默认按调用者所在地区过滤，加 `--no-locale` 取消过滤）。
+
+```bash
+flashduty calendar list [--kind personal|region.official.holiday] [--no-locale]   # 列出日历
+flashduty calendar info|update|delete <cal-id>                                    # 查看 / 修改 / 删除日历
+flashduty calendar event-list <cal-id> [--year <y>] [--month <m>] [--day <d>]     # 列出事件，响应另带 days
+flashduty calendar event-upsert <cal-id> --start-at <date> --end-at <date> --is-off <bool> [--event-id <id>] [--summary <text>]
+flashduty calendar event-delete <cal-id> [--event-id <id> | --start-at <date> --end-at <date>]
+```
+
+以下三点只能从 `--help` 和响应本身看出来：
+
+- **`event-delete` 兼具删除单条事件与清空日期区间两种用法**。传 `--event-id` 删除一条事件；或传 `--start-at` 与 `--end-at`（均为 `YYYY-MM-DD`，`end_at` 为开区间、必须晚于 `start_at`）清空该日历自身在 `[start_at, end_at)` 内的全部事件。被清空的日期回落到关联的节假日日历与每周工作日，效果相当于在控制台里对这些日期点击**恢复默认**。
+- **`event-upsert` 会裁剪同区间内该日历自身的其他事件**：完全落在区间内的被删除、部分重叠的被缩短、跨越区间的被拆成两条，因此这些天以最后一次写入为准（`--summary` 可选）。
+- **`event-list` 的响应除行数组 `items` 外还有 `days`**：按 `YYYY-MM-DD` 给出请求范围内每一天的解析结果，含 `is_off`、决定该天的 `event_id` 与层级 `layer`——`custom`（日历自有事件）优先于 `holiday`（关联的节假日日历），再优先于 `weekly`（每周工作日）；同一层级内工作日事件优先于休息日；`layer` 缺失表示没有任何事件覆盖该天，按工作日计。判断某天是否休息请读 `days`，不要从 `items` 反推：同一天可能同时存在多层事件。
 
 ### template — 通知模板
 
@@ -869,6 +889,8 @@ inc_abc123   DB connection timeout    Critical   Triggered    Production    2026
 inc_def456   High memory usage        Warning    Processing   Staging       2026-04-10 09:15
 Showing 2 results (page 1, total 2).
 ```
+
+生成命令的列表响应若在行数组（`items` / `docs` / `list`）之外还带其它字段（如 `calendar event-list` 的 `days`、`oncall license-list` 的 `release_limited`），表格会在行表格之后额外打印一行 `Also in the response: <字段> (use --json to see it).`，提示这些字段不在表格里，要看它们请用 `--json` 或 `--output-format toon`。
 </Tab>
 
 <Tab title="JSON（--json / --output-format json）">
@@ -908,6 +930,8 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 
 - **整行被丢弃**：写入 `truncated: true` 与 `emitted_rows: N`（N 为实际输出的行数）。此时信封中的 `total`、`has_next_page`、`search_after_ctx` 仍是服务端原始分页的原样回显，**不能**用来判断是否已取全——被截成「100 行中前 7 行」的一页照样带着原来的分页字段。要取全请按实际收到的行数收窄 `--limit` 重新请求，再沿返回的游标继续翻页。
 - **只有长值被截短**（没有丢行）：只写 `truncated: true`，stderr 会点名被截字段。重新请求无法找回这些值，请收窄筛选条件、减少每页行数，或改用支持字段投影的精选命令。
+
+**行数组还带非标量同级字段的响应不做缩减**。行数组为 `items` / `docs` / `list`、但同级还有对象或数组字段的响应（如 `calendar event-list` 的 `days` 地图），无法在不丢字段的前提下压进 16 KiB，因此整包原样输出、处理方式同本节末段的**明细形态的单个对象**：既不写 `truncated` / `emitted_rows`，也不截短任何值。
 
 **顶层数组形态**的响应（如精选命令 `incident list`、`insight incidents`）没有信封可承载标记，缩减仍只写 stderr。
 

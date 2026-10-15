@@ -185,6 +185,8 @@ flashduty incident work-item-post-mortem-bind [flags]            # Bind converte
 
 Key flags for `work-item-create`: `--item-type` (required, `action` or `follow_up`), `--title` (required, up to 512 characters), `--idempotency-key` (required idempotency key, up to 128 characters), `--post-mortem-id` (required for `follow_up`, forbidden for `action`), `--assignee-ids` (initial assignees, a legacy alias). Mutating verbs (`update`/`complete`/`convert`/`delete`/`assignees-reset`) require `--version` (optimistic locking — it must match the stored version).
 
+A work item's status accepts only four values — `open`, `in_progress`, `done`, `cancelled`: `work-item-create --status` defaults to `open` when omitted or blank, `work-item-update --status` can only move it to one of those four, `work-item-complete --target-status` accepts `done` alone (any other value is rejected), and `work-item-convert --target-status` takes one of the four.
+
 A work item's assignees can be members or the account's **AI SRE**:
 
 - `work-item-create` and `work-item-assignees-reset` accept an `assignees` field (each entry shaped `{type, id?}`, where `type` is `person` or `ai_sre`; an `ai_sre` entry carries no `id`, and at most 20 entries are allowed), which can only be passed as JSON through `--data`. `--assignee-ids` is the equivalent legacy alias (an all-`person` list); the two are mutually exclusive and sending both returns an error.
@@ -492,7 +494,25 @@ flashduty rum resource-info [--no-cache]   # View the RUM plan version, quotas, 
 flashduty oncall license-list # List people with active On-call licenses in the current account
 ```
 
-This read-only command returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window.
+This read-only command returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window. The response also carries `release_limited`, which is `true` once the account has used up its license-release quota for the current billing period; while it is `true`, releasing a member's seat fails with the error code `NoLicense`. That quota is the [limit on the number of License releases in each billing period](/en/platform/pricing).
+
+### calendar — Service calendars
+
+A service calendar is what escalation rules and silence rules use to tell working days from rest days; the console-side configuration and layer precedence are described in [Service Calendar](/en/on-call/configuration/service-calendar). The group is generated from the OpenAPI (see "Full command coverage" below): `<cal-id>` (shaped `cal.<uuid>`) is positional and comes from the `cal_id` of the `items[]` rows returned by `calendar list`; `list` returns account-created calendars only, so pass `--kind region.official.holiday` for public-holiday calendars (they are filtered by the caller's locale unless you add `--no-locale`).
+
+```bash
+flashduty calendar list [--kind personal|region.official.holiday] [--no-locale]   # List calendars
+flashduty calendar info|update|delete <cal-id>                                    # Get / update / delete a calendar
+flashduty calendar event-list <cal-id> [--year <y>] [--month <m>] [--day <d>]     # List events; the response also carries days
+flashduty calendar event-upsert <cal-id> --start-at <date> --end-at <date> --is-off <bool> [--event-id <id>] [--summary <text>]
+flashduty calendar event-delete <cal-id> [--event-id <id> | --start-at <date> --end-at <date>]
+```
+
+Three things only `--help` and the responses themselves reveal:
+
+- **`event-delete` both deletes a single event and clears a date range.** Pass `--event-id` to delete one event, or `--start-at` and `--end-at` (both `YYYY-MM-DD`; `end_at` is exclusive and must be later than `start_at`) to clear every event the calendar itself holds over `[start_at, end_at)`. The cleared days fall back to the linked holiday calendars and the weekly workdays — the same effect as clicking **Reset to default** on those dates in the console.
+- **`event-upsert` trims the calendar's other own events off the same days**: an event fully inside the range is deleted, one partly inside is shortened, and one spanning the range is split in two, so the latest write decides those days (`--summary` is optional).
+- **The `event-list` response carries `days` beside the `items` row array**: keyed by `YYYY-MM-DD`, it gives every day in the requested scope its `is_off`, the `event_id` that decided it, and the `layer` that decided it — `custom` (the calendar's own events) beats `holiday` (a linked holiday calendar), which beats `weekly` (the weekly workdays); inside one layer a working-day event beats a rest day; a missing `layer` means no event covers that day, which counts as a working day. Read `days` to tell whether a day is a rest day; do not infer it from `items`, since one day can hold events from several layers.
 
 ### template — Notification templates
 
@@ -885,6 +905,8 @@ inc_abc123   DB connection timeout    Critical   Triggered    Production    2026
 inc_def456   High memory usage        Warning    Processing   Staging       2026-04-10 09:15
 Showing 2 results (page 1, total 2).
 ```
+
+A generated command's list response that carries fields beyond the row array (`items` / `docs` / `list`) — for example `calendar event-list`'s `days` or `oncall license-list`'s `release_limited` — prints an extra line after the row table: `Also in the response: <fields> (use --json to see it).` Those fields never appear in the table; use `--json` or `--output-format toon` to read them.
 </Tab>
 
 <Tab title="JSON (--json / --output-format json)">
@@ -924,6 +946,8 @@ Generated commands (the ones covering the OpenAPI through the code generator, su
 
 - **Rows withheld**: the payload carries `truncated: true` together with `emitted_rows: N` (N is the number of rows actually emitted). The envelope's `total`, `has_next_page`, and `search_after_ctx` still describe the page as the server returned it. They **can't** tell you whether you got everything: a page cut to 7 of 100 rows keeps the original pagination fields. To collect all rows, re-request with a `--limit` no larger than the rows you actually received, then follow the returned cursor.
 - **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or switch to a curated command that supports field projections.
+
+**A response whose row array carries non-scalar siblings is not bounded.** When the row array is named `items` / `docs` / `list` but the response also has object or array fields beside it (for example `calendar event-list`'s `days` map), it cannot be squeezed under 16 KiB without losing fields, so it prints whole, exactly like the **detail-shaped single objects** in the last paragraph of this section: no `truncated` / `emitted_rows` marker, and no value shortened.
 
 **Bare top-level arrays** (such as the curated `incident list` and `insight incidents`) have nowhere to carry the marker, so a reduction is announced on stderr only.
 
