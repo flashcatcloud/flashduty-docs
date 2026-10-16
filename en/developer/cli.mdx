@@ -18,7 +18,7 @@ The tool is open source at [flashcatcloud/flashduty-cli](https://github.com/flas
 curl -sSL https://static.flashcat.cloud/flashduty-cli/install.sh | sh
 ```
 
-Installs to `/usr/local/bin` by default. Override with the `FLASHDUTY_INSTALL_DIR` environment variable.
+Installs to the directory of the `flashduty` already on your `PATH` by default, so an upgrade replaces that copy in place; when there is no `flashduty` on `PATH`, it installs to `/usr/local/bin`. Override the directory with the `FLASHDUTY_INSTALL_DIR` environment variable.
 </Tab>
 
 <Tab title="Windows (PowerShell)">
@@ -39,12 +39,14 @@ Read the latest version from the [CDN latest version pointer](https://static.fla
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FLASHDUTY_VERSION` | Install a specific version, for example, `v1.5.12` | latest |
-| `FLASHDUTY_INSTALL_DIR` | Custom install directory | `/usr/local/bin` (shell), `~\.flashduty\bin` (PowerShell) |
+| `FLASHDUTY_INSTALL_DIR` | Custom install directory | the directory of the `flashduty` already on `PATH`, else `/usr/local/bin` (shell); `~\.flashduty\bin` (PowerShell) |
 | `MIRROR_URL` | Override the release asset download mirror prefix used by the installer script; must use `https://` | `https://static.flashcat.cloud/flashduty-cli` |
 | `FLASHDUTY_UPDATE_BASE_URL` | Override the base URL used by `flashduty update` and the automatic update check | `https://static.flashcat.cloud/flashduty-cli` |
 | `INSTALLED_NAME` | Command name to install as, for example, `fduty` | `flashduty` |
 
 A copy installed under another command name uses that name in help output, error messages, and shell completion scripts; `flashduty update` replaces the running binary in place, under its own name and directory, instead of installing a default-named copy elsewhere.
+
+After installing, the script re-checks `PATH`: if the `flashduty` your shell actually runs is not the copy it just installed (an older copy earlier on `PATH` shadows it), it tells you to remove that copy or move the new directory ahead of it. When the current process is managed by flashduty-runner (`FLASHDUTY_MANAGED_BY_RUNNER=1`), the script refuses to run and tells you to upgrade the runner instead — the runner ships a CLI copy it was built and verified against, and replacing it in place desyncs the two.
 
 ## Authentication
 
@@ -635,12 +637,17 @@ Core fields for `datasource-create` / `datasource-update`:
 - `kafka`: `sasl_mechanism` (`none` default / `plain` / `scram-sha-256` / `scram-sha-512`, the latter three require username and password), `username` / `password`, `timeout_ms` (default 5000), TLS fields (`tls_min_version` defaults to 1.2, max 1.3).
 - Passwords and `kafka.tls_key` support `${env:NAME}` references (resolved on the edge); literal values are omitted from responses, only `${env:...}` references are echoed. **On update, omit those fields to preserve stored secrets; explicitly send an empty string to clear**.
 
-#### Dashboards and rule folders (dashboard-* / folder-list)
+#### Dashboards and rule folders (dashboard-* / folder-*)
 
 The `monit dashboard-*` family manages monitor dashboards (provided by generated OpenAPI commands). A dashboard is a `dashboard.v1` document: pass the `definition` in `--data` when creating or updating. `update`, `delete`, `move`, and `restore` all require `--expected-revision` — if the revision you send is not the current one, the call is rejected with `DashboardRevisionConflict`, so re-read and submit again.
 
 ```bash
 flashduty monit folder-list                                       # List every monitor rule folder, to get a folder-id (top-level array, use jq '.[]')
+flashduty monit folder-health                                     # Read folder health summaries, including issues in descendant folders (paged envelope, use jq '.items[]')
+flashduty monit folder-create --name <folder-name> [flags]        # Create a folder (--name required, no . / ,; --parent-id parent folder, 0 = root; --note note; --team-id team, 0 = account-wide)
+flashduty monit folder-update --id <folder-id> --name <folder-name> # Update a folder's name, note, and team assignment (--id and --name required)
+flashduty monit folder-move <dest-parent-id> --id <folder-id>     # Move a folder and its descendants (dest-parent-id is positional and always required; 0 moves it to the root)
+flashduty monit folder-delete --id <folder-id>                    # Delete a folder (empty folders only: child folders, rules, or dashboards make the call fail)
 flashduty monit dashboard-list <folder-id>                        # List the dashboards in one folder (paged envelope, use jq '.items[]')
 flashduty monit dashboard-search --query "payments"               # Search dashboards by title and description (at least one word)
 flashduty monit dashboard-get <dashboard-id>                      # Read a dashboard, including its definition and current revision
@@ -659,6 +666,8 @@ flashduty monit dashboard-runtime-variables-resolve <dashboard-id>      # Resolv
 flashduty monit dashboard-runtime-variables-preview               # Preview draft variables
 flashduty monit dashboard-runtime-queries-resolve <panel-id> [<id2>...]  # Resolve panel queries: expressions with variables substituted, and the bound datasource
 ```
+
+The `monit folder-*` commands manage the folders themselves. `folder-health` returns a `{items:[...]}` paged envelope in which each entry carries only `folder_id` and `has_issue` (`has_issue` marks a folder whose visible descendants include active alerts or rule runtime issues), and `folder-list` returns a top-level array — read both with `--json | jq`. `folder-create` and `folder-update` return the updated folder object; `folder-move` and `folder-delete` return no folder object. A folder name may not contain `.`, `/`, or `,`. `folder-move` requires `dest-parent-id` even when moving to the root (`0`), and `folder-delete` accepts only an empty folder — child folders, rules, or dashboards inside it make the call fail, so empty it yourself first.
 
 Panel runtime and variable resolution take their time window and variable selections as JSON objects in `--data` (time uses millisecond `from_ms` / `to_ms` timestamps). `dashboard-panel-preview` and `dashboard-runtime-variables-preview` need a `context`: `kind: existing` with a `dashboard_id` targets a stored dashboard, `kind: new` with a `folder_id` targets a folder that does not hold one yet.
 
@@ -721,11 +730,12 @@ Common `create` flags:
 | Flag | Notes |
 |------|-------|
 | `--name` | Rule name (required) |
-| `--team-id` | Scope team ID; `0` means personal scope (default). The scope is immutable after creation |
+| `--team-id` | Scope team ID; an explicit `0` means personal scope and `>0` means that team; when omitted the field is not sent, so the server inherits the authenticated IM conversation's scope when one is available and otherwise applies its normal default. With `--run-in current-chat`, the team ID you pass must match that conversation's scope — it cannot switch the conversation to a different personal or team scope. The scope is immutable after creation |
+| `--run-in` | Execution destination: `current-chat` binds the rule to the current IM conversation, `web` runs it in the web console. When omitted the server decides — it selects `current-chat` for an authenticated IM invocation and `web` otherwise. The server rejects `current-chat` outside a live IM conversation |
 | `--schedule` | Schedule helper: `hourly`, `daily`, `weekly`, or `cron`; defaults to `daily` when omitted |
 | `--at` | `HH:MM` local time (in the rule's timezone); for `hourly` only the minute is used (default 0), for `daily`/`weekly` both hour and minute (default 09:00) |
 | `--weekday` | Weekday for `weekly`: `sun`–`sat` or `0`–`7` (`0` and `7` both mean Sunday; defaults to Monday) |
-| `--cron-expr` | Exact 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers |
+| `--cron-expr` | A supported 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers. The minute must be a fixed `0`–`59` integer, so the fastest schedule is hourly; minute wildcards, ranges, lists, and steps are unsupported, and expressions such as `*/15 * * * *` or `0,30 * * * *` are rejected |
 | `--timezone` | IANA timezone name (for example, `Asia/Shanghai`) that `--at` and `--cron-expr` are interpreted in; when omitted the server uses the caller's member timezone, then the account timezone, then `Asia/Shanghai`. A timezone the server cannot load is rejected |
 | `--disabled` | Create the rule disabled (enabled by default) |
 | `--schedule-enabled` | Whether the schedule trigger is enabled (default `true`) |
@@ -733,7 +743,9 @@ Common `create` flags:
 | `--prompt` / `--prompt-file` | Task prompt, exactly one required; `--prompt-file` reads from a file (`-` for stdin) |
 | `--environment-kind` / `--environment-id` | Runtime environment: `cloud` or `byoc` (`byoc` requires `--environment-id`); empty means automatic |
 
-`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope is immutable after creation, so `update` exposes no scope flag.
+When you create a rule from an IM conversation, omitting `--run-in` lets the server bind the rule to that conversation and inherit its scope; you neither need to nor should pass a chat, platform, integration, or session ID — the server resolves and authorizes the current conversation. Once bound to a conversation, every ordinary run starts a fresh execution session and, where the IM integration creates threads, a fresh IM thread, and it stays on the conversation and immutable scope captured at creation rather than reusing an old session or thread; a retry of the same run reuses that run's execution identity. If the bound conversation's scope no longer matches the rule when it runs, the run is skipped — the rule is never moved or run in another conversation. War-room Automations keep their existing behavior. Because each run starts from a fresh context, write the prompt so it carries the chat context it needs (the service, the team, the delivery target) and do not refer to "above" or to an earlier session. Like the scope, the execution destination is immutable after creation.
+
+`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope and the execution destination (`--run-in`) are both immutable after creation, so `update` exposes neither. `update`'s `--cron-expr` carries the same constraint as `create`: the minute must be a fixed `0`–`59` integer, so the fastest schedule is hourly, and minute wildcards, ranges, lists, and steps are unsupported.
 
 `runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (server-side values `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`, where `war_room_created` is a run triggered by a war room being created), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
 

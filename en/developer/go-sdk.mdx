@@ -155,7 +155,7 @@ Endpoints are grouped by service and hang off the client: the call convention is
 | `client.Account` | Account |
 | `client.AuditLogs` | Audit logs |
 | `client.AlertRules` | Alert rules |
-| `client.RuleFolders` | Rule folders; `List` lists every monitor folder the caller can read (`POST /monit/folder/list`) |
+| `client.RuleFolders` | Rule folders; `ReadList` lists every folder the caller can read (`POST /monit/folder/list`), `ReadHealth` returns folder health summaries (`POST /monit/folder/health`, including active alerts and rule runtime issues in visible descendants), and `WriteCreate` / `WriteUpdate` / `WriteMove` / `WriteDelete` create, update, move, and delete folders; the old `List` is kept as a compatibility alias for `ReadList` |
 | `client.AlertEnrichment` | Alert enrichment |
 | `client.DataSources` | Data sources |
 | `client.Dashboards` | Dashboards; panel preview and run, panel query resolution (`QueryReadResolve`), variable resolution, plus dashboard read/write, move/restore, and revision history |
@@ -167,7 +167,7 @@ Endpoints are grouped by service and hang off the client: the call convention is
 | `client.Analytics` | Analytics |
 | `client.A2aAgents` | A2A Agents |
 | `client.Artifacts` | AI SRE artifacts |
-| `client.Automations` | AI SRE automations |
+| `client.Automations` | AI SRE automations (`RuleReadGet` / `RuleReadList` / `RuleWriteCreate` / `RuleWriteUpdate` / `RuleWriteDelete` / `RuleWriteRun` / `RunReadList` / `TemplateReadList`); on create, the execution destination comes from `AutomationRuleCreateRequest.RunIn` (`current-chat` / `web`; omitted lets the server decide) and the scope from that struct's `TeamID` (a `*int64`: an explicit `0` is personal scope, omitted inherits the authenticated IM conversation's scope); `AutomationRuleUpdateRequest` no longer has `TeamID` |
 | `client.Knowledge` | AI SRE Knowledge (the knowledge itself and its files) |
 | `client.McpServers` | MCP Servers |
 | `client.Sessions` | AI SRE sessions |
@@ -200,9 +200,23 @@ The following services have behavior that needs extra explanation:
 
 `client.Artifacts` (AI SRE artifacts) covers the 11 operations under `/safari/artifact/*`: on the gallery read side `ReadGet` (get a single published artifact by ID), `ReadList` (list artifacts visible to the caller, with title substring search and `scope` (`all` / `personal` / `team`) plus `team_ids` filtering), and `ReadGetFileState` (probe up to 50 presented-file IDs (`pf_` prefix) in one call for ones that already have a live published artifact); on the file side `ReadSign` (issue short-lived download/preview URLs for a presented file, valid 5 minutes, `expires_in` is fixed at 300) and `ReadStream` (download or preview the file's bytes with a signed token — the success body is a file, not a JSON envelope, with the raw bytes on `Response.Raw`); on the write side `WritePublish` (publish a session-produced file to the gallery), `WriteUpdate` (rename the artifact or transfer it between personal and team scope), and `WriteDelete` (detach it from the gallery; the source file stays with its session); public sharing `WriteShareEnable` (turn on anonymous public sharing and return the public link — anyone with the link can view it, no login required), `WriteShareRevoke` (turn sharing off; the link stops resolving immediately), and `WriteShareSync` (refresh the public snapshot with the latest content — when `share_enabled` is true and `share_file_id` differs from `file_id`, the snapshot is stale and calling this refreshes it). Exported types include `PublishedArtifactItem`, `ArtifactShareState`, `SignedUrLs`, and the various `Artifact*Request` / `Artifact*Response` structs.
 
+### Automation rules
+
+`client.Automations` covers `/safari/automation/*`. A rule's **execution destination** (scope and where it runs) is fixed at creation time:
+
+- `AutomationRuleCreateRequest.RunIn` (`run_in`) is `current-chat` (binds the rule to the authenticated live IM conversation) or `web` (runs in the web console). Omitted, the server decides: `current-chat` for an authenticated IM invocation, `web` otherwise. Sending `current-chat` outside a live IM conversation is rejected.
+- `AutomationRuleCreateRequest.TeamID` (`team_id`) is a `*int64`: an explicit `0` means personal scope and a value greater than 0 picks a team in the account. Omitted, it inherits the authenticated IM conversation's scope when one is present; otherwise the server applies its normal default. A `current-chat` rule's scope must match that conversation's scope.
+- `AutomationRuleUpdateRequest` no longer has `TeamID` (nor `RunIn`): scope and execution destination are immutable after creation. Old code that set `TeamID` on an update request should drop the line — otherwise it will not compile.
+
 ### Member email notifications
 
 `client.Members.MemberNotify` (`POST /member/notify`, `memberNotify`) sends an email to account members on behalf of the caller. Only a credential minted for an AI SRE session can call it. Any other credential, including a plain `app_key`, is rejected with `AccessDenied` (check with `IsAccessDenied` / `ErrorCodeOf`). Request fields are `subject` (required, 1–200 characters) and `html` (required, the full email body, up to 102,400 bytes). `person_ids` is optional: at most 20, no duplicates. If it's omitted or empty, the email goes to the caller only. `script`, `meta`, `link`, and `base` tags and `on*` event handlers are silently stripped from `html` before sending; a `style`, `svg`, `iframe`, `object`, `embed`, `form`, `input`, or `button` tag, an `img` without an `https` `src`, or a link outside `http`/`https`/`mailto` instead fails the call with `InvalidParameter` before anything is queued, naming each offending construct. Delivery is asynchronous, so `accepted` only means the email was queued. `recipients[]` returns one entry per recipient with `person_id` and `status` (`accepted` or `skipped`). A skipped entry has a `reason`: `not_member`, `no_email`, `email_disabled`, `duplicate`, `rate_limited` (at most 20 emails per recipient per hour), or `send_failed`. The response carries only two fields, `recipients[]` and an optional `agent_instructions`, and never echoes the sanitized email HTML back; `agent_instructions` is returned when the `html` doesn't follow the default email layout (no `max-width:600px` wrapper table). It tells the calling AI SRE agent how to conform. It's advisory, so an intentional layout needs no change.
+
+### Rule folders
+
+`client.RuleFolders` covers the six operations under `/monit/folder/*`. `ReadList` (`POST /monit/folder/list`) and `ReadHealth` (`POST /monit/folder/health`) take no request body. The first returns a flat `[]FolderItem` that you rebuild into a tree in the client from `ParentID` / `ParentPath` (dashboards and alert rules share that same tree); the second returns a `FolderHealthOutput`, whose `FolderHealthItem.HasIssue` marks a folder that — or whose visible descendant — has active alerts or rule runtime issues. On the write side `WriteCreate` (`/monit/folder/create`) and `WriteUpdate` (`/monit/folder/update`) return the `FolderItem`, while `WriteMove` (`/monit/folder/move`) and `WriteDelete` (`/monit/folder/delete`) return only a `*Response`. Further exported types are `FolderCreateRequest`, `FolderUpdateRequest`, `FolderMoveRequest`, and `FolderDeleteRequest`.
+
+Request fields: `FolderCreateRequest.Name` is required and may not contain a period, slash, or comma, and a `ParentID` of 0 or omitted creates a root folder. `FolderUpdateRequest` requires both `ID` and `Name` and replaces the editable fields — omitting `Note` clears the note and omitting `TeamID` resets it to 0 (account-wide). `FolderMoveRequest` requires `DestParentID` even when moving back to the root (pass 0), and a folder cannot be moved under itself or one of its descendants. `FolderDeleteRequest` carries only `ID`; only an empty folder can be deleted, so child folders, alert rules, or dashboards inside it make the call fail with HTTP 409 and `FolderNotEmpty`.
 
 ### Diagnostic queries
 
