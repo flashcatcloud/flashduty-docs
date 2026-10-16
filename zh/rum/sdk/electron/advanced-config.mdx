@@ -1,7 +1,7 @@
 ---
 title: "Electron SDK 高级配置"
-description: "配置 Electron RUM SDK 的上报地址、批次、用户身份、错误上报和其他进阶选项"
-keywords: ["RUM", "Electron SDK", "高级配置", "代理", "用户身份", "手动上报"]
+description: "配置 Electron RUM SDK 的会话采样、远程配置、上报地址、批次、用户身份、错误上报和其他进阶选项"
+keywords: ["RUM", "Electron SDK", "高级配置", "会话采样", "异常会话补采", "远程配置", "代理", "用户身份", "手动上报"]
 ---
 
 本文介绍主进程 `@flashcatcloud/electron-sdk` 的可选配置和公开 API。渲染进程使用 Browser SDK，其通用配置见 [Web SDK 高级配置](/zh/rum/sdk/web/advanced-config)。
@@ -34,6 +34,9 @@ if (!initialized) {
 | `proxy` | `string` | 否 | — | 普通 RUM 事件的自定义转发地址 |
 | `env` | `string` | 否 | — | 环境标识。当前主进程 RUM 事件不带该字段；渲染进程需要单独配置 |
 | `version` | `string` | 否 | — | 应用版本；上传 sourcemap 时需要使用相同的值 |
+| `sessionSampleRate` | `number` | 否 | `100` | 会话采样率，范围为 0–100，超出范围时 `init()` 失败。见[会话采样](#会话采样)，SDK 0.4.0 起 |
+| `sessionOnError` | `boolean` | 否 | `false` | 异常会话补采：未被采样抽中的会话先暂存在内存中，只有报错时才上报。见[异常会话补采](#异常会话补采)，SDK 0.4.0 起 |
+| `remoteConfigurationEnabled` | `boolean` | 否 | `false` | 允许控制台在线调整采样并下发自定义配置项。见[远程配置](#远程配置)，SDK 0.4.0 起 |
 | `telemetrySampleRate` | `number` | 否 | `20` | SDK 自身遥测采样率，范围为 0–100；设为 `0` 可关闭 |
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | 否 | `MEDIUM` | 普通 RUM 事件的单批大小 |
 | `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | 否 | `NORMAL` | 普通 RUM 事件的上报间隔 |
@@ -44,6 +47,89 @@ if (!initialized) {
 | `normalizeStackPath` | `(path: string) => string \| undefined` | 否 | — | 自定义单个栈帧的路径映射 |
 
 `init()` 返回 `false` 表示配置校验失败。SDK 会在主进程控制台输出具体原因，并且不会开始采集，但不会阻止应用继续启动。
+
+## 会话采样
+
+Electron SDK 0.4.0 起支持会话采样。`sessionSampleRate` 决定采集多少比例的会话，默认 `100`（全部采集）：
+
+```ts main.ts
+await init({
+  // 其余配置
+  sessionSampleRate: 20, // 采集 20% 的会话
+});
+```
+
+- 每个会话只在主进程抽样一次，结果同时决定渲染进程：渲染进程事件经桥接由主进程上报，主进程会丢弃未抽中会话的事件。
+- 渲染进程 `flashcatRum.init()` 中的 `sessionSampleRate` 对经桥接上报的事件不生效，请只在主进程设置。
+- 应用重启后恢复的会话沿用创建时的抽样结果。
+- 每条 RUM 事件都会带上会话抽样时使用的采样率（`_dd.configuration.session_sample_rate`），平台据此换算总量。
+
+## 异常会话补采
+
+开启 `sessionOnError` 后，采样未抽中的会话不会直接丢弃，而是先在内存中暂存，只有该会话报错时才上报：
+
+```ts main.ts
+await init({
+  // 其余配置
+  sessionSampleRate: 0, // 不无条件采集任何会话……
+  sessionOnError: true, // ……但所有报错的会话都会被采集
+});
+```
+
+- 暂存范围覆盖主进程和渲染进程的事件，最多保留报错前 60 秒的内容（同时受 64 KiB 明细、200 条事件和 50 个 view 的上限约束）。暂存内容只在内存中，不写入磁盘。
+- 会话首次报错后，暂存内容与错误一起在 0–3 秒内上报（按会话打散，避免一次故障让所有客户端同时上传），之后该会话像普通采集的会话一样持续上报。
+- 应用可能即将退出时（主进程未捕获异常、`before-quit`、`will-quit` 与进程 `exit` 事件），已经触发补采的内容会先写入磁盘，下次启动再上传。主进程未捕获异常要被计入，应用自己的 `uncaughtException` 监听器需在 `await init(...)` 完成之后注册。
+- 没有报错就结束的会话整体丢弃，退出应用时也不会上传。
+- 只有应用自身的错误会触发补采：被渲染进程 `beforeSend` 丢弃的错误、SDK 自身上报的错误不计入。原生崩溃同样计入，会在下次启动时随崩溃所在的 view 一起上报。
+
+被补采的会话上报的会话采样率为 `0`，并在 view 上带 `session.sampled_for_error: true` 标记，按自身计数、不会按采样率放大。筛选方式见[数据查询语法指南](/zh/rum/explorer/data-query)中的 `session_sampled_for_error`。
+
+<Warning>
+**会话回放不受异常补采控制。** 回放由渲染进程直接上传，不经过主进程。开启 `sessionReplayDirectUpload` 时，被异常补采暂存的会话无论最终是否报错，其回放都会上传。请不要同时使用 `sessionOnError` 与会话回放。
+</Warning>
+
+## 远程配置
+
+Electron SDK 0.4.0 起，会话采样率、异常会话补采与自定义配置项可以在控制台 **应用管理 → 远程配置** 页签在线调整，无需改代码、重新发版。该功能默认关闭，需要在主进程初始化时开启：
+
+```ts main.ts
+await init({
+  // 其余配置
+  sessionSampleRate: 100, // 控制台未下发时使用的采样率
+  remoteConfigurationEnabled: true, // 允许控制台调整采样率与异常补采
+});
+```
+
+控制台 Electron 接入向导中的 **允许远程配置** 开关打开时，生成的主进程初始化代码会自动带上这一行。
+
+开启后的行为：
+
+- 配置由主进程在 `init()` 时与每次新建会话时请求，`init()` 不会等待请求完成。拿到的配置对**下一个新会话**生效，进行中的会话不受影响。
+- 控制台下发的值优先于初始化值；控制台未设置的项、或控制台停用远程配置时，沿用初始化值。
+- 最近一次接收的配置保存在应用的 `userData` 目录，冷启动后的新会话在网络返回前、甚至离线时也会按它抽样。缓存只对相同的上报地址、应用、`env` 与 `version` 生效。
+- 请求失败、超时或响应无法识别时，沿用已生效的配置；SDK 约 5 秒后重试一次、再约 60 秒后重试一次（两次都带 ±20% 抖动）。
+- Electron SDK 只读取**会话采样率**、**异常会话补采**与**自定义配置项**三项。会话回放由渲染进程的 Browser SDK 自行录制与采样，远程配置不会下发到渲染进程，回放与 Trace 相关的配置项不会在 Electron 应用里出现。
+- 渲染进程无需开启远程配置，主进程会统一处理会话与采样。
+- 抽样时读到了下发配置的会话，会在事件中带上配置版本（`_dd.configuration.rc_version`）。
+
+<Note>
+配置接口位于上报地址旁的 `/api/v2/rum/config` 路径：配置 `site` 时为 `https://<site>/api/v2/rum/config`；配置 `proxy` 时，请求同样发往 `proxy`，目标路径 `/api/v2/rum/config` 放在 `ddforward` 参数中。私有化部署请确认转发服务放行了该路径。
+</Note>
+
+自定义配置项通过 `getRemoteConfig()` 读取，返回一份副本；未开启远程配置、尚未拿到配置或控制台未设置该项时返回 `undefined`。在服务端返回前，它从本地缓存读取，因此 `init()` 完成后即可调用：
+
+```ts main.ts
+import { getRemoteConfig } from '@flashcatcloud/electron-sdk';
+
+const custom = getRemoteConfig();
+const debugUsers = custom?.['debugUsers'] as string[] | undefined;
+```
+
+<Warning>
+自定义配置项会下发到客户端，任何持有 Client Token 的人都能读到。请勿在其中存放密钥、访问令牌或个人敏感信息。
+</Warning>
+
+控制台侧的配置项、发布与生效方式见 [应用管理 · 远程配置](/zh/rum/quickstart/app-management#远程配置)。
 
 ## 自定义上报地址
 
