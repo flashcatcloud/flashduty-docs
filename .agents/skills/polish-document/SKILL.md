@@ -1,16 +1,16 @@
 ---
 name: polish-document
-description: Polish and optimize documentation following Mintlify writing standards, then validate with broken-links check. Use when improving, optimizing, polishing, or reviewing documentation quality.
+description: Polish and optimize documentation following the repo's writing rules (AGENTS.md → Writing and page design), then validate with broken-links check. Use when improving, optimizing, polishing, or reviewing documentation quality.
 ---
 
 # Polish Documentation
 
-Optimize documents following Mintlify writing standards and validate links.
+Optimize documents following the writing rules in `AGENTS.md` (section **Writing and page design**) and validate links. Start with **Reader first**: decide what stays on the page before polishing how it reads.
 
 ## Quick Start
 
 1. Detect target files (see below)
-2. Read standards: [standards.md](standards.md)
+2. Read the writing rules: `AGENTS.md` → **Writing and page design** (repo root)
 3. Read components: [components.md](components.md)
 4. Optimize document content
 5. Run `mint broken-links` to validate
@@ -122,5 +122,5 @@ After optimization, provide a report:
 
 ## Resources
 
-- Writing standards: [standards.md](standards.md)
+- Writing rules: `AGENTS.md` → **Writing and page design** (repo root)
 - Component reference: [components.md](components.md)
