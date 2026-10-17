@@ -110,6 +110,65 @@ Monitors 告警规则的 **备注描述（Description）** 用于定义告警和
 {{- end }}
 ```
 
+<span id="recovery-values"></span>
+## 在恢复通知中显示恢复时的数值
+
+告警恢复时，备注描述和自定义字段（含 `title`）会重新渲染一次，此时 `$status` 为 `recovered`。`$values` 中是哪一次检测的数值，取决于检测方式和**恢复方式**。
+
+### 各恢复方式下的数值
+
+| 检测方式 | 恢复方式 | 恢复通知中 `$values` 的数值 |
+| --- | --- | --- |
+| **阈值判定** | 未触发任一阈值就算恢复 | 恢复时的数值 |
+| **阈值判定** | 结果满足条件才算恢复 | 恢复时的数值，包括恢复表达式额外引用的查询 |
+| **阈值判定** | 表达式查到数据就算恢复 | 主查询数值，见下方说明 |
+| **数据存在** | 查询检测查不到数据即恢复 | 最近一次告警或重复通知时的数值 |
+| **数据存在** | 恢复检测查到数据才恢复 | 主查询数值，见下方说明 |
+
+使用恢复查询的两种方式中，如果恢复时主查询仍能查到该告警对象，主查询数值是恢复时的数值，否则是最近一次告警或重复通知时的数值。恢复查询只用于判断是否恢复，查询结果不提供给模板。需要在恢复通知中展示其他数值时，请使用[关联查询](#recovery-related-query)。
+
+<Note>
+存在多个数值时 `$value` 为 0。规则有多个查询或查询返回多个值字段时，请用 `getvalue $values "<key>"` 按 key 读取。
+</Note>
+
+### 阈值判定：直接引用查询值
+
+使用前两种恢复方式时，在模板中按 `$status` 分支，引用同一个 key 即可。下例中主查询 A 返回 CPU 使用率：
+
+```gotemplate
+{{- if eq $status "firing" }}
+CPU 使用率 {{ getvalue $values "$A" "%.1f" }}%，超过阈值。
+{{- else }}
+已恢复，当前 CPU 使用率 {{ getvalue $values "$A" "%.1f" }}%。
+{{- end }}
+```
+
+<span id="recovery-related-query"></span>
+### 数据存在：用关联查询获取恢复时的数值
+
+使用“查询检测查不到数据即恢复”时，恢复这一次检测没有查到数据，`$values` 只能提供最近一次通知时的数值。需要恢复时的数值，请使用关联查询：每次发送通知（包括恢复通知）时都会执行一次关联查询，与检测方式和恢复方式无关。在关联查询中查询需要展示的数值，然后在模板中通过 `$relates` 引用。
+
+SQL 类数据源的关联查询结果以文本形式返回，请用 `$row.Field "<列名>"` 读取。
+
+关联查询示例：主查询按 `service` 检测错误日志，关联查询 R1 统计最近 5 分钟的错误数。
+
+```sql
+SELECT count(*) AS cnt
+FROM app_logs
+WHERE level = 'ERROR'
+  AND service = '${service}'
+  AND ts > now() - INTERVAL 5 MINUTE
+```
+
+```gotemplate
+{{- if eq $status "firing" }}
+服务 {{ index $labels "service" }} 出现错误日志。
+{{- else }}
+服务 {{ index $labels "service" }} 已恢复，最近 5 分钟错误数：
+{{- range $row := $relates.R1 }} {{ $row.Field "cnt" }}{{ end }}
+{{- end }}
+```
+
 ## Go Template 内置函数
 
 以下函数由 Go `text/template` 提供。
