@@ -18,7 +18,7 @@ The tool is open source at [flashcatcloud/flashduty-cli](https://github.com/flas
 curl -sSL https://static.flashcat.cloud/flashduty-cli/install.sh | sh
 ```
 
-Installs to `/usr/local/bin` by default. Override with the `FLASHDUTY_INSTALL_DIR` environment variable.
+Installs to the directory of the `flashduty` already on your `PATH` by default, so an upgrade replaces that copy in place; when there is no `flashduty` on `PATH`, it installs to `/usr/local/bin`. Override the directory with the `FLASHDUTY_INSTALL_DIR` environment variable.
 </Tab>
 
 <Tab title="Windows (PowerShell)">
@@ -39,12 +39,14 @@ Read the latest version from the [CDN latest version pointer](https://static.fla
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `FLASHDUTY_VERSION` | Install a specific version, for example, `v1.5.12` | latest |
-| `FLASHDUTY_INSTALL_DIR` | Custom install directory | `/usr/local/bin` (shell), `~\.flashduty\bin` (PowerShell) |
+| `FLASHDUTY_INSTALL_DIR` | Custom install directory | the directory of the `flashduty` already on `PATH`, else `/usr/local/bin` (shell); `~\.flashduty\bin` (PowerShell) |
 | `MIRROR_URL` | Override the release asset download mirror prefix used by the installer script; must use `https://` | `https://static.flashcat.cloud/flashduty-cli` |
 | `FLASHDUTY_UPDATE_BASE_URL` | Override the base URL used by `flashduty update` and the automatic update check | `https://static.flashcat.cloud/flashduty-cli` |
 | `INSTALLED_NAME` | Command name to install as, for example, `fduty` | `flashduty` |
 
 A copy installed under another command name uses that name in help output, error messages, and shell completion scripts; `flashduty update` replaces the running binary in place, under its own name and directory, instead of installing a default-named copy elsewhere.
+
+After installing, the script re-checks `PATH`: if the `flashduty` your shell actually runs is not the copy it just installed (an older copy earlier on `PATH` shadows it), it tells you to remove that copy or move the new directory ahead of it. When the current process is managed by flashduty-runner (`FLASHDUTY_MANAGED_BY_RUNNER=1`), the script refuses to run and tells you to upgrade the runner instead — the runner ships a CLI copy it was built and verified against, and replacing it in place desyncs the two.
 
 ## Authentication
 
@@ -94,14 +96,16 @@ flashduty config set base_url URL  # Override the API endpoint
 
 ## Global flags
 
-All subcommands accept these flags:
+These flags are registered on the root command; every subcommand accepts them except `--version`:
 
 | Flag | Description |
 |------|-------------|
 | `--output-format` | Output format: `table` (default), `json`, or `toon` (compact, token-efficient) |
 | `--json` | Alias for `--output-format json`; emit JSON for parsing with `jq` or similar tools |
 | `--no-trunc` | Disable column truncation in table output |
+| `--fields` | In `json`/`toon` output, keep only the named top-level fields (comma-separated): each row of a list, or the keys of a single record. Table output ignores it and a stderr note says so; a name that matches no key is reported on stderr together with the keys the output does carry, and output that is neither an object nor a list of objects fails the command. See "Field projections for structured output" below |
 | `--base-url` | Override the API endpoint (for private deployments) |
+| `--version` | Print the version — the same single line as `flashduty version`. That meaning exists only on the root command; a command that defines its own `--version` (for example the optimistic-locking version on mutating verbs) follows its own description |
 
 ## Command catalog
 
@@ -116,7 +120,7 @@ flashduty incident ack <id> [<id2>...]   # Acknowledge incidents
 flashduty incident close <id> [<id2>...] # Close (resolve) incidents
 flashduty incident merge <target-id> --source <ids> # Merge incidents into a target incident
 flashduty incident timeline <id>         # View an incident timeline
-flashduty incident alerts <id>           # List alerts associated with an incident
+flashduty incident alerts <id>           # List alerts associated with an incident (--limit default 10, --page)
 flashduty incident similar <id>          # Find similar historical incidents
 flashduty incident feed <id> [flags]    # View an incident's paginated feed (timeline entries)
 ```
@@ -141,7 +145,7 @@ Common filter flags for `incident list`:
 | `--is-rare` | Only outlier incidents | `false` |
 | `--is-snoozed` | Only snoozed incidents | `false` |
 | `--ever-muted` | Only incidents that were ever silenced | `false` |
-| `--since` | Start time (duration, date, datetime, or unix timestamp); the `--since` to `--until` window must be under 31 days | `24h` |
+| `--since` | Start time (duration, date, datetime, or unix timestamp); the `--since` to `--until` window must be under 31 days | `24h` (`30d` when `--progress` lists only `Triggered,Processing`) |
 | `--until` | End time | `now` |
 | `--asc` | Sort ascending (oldest first) | `false` (newest first) |
 | `--limit` | Max results (max 100) | `20` |
@@ -150,6 +154,8 @@ Common filter flags for `incident list`:
 Time format examples: `5m`, `1h`, `24h`, `168h`, `2026-04-01`, `2026-04-01 10:00:00`, `1712000000`.
 
 `incident feed <id>` reads an incident's feed (timeline entries) page by page. `--asc` lists the oldest entries first (the default is newest first). `--types` filters by comma-separated entry types, for example `i_comm,i_assign`; each entry's `type` field gives its actual type. `--limit` (max 100) and `--page` paginate the result.
+
+`incident alerts <id>` lists the alerts attached to that incident; `--limit` defaults to `10` and `--page` starts at `1`.
 
 #### Create, update, and merge
 
@@ -184,6 +190,8 @@ flashduty incident work-item-post-mortem-bind [flags]            # Bind converte
 ```
 
 Key flags for `work-item-create`: `--item-type` (required, `action` or `follow_up`), `--title` (required, up to 512 characters), `--idempotency-key` (required idempotency key, up to 128 characters), `--post-mortem-id` (required for `follow_up`, forbidden for `action`), `--assignee-ids` (initial assignees, a legacy alias). Mutating verbs (`update`/`complete`/`convert`/`delete`/`assignees-reset`) require `--version` (optimistic locking — it must match the stored version).
+
+A work item's status accepts only four values — `open`, `in_progress`, `done`, `cancelled`: `work-item-create --status` defaults to `open` when omitted or blank, `work-item-update --status` can only move it to one of those four, `work-item-complete --target-status` accepts `done` alone (any other value is rejected), and `work-item-convert --target-status` takes one of the four.
 
 A work item's assignees can be members or the account's **AI SRE**:
 
@@ -492,7 +500,25 @@ flashduty rum resource-info [--no-cache]   # View the RUM plan version, quotas, 
 flashduty oncall license-list # List people with active On-call licenses in the current account
 ```
 
-This read-only command returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window.
+This read-only command returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window. The response also carries `release_limited`, which is `true` once the account has used up its license-release quota for the current billing period; while it is `true`, releasing a member's seat fails with the error code `NoLicense`. That quota is the [limit on the number of License releases in each billing period](/en/platform/pricing).
+
+### calendar — Service calendars
+
+A service calendar is what escalation rules and silence rules use to tell working days from rest days; the console-side configuration and layer precedence are described in [Service Calendar](/en/on-call/configuration/service-calendar). The group is generated from the OpenAPI (see "Full command coverage" below): `<cal-id>` (shaped `cal.<uuid>`) is positional and comes from the `cal_id` of the `items[]` rows returned by `calendar list`; `list` returns account-created calendars only, so pass `--kind region.official.holiday` for public-holiday calendars (they are filtered by the caller's locale unless you add `--no-locale`).
+
+```bash
+flashduty calendar list [--kind personal|region.official.holiday] [--no-locale]   # List calendars
+flashduty calendar info|update|delete <cal-id>                                    # Get / update / delete a calendar
+flashduty calendar event-list <cal-id> [--year <y>] [--month <m>] [--day <d>]     # List events; the response also carries days
+flashduty calendar event-upsert <cal-id> --start-at <date> --end-at <date> --is-off <bool> [--event-id <id>] [--summary <text>]
+flashduty calendar event-delete <cal-id> [--event-id <id> | --start-at <date> --end-at <date>]
+```
+
+Three things only `--help` and the responses themselves reveal:
+
+- **`event-delete` both deletes a single event and clears a date range.** Pass `--event-id` to delete one event, or `--start-at` and `--end-at` (both `YYYY-MM-DD`; `end_at` is exclusive and must be later than `start_at`) to clear every event the calendar itself holds over `[start_at, end_at)`. The cleared days fall back to the linked holiday calendars and the weekly workdays — the same effect as clicking **Reset to default** on those dates in the console.
+- **`event-upsert` trims the calendar's other own events off the same days**: an event fully inside the range is deleted, one partly inside is shortened, and one spanning the range is split in two, so the latest write decides those days (`--summary` is optional).
+- **The `event-list` response carries `days` beside the `items` row array**: keyed by `YYYY-MM-DD`, it gives every day in the requested scope its `is_off`, the `event_id` that decided it, and the `layer` that decided it — `custom` (the calendar's own events) beats `holiday` (a linked holiday calendar), which beats `weekly` (the weekly workdays); inside one layer a working-day event beats a rest day; a missing `layer` means no event covers that day, which counts as a working day. Read `days` to tell whether a day is a rest day; do not infer it from `items`, since one day can hold events from several layers.
 
 ### template — Notification templates
 
@@ -629,12 +655,17 @@ Core fields for `datasource-create` / `datasource-update`:
 - `kafka`: `sasl_mechanism` (`none` default / `plain` / `scram-sha-256` / `scram-sha-512`, the latter three require username and password), `username` / `password`, `timeout_ms` (default 5000), TLS fields (`tls_min_version` defaults to 1.2, max 1.3).
 - Passwords and `kafka.tls_key` support `${env:NAME}` references (resolved on the edge); literal values are omitted from responses, only `${env:...}` references are echoed. **On update, omit those fields to preserve stored secrets; explicitly send an empty string to clear**.
 
-#### Dashboards and rule folders (dashboard-* / folder-list)
+#### Dashboards and rule folders (dashboard-* / folder-*)
 
 The `monit dashboard-*` family manages monitor dashboards (provided by generated OpenAPI commands). A dashboard is a `dashboard.v1` document: pass the `definition` in `--data` when creating or updating. `update`, `delete`, `move`, and `restore` all require `--expected-revision` — if the revision you send is not the current one, the call is rejected with `DashboardRevisionConflict`, so re-read and submit again.
 
 ```bash
 flashduty monit folder-list                                       # List every monitor rule folder, to get a folder-id (top-level array, use jq '.[]')
+flashduty monit folder-health                                     # Read folder health summaries, including issues in descendant folders (paged envelope, use jq '.items[]')
+flashduty monit folder-create --name <folder-name> [flags]        # Create a folder (--name required, no . / ,; --parent-id parent folder, 0 = root; --note note; --team-id team, 0 = account-wide)
+flashduty monit folder-update --id <folder-id> --name <folder-name> # Update a folder's name, note, and team assignment (--id and --name required)
+flashduty monit folder-move <dest-parent-id> --id <folder-id>     # Move a folder and its descendants (dest-parent-id is positional and always required; 0 moves it to the root)
+flashduty monit folder-delete --id <folder-id>                    # Delete a folder (empty folders only: child folders, rules, or dashboards make the call fail)
 flashduty monit dashboard-list <folder-id>                        # List the dashboards in one folder (paged envelope, use jq '.items[]')
 flashduty monit dashboard-search --query "payments"               # Search dashboards by title and description (at least one word)
 flashduty monit dashboard-get <dashboard-id>                      # Read a dashboard, including its definition and current revision
@@ -653,6 +684,8 @@ flashduty monit dashboard-runtime-variables-resolve <dashboard-id>      # Resolv
 flashduty monit dashboard-runtime-variables-preview               # Preview draft variables
 flashduty monit dashboard-runtime-queries-resolve <panel-id> [<id2>...]  # Resolve panel queries: expressions with variables substituted, and the bound datasource
 ```
+
+The `monit folder-*` commands manage the folders themselves. `folder-health` returns a `{items:[...]}` paged envelope in which each entry carries only `folder_id` and `has_issue` (`has_issue` marks a folder whose visible descendants include active alerts or rule runtime issues), and `folder-list` returns a top-level array — read both with `--json | jq`. `folder-create` and `folder-update` return the updated folder object; `folder-move` and `folder-delete` return no folder object. A folder name may not contain `.`, `/`, or `,`. `folder-move` requires `dest-parent-id` even when moving to the root (`0`), and `folder-delete` accepts only an empty folder — child folders, rules, or dashboards inside it make the call fail, so empty it yourself first.
 
 Panel runtime and variable resolution take their time window and variable selections as JSON objects in `--data` (time uses millisecond `from_ms` / `to_ms` timestamps). `dashboard-panel-preview` and `dashboard-runtime-variables-preview` need a `context`: `kind: existing` with a `dashboard_id` targets a stored dashboard, `kind: new` with a `folder_id` targets a folder that does not hold one yet.
 
@@ -681,8 +714,9 @@ This command only reads the value set of one label; to fetch time series from an
 ### alert — Alert and alert-event queries
 
 ```bash
-flashduty alert list [flags]        # List alerts (default: last 24h)
+flashduty alert list [flags]        # List alerts (default: last 24h; 30d with --active)
 flashduty alert get <alert_id>      # Get full detail of one alert; detail is an alias
+flashduty alert events <alert_id>   # List the raw events that make up one alert (--limit, --page)
 flashduty alert-event list [flags]  # List alert events (default: last 1h)
 ```
 
@@ -694,6 +728,10 @@ Common filter flags for both `list` commands: `--severity` (`Critical,Warning,In
 - `--alert-keys`: comma-separated alert deduplication keys.
 - `--asc`: sort oldest first by start time (the default is newest first).
 - `--by-updated-at`: apply `--since`/`--until` to the last-updated time instead of the start time. `alert-event list` also supports `--asc` (oldest first; newest first by default), but has no `--by-updated-at` counterpart.
+
+`alert list` also filters by state through `--active` (active alerts only) and `--recovered` (recovered alerts only). They are mutually exclusive — passing both is an error — and passing neither applies no state filter. Active alerts can be older than a day, so with `--active` and no `--since` the window widens to 30 days by default (the window actually sent is reported by the stderr note).
+
+`alert events <alert_id>` lists the raw events that make up one alert: leave `--limit` unset to take the server default of 20 (max 100), and `--page` starts at 1. It reads events for a single alert; for a time-window query across alerts use `alert-event list`.
 
 ### automation — AI SRE automation rules
 
@@ -715,11 +753,12 @@ Common `create` flags:
 | Flag | Notes |
 |------|-------|
 | `--name` | Rule name (required) |
-| `--team-id` | Scope team ID; `0` means personal scope (default). The scope is immutable after creation |
+| `--team-id` | Scope team ID; an explicit `0` means personal scope and `>0` means that team; when omitted the field is not sent, so the server inherits the authenticated IM conversation's scope when one is available and otherwise applies its normal default. With `--run-in current-chat`, the team ID you pass must match that conversation's scope — it cannot switch the conversation to a different personal or team scope. The scope is immutable after creation |
+| `--run-in` | Execution destination: `current-chat` binds the rule to the current IM conversation, `web` runs it in the web console. When omitted the server decides — it selects `current-chat` for an authenticated IM invocation and `web` otherwise. The server rejects `current-chat` outside a live IM conversation |
 | `--schedule` | Schedule helper: `hourly`, `daily`, `weekly`, or `cron`; defaults to `daily` when omitted |
 | `--at` | `HH:MM` local time (in the rule's timezone); for `hourly` only the minute is used (default 0), for `daily`/`weekly` both hour and minute (default 09:00) |
 | `--weekday` | Weekday for `weekly`: `sun`–`sat` or `0`–`7` (`0` and `7` both mean Sunday; defaults to Monday) |
-| `--cron-expr` | Exact 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers |
+| `--cron-expr` | A supported 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers. The minute must be a fixed `0`–`59` integer, so the fastest schedule is hourly; minute wildcards, ranges, lists, and steps are unsupported, and expressions such as `*/15 * * * *` or `0,30 * * * *` are rejected |
 | `--timezone` | IANA timezone name (for example, `Asia/Shanghai`) that `--at` and `--cron-expr` are interpreted in; when omitted the server uses the caller's member timezone, then the account timezone, then `Asia/Shanghai`. A timezone the server cannot load is rejected |
 | `--disabled` | Create the rule disabled (enabled by default) |
 | `--schedule-enabled` | Whether the schedule trigger is enabled (default `true`) |
@@ -727,7 +766,9 @@ Common `create` flags:
 | `--prompt` / `--prompt-file` | Task prompt, exactly one required; `--prompt-file` reads from a file (`-` for stdin) |
 | `--environment-kind` / `--environment-id` | Runtime environment: `cloud` or `byoc` (`byoc` requires `--environment-id`); empty means automatic |
 
-`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope is immutable after creation, so `update` exposes no scope flag.
+When you create a rule from an IM conversation, omitting `--run-in` lets the server bind the rule to that conversation and inherit its scope; you neither need to nor should pass a chat, platform, integration, or session ID — the server resolves and authorizes the current conversation. Once bound to a conversation, every ordinary run starts a fresh execution session and, where the IM integration creates threads, a fresh IM thread, and it stays on the conversation and immutable scope captured at creation rather than reusing an old session or thread; a retry of the same run reuses that run's execution identity. If the bound conversation's scope no longer matches the rule when it runs, the run is skipped — the rule is never moved or run in another conversation. War-room Automations keep their existing behavior. Because each run starts from a fresh context, write the prompt so it carries the chat context it needs (the service, the team, the delivery target) and do not refer to "above" or to an earlier session. Like the scope, the execution destination is immutable after creation.
+
+`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope and the execution destination (`--run-in`) are both immutable after creation, so `update` exposes neither. `update`'s `--cron-expr` carries the same constraint as `create`: the minute must be a fixed `0`–`59` integer, so the fastest schedule is hourly, and minute wildcards, ranges, lists, and steps are unsupported.
 
 `runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (server-side values `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`, where `war_room_created` is a run triggered by a war room being created), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
 
@@ -879,6 +920,8 @@ inc_abc123   DB connection timeout    Critical   Triggered    Production    2026
 inc_def456   High memory usage        Warning    Processing   Staging       2026-04-10 09:15
 Showing 2 results (page 1, total 2).
 ```
+
+A generated command's list response that carries fields beyond the row array (`items` / `docs` / `list`) — for example `calendar event-list`'s `days` or `oncall license-list`'s `release_limited` — prints an extra line after the row table: `Also in the response: <fields> (use --json to see it).` Those fields never appear in the table; use `--json` or `--output-format toon` to read them.
 </Tab>
 
 <Tab title="JSON (--json / --output-format json)">
@@ -906,6 +949,14 @@ Table view with no column truncation — useful for copy-paste or wide terminals
 </Tab>
 </Tabs>
 
+### Time-window note
+
+Commands that query a time range print the window they actually sent to stderr in the local timezone, for example `note: window 2026-10-08T14:00:00+08:00..2026-10-09T14:00:00+08:00 (1d, ended now)`. The parenthesised part carries the span and where the end sits relative to now (`ended 3m ago` / `ends in 2h`); when the window comes from a default rather than from `--since`/`--until` you typed, the note names that default (an `--progress` filter of open states only, or `--active`).
+
+This covers `incident list`, `alert list`, `alert-event list`, `change list`, `audit search`, `insight`, `oncall`, `monit-query` (when its tool params carry an execution window), and every generated command whose `--start-time`/`--end-time` resolve. A command that leaves one side to `--data` or to the server default prints no note, because the window was never fully resolved by the CLI. A query with a single evaluation timestamp reads `note: instant <time> (…)` instead.
+
+Use it to catch a window you did not intend: a default wider than you expected (`--active` widens it to 30 days), or an epoch read in the wrong timezone, which lands the window in the future and reads `ends in 7h`. The note goes only to stderr, so stdout stays byte-identical for `jq` and toon consumers.
+
 ### Generated-command output bound
 
 Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply a 16 KiB bound to **list-shaped** responses in `json`/`toon` mode. The reduction has three tiers, plus a machine-readable marker:
@@ -917,15 +968,19 @@ Generated commands (the ones covering the OpenAPI through the code generator, su
 **A reduced list envelope is rebuilt with the reduction written into the payload.** A list envelope is a response whose row array is named `items`, `docs`, or `list`, and whose other fields are all scalars (`total`, `has_next_page`, `search_after_ctx`, …). Examples are `monit datasource-list` and `safari session-list`. Once a reduction happens, the CLI rebuilds that envelope and adds fields to the payload, so a script sees the reduction without parsing stderr:
 
 - **Rows withheld**: the payload carries `truncated: true` together with `emitted_rows: N` (N is the number of rows actually emitted). The envelope's `total`, `has_next_page`, and `search_after_ctx` still describe the page as the server returned it. They **can't** tell you whether you got everything: a page cut to 7 of 100 rows keeps the original pagination fields. To collect all rows, re-request with a `--limit` no larger than the rows you actually received, then follow the returned cursor.
-- **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or switch to a curated command that supports field projections.
+- **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or keep only the fields you need with the global `--fields`.
+
+**A response whose row array carries non-scalar siblings is not bounded.** When the row array is named `items` / `docs` / `list` but the response also has object or array fields beside it (for example `calendar event-list`'s `days` map), it cannot be squeezed under 16 KiB without losing fields, so it prints whole, exactly like the **detail-shaped single objects** in the last paragraph of this section: no `truncated` / `emitted_rows` marker, and no value shortened.
 
 **Bare top-level arrays** (such as the curated `incident list` and `insight incidents`) have nowhere to carry the marker, so a reduction is announced on stderr only.
 
-**Detail-shaped single objects** (for example, `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Most generated commands have no flag that narrows their output. An occasional `--fields` selects request-body fields, not output fields. For complete JSON, lower `--limit` and page through with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
+**Detail-shaped single objects** (for example, `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands can narrow their output fields with the global `--fields` (see "Global flags" and "Field projections for structured output" below; where an occasional command spells `--fields` as a request-body field selector, such as `monit rule-update-fields`, it does not apply to the output). For complete JSON, lower `--limit` and page through with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
 
 ### Field projections for structured output
 
-The following commands support `--fields` with `json` or `toon` output. Supply comma-separated top-level response fields; an unknown field fails immediately, and table output ignores this flag.
+`--fields` is a global flag (see "Global flags"): every command accepts it in `json` or `toon` output, and it takes a comma-separated list of top-level fields to keep, applied to each row of a list or to the keys of a single record. The projection runs on the response: for a list envelope (row array named `items`, `docs`, or `list`, with only scalar paging fields beside it) it narrows that row array and leaves the paging fields intact; a field no row of the response carries is left out and stderr reports it as matching no key, listing the keys the output does carry; output that is neither an object nor a list of objects fails the command and tells you to drop `--fields`. Table output ignores `--fields`, and stderr says so.
+
+The curated commands in the table below fall back to a default compact projection when `--fields` is omitted, and are size-bounded; each of them defines its own `--fields` (same meaning as the global one), so a misspelled field name fails immediately and lists the names that are valid. Every other command — all the generated ones included — has no default projection: on those, `--fields` applies to the raw fields of the API response, and a name that matches no key only produces the stderr note above.
 
 | Command | Structured output when `--fields` is omitted | Limit |
 | --- | --- | --- |
