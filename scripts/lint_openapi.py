@@ -15,6 +15,17 @@ consolidated) and fails on:
                        learn what each value means
   missing-example      every operation needs a request example (when it has a
                        request body) and a 200 response example
+  int-enum-undocumented  every value of an integer enum must be mentioned in the
+                       property description
+  required-undeclared  a schema's `required` may only name its own properties
+                       (schemas composed with allOf are exempt)
+  missing-403          every operation documents the 403 response (APP Key
+                       scopes can deny any operation)
+  example-mismatch     request and 200 response examples must match their schema:
+                       types, enum members, no undeclared keys, and required keys
+                       present in responses
+  description-too-long the operation description is the one-line subtitle;
+                       longer prose belongs in x-mint.content
 
 Usage:
   python3 scripts/lint_openapi.py            # lint all spec files, exit 1 on violations
@@ -43,6 +54,9 @@ WELL_KNOWN_ENUMS = [
     {"enabled", "disabled"},
     {"success", "failed"},
 ]
+
+# the operation `description` renders as the page subtitle
+MAX_OP_DESCRIPTION = 220
 
 # field-name exemptions: order-by enums list sortable field names, whose
 # meaning lives on the referenced fields themselves
@@ -87,6 +101,11 @@ def walk_properties(node, where, file, rep, seen):
         if isinstance(member, dict) and "$ref" not in member:
             walk_properties(member, where, file, rep, seen)
 
+    if "allOf" not in node:
+        undeclared = [r for r in node.get("required", []) if r not in node.get("properties", {})]
+        if undeclared:
+            rep.add(file, "required-undeclared", where, f"required names undeclared properties: {undeclared}")
+
     for name, prop in node.get("properties", {}).items():
         if not isinstance(prop, dict):
             continue
@@ -111,12 +130,83 @@ def walk_properties(node, where, file, rep, seen):
             if missing:
                 rep.add(file, "enum-undocumented", pwhere,
                         f"enum values not explained in description: {missing}")
+        if enum and prop.get("type") == "integer":
+            missing = [v for v in enum if str(v) not in desc]
+            if missing:
+                rep.add(file, "int-enum-undocumented", pwhere,
+                        f"integer enum values not explained in description: {missing}")
         # recurse
         if prop.get("type") == "object" or "properties" in prop:
             walk_properties(prop, pwhere, file, rep, seen)
         items = prop.get("items")
         if isinstance(items, dict) and "$ref" not in items:
             walk_properties(items, pwhere + "[]", file, rep, seen)
+
+
+def resolve(spec, node, depth=0):
+    while isinstance(node, dict) and "$ref" in node and depth < 20:
+        node = spec["components"]["schemas"].get(node["$ref"].split("/")[-1], {})
+        depth += 1
+    return node
+
+
+def flatten(spec, schema):
+    """Merge allOf members into one object schema (properties + required)."""
+    s = resolve(spec, schema)
+    if not isinstance(s, dict) or "allOf" not in s:
+        return s
+    merged = {"type": "object", "properties": {}, "required": []}
+    for m in s["allOf"] + [{k: v for k, v in s.items() if k != "allOf"}]:
+        m = flatten(spec, m)
+        merged["properties"].update(m.get("properties", {}))
+        merged["required"] += m.get("required", [])
+        if m.get("additionalProperties"):
+            merged["additionalProperties"] = m["additionalProperties"]
+    return merged
+
+
+def check_example(spec, schema, ex, file, where, rep, path="$", response=False, depth=0):
+    s = flatten(spec, schema)
+    if depth > 20 or not isinstance(s, dict) or "oneOf" in s or "anyOf" in s:
+        return
+    types = s.get("type")
+    types = types if isinstance(types, list) else [types] if types else []
+    if ex is None:
+        if types and "null" not in types:
+            rep.add(file, "example-mismatch", where, f"{path} is null but the schema is not nullable")
+        return
+    if "enum" in s and ex not in s["enum"]:
+        rep.add(file, "example-mismatch", where, f"{path}={ex!r} is not an enum member")
+    kind = next((t for t in types if t != "null"), "object" if "properties" in s else None)
+    if kind == "object":
+        if not isinstance(ex, dict):
+            rep.add(file, "example-mismatch", where, f"{path} should be an object")
+            return
+        props, extra = s.get("properties", {}), s.get("additionalProperties")
+        for k, v in ex.items():
+            if k in props:
+                check_example(spec, props[k], v, file, where, rep, f"{path}.{k}", response, depth + 1)
+            elif isinstance(extra, dict):
+                check_example(spec, extra, v, file, where, rep, f"{path}.{k}", response, depth + 1)
+            elif props and not extra:
+                rep.add(file, "example-mismatch", where, f"{path}.{k} is not declared in the schema")
+        if response:
+            for r in s.get("required", []):
+                if r not in ex:
+                    rep.add(file, "example-mismatch", where, f"{path}.{r} is required but missing")
+    elif kind == "array":
+        if not isinstance(ex, list):
+            rep.add(file, "example-mismatch", where, f"{path} should be an array")
+            return
+        for i, v in enumerate(ex):
+            check_example(spec, s.get("items", {}), v, file, where, rep, f"{path}[{i}]", response, depth + 1)
+    elif kind in ("integer", "number", "string", "boolean"):
+        ok = {"integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+              "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+              "string": lambda v: isinstance(v, str),
+              "boolean": lambda v: isinstance(v, bool)}[kind](ex)
+        if not ok:
+            rep.add(file, "example-mismatch", where, f"{path}={ex!r} is not a {kind}")
 
 
 def lint_operations(spec, file, rep):
@@ -130,6 +220,13 @@ def lint_operations(spec, file, rep):
             body = op.get("requestBody", {}).get("content", {}).get("application/json", {})
             if body and "example" not in body and "examples" not in body:
                 rep.add(file, "missing-example", where, "request body has no example")
+            if body.get("schema") and "example" in body:
+                check_example(spec, body["schema"], body["example"], file, where + " request", rep)
+            if "403" not in op.get("responses", {}):
+                rep.add(file, "missing-403", where, "no 403 response")
+            if len(op.get("description", "")) > MAX_OP_DESCRIPTION:
+                rep.add(file, "description-too-long", where,
+                        f"{len(op['description'])} chars; move detail into x-mint.content")
             ok = op.get("responses", {}).get("200", {})
             if "$ref" not in ok:
                 content = ok.get("content", {}).get("application/json", {})
@@ -137,6 +234,9 @@ def lint_operations(spec, file, rep):
                 # downloads and empty 200s are exempt
                 if content and "example" not in content and "examples" not in content:
                     rep.add(file, "missing-example", where, "200 response has no example")
+                if content.get("schema") and "example" in content:
+                    check_example(spec, content["schema"], content["example"], file,
+                                  where + " response", rep, response=True)
 
 
 def lint_file(path, rep):
