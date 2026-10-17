@@ -5,7 +5,7 @@ description: "Flashduty periodically queries a MySQL, PostgreSQL, or ClickHouse 
 keywords: ["Alert Integration", "DB Pull", "Database", "MySQL", "PostgreSQL", "ClickHouse", "Polling", "Data Ingestion"]
 ---
 
-By configuring a database connection and a SELECT query, Flashduty connects to your database on the schedule you define, incrementally fetches new rows through cursor-based pagination, and converts each row into a [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard%20alert) using field mapping rules. Your system does not need to support push delivery.
+By configuring a database connection and a SELECT query, Flashduty connects to your database on the schedule you define, incrementally fetches new rows, and converts each row into a [Standard Alert Event](/en/on-call/integration/alert-integration/alert-sources/standard-alert) using field mapping rules. Your system does not need to support push delivery.
 
 :::tips
 DB Pull is the right choice when **alert data is already stored in a relational database** and you **cannot or do not want to modify the existing system to support webhook push**. If the database is on a network that Flashduty cannot reach, consider exporting alerts to a publicly accessible HTTP endpoint and using the HTTP Pull integration instead.
@@ -71,12 +71,12 @@ When you need to route alert events to different channels based on the alert pay
 | Page Size | Yes | `500` | Maximum rows returned per page, range `1 ~ 1000`. Values above `1000` are clamped to `1000`. |
 
 <Note>
-The total rows ingested per cycle is bounded by `max_pages × page_size` and is also subject to a system-wide event count ceiling. Set `page_size` to a batch size your database can handle efficiently (typically 200–500 rows) and tune `max_pages` based on your alert throughput.
+Each cycle ingests at most `max_pages × page_size` rows. Set `page_size` to 200–500 and tune `max_pages` to your alert throughput.
 </Note>
 
 ### Cursor configuration
 
-Flashduty uses **keyset pagination** to fetch new rows incrementally and avoid full-table scans. After each polling cycle, the system persists the cursor position of the last processed row and resumes from there on the next cycle.
+Each cycle fetches only the rows whose time column and ID column come after the last row of the previous cycle. Rows older than the initial time are not fetched.
 
 | Field | Required | Description |
 | :-: | :-: | :--- |
@@ -84,22 +84,11 @@ Flashduty uses **keyset pagination** to fetch new rows incrementally and avoid f
 | ID Column (`id_column`) | Yes | A unique-identifier column used together with the time column to break ties when multiple rows share the same timestamp (typically an auto-increment primary key or UUID). Same naming rules as `time_column`. |
 | Initial Time (`initial_time`) | Yes | The starting point for the very first fetch (or after a checkpoint reset), in `YYYY-MM-DD HH:mm:ss` format. The form defaults to the current time, so **rows that already exist before that moment will not be fetched**. Select an earlier time if you need to backfill historical rows. |
 
-**How pagination works**
-
-The system wraps your SELECT statement in a subquery and appends keyset conditions, ordering, and a LIMIT on the outer query:
-
-```sql
-SELECT * FROM (<your query>) AS _src
-WHERE (_src.<time_column> > ? OR (_src.<time_column> = ? AND _src.<id_column> > ?))
-ORDER BY _src.<time_column> ASC, _src.<id_column> ASC
-LIMIT <page_size>
-```
-
-Do not include `ORDER BY`, `LIMIT`, or `OFFSET` in your own query — the system controls these.
+Do not include `ORDER BY`, `LIMIT`, or `OFFSET` in your own query. Flashduty controls ordering and paging.
 
 **Automatic checkpoint reset**
 
-The system computes a fingerprint over the fields that define the ordered row stream: `driver`, `host`, `port`, `database`, `query`, `time_column`, `id_column`, and `initial_time`. When any of these fields change, the checkpoint is automatically invalidated and the next fetch restarts from `initial_time`. Editing field mappings or severity mappings **does not** trigger a checkpoint reset and will not replay historical rows.
+After you change any of `driver`, `host`, `port`, `database`, `query`, `time_column`, `id_column`, or `initial_time`, the next fetch restarts from `initial_time`. Editing field mappings or severity mappings **does not** trigger a checkpoint reset and will not replay historical rows.
 
 ### Field mapping
 
