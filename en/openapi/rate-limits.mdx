@@ -1,101 +1,69 @@
 ---
-title: "Rate limits"
-description: "Flashduty Open API rate limits and error codes"
+title: "Rate limits and errors"
+description: "Flashduty Open API rate limits, permission checks, error codes, and retry advice"
 ---
 
-## Request limits
+## Rate limits
 
-### Rate limits
+Every operation is rate limited. Limits are counted per account (all APP Keys and console sessions of the account share one budget), in a per-second and a per-minute window; each operation also has a platform-wide limit shared by all accounts. The exact numbers for an operation are on its page under **Restrictions**.
 
-To ensure service stability, APIs have rate limits on request frequency. When requests are too frequent, a `429` status code with `RequestTooFrequently` error will be returned.
+Default limits per account:
+
+| Operation type | Per second | Per minute |
+| --- | :---: | :---: |
+| Read (list, get, query) | 50 | 1,000 |
+| Write (create, update, delete, enable, …) | 20 | 300 |
+
+Some operations have tighter limits, for example exports and heavy analytics queries; their **Restrictions** table shows the actual values.
+
+### When you hit a limit
+
+The request fails with HTTP `429` and error code `RequestTooFrequently`. The response carries the header `Flashcat-Request-Rate-Limit-Delay`, the number of seconds until the current window resets. Wait at least that long before retrying; if the header is absent, back off exponentially (1 s, 2 s, 4 s, …).
 
 <Warning>
-Please control your request frequency reasonably and avoid sending a large number of requests in a short period. It is recommended to implement a retry mechanism with exponential backoff when receiving a 429 error.
+Retrying immediately in a loop keeps the window saturated. Spread bulk jobs over time, and prefer list operations that accept multiple IDs over one call per object.
 </Warning>
 
-### Permission limits
+---
 
-- An APP Key with **All permissions** has no additional API-scope restriction, but remains limited by the creator's current role permissions
-- **Custom permissions** requires at least one selected API permission; the APP Key can call only APIs in that selected scope
-- When an operation exceeds either the APP Key scope or the creator's role permissions, a `403` status code with `AccessDenied` error is returned
-- It is recommended to create separate APP Keys for different purposes, following the principle of least privilege
+## Permission checks
+
+- An APP Key with **All permissions** has no additional API-scope restriction, but remains limited by the creator's current role permissions.
+- An APP Key with **Custom permissions** can call only the APIs in its selected scope.
+- A call outside either the key's scope or the creator's role permissions fails with HTTP `403` and `AccessDenied`. The required permission of each operation is listed under **Restrictions** on its page.
+- Some operations additionally check object-level access (for example, only members of a channel's team can change it); those rules are described in each operation's **Usage** section.
+- Create separate APP Keys for different purposes, each with the smallest scope it needs.
 
 ---
 
-## Error code list
+## Error codes
 
-| Error Code | HTTP Status | Description |
-| --- | :---: | --- |
-| `InvalidParameter` | 400 | Parameter error, please check if request parameters are correct |
-| `InvalidContentType` | 400 | Content-Type not supported, please use `application/json` |
-| `MethodNotAllowed` | 400 | HTTP Method not supported |
-| `Unauthorized` | 401 | Authentication failed, please check if the APP Key is correct |
-| `AccessDenied` | 403 | Permission denied, current user does not have permission for this operation |
-| `RouteNotFound` | 404 | Request Method + Path not matched, please check the API address |
-| `RequestTooFrequently` | 429 | Request too frequent, please try again later |
-| `ResourceNotFound` | 400 | Account has not purchased resources, please go to the billing center to place an order |
-| `NoLicense` | 400 | Account does not have sufficient subscription License, please go to the billing center to upgrade or purchase a subscription |
-| `InternalError` | 500 | Internal or unknown error, please contact technical support |
+Every failure returns the envelope `{ "request_id": "…", "error": { "code": "…", "message": "…" } }`. Branch on `error.code`; it is stable. `message` is localized and may change.
 
----
+| Error code | HTTP status | Meaning | What to do |
+| --- | :---: | --- | --- |
+| `InvalidParameter` | 400 | A parameter is missing, has the wrong type, or failed validation. `message` usually names the field. | Fix the request; do not retry unchanged. |
+| `BadRequest` | 400 | The request breaks a business rule or conflicts with the current state of an object; `message` says which. | Read `message`, then fix the request or the object state. |
+| `InvalidContentType` | 400 | The body is not sent as `application/json`. | Set `Content-Type: application/json`. |
+| `ResourceNotFound` | 400 | The referenced object does not exist in this account or was deleted. Returned as 400, not 404. | Check the ID. |
+| `ReferenceExist` | 400 | The object is still referenced by other objects, so it cannot be deleted. | Remove the references first. |
+| `NoLicense` | 400 | The account's plan does not include the feature, a plan quota is used up, the plan has expired, or credits are insufficient. | Upgrade the plan, buy licenses, or add credits in the billing center. |
+| `Unauthorized` | 401 | The APP Key is missing, invalid, or deleted. | Check the `app_key` parameter or `Fd-App-Key` header. |
+| `AccessDenied` | 403 | The key's scope or the creator's role does not allow this operation or object. | Grant the permission or use another key. |
+| `RouteNotFound` | 404 | No operation matches the method and path. | Check the path and HTTP method on the operation page. |
+| `MethodNotAllowed` | 405 | The path exists but not for this HTTP method. | Use the method shown on the operation page. |
+| `EntityTooLarge` | 413 | The request body exceeds the size limit. | Send less data per request. |
+| `RequestTooFrequently` | 429 | A rate limit was hit. | Wait for `Flashcat-Request-Rate-Limit-Delay` seconds, then retry. |
+| `InternalError` | 500 | Unexpected server error. | Retry with backoff; if it persists, contact support with the `request_id`. |
+| `ServiceUnavailable` | 503 | A backend dependency is overloaded or unavailable. | Retry with backoff. |
 
-## Error handling recommendations
-
-<AccordionGroup>
-  <Accordion title="400 Parameter Error">
-    **Possible causes**:
-    - Missing required parameters
-    - Incorrect parameter format
-    - Content-Type not set to `application/json`
-    
-    **Solution**:
-    Check request parameters and Headers settings, refer to API documentation for parameter requirements.
-  </Accordion>
-
-  <Accordion title="401 Authentication Failed">
-    **Possible causes**:
-    - APP Key not provided
-    - APP Key is incorrect or has expired
-    
-    **Solution**:
-    1. Confirm that the request URL contains the `app_key` parameter
-    2. Go to the console to check if the APP Key is valid
-  </Accordion>
-
-  <Accordion title="403 Permission Denied">
-    **Possible causes**:
-    - Current user does not have permission to perform this operation
-    - The user corresponding to the APP Key has insufficient permissions
-    
-    **Solution**:
-    Contact the account administrator to elevate permissions, or use an APP Key with the appropriate permissions.
-  </Accordion>
-
-  <Accordion title="429 Too Many Requests">
-    **Possible causes**:
-    - Too many requests sent in a short period
-    
-    **Solution**:
-    1. Reduce request frequency
-    2. Implement exponential backoff retry mechanism
-    3. Combine multiple requests (for example, use batch APIs)
-  </Accordion>
-
-  <Accordion title="500 Internal Error">
-    **Possible causes**:
-    - Server-side internal exception
-    
-    **Solution**:
-    1. Retry later
-    2. If the issue persists, contact technical support and provide the `request_id`
-  </Accordion>
-</AccordionGroup>
+Other values of the `ErrorCode` enum in the API reference (`RequestVerifyRequired`, `DangerousOperation`, `RequestLocked`, `BalanceNotEnough`, `UndonedOrderExist`) belong to console-only flows such as MFA and billing and are not returned by Open API operations.
 
 ---
 
-## Best practices
+## Retry advice
 
-- **Implement Retry Mechanism**: For network errors and 5xx errors, it is recommended to implement exponential backoff retry with an initial interval of 1 second and a maximum of 3 retries.
-- **Record request_id**: Save the `request_id` returned from each request to facilitate troubleshooting and technical support.
-- **Protect APP Key**: Do not hardcode APP Key in client code. It is recommended to manage it through environment variables or configuration centers.
-- **Rotate Keys Regularly**: Regularly replace APP Keys and promptly delete keys that are no longer in use to reduce the risk of leakage.
+- **Retry** only `429`, `500`, `503`, and network errors, with exponential backoff (start at 1 second, at most 3 retries). For `429`, honor `Flashcat-Request-Rate-Limit-Delay`.
+- **Do not retry** other `4xx` errors unchanged; they will fail the same way.
+- **Treat creates as not idempotent.** Before retrying a create that timed out, list or query to check whether the first attempt succeeded.
+- **Log the `request_id`** of every failed call; support needs it to locate the request.
