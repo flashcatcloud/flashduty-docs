@@ -9,7 +9,7 @@ An alert rule can carry a set of **investigation entries**. Each entry is a pre-
 Entries are configured in the rule form's **sixth section, "Investigation entries"** and are saved with the rule. They are rendered into a snapshot **at the moment the alert event is produced** and travel with the event; changing the rule afterwards does not affect alerts already accepted.
 
 <Warning>
-Saving investigation entries requires monit-edge `v0.75.3` or later. Saving checks **every** active instance in the clusters of the data sources the rule matches: if any instance is older than `v0.75.3`, saving is rejected. See [Edge version requirement at save time](#edge-version-requirement-at-save-time).
+Saving investigation entries requires alert engine `v0.75.3` or later. If any active instance in the cluster of a data source the rule matches is older, saving is rejected and the message names the cluster and instance to upgrade (the API error reads like `investigation_targets require monit-edge v0.75.3 or later on every active instance serving the rule's datasources`). Downgrading an instance after saving does not affect the saved rule.
 </Warning>
 
 ## How it works
@@ -18,7 +18,7 @@ A rule can hold many investigation entries. Each entry has three parts: the entr
 
 - **An entry is a weak navigation reference.** Saving the configuration and rendering the snapshot never run a query and never read the dashboard. Entries do not participate in alert evaluation, alert identity, instance identity or lifecycle, and they trigger no automatic investigation task.
 - **An entry follows the event's data source.** A rule can match several data sources by type plus name pattern, but each alert event comes from exactly one of them. A query entry runs on the **event's own data source** by default, so the jump lands on the data source that fired the alert rather than on a fixed or default one. You can also name a different data source explicitly (for example to drill into a log data source).
-- **Rendering happens when the alert is ingested.** When monit-webapi accepts an event, it renders the entries configured on the rule at that moment — using the final event time, the event's raw data labels and the event data source — into a snapshot (the Investigation Context), which is stored and delivered with the event. The investigation block in the **active alert** detail drawer, the **Investigation** block in an incident's comprehensive info panel (see [Incident details](/en/on-call/incident/search-view-incident#investigation-entries)) and AI SRE all read that same snapshot.
+- **Rendering happens when the alert is ingested.** When an alert is produced, the system renders the entries configured on the rule at that moment — using the event time, the event's raw data labels and the event data source — into a snapshot, which is stored and delivered with the event. The investigation block in the **active alert** detail drawer, the **Investigation** block in an incident's comprehensive info panel (see [Incident details](/en/on-call/incident/search-view-incident#investigation-entries)) and AI SRE all read that same snapshot.
 - **The block has a different name on each side**: it is called **Investigation entries** in Monitors and **Investigation** in incident details, but both render the same event snapshot.
 - **Order affects display only.** Entries can be dragged into any order, but the first one carries no default, primary or recommended meaning, and the order never reaches alert evaluation or lifecycle.
 
@@ -48,7 +48,7 @@ The limit is **20 entries**: once you reach 20 the two add buttons become disabl
 
 | Field | Required | Notes |
 |------|------|------|
-| **Purpose** | No | One sentence on what this entry helps confirm. Single-line plain text; line breaks are replaced with spaces. The console caps the input at 200 characters and the backend also enforces **≤512 bytes**. The purpose is **not** rendered as a template and is **not** part of duplicate identity (two entries that differ only in purpose are still duplicates). It is shown to responders and read by AI SRE to judge each entry's intent |
+| **Purpose** | No | One sentence on what this entry helps confirm. Single-line plain text; line breaks are replaced with spaces. The console caps the input at 200 characters and the purpose must also be **≤512 bytes**. The purpose is **not** rendered as a template and is **not** part of duplicate identity (two entries that differ only in purpose are still duplicates). It is shown to responders and read by AI SRE to judge each entry's intent |
 | **Time range** | Yes | "**From** N **min before the alert to** M **min after**". A new entry defaults to 60 minutes before and 0 minutes after. Both directions must be non-negative and at least one must be greater than 0 |
 
 Time range semantics:
@@ -83,7 +83,7 @@ Time range semantics:
 | **Data source** | Defaults to `Alert event datasource` (the query is written against the rule's data source type); you can also pick a specific data source. When the rule's data source type is not queryable in the workbench, the `Alert event datasource` option is disabled and labelled `Alert event datasource (not supported for this rule type)`, so the entry must name a data source explicitly. **Changing the data source resets the query**, because the query language changed |
 | **Query type** | Only shown for data sources with more than one query type (Prometheus: Graph only / Raw only; Loki: Range / Instant; VictoriaLogs: Raw logs / Instant stats / Range stats). Prometheus "Graph + Raw" is not offered here because it is two executions and cannot be stored as one query. SQL-type data sources, SLS and Tencent CLS each have a single query mode and therefore no such row |
 | **Initial query** | The query editor, with the same syntax and completion as the Query Workbench. The whole expression is rendered as a Go template and inserted **verbatim — no automatic quoting or escaping** |
-| **Query parameters** | The data source's named parameters, per data source type (Limit, Direction, Min step (s), the SLS project / logstore, the Tencent CLS region / topic / syntax). Parameter values are **not templated** |
+| **Query parameters** | The data source's named parameters, per data source type (Limit, Direction, Min step (s), the SLS project / logstore, the Tencent CLS region / topic / syntax). Parameter values are **not templated**; a `{{` is rejected (`query args do not support templates`) |
 
 With the event data source selected, a rule type that the workbench does not support shows `Choose a datasource type under "Datasource and query" first, or pick a datasource for this entry`; an explicitly selected data source that was deleted or that you cannot use shows `The selected datasource is unavailable`. The data source's real type, permissions and provider-specific restrictions are re-checked by the workbench as the current user when the entry is opened or run.
 
@@ -136,7 +136,7 @@ Click the eye icon on an entry to open the **Preview investigation entry** dialo
 | Query entry | A query must be filled in | `Investigation entry #N has no query` |
 | Query entry | When the rule's type is not queryable in the workbench, a data source must be named | `Investigation entry #N needs a datasource: this rule's datasource type is not supported by the query workbench` |
 | Time range | Both directions non-negative, length greater than 0 | `Investigation entry #N needs a time range longer than 0` |
-| Purpose | 200 characters in the console input, **≤512 bytes** on the backend | `The purpose of investigation entry #N is too long`. 200 CJK characters can exceed 512 bytes, in which case it is rejected as well |
+| Purpose | 200 characters in the console input, and **≤512 bytes** | `The purpose of investigation entry #N is too long`. 200 CJK characters can exceed 512 bytes, in which case it is rejected as well |
 | Duplicates | Not allowed | `Investigation entry #N duplicates entry #first` |
 
 Duplicate identity:
@@ -144,18 +144,7 @@ Duplicate identity:
 - **Dashboard entries**: the same dashboard plus the same target object is a duplicate, **regardless of variable values and time range**. Duplicates cannot be used to express a variable fallback or multiple instances.
 - **Query entries**: de-duplicated by the normalized data source, query (mode, expression, arguments, minimum step) and time range; the event data source (no data source named) counts as its own distinct value. Several **different** queries may be configured on the same data source.
 
-These checks run in two places: in the entry dialog (only the entry being edited, so it can be fixed item by item) and when the rule is saved (the whole set, with the error shown under the section). The API additionally validates that dashboard IDs and target objects are canonical UUIDv7, that variable names are legal and that templates parse, and it rejects unknown fields.
-
-## Edge version requirement at save time
-
-Investigation entries require monit-edge **`v0.75.3` or later**. To drive the upgrade, the version gate is enforced **at save time**; event handling never checks the version:
-
-- **When it applies**: the saved rule carries non-empty entries and the request either submitted non-empty entries explicitly, or kept existing entries while changing the data source scope (data source type, name patterns or exact bindings). A rule with no entries, an explicit empty array, and requests that only change other fields are not checked.
-- **What it checks**: every data source the rule currently matches, and the **active instances** of the Edge clusters those data sources belong to. Data sources without any active instance are skipped; a rule that matches no data source at all is allowed to save.
-- **To pass**: every checked instance must be at version `v0.75.3` or later. An unrecognizable version counts as failing.
-- **On rejection**: no field is saved, and the request returns an upgrade error listing the minimum version and the failing data sources, Edge clusters, instance IPs and versions (bounded in number). The message looks like: `investigation_targets require monit-edge v0.75.3 or later on every active instance serving the rule's datasources; upgrade cluster "<cluster>" <instance IP>:<port> (v0.75.2)`.
-- The gate covers every write path: create, update, batch field updates that can change entries or the data source scope, and native-bundle and legacy JSON imports. Rules imported from external formats (Prometheus, Nightingale and so on) always have an empty entry list and are unaffected.
-- After a successful save, a newly added or downgraded low-version instance does **not** invalidate the saved rule; the check runs again only when you next submit entries or change the data source scope.
+These checks run in two places: in the entry dialog (only the entry being edited, so it can be fixed item by item) and when the rule is saved (the whole set, with the error shown under the section).
 
 ## Snapshot semantics and failures
 
@@ -167,20 +156,20 @@ Investigation entries require monit-edge **`v0.75.3` or later**. To drive the up
 
 **Alerts accepted before the configuration took effect have no snapshot.** An alert produced before you saved the entries shows `This alert has no investigation links. Select an alert generated after the configuration took effect.` in its details. Verify with alerts produced after the configuration took effect.
 
-**When the whole event fails to render, no snapshot is produced** and a bounded error code is delivered instead:
+**When the whole event fails to render, no snapshot is produced**, and the active alert and incident details show the reason:
 
-| Error code | Meaning | Message in the UI |
-|--------|------|---------|
-| `rule_missing` | The rule no longer exists | The alert rule no longer exists, so no investigation entries were generated |
-| `edge_upgrade_required` | The event came from an older protocol that carries no data source ID (Alert Rule Event v1 and earlier) | The Edge that reported this event is too old to generate investigation entries. Please upgrade Edge. |
-| `invalid_config` | The configuration is structurally invalid, the event time is invalid, or the window computed from the event time exceeds the representable range | Investigation entries were not generated because the configuration or event time is invalid |
-| `payload_limit` | The rendered result exceeds the size limit (the snapshot itself exceeds 64 KiB) | Investigation entries were not generated because the rendered result exceeds the size limit |
+| Case | Message in the UI |
+|------|---------|
+| The rule no longer exists | The alert rule no longer exists, so no investigation entries were generated |
+| The alert engine that reported the event is too old | The alert engine that reported this event is too old to generate investigation entries. Please upgrade the alert engine. |
+| The configuration or event time is invalid | Investigation entries were not generated because the configuration or event time is invalid |
+| The rendered result exceeds 64 KiB | Investigation entries were not generated because the rendered result exceeds the size limit |
 
 **A single entry failing to render does not drop it.** When a dashboard variable fails to render, that variable stays unresolved and shows `Variable <name> failed to render: <reason>`; when a query fails to render, the entry produces no executable query and is not run, and shows `Query failed to render and was not run: <reason>`. Such entries are still listed, carry a red `Entry error` label, and give no link. The remaining entries work normally.
 
 **Permissions are re-checked at the destination.** A snapshot's visibility follows the alert event itself and is not filtered by dashboard folder or data source permissions when it is generated; opening the dashboard or the workbench re-authorizes as the **current user**, and a target that no longer exists or that you cannot access reports the destination's own error rather than falling back to another resource.
 
-**A snapshot delivered to On-call has a separate 8 KiB limit.** The full snapshot travels with the alert event as the `__alert_rule_investigation_context` label; when the label value exceeds 8 KiB it is degraded as a whole to `payload_limit` (the incident shows a notice, not a truncated snapshot), and the full snapshot remains available in the active alert details in Monitors.
+**A snapshot delivered to On-call is limited to 8 KiB.** When it is exceeded, the incident shows a notice instead of a truncated snapshot; the full snapshot remains available in the active alert details in Monitors.
 
 ## Related pages
 
