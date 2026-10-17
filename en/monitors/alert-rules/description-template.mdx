@@ -111,6 +111,65 @@ Example:
 {{- end }}
 ```
 
+<span id="recovery-values"></span>
+## Show values at recovery time in recovery notifications
+
+When an alert recovers, the description and custom fields (including `title`) are rendered again, and `$status` is `recovered`. Which check the numbers in `$values` come from depends on the check mode and the **Recovery mode**.
+
+### Values for each recovery mode
+
+| Check mode | Recovery mode | `$values` in the recovery notification |
+| --- | --- | --- |
+| **Threshold evaluation** | Recovery when no thresholds are triggered | Values at recovery time |
+| **Threshold evaluation** | Recovery only when conditions are met | Values at recovery time, including queries referenced only by the recovery expression |
+| **Threshold evaluation** | Recovery when expression finds data | Main query values; see the note below |
+| **Data exists** | Recover if no data | Values from the most recent firing or repeat notification |
+| **Data exists** | Recover when results found | Main query values; see the note below |
+
+In the two modes that use a recovery query, main query values are the values at recovery time if the main query still returns the alerting object. Otherwise, they're the values from the most recent firing or repeat notification. The recovery query only decides whether the alert recovers, and its results aren't available to the template. To show other values in recovery notifications, use a [related query](#recovery-related-query).
+
+<Note>
+When there are multiple values, `$value` is 0. When a rule has multiple queries or a query returns multiple value fields, read values by key with `getvalue $values "<key>"`.
+</Note>
+
+### Threshold evaluation: reference query values directly
+
+With the first two recovery modes, branch on `$status` in the template and reference the same key. In this example, main query A returns CPU usage:
+
+```gotemplate
+{{- if eq $status "firing" }}
+CPU usage {{ getvalue $values "$A" "%.1f" }}% exceeds the threshold.
+{{- else }}
+Recovered. Current CPU usage {{ getvalue $values "$A" "%.1f" }}%.
+{{- end }}
+```
+
+<span id="recovery-related-query"></span>
+### Data exists: get values at recovery time with a related query
+
+With **Recover if no data**, the recovering check finds no data, so `$values` only has the values from the most recent notification. To show values at recovery time, use a related query: related queries run every time a notification is sent, including recovery notifications, regardless of the check mode and recovery mode. Query the values you want to show, then reference them in the template through `$relates`.
+
+Related query results from SQL data sources are returned as text, so read them with `$row.Field "<column name>"`.
+
+Related query example: the main query detects error logs by `service`, and related query R1 counts errors in the last 5 minutes.
+
+```sql
+SELECT count(*) AS cnt
+FROM app_logs
+WHERE level = 'ERROR'
+  AND service = '${service}'
+  AND ts > now() - INTERVAL 5 MINUTE
+```
+
+```gotemplate
+{{- if eq $status "firing" }}
+Service {{ index $labels "service" }} has error logs.
+{{- else }}
+Service {{ index $labels "service" }} recovered. Errors in the last 5 minutes:
+{{- range $row := $relates.R1 }} {{ $row.Field "cnt" }}{{ end }}
+{{- end }}
+```
+
 ## Go template built-in functions
 
 These functions are provided by Go `text/template`.
