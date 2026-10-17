@@ -3,25 +3,23 @@ title: "About pagination"
 description: "Flashduty Open API pagination mechanism"
 ---
 
-In general, when we pull or retrieve certain data objects, data is returned in batches based on pagination, rather than returning all data in a single request.
+List operations return results in pages. Most use page-number pagination; operations over large or fast-changing collections also accept a cursor. The parameters an operation supports, and their limits and defaults, are documented on its page — the values below are the common defaults, not guarantees for every operation.
 
-## Traditional pagination
-
-We define pagination technology based on OFFSET and LIMIT queries as traditional pagination. In most Flashduty list query APIs, you can see the following parameter definitions:
+## Page-number pagination
 
 ### Request parameters
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `p` | number | Page number, starting from 1 by default. offset = (p - 1) * limit |
-| `limit` | number | Number of items per page, maximum value not exceeding 100, default is 20 |
+| `p` | integer | Page number, starting at 1. Omitted or `0` means 1. offset = (p - 1) × limit |
+| `limit` | integer | Items per page. Typically at most 100, default 20; some operations use other bounds, shown on their page. |
 
-### Response parameters
+### Response fields
 
-| Parameter | Type | Description |
+| Field | Type | Description |
 | --- | --- | --- |
-| `total` | number | Total number of matched entries under current conditions |
-| `has_next_page` | boolean | Whether there is next page data under current conditions |
+| `total` | integer | Number of matching items (see [About total](#about-total)) |
+| `has_next_page` | boolean | Whether another page exists |
 
 ### Example
 
@@ -38,60 +36,42 @@ We define pagination technology based on OFFSET and LIMIT queries as traditional
 ```json
 {
   "total": 1000,
-  "has_next_page": true
+  "has_next_page": true,
+  "items": []
 }
 ```
   </Tab>
 </Tabs>
 
-### Potential issues
-
-Although querying based on traditional pagination technology is simple, you may encounter the following issues:
-
-<AccordionGroup>
-  <Accordion title="Performance Issues">
-    When using OFFSET and LIMIT for paginated queries, the database needs to skip a specified number of rows (OFFSET) and then return a specified number of rows (LIMIT). As the offset increases, query performance may decrease, especially when handling large amounts of data. Each query needs to scan and skip the previous rows, which causes queries to become slower and slower.
-  </Accordion>
-  <Accordion title="Data Instability">
-    When using PAGE and LIMIT for paginated queries, if data is deleted or inserted during the query, results may become unstable. For example, if previous rows are deleted during the query process, subsequent offsets may become invalid, leading to inaccurate or missing results.
-  </Accordion>
-</AccordionGroup>
-
-### Query limits
-
-To protect the system and ensure stable access for most users, we have imposed the following restrictions on API parameters based on traditional pagination technology:
+### Depth limit
 
 <Warning>
-PAGE × LIMIT must be ≤ 10000. If it exceeds 10000, the system will directly return a 400 error. In this case, please switch to cursor pagination or narrow your query conditions.
+On On-call list operations, `p × limit` must be at most 10,000. Deeper pages fail with `400 InvalidParameter`. To walk further, use cursor pagination where the operation supports it, or narrow the filters (for example, a shorter time range).
 </Warning>
+
+Page-number pagination can skip or repeat items when objects are created or deleted between two calls, because offsets shift. Use a cursor for complete, stable exports.
 
 ---
 
 ## Cursor pagination
 
-We define pagination technology based on SEARCH_AFTER_CTX as cursor pagination. Cursor pagination technology can better handle large datasets and high-performance requirements, providing a more stable and efficient paginated query experience.
+Pass `search_after_ctx` from the previous response to get the next page. A cursor is opaque: do not build or modify it, and keep the other request parameters unchanged between pages. When `search_after_ctx` is set, `p` is ignored.
 
-### Supported APIs
-
-We provide cursor pagination support in the following APIs:
-
-- [Incident List](/en/api-reference/on-call/incidents/incident-list)
-- [Alert List](/en/api-reference/on-call/alerts/alert-read-list)
+On List incidents and List alerts you can start with page-number pagination and switch at any time: every non-empty page also returns `search_after_ctx`, the cursor after its last item.
 
 ### Request parameters
 
 | Parameter | Type | Description |
 | --- | --- | --- |
-| `search_after_ctx` | string | Cursor index, starts from the first page when not set |
-| `limit` | number | Number of items per page, maximum value not exceeding 100, default is 20 |
+| `search_after_ctx` | string | Cursor from the previous response. Omit it for the first page. |
+| `limit` | integer | Items per page, bounds as documented on the operation page. |
 
-### Response parameters
+### Response fields
 
-| Parameter | Type | Description |
+| Field | Type | Description |
 | --- | --- | --- |
-| `total` | number | Total number of matched entries under current conditions |
-| `has_next_page` | boolean | Whether there is next page data under current conditions |
-| `search_after_ctx` | string | Next page cursor address, returned only when next page exists |
+| `has_next_page` | boolean | Whether another page exists |
+| `search_after_ctx` | string | Cursor for the next page. In cursor mode it is returned only when `has_next_page` is `true`. |
 
 ### Example
 
@@ -109,23 +89,45 @@ We provide cursor pagination support in the following APIs:
 {
   "total": 1000,
   "has_next_page": true,
-  "search_after_ctx": "658ba7f9566077d6090e8d51"
+  "search_after_ctx": "658ba7f9566077d6090e8d51",
+  "items": []
 }
 ```
   </Tab>
 </Tabs>
 
+### Operations that accept `search_after_ctx`
+
+- [List incidents](/en/api-reference/on-call/incidents/incident-list)
+- [List alerts](/en/api-reference/on-call/alerts/alert-read-list)
+- [List events for an alert](/en/api-reference/on-call/alerts/alert-read-event-list)
+- [List raw alert events](/en/api-reference/on-call/alerts/alert-event-read-list)
+- [List post-mortems](/en/api-reference/on-call/incidents/incident-post-mortem-list)
+- [List post-mortem templates](/en/api-reference/on-call/incidents/postmortem-read-list-templates)
+- [Get ServiceDeskPlus linked incidents](/en/api-reference/on-call/incidents/incident-service-desk-plus-request-read-list)
+- [List mapping data](/en/api-reference/on-call/alert-enrichment/mapping-data-read-list)
+- [List webhook delivery history](/en/api-reference/on-call/integrations/webhook-history-list)
+- [List session replay segments](/en/api-reference/rum/session-replay/rum-session-replay-read-segments)
+- [Search audit logs](/en/api-reference/platform/audit-logs/audit-read-search)
+- [Get session detail](/en/api-reference/ai-sre/sessions/session-read-info) (pages through session events)
+
+A few operations use other styles, documented on their pages: [List work items](/en/api-reference/on-call/incidents/incident-work-item-list) takes a `cursor`, and some AI SRE and monitors lists take an `offset`.
+
 ---
 
-## About TOTAL
+## About total
 
-Regardless of which pagination technology is used, Flashduty will return `total` and `has_next_page` parameters. However, please note that the `total` value is not always accurate. To ensure the system can respond quickly, we have added the following restrictions:
+`total` is not always exact. To keep large queries fast, operations over incidents, alerts, alert events, post-mortems, and mapping data stop counting at 1,000:
 
 <Warning>
-- When the total matching data is less than 1000, the `total` value is exact
-- When the total matching data is greater than or equal to 1000, the `total` value is always 1000, which only indicates that the system matched 1000+ data
+- When fewer than 1,000 items match, `total` is exact.
+- When 1,000 or more match, `total` is 1,000, meaning "1,000 or more".
+</Warning>
+
+<Warning>
+On [List incidents](/en/api-reference/on-call/incidents/incident-list) and [List alerts](/en/api-reference/on-call/alerts/alert-read-list) in page-number mode, `has_next_page` is derived from the capped `total`: once you have paged through 1,000 items it is `false` even if more items match. To read past 1,000 items, use cursor mode, where `has_next_page` is always accurate.
 </Warning>
 
 <Tip>
-Please use `has_next_page` to determine whether there is next page data, rather than `total`.
+Use `has_next_page`, not `total`, to decide whether to fetch another page, and use a cursor for anything that may exceed 1,000 items.
 </Tip>
