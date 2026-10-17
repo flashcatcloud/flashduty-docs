@@ -5,8 +5,6 @@ keywords: ["AI SRE", "会话", "对话", "流式响应", "工具调用", "任务
 sidebarTitle: "控制台对话"
 ---
 
-> AI SRE 需在控制台开通，面向 On-call 专业版及以上订阅，按实际用量计费，详见[开通与计费](/zh/ai-sre/overview#开通与计费)。
-
 ## 概述
 
 会话（Session）是您与 AI SRE 的一次完整对话。它承载您发送的每一条消息、Agent 的流式回复、过程中的工具调用，以及 Agent 产出的产物（Artifacts，例如代码、报告、图表或 Skill 压缩包）。
@@ -251,31 +249,18 @@ IM 和 API 会话不显示草稿卡，Agent 会在回复开头给出“审阅并
 
 | 触发方式 | 时机 |
 |---|---|
-| 自动 | 上下文占用超过阈值时（回合开始前或进行中），或会话事件累计约 **500 条**时 |
+| 自动 | 上下文占用接近上限时 |
 | 手动 | 输入 `/compact` |
 
-压缩时对话中会显示进度，完成后聊天页头部的 **Context** 占用百分比会下降（悬停可查看 token 用量）。如果看到占用远低于阈值时也发生了压缩，是因为事件数达到了上限。
+压缩时对话中会显示进度，完成后聊天页头部的 **Context** 占用百分比会下降（悬停可查看 token 用量）。
 
 ## 选择运行环境
 
-新建会话时，可以在输入区选择 **运行环境**，决定 Agent 的工具、Skill 和 MCP 在哪里执行：
-
-| 选项 | 说明 |
-|---|---|
-| 自动（默认） | 系统选择可用环境，没有可用环境时使用云端沙箱 |
-| 云端环境 | Flashduty 托管的云端沙箱（默认模板或您创建的模板） |
-| BYOC Runner | 选择一台在线的自托管 Runner，在您的内网中排障 |
-
-离线的 Runner 不能选择；已选的 Runner 离线后无法发送消息。运行环境在会话创建后固定，如需更换，可以 Fork 一个新会话（IM 会话可以就地切换）。
+新建会话时，可以在输入区选择 **运行环境**，决定 Agent 的工具、Skill 和 MCP 在哪里执行：自动（默认）、云端沙箱或一台在线的自托管 BYOC Runner。选择顺序、离线处理，以及“会话创建后环境固定”的规则，见 [运行环境 · 在会话中选择环境](/zh/ai-sre/environments#在会话中选择环境)。
 
 ## 绑定团队
 
-新建会话时可以 **绑定团队**，会话启动时会加载该团队的知识、Skill 与 MCP。团队选择会被记住。未绑定团队的个人会话中，Agent 可以按需加载您所属团队的知识；绑定了团队的会话只使用账户共享内容和该团队的内容。
-
-<Note>
-故障和作战室场景下自动绑定团队的能力仍在完善中。
-</Note>
-
+新建会话时可以 **绑定团队**，会话启动时会加载该团队的知识、Skill 与 MCP。团队选择会被记住。未绑定团队的个人会话中，Agent 可以按需加载您所属团队的知识；绑定了团队的会话只使用账户共享内容和该团队的内容。作用域与权限规则见 [上下文](/zh/ai-sre/context#作用域与权限)。
 
 ## 会话来源
 
@@ -319,67 +304,32 @@ IM 和 API 会话不显示草稿卡，Agent 会在回复开头给出“审阅并
 
 ### 会话数据导出
 
-通过 `POST /safari/session/export` 可以将一个会话的全部事件以 **NDJSON**（`application/x-ndjson`）格式流式导出，每行一个 JSON 对象。这一能力适用于审计、归档、离线分析或将会话数据接入外部系统等场景。
-
-#### 请求参数
+`POST /safari/session/export` 以 **NDJSON**（`application/x-ndjson`）流式导出一个会话的全部事件，每行一个 JSON 对象，适用于归档、离线分析或接入外部系统。接口说明见 [导出会话记录](/zh/api-reference/ai-sre/sessions/session-read-export)。
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `session_id` | string | 是 | 要导出的会话 ID |
-| `include_subagents` | bool | 否 | 为 `true` 时递归包含所有子 Agent 会话的事件流；默认 `false` |
+| `include_subagents` | bool | 否 | 为 `true` 时，在每个 `subagent_dispatch` 行之后内联该子会话的完整事件流；默认 `false` |
 
-#### 响应格式
-
-响应的 `Content-Type` 为 `application/x-ndjson`，**第一行始终**是 `session_meta` 类型的会话元数据信封，后续各行为会话事件。启用 `include_subagents=true` 时，每遇到一条 `subagent_dispatch` 类型的行，其后紧跟该子会话的完整事件流，子会话同样以自己的 `session_meta` 行作为起始。
+- 第一行始终是 `session_meta`（会话元数据），其后为会话事件；每个内联子会话也以自己的 `session_meta` 行开头，并带 `parent_session_id`。
+- 每行的 `type` 标明事件类型，全部取值：`session_meta`、`user_message`、`system_reminder`（系统注入的上下文，不是用户输入）、`tool_call`、`subagent_dispatch`、`final_answer`、`llm_call`、`agent_text`、`session_fork`、`error`。`seq` 从 1 开始递增，每个子会话重新计数。
+- 工具调用的请求与回执各占一行，用 `call_id` 配对，不要依赖行的先后顺序。
+- `usage` 是该事件的 token 用量，只出现在事件的第一行。
+- `ts` 是事件写入时间（RFC 3339）；导出不包含服务模型标识。
 
 ```
-{"type":"session_meta","session_id":"s_...","app_name":"ai-sre","entry_kind":"web","started_at":"2026-09-08T08:00:00Z","ended_at":"2026-09-08T08:05:00Z"}   // 第一行：会话元数据（不携带 seq）
-{"type":"user_message","seq":1,"session_id":"s_...","content":"帮我排查一下这个故障","ts":"2026-09-08T08:00:01Z"}   // 用户消息
-{"type":"tool_call","seq":2,"session_id":"s_...","name":"bash","input":{"command":"..."},"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:02Z"}   // 工具调用（模型请求侧）
-{"type":"tool_call","seq":3,"session_id":"s_...","name":"bash","output":"...","output_bytes":123,"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:03Z"}   // 工具调用（运行时回执侧）
-{"type":"subagent_dispatch","seq":4,"session_id":"s_...","agent_name":"explore","call_id":"call_def","ts":"2026-09-08T08:00:04Z"}   // 子 Agent 派发
-{"type":"session_meta","session_id":"sub-tsk_...","parent_session_id":"s_...","app_name":"ai-sre","entry_kind":"web"}   // 子会话元数据（include_subagents=true 时内联）
-{"type":"user_message","seq":1,"session_id":"sub-tsk_...","content":"...","ts":"..."}   // 子会话事件
-{"type":"final_answer","seq":5,"session_id":"s_...","content":"...","usage":{"input_tokens":0,"output_tokens":0,"cache_read":0,"cache_creation":0},"ts":"2026-09-08T08:05:00Z"}   // 回合结束的最终回答
+{"type":"session_meta","session_id":"s_...","app_name":"ai-sre","entry_kind":"web","started_at":"2026-09-08T08:00:00Z","ended_at":"2026-09-08T08:05:00Z"}
+{"type":"user_message","seq":1,"session_id":"s_...","content":"帮我排查一下这个故障","ts":"2026-09-08T08:00:01Z"}
+{"type":"tool_call","seq":2,"session_id":"s_...","name":"bash","input":{"command":"..."},"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:02Z"}
+{"type":"tool_call","seq":3,"session_id":"s_...","name":"bash","output":"...","output_bytes":123,"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:03Z"}
+{"type":"final_answer","seq":4,"session_id":"s_...","content":"...","usage":{"input_tokens":0,"output_tokens":0,"cache_read":0,"cache_creation":0},"ts":"2026-09-08T08:05:00Z"}
 ```
-
-<AccordionGroup>
-<Accordion title="行类型">
-
-导出流只包含以下行类型（`type` 字段），不会出现其它类型：
-
-| 行类型 | 出现时机 | 关键字段 |
-|---|---|---|
-| `session_meta` | **每个会话的第一行**（主会话与内联子会话都有） | `session_id`、`account_id`、`app_name`、`parent_session_id`（子会话时）、`entry_kind`（`web` / `im` / `api` / `automation`，空值归一为 `web`）、`started_at` / `ended_at`（会话创建 / 更新时间） |
-| `user_message` | 用户消息事件 | `content`（提取的文本：多个 text part 按 `\n` 连接，推理 / thought part 跳过；用户消息不携带 `usage`） |
-| `system_reminder` | 以 `<system-reminder>` 开头的用户行 | `content`（locale / env / knowledge / memory / channel-guide / mount 等系统注入的上下文，不是用户输入） |
-| `tool_call` | 模型请求工具（`function_call` part）或运行时回执（`function_response` part），**每个 part 一行** | 请求侧：`name`、`input`（参数对象）、`status`（乐观标记 `ok`）、`call_id`；回执侧：`name`、`output`（回执 JSON 序列化为字符串）、`output_bytes`、`status`（`ok` / `error`；行级错误时另带 `error` 信息）、`call_id` |
-| `subagent_dispatch` | 模型发起 `agent_dispatch` 调用（每个调用一行） | `agent_name`、`call_id`；`include_subagents=true` 时该行之后内联子会话的完整事件流 |
-| `final_answer` | 回合结束的 assistant 事件（优先于 `llm_call`） | `content`、`usage` |
-| `llm_call` | 纯文本模型响应且携带 token 用量 | `content`、`usage`、`ended_at` |
-| `agent_text` | 无用量、非回合结束的助手文本（后备类型） | `content` |
-| `session_fork` | “Fork 新对话”分隔线行 | `content` |
-| `error` | 流已开始后出错时追加在流末尾；或 `include_subagents` 下子会话不可用时内联 | `content`（错误文本；消费方需检测该行以判断流是否完整，见下方 Warning） |
-
-</Accordion>
-<Accordion title="字段与行为约定">
-
-- **`seq`**：从 1 开始、按**输出行**计数的单调序号（按子会话重置；跨分页不重置）。一个 DB 事件产生多行时（见下），多行按 part 顺序连续编号。`session_meta` 行不携带 `seq`。
-- **`call_id`（配对依据）**：`function_call` / `function_response` 的 ID（两侧共用同一个 `id`）。一个模型响应可以把多次工具调用**合并进一个 DB 事件**（例如同一事件里 2 个 `agent_dispatch` + 1 个 `bash`）；导出按 part 各输出一行（顺序与原事件一致），`call_id` 让消费方把回执行与对应的调用行重新配对，而不依赖输出顺序。
-- **`usage`（token 用量）**：事件级计数（`input_tokens` / `output_tokens` / `cache_read` / `cache_creation`），无值时输出 `0` 而非省略。**只在事件的首行盖章**——一次批处理派发的多条行共享同一份用量，按行累计的消费方不会被多算 N 倍。
-- **不含模型标识**：导出刻意**不携带服务模型标识**——`session_meta` 与 `llm_call` 行都没有 `model` 字段。导出是供客户下载的制品，服务模型标识与逐次 token 用量组合起来足以反推底层用量成本，因此导出与查询接口（包括 `/safari/session/get`）都不返回它。
-- **时间与耗时**：`ts` 为事件写入时间（RFC 3339）。`llm_call` 与 `tool_call` 行以该时间近似**结束时间**（`ended_at`）；开始时间与耗时（`started_at` / `duration_ms`）当前不提供（为空 / 0）。
-- **`include_subagents=true`**：每个 `subagent_dispatch` 行之后立即递归内联该子会话的完整导出流（批量派发的每个 dispatch 行都会内联一次）；子会话的 `seq` 从 1 重新计数，其 `session_meta` 携带 `parent_session_id`。子会话不存在或导出失败时不中断父流，输出一条内联的 `error` 行继续。
-- 部分簿记行不产生导出行（例如 OAuth 授权成功标记），因此事件行数可能少于会话事件数。
-
-</Accordion>
-</AccordionGroup>
 
 <Warning>
-若流式传输已开始后发生错误，服务器**无法**切换回标准 JSON 错误包。此时会在流末尾追加一行 JSON 编码的错误对象，消费方需检测该行以判断流是否完整。
+流开始后如果发生错误，服务器无法再返回标准 JSON 错误，而是在流末尾追加一行 JSON 错误对象。请检测这一行来判断导出是否完整。
 </Warning>
 
-**权限**：导出端点使用与发送消息相同的权限门控，即要求调用方具备该会话的消息收发权限，单纯的只读访问权限不够。个人会话只能由创建者导出；团队会话可由同账户内具备会话访问能力的成员导出。
+**权限**：调用方需要具备该会话的消息收发权限，只读权限不够。个人会话只能由创建者导出；团队会话可由同账户内具备会话访问权限的成员导出。
 
 ## 相关页面
 

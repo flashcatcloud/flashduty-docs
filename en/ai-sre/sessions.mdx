@@ -5,8 +5,6 @@ keywords: ["AI SRE", "session", "chat", "streaming response", "tool call", "task
 sidebarTitle: "Console chat"
 ---
 
-> AI SRE must be activated in the console, is available on On-call Pro or higher, and is billed on actual usage. See [Activation and billing](/en/ai-sre/overview#activation-and-billing).
-
 ## Overview
 
 A session is one complete conversation between you and AI SRE. It holds every message you send, the agent's streaming replies, tool calls made along the way, and any artifacts the agent produces (such as code, reports, charts, or Skill archives).
@@ -251,30 +249,18 @@ As a conversation grows, AI SRE automatically summarizes older history while kee
 
 | Trigger | When |
 |---|---|
-| Automatic | When context usage passes the threshold (before or during a turn), or when the session reaches about **500 events** |
+| Automatic | When context usage nears the limit |
 | Manual | Type `/compact` |
 
-Progress is shown while compacting; afterwards the **Context** percentage in the chat header drops (hover for token usage). If compaction happens while usage is far below the threshold, the event limit was reached.
+Progress is shown while compacting; afterwards the **Context** percentage in the chat header drops (hover for token usage).
 
 ## Choosing a runtime environment
 
-When creating a session, choose the **runtime environment** in the input area to decide where the agent's tools, Skills and MCP run:
-
-| Option | Description |
-|---|---|
-| Auto (default) | The system picks an available environment, falling back to the cloud sandbox |
-| Cloud environment | A Flashduty-hosted cloud sandbox (the default template or one you created) |
-| BYOC Runner | An online self-hosted runner, so troubleshooting runs inside your network |
-
-Offline runners cannot be selected, and if the selected runner goes offline you cannot send messages. The environment is fixed once the session is created; to change it, fork a new session (IM sessions can switch in place).
+When creating a session, choose the **runtime environment** in the input area to decide where the agent's tools, Skills and MCP run: Auto (default), the cloud sandbox, or an online self-hosted BYOC Runner. For the selection order, offline handling, and why the environment is fixed once the session is created, see [Environments · Selecting an environment in a session](/en/ai-sre/environments#selecting-an-environment-in-a-session).
 
 ## Binding a team
 
-When creating a session you can **bind a team**; the session then loads that team's knowledge, Skills and MCP. Your choice is remembered. In a personal session without a team, the agent can load knowledge from your teams when needed; a team session uses only shared content and that team's content.
-
-<Note>
-Automatic team binding for incidents and war rooms is still being improved.
-</Note>
+When creating a session you can **bind a team**; the session then loads that team's knowledge, Skills and MCP. Your choice is remembered. In a personal session without a team, the agent can load knowledge from your teams when needed; a team session uses only shared content and that team's content. For scope and permission rules, see [Context](/en/ai-sre/context#scope-and-permissions).
 
 ## Session source
 
@@ -318,67 +304,32 @@ Frames in the session stream may carry `is_error` and `error_code`, marking a ru
 
 ### Session data export
 
-`POST /safari/session/export` streams all events from a session as **NDJSON** (`application/x-ndjson`), one JSON object per line. This is intended for auditing, archiving, offline analysis, or feeding session data into external systems.
-
-#### Request fields
+`POST /safari/session/export` streams all events from a session as **NDJSON** (`application/x-ndjson`), one JSON object per line, for archiving, offline analysis, or feeding session data into external systems. See [Export session transcript](/en/api-reference/ai-sre/sessions/session-read-export) for the endpoint.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `session_id` | string | Yes | ID of the session to export |
-| `include_subagents` | bool | No | When `true`, recursively includes the event streams of all subagent child sessions; defaults to `false` |
+| `include_subagents` | bool | No | When `true`, inlines each child session's complete event stream after its `subagent_dispatch` line; defaults to `false` |
 
-#### Response format
-
-The response `Content-Type` is `application/x-ndjson`. The **first line is always** a `session_meta` envelope containing the session's metadata; subsequent lines are session events. When `include_subagents=true`, each `subagent_dispatch` line is immediately followed by the complete event stream of the child session, which also begins with its own `session_meta` line.
+- The first line is always `session_meta` (session metadata), followed by the session events. Each inlined child session also starts with its own `session_meta` line, which carries `parent_session_id`.
+- Each line's `type` names the event type; all values: `session_meta`, `user_message`, `system_reminder` (system-injected context, not user input), `tool_call`, `subagent_dispatch`, `final_answer`, `llm_call`, `agent_text`, `session_fork`, and `error`. `seq` starts at 1 and restarts for each child session.
+- A tool call's request and response are separate lines. Pair them by `call_id`, not by line order.
+- `usage` holds the event's token counts and appears on the event's first line only.
+- `ts` is the event's write time (RFC 3339). The export doesn't include the serving model identifier.
 
 ```
-{"type":"session_meta","session_id":"s_...","app_name":"ai-sre","entry_kind":"web","started_at":"2026-09-08T08:00:00Z","ended_at":"2026-09-08T08:05:00Z"}   // first line: session metadata (has no seq)
-{"type":"user_message","seq":1,"session_id":"s_...","content":"help me investigate this incident","ts":"2026-09-08T08:00:01Z"}   // user message
-{"type":"tool_call","seq":2,"session_id":"s_...","name":"bash","input":{"command":"..."},"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:02Z"}   // tool call (model request side)
-{"type":"tool_call","seq":3,"session_id":"s_...","name":"bash","output":"...","output_bytes":123,"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:03Z"}   // tool call (runtime response side)
-{"type":"subagent_dispatch","seq":4,"session_id":"s_...","agent_name":"explore","call_id":"call_def","ts":"2026-09-08T08:00:04Z"}   // subagent dispatch
-{"type":"session_meta","session_id":"sub-tsk_...","parent_session_id":"s_...","app_name":"ai-sre","entry_kind":"web"}   // child session metadata (inlined when include_subagents=true)
-{"type":"user_message","seq":1,"session_id":"sub-tsk_...","content":"...","ts":"..."}   // child session events
-{"type":"final_answer","seq":5,"session_id":"s_...","content":"...","usage":{"input_tokens":0,"output_tokens":0,"cache_read":0,"cache_creation":0},"ts":"2026-09-08T08:05:00Z"}   // turn-final answer
+{"type":"session_meta","session_id":"s_...","app_name":"ai-sre","entry_kind":"web","started_at":"2026-09-08T08:00:00Z","ended_at":"2026-09-08T08:05:00Z"}
+{"type":"user_message","seq":1,"session_id":"s_...","content":"Help me investigate this incident","ts":"2026-09-08T08:00:01Z"}
+{"type":"tool_call","seq":2,"session_id":"s_...","name":"bash","input":{"command":"..."},"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:02Z"}
+{"type":"tool_call","seq":3,"session_id":"s_...","name":"bash","output":"...","output_bytes":123,"status":"ok","call_id":"call_abc","ts":"2026-09-08T08:00:03Z"}
+{"type":"final_answer","seq":4,"session_id":"s_...","content":"...","usage":{"input_tokens":0,"output_tokens":0,"cache_read":0,"cache_creation":0},"ts":"2026-09-08T08:05:00Z"}
 ```
-
-<AccordionGroup>
-<Accordion title="Line types">
-
-The export stream contains only the line types below (the `type` field); no other types occur:
-
-| Line type | When it appears | Key fields |
-|---|---|---|
-| `session_meta` | **First line of every session** (both the main session and inlined child sessions) | `session_id`, `account_id`, `app_name`, `parent_session_id` (child sessions), `entry_kind` (`web` / `im` / `api` / `automation`; empty normalized to `web`), `started_at` / `ended_at` (session created / updated time) |
-| `user_message` | User message events | `content` (extracted text: multiple text parts joined with `\n`; reasoning / thought parts skipped; user rows never carry `usage`) |
-| `system_reminder` | User rows whose text starts with `<system-reminder>` | `content` (harness context injected by the system — locale / env / knowledge / memory / channel-guide / mount — not something you typed) |
-| `tool_call` | Model tool request (`function_call` part) or runtime response (`function_response` part), **one line per part** | Request side: `name`, `input` (args object), `status` (optimistically `ok`), `call_id`. Response side: `name`, `output` (response JSON serialized to a string), `output_bytes`, `status` (`ok` / `error`; a row-level error also carries `error`), `call_id` |
-| `subagent_dispatch` | Model initiates an `agent_dispatch` call (one line per call) | `agent_name`, `call_id`; with `include_subagents=true` the child's full event stream is inlined right after this line |
-| `final_answer` | Turn-complete assistant event (takes priority over `llm_call`) | `content`, `usage` |
-| `llm_call` | Text-only model response that carries token usage | `content`, `usage`, `ended_at` |
-| `agent_text` | Assistant prose with no usage and not turn-complete (fallback type) | `content` |
-| `session_fork` | The "Forked from conversation" divider row | `content` |
-| `error` | Appended at the end of the stream when an error occurs after streaming started, or inlined when a child session is unavailable under `include_subagents` | `content` (error text; consumers must inspect this line to tell whether the stream completed — see the Warning below) |
-
-</Accordion>
-<Accordion title="Fields and behavioral conventions">
-
-- **`seq`**: a monotonic counter over **lines emitted**, starting at 1 (reset per child session; never reset across pages). When one DB event yields several lines (see below), the lines are numbered consecutively in part order. `session_meta` lines carry no `seq`.
-- **`call_id` (the pairing key)**: the `function_call` / `function_response` id (both sides of a call share the same `id`). A single model response can bundle several tool calls into **one DB event** (for example, 2 `agent_dispatch` calls + 1 `bash` call in the same event). The export emits one line per part, in the original part order, and `call_id` lets a consumer re-pair a response line with its call line without relying on emission order.
-- **`usage` (token counts)**: per-event totals (`input_tokens` / `output_tokens` / `cache_read` / `cache_creation`), emitted as `0` rather than omitted when absent. It appears **on the first line of the event only**. The lines of a batched dispatch share one usage figure, so a consumer that sums per line doesn't count it N times.
-- **No model identifier**: the export deliberately carries **no serving model identifier** — neither `session_meta` nor `llm_call` lines have a `model` field. Customers can download the export. The model identifier plus the per-call token counts would reveal the underlying usage cost. So neither the export nor the query APIs (including `/safari/session/get`) return the model identifier.
-- **Timing**: `ts` is the event's write time (RFC 3339). `llm_call` and `tool_call` lines use it as an approximate **end time** (`ended_at`). Start times and durations (`started_at` / `duration_ms`) aren't provided and show as empty / 0.
-- **`include_subagents=true`**: each `subagent_dispatch` line is immediately followed by the child session's complete export stream, recursively (every dispatch line of a batch is inlined, not just the first). The child's `seq` restarts at 1 and its `session_meta` carries `parent_session_id`. If a child session is missing or fails to export, the parent stream is not interrupted — an inlined `error` line is emitted and the stream continues.
-- Some bookkeeping rows produce no export line (for example, OAuth-authorized markers), so the line count can be lower than the session's event count.
-
-</Accordion>
-</AccordionGroup>
 
 <Warning>
-If an error occurs after streaming has already begun, the server cannot switch to a standard JSON error envelope. Instead, a JSON-encoded error object is appended as the final line of the stream. Consumers must inspect this last line to determine whether the stream completed successfully.
+If an error occurs after streaming has begun, the server can't return a standard JSON error. It appends a JSON error object as the last line of the stream instead. Check the last line to tell whether the export completed.
 </Warning>
 
-**Permissions**: the export endpoint uses the same access gate as sending messages, meaning the caller must have message-send permission on the session — read-only access is not sufficient. Personal sessions can be exported only by their creator; team sessions can be exported by same-account members who can access the session.
+**Permissions**: the caller must have message-send permission on the session; read-only access is not enough. Personal sessions can be exported only by their creator; team sessions can be exported by same-account members who can access the session.
 
 ## Related pages
 
