@@ -4,70 +4,31 @@ description: "了解 Flashduty RUM 的异常聚合机制，提高 Issue 定位�
 keywords: ["RUM", "异常追踪", "用户监控", "前端监控"]
 ---
 
-当新错误事件发生时，Flashduty 采用三步聚合策略将错误聚合为 Issue，有效减少需要处理的错误数量。
+Flashduty 将相同原因的错误事件聚合为一个 Issue，减少需要处理的条数。聚合默认开启，无需配置。
 
-## 聚合流程
+## 聚合规则
 
-<Steps>
-  <Step title="指纹匹配">
-    获取错误事件的指纹，并与现有 Issue 的指纹比较
-  </Step>
-  <Step title="自动合并">
-    如果新事件与现有某个 Issue 共享相同指纹，则自动归入该 Issue
-  </Step>
-  <Step title="相似度分析">
-    如果指纹未匹配，则利用机器学习模型分析错误相似度，将事件归入相似度最高的 Issue，或在相似度过低时创建新的 Issue。
+新错误事件按以下顺序归入 Issue：
 
-    <Note>
-    **Android NDK 原生崩溃例外：** NDK 原生崩溃（`source_type` 含 `ndk` 或堆栈中存在应用层原生帧）会跳过此步骤的机器学习相似度分析，完全依赖步骤一的确定性指纹进行聚合。这是因为 NDK 崩溃的错误消息（如 `signal: SIGSEGV`）几乎完全相同，若走相似度分析会将来自不同代码位置的崩溃错误地合并为同一 Issue；而帧感知指纹能够精确区分不同的崩溃点。
+1. 与已有 Issue 的指纹相同，归入该 Issue。
+2. 指纹不同但错误相似，归入最相似的 Issue。
+3. 没有相似的 Issue，创建新 Issue。
 
-    **Flutter 原生崩溃按真实平台处理：** Flutter 应用上报的原生崩溃 `source` 为 `flutter`，聚合时会按 `source_type`（`ndk`、`android`、`ios`）解析出真实平台。其中 `source_type` 为 `ndk`（或堆栈中存在应用层原生帧）的崩溃与 Android NDK 崩溃一致，同样跳过机器学习相似度分析、使用原生帧指纹聚合；`source_type` 为 `ios` 的崩溃仍走消息指纹，与独立 iOS 应用的行为相同。
-
-    **React Native 原生崩溃与 Flutter 一致：** React Native 应用的原生崩溃 `source` 为 `react-native`，同理会按 `source_type`（`ndk`、`android`、`ios`）解析出真实平台——`ndk`（或堆栈中存在应用层原生帧）的崩溃跳过机器学习相似度分析、使用原生帧指纹聚合；`source_type` 为 `ios` 的崩溃走消息指纹，与独立 iOS 应用的行为相同。JS 错误的 `source_type` 为 `react-native`（或为空），保持 `react-native` 身份参与聚合与 JS 指纹计算。
-
-    **Electron 进程终止事件跳过相似度分析：** Electron 上报的进程终止事件（`error.type` 为 `RenderProcessGone` 或 `ChildProcessGone`）同样跳过机器学习相似度分析，仅按确定性指纹（错误类型 + 消息）聚合。进程终止事件的消息格式统一为 `<process> process gone: <reason>`（例如 `Renderer process gone: killed`），任意两条事件只差一个 token，若走相似度分析会把「进程被杀」与「进程启动失败」等不相关的失败错误地合并进同一 Issue；确定性指纹则按退出原因将它们分开。
-    </Note>
-  </Step>
-</Steps>
+Android NDK 原生崩溃、Electron 进程终止事件（`RenderProcessGone`、`ChildProcessGone`）和 Flutter、React Native 应用中的 NDK 崩溃只按指纹聚合，不做相似度归并。这类事件的错误消息几乎相同，按相似度归并会把不同位置的崩溃合为一个 Issue。
 
 ## 默认指纹
 
-Flashduty 默认启用异常聚合，无需额外配置即可开始工作。Browser SDK 会自动收集错误数据并进行聚合。
-
-<Tabs>
-  <Tab title="集成 SDK">
-    在 HTML 文件中引入 Flashduty Browser SDK：
-
-    ```html
-    <script src="https://cdn.flashcat.com/rum-browser-sdk.js"></script>
-    ```
-  </Tab>
-  <Tab title="初始化 SDK">
-    初始化 SDK 时，指定应用 ID 和环境：
-
-    ```javascript
-    window.FLASHCAT_RUM.init({
-      applicationId: "rum-application-id",
-      environment: "production",
-      version: "1.0.0",
-    });
-    ```
-  </Tab>
-</Tabs>
-
-### 指纹计算规则
-
-当错误事件没有携带指纹时，Flashduty 基于以下错误属性自动计算指纹：
+当错误事件没有携带指纹时，Flashduty 用以下属性计算指纹。Web 应用接入 SDK 的方法见 [Web SDK 接入](/zh/rum/sdk/web/sdk-integration)。
 
 | 属性 | 说明 |
 |------|------|
 | `service` | 错误发生的服务 |
 | `env` | 错误发生的环境 |
 | `error.type` | 错误的类型分类 |
-| `error.message` | 错误的描述文本。对于 Android NDK 原生崩溃，此分量会附加堆栈中最顶层的应用层原生帧信息，格式为 `<message>\|native:<library>:<symbol+offset>`（例如 `signal: SIGSEGV\|native:libmyapp.so:crash_func+48`）。系统库帧（`libc.so`、`libart.so` 等）和伪映射（`[vdso]`、`[stack]`）会被跳过，以确保同一崩溃位置在不同运行时始终产生相同指纹。 |
+| `error.message` | 错误的描述文本。Android NDK 原生崩溃还会计入堆栈中最顶层的应用层原生帧，系统库帧不参与，因此同一崩溃位置始终聚合为同一 Issue。 |
 
 <Tip>
-为提高聚合准确性，Flashduty 会去除堆栈帧中的变量属性，如版本号、ID、日期等动态参数。
+计算指纹时，Flashduty 会忽略堆栈帧中的版本号、ID、日期等动态参数。
 </Tip>
 
 ## 自定义指纹
@@ -83,7 +44,7 @@ Flashduty 默认启用异常聚合，无需额外配置即可开始工作。Brow
     在手动报告错误时，通过 `addError` 添加自定义指纹：
 
     ```javascript
-    window.FLASHCAT_RUM.addError(new Error("My error message"), {
+    window.FC_RUM.addError(new Error("My error message"), {
       source: "custom",
       fingerprint: "my-custom-grouping-fingerprint",
     });
@@ -93,9 +54,11 @@ Flashduty 默认启用异常聚合，无需额外配置即可开始工作。Brow
     通过 `beforeSend` 回调动态设置指纹：
 
     ```javascript
-    window.FLASHCAT_RUM.init({
-      applicationId: "rum-application-id",
-      environment: "production",
+    window.FC_RUM.init({
+      applicationId: "<YOUR_APPLICATION_ID>",
+      clientToken: "<YOUR_CLIENT_TOKEN>",
+      service: "<SERVICE_NAME>",
+      env: "production",
       beforeSend: (event) => {
         if (event.type === "error") {
           event.error.fingerprint = "my-custom-grouping-fingerprint";
@@ -111,7 +74,7 @@ Flashduty 默认启用异常聚合，无需额外配置即可开始工作。Brow
 - 自定义 fingerprint 必须为字符串类型
 - 相同服务中具有相同 fingerprint 的错误将被归入同一 Issue
 - 不同服务的错误即使 fingerprint 相同也会被归入不同 Issue
-- `beforeSend` 回调还可用于过滤无关错误（如第三方脚本错误）
+- 可用 `beforeSend` 回调过滤无关错误，见下文“第三方脚本错误过滤”
 </Note>
 
 ## Web 特定注意事项
@@ -130,14 +93,12 @@ Flashduty 默认启用异常聚合，无需额外配置即可开始工作。Brow
     ```
   </Accordion>
   <Accordion title="第三方脚本错误过滤">
-    默认情况下，Flashduty 会过滤来自浏览器扩展或第三方脚本的错误（如 `network` 来源），以减少噪声。
-
-    可通过 `beforeSend` 进一步自定义过滤规则：
+    SDK 不会自动过滤浏览器扩展或第三方脚本产生的错误。如需排除，请在 `beforeSend` 中配置：
 
     ```javascript
     beforeSend: (event) => {
       if (
-        event.error.source === "network" &&
+        event.type === "error" &&
         event.error.message.includes("ThirdPartyScript")
       ) {
         return false; // 丢弃该错误
@@ -150,9 +111,7 @@ Flashduty 默认启用异常聚合，无需额外配置即可开始工作。Brow
 
 ## 查看聚合结果
 
-在 Flashduty 平台，导航至「异常追踪」，查看聚合后的 Issue 列表。
-
-也可以从应用列表直达：应用卡片上的 **Issue** 数字可以点击，点击后跳转到该应用的异常追踪列表，并自动锁定与卡片一致的口径——最近 24 小时、状态为「全部」，同时清除上次遗留的筛选条件，因此列表里的条数与卡片上的数字一致。
+在 Flashduty 平台，导航至「异常追踪」，查看聚合后的 Issue 列表。点击应用卡片上的 **Issue** 数字，可直达该应用最近 24 小时、状态为「全部」的 Issue 列表，条数与卡片一致。
 
 每个 Issue 包含：
 

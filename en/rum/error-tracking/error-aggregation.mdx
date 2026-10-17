@@ -3,70 +3,31 @@ title: "Error grouping"
 description: "Learn about RUM error grouping mechanisms to improve Issue localization efficiency."
 ---
 
-When a new error event occurs, Flashduty uses a three-step aggregation strategy to group errors into Issues, effectively reducing the number of errors that need to be handled.
+Flashduty groups error events with the same cause into one Issue, which reduces the number of items you need to handle. Grouping is on by default and needs no configuration.
 
-## Grouping process
+## Grouping rules
 
-<Steps>
-  <Step title="Fingerprint Matching">
-    Get the fingerprint of the error event and compare it with fingerprints of existing Issues
-  </Step>
-  <Step title="Automatic Merging">
-    If the new event shares the same fingerprint as an existing Issue, it is automatically grouped into that Issue
-  </Step>
-  <Step title="Similarity Analysis">
-    If no fingerprint matches, machine learning models compare error similarity. The event joins the most similar Issue, or starts a new Issue if similarity is too low.
+A new error event is assigned to an Issue in this order:
 
-    <Note>
-    **Android NDK native crash exception:** NDK native crashes skip the ML similarity analysis in this step and rely only on the deterministic fingerprint from Step 1. These are crashes whose `source_type` contains `ndk` or whose stack contains application-layer native frames. NDK crash messages (such as `signal: SIGSEGV`) look almost the same across unrelated crashes. Similarity analysis would wrongly merge crashes from different code locations into one Issue. The frame-aware fingerprint precisely distinguishes different crash sites.
+1. If its fingerprint matches an existing Issue, it joins that Issue.
+2. If the fingerprint differs but the error is similar, it joins the most similar Issue.
+3. If no Issue is similar, Flashduty creates a new Issue.
 
-    **Flutter native crashes are handled by their real platform:** Native crashes from a Flutter app carry `source` = `flutter`. Grouping resolves the real platform from `source_type` (`ndk`, `android`, `ios`). Crashes whose `source_type` is `ndk` (or whose stack contains application-layer native frames) behave exactly like Android NDK crashes — they skip ML similarity analysis and group by the native-frame fingerprint. Crashes whose `source_type` is `ios` still group by the message fingerprint, the same as a standalone iOS app.
-
-    **React Native native crashes follow the same rule:** Native crashes from a React Native app carry `source` = `react-native`, and grouping resolves the real platform from `source_type` (`ndk`, `android`, `ios`). `ndk` crashes, and stacks with application-layer native frames, skip ML similarity analysis and group by the native-frame fingerprint; `source_type` = `ios` groups by the message fingerprint, the same as a standalone iOS app. JS errors carry `source_type` = `react-native` (or empty) and keep their `react-native` identity for grouping and JS fingerprinting.
-
-    **Electron process-gone events skip similarity analysis:** Electron process-gone events (whose `error.type` is `RenderProcessGone` or `ChildProcessGone`) also skip ML similarity analysis and group solely by the deterministic fingerprint (error type + message). Every process-gone event reads `<process> process gone: <reason>` (for example `Renderer process gone: killed`), so two events differ by one token. Similarity grouping would wrongly merge unrelated failures such as "killed" and "launch-failed" into one Issue. The deterministic fingerprint keeps them separate by exit reason.
-    </Note>
-  </Step>
-</Steps>
+Android NDK native crashes, Electron process-gone events (`RenderProcessGone`, `ChildProcessGone`), and NDK crashes from Flutter and React Native apps are grouped by fingerprint only, without the similarity step. Their error messages are almost identical, so similarity grouping would merge crashes from different locations into one Issue.
 
 ## Default fingerprint
 
-Flashduty enables error grouping by default, working without additional configuration. The Browser SDK automatically collects error data and performs grouping.
-
-<Tabs>
-  <Tab title="Integrate SDK">
-    Include the Flashduty Browser SDK in your HTML file:
-
-    ```html
-    <script src="https://cdn.flashcat.com/rum-browser-sdk.js"></script>
-    ```
-  </Tab>
-  <Tab title="Initialize SDK">
-    When initializing the SDK, specify the application ID and environment:
-
-    ```javascript
-    window.FLASHCAT_RUM.init({
-      applicationId: "rum-application-id",
-      environment: "production",
-      version: "1.0.0",
-    });
-    ```
-  </Tab>
-</Tabs>
-
-### Fingerprint calculation rules
-
-When an error event doesn't carry a fingerprint, Flashduty automatically calculates one based on the following error attributes:
+When an error event doesn't carry a fingerprint, Flashduty calculates one from the attributes below. To set up the Web SDK, see [Web SDK integration](/en/rum/sdk/web/sdk-integration).
 
 | Attribute | Description |
 |-----------|-------------|
 | `service` | Service where the error occurred |
 | `env` | Environment where the error occurred |
 | `error.type` | Error type classification |
-| `error.message` | Error description text. For Android NDK native crashes, this component is augmented with the topmost application-layer native frame from the stack, in the format `<message>\|native:<library>:<symbol+offset>` (for example, `signal: SIGSEGV\|native:libmyapp.so:crash_func+48`). System library frames (`libc.so`, `libart.so`) and pseudo-mappings (`[vdso]`, `[stack]`) are skipped, ensuring the same crash location always produces the same fingerprint across different runs. |
+| `error.message` | Error description text. For Android NDK native crashes, the topmost application-layer native frame in the stack also counts and system library frames do not, so the same crash location always groups into the same Issue. |
 
 <Tip>
-To improve grouping accuracy, Flashduty removes variable attributes from stack frames, such as version numbers, IDs, dates, and other dynamic parameters.
+When calculating the fingerprint, Flashduty ignores dynamic values in stack frames, such as version numbers, IDs, and dates.
 </Tip>
 
 ## Custom fingerprint
@@ -82,7 +43,7 @@ Custom fingerprints take priority over default fingerprints.
     When manually reporting errors, add a custom fingerprint through `addError`:
 
     ```javascript
-    window.FLASHCAT_RUM.addError(new Error("My error message"), {
+    window.FC_RUM.addError(new Error("My error message"), {
       source: "custom",
       fingerprint: "my-custom-grouping-fingerprint",
     });
@@ -92,9 +53,11 @@ Custom fingerprints take priority over default fingerprints.
     Dynamically set fingerprints through the `beforeSend` callback:
 
     ```javascript
-    window.FLASHCAT_RUM.init({
-      applicationId: "rum-application-id",
-      environment: "production",
+    window.FC_RUM.init({
+      applicationId: "<YOUR_APPLICATION_ID>",
+      clientToken: "<YOUR_CLIENT_TOKEN>",
+      service: "<SERVICE_NAME>",
+      env: "production",
       beforeSend: (event) => {
         if (event.type === "error") {
           event.error.fingerprint = "my-custom-grouping-fingerprint";
@@ -110,7 +73,7 @@ Custom fingerprints take priority over default fingerprints.
 - Custom fingerprint must be a string type
 - Errors with the same fingerprint within the same service will be grouped into the same Issue
 - Errors from different services will be grouped into different Issues even if they have the same fingerprint
-- The `beforeSend` callback can also be used to filter irrelevant errors (such as third-party script errors)
+- Use the `beforeSend` callback to filter irrelevant errors; see "Third-party script error filtering" below
 </Note>
 
 ## Web-specific considerations
@@ -129,14 +92,12 @@ Custom fingerprints take priority over default fingerprints.
     ```
   </Accordion>
   <Accordion title="Third-party Script Error Filtering">
-    By default, Flashduty filters errors from browser extensions or third-party scripts (such as `network` source) to reduce noise.
-
-    You can further customize filtering rules through `beforeSend`:
+    The SDK doesn't filter errors from browser extensions or third-party scripts automatically. To exclude them, configure `beforeSend`:
 
     ```javascript
     beforeSend: (event) => {
       if (
-        event.error.source === "network" &&
+        event.type === "error" &&
         event.error.message.includes("ThirdPartyScript")
       ) {
         return false; // Discard this error
@@ -149,9 +110,7 @@ Custom fingerprints take priority over default fingerprints.
 
 ## View grouping results
 
-In the Flashduty platform, navigate to "Error Tracking" to view the grouped Issue list.
-
-You can also get there from the application list. Click the **Issue** count on an application card to open that application's error tracking list with the card's scope: the last 24 hours and status "all". Filters from earlier visits are cleared, so the list count matches the card.
+In the Flashduty platform, navigate to "Error Tracking" to view the grouped Issue list. Click the **Issue** count on an application card to open that application's Issues for the last 24 hours with status "all". The count matches the card.
 
 Each Issue contains:
 
