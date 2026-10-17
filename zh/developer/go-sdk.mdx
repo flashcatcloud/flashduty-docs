@@ -153,7 +153,7 @@ client, err := flashduty.NewClientWithAccessToken(accessToken,
 | `client.Account` | 账户 |
 | `client.AuditLogs` | 审计日志 |
 | `client.AlertRules` | 告警规则 |
-| `client.RuleFolders` | 规则分组；`List` 列出调用方可读的全部监控规则分组（`POST /monit/folder/list`） |
+| `client.RuleFolders` | 规则分组；`ReadList` 列出调用方可读的全部分组（`POST /monit/folder/list`）、`ReadHealth` 取分组健康摘要（`POST /monit/folder/health`，含可见后代分组的活跃告警与规则运行问题）、`WriteCreate` / `WriteUpdate` / `WriteMove` / `WriteDelete` 建改移删分组；旧的 `List` 保留为 `ReadList` 的兼容别名 |
 | `client.AlertEnrichment` | 告警字段加工 |
 | `client.DataSources` | 数据源 |
 | `client.Dashboards` | 仪表盘；面板试跑与执行、面板查询解析（`QueryReadResolve`）、变量解析，以及仪表盘的读写、移动/恢复与修订历史 |
@@ -165,7 +165,7 @@ client, err := flashduty.NewClientWithAccessToken(accessToken,
 | `client.Analytics` | 分析 |
 | `client.A2aAgents` | A2A Agents |
 | `client.Artifacts` | AI SRE 产物 |
-| `client.Automations` | AI SRE 自动化 |
+| `client.Automations` | AI SRE 自动化（`RuleReadGet` / `RuleReadList` / `RuleWriteCreate` / `RuleWriteUpdate` / `RuleWriteDelete` / `RuleWriteRun` / `RunReadList` / `TemplateReadList`）；创建规则时执行位置用 `AutomationRuleCreateRequest.RunIn`（`current-chat` / `web`，省略由服务端决定），作用域用同结构的 `TeamID`（`*int64`：显式 0 表示个人作用域，省略表示继承已认证 IM 会话作用域）；`AutomationRuleUpdateRequest` 已无 `TeamID` |
 | `client.Knowledge` | AI SRE 知识（每份知识本身与其中的知识文件） |
 | `client.McpServers` | MCP Servers |
 | `client.Sessions` | AI SRE 会话 |
@@ -197,6 +197,20 @@ client, err := flashduty.NewClientWithAccessToken(accessToken,
 ### AI SRE 产物
 
 `client.Artifacts`（AI SRE 产物）对应 `/safari/artifact/*` 的 11 个 API 操作：画廊读取侧 `ReadGet`（按 ID 获取单个已发布产物）、`ReadList`（分页列出调用方可见的产物，支持标题子串搜索、`scope`（`all` / `personal` / `team`）与 `team_ids` 过滤）、`ReadGetFileState`（批量探测会话展示文件是否已有上线产物，单次至多 50 个 ID）；文件侧 `ReadSign`（为展示文件签发短期有效的下载/预览 URL，有效期 5 分钟，`expires_in` 固定 300 秒）与 `ReadStream`（凭签名 token 下载或预览文件，成功响应体是文件而非 JSON 信封，原始字节放在 `Response.Raw`）；写入侧 `WritePublish`（把会话产生的文件发布为画廊产物）、`WriteUpdate`（重命名或转移个人/团队作用域）、`WriteDelete`（从画廊移除，源文件仍保留在会话中）；公开分享 `WriteShareEnable`（开启匿名公开分享并返回公开链接，任何人凭链接即可查看、无需登录）、`WriteShareRevoke`（关闭分享，链接立即失效）、`WriteShareSync`（把公开快照刷新为最新内容——当 `share_enabled` 为 true 且 `share_file_id` 与 `file_id` 不一致时表示快照已过期，调用它刷新）。相关导出类型包括 `PublishedArtifactItem`、`ArtifactShareState`、`SignedUrLs` 以及各 `Artifact*Request` / `Artifact*Response`。
+
+### AI SRE 自动化规则
+
+`client.Automations` 对应 `/safari/automation/*`。规则的**执行目标**（作用域与执行位置）只在创建时确定：
+
+- `AutomationRuleCreateRequest.RunIn`（`run_in`）取 `current-chat`（把规则绑定到已认证的当前 IM 会话）或 `web`（在 Web 控制台执行）。省略该字段时由服务端决定：已认证的 IM 调用取 `current-chat`，其他调用取 `web`；在实时 IM 会话之外传 `current-chat` 会被服务端拒绝。
+- `AutomationRuleCreateRequest.TeamID`（`team_id`）是 `*int64`：显式传 0 表示个人作用域，大于 0 表示账户内的某个团队；省略时若存在已认证的 IM 会话则继承该会话的作用域，否则由服务端取常规默认值。`current-chat` 规则的作用域必须与该会话一致。
+- `AutomationRuleUpdateRequest` 已不再包含 `TeamID`（同样没有 `RunIn`）：作用域与执行位置创建后不可变。旧代码若在更新请求里设置 `TeamID`，删掉该行即可，否则无法编译。
+
+### 规则分组
+
+`client.RuleFolders` 覆盖 `/monit/folder/*` 的 6 个操作：`ReadList`（`POST /monit/folder/list`）与 `ReadHealth`（`POST /monit/folder/health`）不带请求体——前者返回扁平的 `[]FolderItem`，要用 `ParentID` / `ParentPath` 自行在客户端重建目录树（仪表盘与告警规则共用这棵树），后者返回 `FolderHealthOutput`，其中 `FolderHealthItem.HasIssue` 标记该分组或其可见后代是否有活跃告警或规则运行问题；写入侧 `WriteCreate`（`/monit/folder/create`）与 `WriteUpdate`（`/monit/folder/update`）返回 `FolderItem`，`WriteMove`（`/monit/folder/move`）与 `WriteDelete`（`/monit/folder/delete`）只返回 `*Response`。相关导出类型还有 `FolderCreateRequest`、`FolderUpdateRequest`、`FolderMoveRequest` 与 `FolderDeleteRequest`。
+
+请求字段：`FolderCreateRequest.Name` 必填且不能包含句点、斜杠或逗号，`ParentID` 传 0 或省略即建在顶层；`FolderUpdateRequest` 必须同时传 `ID` 与 `Name`，它替换可编辑字段——省略 `Note` 会清空备注、省略 `TeamID` 会重置为 0（账户级）；`FolderMoveRequest` 即使移回顶层也必须显式传 `DestParentID`（传 0），且不能移动到自身或自己的后代之下；`FolderDeleteRequest` 只带 `ID`，只能删除空分组，分组内还有子分组、告警规则或仪表盘时返回 HTTP 409 与 `FolderNotEmpty`。
 
 ### 诊断查询
 
@@ -238,6 +252,20 @@ out, _, err := client.DataSources.ToolsInvoke(ctx, req)
 `client.DataSources` 的 `payload` 按 `type_ident` 选择类型专属配置块。当前允许的 `type_ident` 共 15 种：`prometheus`、`loki`、`mysql`、`oracle`、`postgres`、`clickhouse`、`elasticsearch`、`sls`、`tencent_cls`、`victorialogs`，以及诊断专用类型 `redis_node`、`redis_sentinel`、`mongodb_mongod`、`mongodb_mongos`、`kafka`——诊断专用类型的 `alerting_enabled` 恒为 false（不阻止非告警查询与工具调用），且拒绝传 true。连接地址规则：Redis/MongoDB 诊断类型为单个 `host:port`（IPv6 需加方括号），不接受 URI、userinfo 或 query；`kafka` 为 1–32 个以逗号分隔、互不重复的 `host:port` bootstrap 地址（规范化后至多 4096 字符）；`mongodb_mongod` / `mongodb_mongos` 的配置块中 `auth_source` 默认为 `admin`，用户名与密码必须成对配置，不支持客户端证书；Redis 节点配置的 `database` 默认为 0。诊断类型的 `password` 与 Kafka 的 `tls_key` 等敏感字段支持 `${env:NAME}` 引用：响应中字面值会被省略（仅当存储值本身就是 `${env:...}` 引用时才回显），更新时省略这些字段即保留原值，显式传空字符串则清除。
 
 `enabled` 与 `alerting_enabled` 相互独立：`enabled`（业务执行开关）创建时默认 true，`alerting_enabled`（是否允许参与告警评估；告警还要求 `enabled` 为 true 且类型支持告警）创建时对告警类型默认 true、对诊断专用类型默认 false；二者更新时省略均保留当前值，显式传 `null` 非法；当有启用的告警规则引用该数据源时，将其 `enabled` 置为 false 会以 conflict 拒绝。另外 `/monit/datasource/list` 响应中 `payload` 恒为 `null`（列表查询不读 payload 列），create/update/info 响应中才会填充。
+
+### 服务日历事件
+
+`client.Calendars` 对应 `/calendar/*`。
+
+`CalEventIDRequest`（`CalEventDelete`，`POST /calendar/event/delete`）有两种用法：传 `EventID` 删除单条事件；省略 `EventID` 并同时传 `StartAt` 与 `EndAt`（`YYYY-MM-DD`，`EndAt` 为开区间）则清空该日历自身在这段日期上的事件，被清空的日期回落到关联的节假日日历与每周工作日。两者二选一，`CalID` 始终必填。
+
+`CalEventUpsert`（`POST /calendar/event/upsert`）在 `[StartAt, EndAt)` 上创建或更新一条该日历自有的事件（`IsOff` 为 true 表示休息日，false 表示工作日覆盖）：省略 `EventID` 即新建，传入的 `EventID` 必须是该日历已有的自身事件。写入会先把该日历自己的其他事件从同一段日期上摘掉——完全落在范围内的事件被删除，部分重叠的被截短，跨越整个范围的被拆成两段——因此这些日期以最后一次写入为准。`EndAt` 必须晚于 `StartAt`；`Summary` 为选填。
+
+`CalEventList`（`POST /calendar/event/list`）用 `CalEventListRequest` 的 `Year` / `Month` / `Day` 划定范围（`Month` 与 `Day` 都为 0 时返回整年）。响应 `CalEventListResponse` 除 `Items`（按 `StartAt` 排序的事件）与 `Total` 外，还有一个必填的 `Days`：`map[string]CalDay`，键为 `YYYY-MM-DD`，给出该范围内每一天的最终状态。每个 `CalDay` 给出 `IsOff`、`EventID`（决定这一天的事件，没有任何事件覆盖时为空）与 `Layer`（`custom` / `holiday` / `weekly`）。日期按层优先级判定：该日历自有事件（`custom`）高于关联的节假日日历（`holiday`），再高于每周工作日（`weekly`）；同一层内工作日事件优先于休息日，因此节假日日历里的调休补班日会盖过节假日休息日。没有任何事件覆盖的日期为工作日。
+
+### 故障工作项
+
+`client.Incidents` 的 `WorkItem*` 方法（`/incident/work-item/*`）管理故障的行动项与复盘跟进项。工作项状态是封闭枚举：`CreateWorkItemRequest` / `UpdateWorkItemRequest` 的 `Status` 与 `ConvertWorkItemRequest` 的 `TargetStatus` 只接受 `open`、`in_progress`、`done`、`cancelled`，创建时省略或留空即取 `open`，`TargetStatus` 为选填。`WorkItemComplete` 的 `CompleteWorkItemRequest.TargetStatus` 只接受 `done`，传其他值一律被拒绝。
 
 ## 响应时间戳
 
