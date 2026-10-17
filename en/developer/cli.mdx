@@ -54,7 +54,7 @@ A copy installed under another command name uses that name in help output, error
 flashduty login
 ```
 
-When prompted, paste your APP Key. To obtain one, sign in to the [Flashduty console](https://console.flashcat.cloud) and copy your APP Key from **Profile → Personal Info**.
+When prompted, paste your APP Key. To obtain one, sign in to the [Flashduty console](https://console.flashcat.cloud) and create and copy an APP Key from **Personal center → APP Key**. See [Personal settings](/en/on-call/configuration/personal-settings#app-key).
 
 ### Credential resolution order
 
@@ -283,7 +283,7 @@ flashduty channel list [flags]   # List channels
 
 ### channel escalate-rule-list — Escalation rule queries
 
-Escalation rule management has moved into the `channel` command group. Pass the channel ID as a positional argument:
+Escalation rule queries belong to the `channel` command group. Pass the channel ID as a positional argument:
 
 ```bash
 flashduty channel escalate-rule-list <channel-id>   # List all escalation rules for a channel
@@ -330,11 +330,11 @@ flashduty status-page draft-create [flags]                            # Create a
 
 ```bash
 flashduty status-page draft-create \
-  --source 'ai_sre:sess_xxx' \
+  --source 'my-script' \
   --data '{"draft":{"page_id":5750613685214,"type":"incident","name":"Web Console Degraded Performance","message":"We are investigating degraded performance affecting the web console.","status":"investigating","affected_components":[{"component_id":"01KC3GAZ6ZJE40H55GM31RPWZE","status":"degraded"}]}}'
 ```
 
-- `--source`: opaque marker of the drafting origin (for example, `ai_sre:sess_xxx`), up to 64 characters.
+- `--source`: opaque marker of the drafting origin (for example, `my-script`), up to 64 characters.
 - The `draft` object in `--data` (required, stored verbatim, up to 64 KB serialized). Required fields: `page_id`, `type` (`incident` or `maintenance`), `name`, `message`; optional `change_id` (append an update to an existing event when > 0), `status`, `affected_components`, and `start_time`/`end_time` (Unix epoch seconds, new maintenance only).
 - The response returns `draft_id` (matching `draft_[A-Za-z0-9]{22}`) and `created_at`; the console review link carries `draft_id`.
 
@@ -545,7 +545,7 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 
 ### monit-query — Unified datasource tool invocation
 
-`monit-query` executes **a single named tool** against a configured datasource — the unified entry for both query tools (`<type>.query`, covering `prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`) and diagnostic tools (for example, `mysql.overview`, `redis_node.slowlog`), bypassing the alert-rule layer. The legacy `monit-query data` subcommand is retired. Get the datasource ID from the `id` field of `monit datasource-list`:
+`monit-query` executes **a single named tool** against a configured datasource — the unified entry for both query tools (`<type>.query`, covering `prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`) and diagnostic tools (for example, `mysql.overview`, `redis_node.slowlog`), bypassing the alert-rule layer. Get the datasource ID from the `id` field of `monit datasource-list`:
 
 ```bash
 flashduty monit datasource-list --type prometheus --json | jq '.[] | {id, name, type_ident, address}'
@@ -560,18 +560,13 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `--tool` | Tool name (required), prefixed by the datasource type, for example, `prometheus.query`, `mysql.overview`, `redis_node.slowlog`; 1–128 chars |
 | `--params` | Tool parameters JSON (may be omitted, meaning `{}`; pass `-` to read a larger payload from standard input; an explicit `null` is invalid) |
 
-Query tools and diagnostic tools have different Edge version requirements. Query tools use the Explore execution path and require **all** online routable Edge sessions in the cluster to support the Explore query protocol **v0.68.0**. Diagnostic tools use the base invoke protocol and require **v0.71.0** (see `monit datasource-tools-invoke` below). If the versions don't qualify, the command fails with one of these error codes:
-
-- `edge_upgrade_required`: Edge is too old.
-- `mixed_edge_versions`: the cluster has mixed versions, and only some sessions qualify.
-- `edge_version_unknown`: an Edge session reports a version the platform can't recognize.
-- `no_active_edge`: no routable online Edge. On any of these, do not rotate Edges or fall back to the legacy entry point.
+Query tools require every online Edge in the cluster to be v0.68.0 or later, and diagnostic tools require v0.71.0 or later. If the versions don't match, the command fails with one of these error codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `edge_version_unknown` (an Edge version in the cluster can't be identified), `no_active_edge` (no online Edge available). Upgrade Edge first; do not rotate Edge and retry.
 
 Query tools return a complete `explore_result.v1` structured result. `format` is always `explore_result.v1`. `result.kind` is `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
 
 ### monit datasource-tools-invoke — Datasource diagnostics
 
-`monit datasource-tools-invoke` executes **one deterministic read-only tool** against a configured datasource — the current path for structured datasource diagnostics (replacing `monit-query diagnose`). It is equivalent to the `monit-query` command above, which is the recommended path. Get the datasource ID from the `id` field of `monit datasource-list`:
+`monit datasource-tools-invoke` executes **one deterministic read-only tool** against a configured datasource. It is equivalent to the `monit-query` command above, which is the recommended path. Get the datasource ID from the `id` field of `monit datasource-list`:
 
 ```bash
 flashduty monit datasource-list --type redis_node --json | jq '.[] | {id, name, type_ident, address}'
@@ -589,12 +584,11 @@ flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowl
 Semantics and limits:
 
 - **No tool catalog, no auto-replay, no fallback**: one call runs exactly one named tool; fill parameters according to the datasource tool's contract rather than guessing from the command list. Alongside diagnostic tools, the entry also supports `<type>.query` query tools (`prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`).
-- Requires **all** currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation); query tools (`<type>.query`) go through the Explore execution path instead and carry an additional floor of the Explore query protocol v0.68.0 — a cluster that only supports older versions fails the query tool too, with no fallback.
 - Request body limit 128 KiB; complete success response limit 10 MiB; tool timeout at most 25 seconds.
 - The datasource must have `enabled=true`; `alerting_enabled=false` does not block diagnostics.
-- Response: `data` (tool-specific JSON evidence, preserved without conversion, never null, no legacy diagnose envelope), `tool`, `datasource_id`, optional `summary`, and a `truncated` object (with `reason`; its presence indicates truncation).
+- Response: `data` (tool-specific JSON evidence, preserved without conversion, never null), `tool`, `datasource_id`, optional `summary`, and a `truncated` object (with `reason`; its presence indicates truncation).
 
-Errors are returned as-is; common codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `edge_version_unknown` (an Edge session reports an unrecognized version; returned on the query-tool path), `no_active_edge` (no routable online Edge), `tool_not_supported` (tool unavailable), `invalid_request` (fix the parameters), `source_too_large` / `result_too_large` (narrow the request). On Edge version issues, do not rotate Edges or fall back to the legacy diagnose.
+On the Edge version error codes above or `tool_not_supported` (tool not supported), act as described above; on `invalid_request`, fix the parameters; on `source_too_large` or `result_too_large`, narrow the request.
 
 ### monit — Datasources, dashboards, and rule groups
 
@@ -768,7 +762,7 @@ In `json`/`toon` mode the rows default to the compact fields `incident_id`, `tit
 
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The OpenAPI spec the generator reads contains **365 API operations**, and the CLI generates resource-organized commands for **361** of them; the remaining four are provided by hand-written commands — the streaming export `session-read-export` (`session export`), the multipart uploads `mapping-data-write-upload` and `skill-write-upload` (`enrichment mapping-data-upload`, `safari skill-upload`), and the path-parameterized `monit-prometheus-read-label-values` (`monit prometheus-api-v1-label-{label_name}-values`, see "Query Prometheus label values" below) — and are organized into top-level command groups alongside the generated ones. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI covers **all** Flashduty Open APIs through a spec-driven code generator, organized into top-level command groups by resource. Run `flashduty <group> --help` to browse them. `session export`, `enrichment mapping-data-upload`, `safari skill-upload`, and `monit prometheus-api-v1-label-{label_name}-values` (see "Query Prometheus label values" below) are hand-written. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
 - **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
