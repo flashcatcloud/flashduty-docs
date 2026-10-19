@@ -1,0 +1,134 @@
+---
+title: "引擎自监控指标"
+description: "采集告警引擎暴露的 Prometheus 指标，监控引擎与中心的连接、规则同步和规则评估健康度"
+keywords: ["告警引擎", "monitedge", "自监控", "Prometheus 指标", "引擎健康检查"]
+---
+
+告警引擎（`monitedge`）在本地暴露一组 Prometheus 指标，覆盖三项会静默停掉监控的故障：与中心的连接断了、规则同步卡住了、规则一直在评估失败。把它们采集到您自己的时序库，就可以在控制台之外持续判断这台引擎是否还在正常工作。
+
+这些指标不在控制台展示，也没有对应的菜单入口，只能从引擎的 `/metrics` 读取。
+
+## 采集方式
+
+`/metrics` 与引擎的 `http.listen` 是同一个端口，默认 `0.0.0.0:6868`，不需要认证。用您自己的 Prometheus 或 VictoriaMetrics 直接抓取该地址即可：
+
+```yaml
+scrape_configs:
+  - job_name: monit-edge
+    static_configs:
+      - targets: ["10.0.0.1:6868"]
+```
+
+Flashduty 不会代为抓取这些指标。控制台的**告警引擎状态**页展示的是实例清单、心跳与版本，不含这些指标；指标只存在于您自己的时序库中。
+
+<Warning>
+**不要让被监控的这台引擎评估它自己的指标告警。** 引擎进程退出、租约不处于 `ACTIVE` 或与中心断连时，跑在这台引擎上的规则既不进行评估也发不出事件。引擎是否存活请用中心侧的[引擎失联告警](/zh/monitors/engine/engine-lost-alert)兜底；下文这些指标告警适合放在您自己的 Prometheus/Alertmanager 上，或另一个引擎集群上评估。
+</Warning>
+
+## 与中心的连接
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `monit_edge_websocket_connected` | Gauge | — | 当前是否持有到中心的 WebSocket 连接，1 为在线、0 为不在线。控制台的查询预览、实体运行状态都走这条连接 |
+| `monit_edge_websocket_connects_total` | Counter | — | 拨号成功的累计次数，含首次连接。持续增长说明连接在反复重建 |
+| `monit_edge_websocket_dial_failures_total` | Counter | — | 拨号失败的累计次数。它一直涨而 `connects_total` 不涨，就是连不上中心（网络、代理或中心拒绝） |
+| `monit_edge_lease_info` | Gauge | `session_mode`、`phase` | 恒为 1，用 `phase` 读租约阶段：`BOOT`、`INITIALIZING`、`ACTIVE`、`FENCED`。只有 `ACTIVE` 阶段才评估规则并投递事件；`session_mode` 目前恒为 `lease_v1` |
+| `monit_edge_lease_renewal_age_seconds` | Gauge | — | 距上一次心跳续租成功过去的秒数。心跳默认每 10 秒一次，可用 `alerter.heartbeatInterval` 调整；租约有效期由中心下发 |
+| `monit_edge_webapi_access_blocked` | Gauge | — | 1 表示中心因授权或 license 原因永久拒绝，该进程已停止与中心通信，恢复授权后需要重启引擎 |
+
+```promql
+# 连接断了 5 分钟以上
+monit_edge_websocket_connected == 0
+
+# 租约不在 ACTIVE 超过 2 分钟：引擎既不评估也不投递
+(sum(monit_edge_lease_info{phase="ACTIVE"}) or vector(0)) == 0
+
+# 最近 10 分钟内出现过拨号失败
+increase(monit_edge_websocket_dial_failures_total[10m]) > 0
+```
+
+<Note>
+以 `-alerter.webSocketDisable` 启动的引擎不会建立 WebSocket 连接，`monit_edge_websocket_connected` 恒为 0，`connects_total` 也不增长。这类实例上不要用 `monit_edge_websocket_connected` 判断连接健康度；租约相关指标不受该参数影响。
+</Note>
+
+## 规则同步
+
+引擎默认每 10 秒从中心同步一次规则。
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `monit_edge_alert_rule_sync_age_seconds` | Gauge | — | 距上一次同步成功过去的秒数 |
+| `monit_edge_alert_rule_sync_status` | Gauge | `outcome` | 最近一次同步的结果，值恒为 1，只在当前结果的 `outcome` 上出现一条：`success`、`error`，或 `pending`（还没同步过） |
+| `monit_edge_alert_rule_sync_rules` | Gauge | — | 最近一次同步成功时中心分配给这台引擎的规则数。它掉到 0 或远小于预期时，先确认规则是否被停用、数据源绑定或实例分片是否变化 |
+
+```promql
+# 同步停滞 3 分钟以上：中心新建或修改的规则不会生效
+monit_edge_alert_rule_sync_age_seconds > 300
+
+# 最近一次同步失败
+monit_edge_alert_rule_sync_status{outcome="error"} == 1
+```
+
+## 规则评估
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `monit_edge_alert_rule_evaluations_total` | Counter | `outcome`、`error_type` | 评估轮次累计。`outcome` 为 `success` 或 `error`；成功轮次的 `error_type` 是空字符串，失败轮次的取值见下表 |
+| `monit_edge_alert_rule_evaluation_duration_seconds_total` | Counter | — | 评估耗时累计（秒），除以 `evaluations_total` 的 `success` 与 `error` 之和，得到平均每轮评估耗时 |
+| `monit_edge_alert_rule_scopes` | Gauge | `datasource_id`、`state` | 按数据源统计每条“规则 × 数据源”作用域的最新状态，每个数据源固定三条：`ok`、`failing`、`pending`（尚未完成首轮评估） |
+| `monit_edge_alert_rule_failing_duration_seconds` | Gauge | `datasource_id` | 该数据源上持续失败最久的那条作用域已失败的秒数；没有失败作用域时为 0 |
+
+失败轮次的 `error_type` 取值是固定集合，可以直接按它分组做告警：
+
+| `error_type` | 含义 |
+|------|------|
+| `datasource_unavailable` | 拿不到该数据源的连接，这一轮评估没有执行 |
+| `query_failed` | 查询语句本身报错，如语法、权限或超时 |
+| `result_invalid` | 查询返回的数据无法映射成规则需要的字段 |
+| `threshold_failed` | 阈值判定这一步出错 |
+| `anydata_failed` | 数据存在判定这一步出错 |
+| `nodata_failed` | 数据缺失判定这一步出错 |
+| `recovery_failed` | 恢复查询或恢复判定出错，这一轮不产生恢复事件 |
+
+```promql
+# 某个数据源上的规则持续失败 5 分钟以上
+max by (datasource_id) (monit_edge_alert_rule_failing_duration_seconds) > 300
+
+# 最近 15 分钟内按错误类型分布的失败轮次
+sum by (error_type) (increase(monit_edge_alert_rule_evaluations_total{outcome="error"}[15m])) > 0
+```
+
+<Note>
+`monit_edge_alert_rule_failing_duration_seconds` 涨起来时，对照 `monit_edge_alert_rule_scopes{state="failing"}` 看范围：同一数据源下大量作用域同时失败，通常是这个数据源不可用；只有个别作用域失败，问题在那条规则的查询或阈值配置上。单条规则的执行状态和错误摘要见控制台的**运行详情**，说明见[规则运行详情](/zh/monitors/quickstart/quickstart)。
+</Note>
+
+## 查询并发与版本
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `monit_edge_alert_query_admission` | Gauge | `state` | 普通告警与实体告警共用的查询并发准入：`waiting` 是排队等许可的查询数，`in_flight` 是正在执行的查询数 |
+| `monit_edge_alert_query_admission_rejected_total` | Counter | `reason` | 被准入边界拒绝的累计数：`timeout` 是排队超时、这一轮评估被跳过，`canceled` 是调用方已取消 |
+| `monit_edge_build_info` | Gauge | `version` | 恒为 1，`version` 是当前运行的引擎版本。Linux 自动升级是就地替换进程，PID 与 `process_start_time_seconds` 都不变，版本变化只能从这条指标看出来 |
+
+```promql
+# 最近 10 分钟内有查询因排队超时被跳过
+sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0
+```
+
+## 推荐告警
+
+下表按“指标 + 持续条件”给出可以直接复制的规则。多实例部署时请保留 `instance` 或您自己的实例标签，避免不同实例的同名序列互相覆盖。
+
+| 告警 | PromQL | 持续 | 处置 |
+|------|--------|------|------|
+| WebSocket 断连 | `monit_edge_websocket_connected == 0` | 5 分钟 | 控制台无法通过该引擎查询；检查到中心的网络与代理，用 `dial_failures_total` 的增长确认是否在反复重连 |
+| 租约不在 ACTIVE | `(sum(monit_edge_lease_info{phase="ACTIVE"}) or vector(0)) == 0` | 2 分钟 | 引擎既不评估也不投递；看 `monit_edge_lease_renewal_age_seconds` 与心跳 |
+| 中心永久拒绝 | `monit_edge_webapi_access_blocked == 1` | 1 次 | 授权或 license 问题，恢复后重启引擎 |
+| 规则同步停滞 | `monit_edge_alert_rule_sync_age_seconds > 300` | 3 分钟 | 中心新建或修改的规则不生效；检查到中心的网络 |
+| 规则同步失败 | `monit_edge_alert_rule_sync_status{outcome="error"} == 1` | 3 分钟 | 同上，并结合引擎日志看同步报错 |
+| 规则持续评估失败 | `max by (datasource_id) (monit_edge_alert_rule_failing_duration_seconds) > 300` | 1 次 | 对照 `monit_edge_alert_rule_scopes{state="failing"}` 判断是数据源不可用还是单条规则查询有问题 |
+| 查询准入排队超时 | `sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0` | 3 分钟 | 某个数据源变慢占满了查询并发，这一轮评估被跳过 |
+
+<Note>
+实体树告警走另一组指标（`monit_edge_entity_alert_*`），覆盖实体发现、条件查询和实体事件投递；本文只覆盖普通告警规则。
+</Note>

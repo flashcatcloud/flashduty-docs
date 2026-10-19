@@ -43,6 +43,12 @@ Click **Save** to complete creation
 </Step>
 </Steps>
 
+<Tip>
+**System preset templates and read-only**: System preset templates (Rendering Example, Default Template) and templates the current member has no permission to manage are always read-only on the detail page, marked **Built-in · Read-only** next to the title (a template you lack permission for shows no badge, but is equally uneditable). To make one your own, click **Copy as new template** in the top right and edit the copy, whose name is pre-filled as "Copy of *original template name*"; copying requires the **Templates Manage** permission and On-call Pro.
+
+For a template you can edit, the top right shows **Template settings** (gear icon), which changes the template name, team and description only — not the body. Delete sits in the **More actions** ⋯ menu; system preset templates have no such menu and cannot be deleted.
+</Tip>
+
 ### Apply template
 
 <Steps>
@@ -157,6 +163,98 @@ Complete variable list for incident objects:
 </Accordion>
 </AccordionGroup>
 
+## Preview and test send
+
+The right side of the template detail page is the preview pane: it renders the current channel's content with the selected incident, followed by a line of diagnostics and any warnings the send engine reports. The preview's title bar also holds **Send test**, which sends the editor's current content for real so you can see what the recipient gets.
+
+### What the preview tells you
+
+The preview renders the current channel's content with the incident selected under **Render with this incident's data**; with nothing selected it uses the system default data. When the editor is empty, the preview renders the channel's system default template and notes "No template content set, system default template will be used."
+
+One line under the preview explains how this content was rendered:
+
+| Field | Description |
+| :--- | :--- |
+| Channel format | The Feishu/Lark app shows **Feishu Card 2.0**; the WeCom bot shows **Markdown** or **Markdown v2**; other channels show nothing |
+| Native tables: N / Markdown tables: N | How many tables in this render became native tables and how many stayed Markdown tables; a zero count is hidden |
+| Used / limit | The content's byte count and the channel's size limit, e.g. `12.3 KB / 30.0 KB`; when the channel has no known limit, only the used bytes are shown |
+
+The yellow notices above that line come from the send engine. Any of them means the template will be reshaped or rejected on a real send — trim it before saving:
+
+| Notice | Meaning |
+| :--- | :--- |
+| `table_not_rendered` | This channel doesn't render Markdown tables, so recipients see the raw `\|` rows; consider a list instead |
+| `native_table_fallback` | **Native tables** is on for the Feishu/Lark app, but a table here misses the native-table conditions and will be sent as a Markdown table |
+| `content_too_large` | The content exceeds the channel's size limit |
+
+`native_table_fallback` has six reasons: `too_many_tables`, `too_many_columns`, `too_many_rows`, `cell_too_long`, `unsupported_cell`, `card_too_large` — see [Native tables](#native-tables).
+
+`content_too_large` has three outcomes:
+
+| Outcome | Meaning |
+| :--- | :--- |
+| `rejected` | The channel refuses the message, so this notification is not delivered — real alerts included. You must trim the template |
+| `truncated` | The excess is truncated and the notification still goes out; per-channel limits are listed below |
+| `compact_fallback` | A WeCom bot Markdown v2 message over 4096 bytes is replaced by a compact summary, so nothing is lost |
+
+### Send test
+
+**Send test** sits in the preview's title bar. It renders the editor's current content (**unsaved changes included**) with the incident selected in the preview and sends it to the channel for real, so you can confirm what the recipient sees. It needs the **Templates Manage** permission; system preset templates can be test-sent too. The button is disabled while the template fails validation.
+
+Supported channels: the five IM apps (Feishu/Lark, Dingtalk, WeCom, Slack, Teams), six group chat bots (Feishu/Lark, Dingtalk, WeCom, Slack, Telegram, Zoom) and email. SMS and voice are not offered — they are billed per message and the preview already equals what would be sent.
+
+The content is the same one the preview shows: the editor's current content plus the selected incident's data (system default data when none is selected), with the same channel switches (card field visibility, the Feishu Card 2.0 table and blank-line switches, WeCom bot Markdown v2). When the editor is empty, the channel's system default template is sent.
+
+Where each channel can send:
+
+| Channel | Target | Notes |
+| :--- | :--- | :--- |
+| IM app | Myself / Group chat | The WeCom app only offers **Myself**: WeCom has no API to list the chats a bot has joined, and group messages go through the WeCom bot template |
+| Group chat bot | Enter the robot address | The same address the notification rule takes, either a bare token or a full URL; Telegram also needs a Chat ID, Zoom a Verify token. These values are used for this send only and are never saved |
+| Email | Your own account email | Cannot send when your account has no email address |
+
+- **Myself**: requires your account to be linked to that IM integration; when it is not, the send button is disabled and members with permission can click the link to finish linking in the onboarding flow. The Slack app is the exception — no per-person linking is needed (it DMs workspace members directly), but the send still resolves you to a member of that workspace and returns `im_not_linked` if it cannot.
+- **Group chat**: lists only chats this integration's bot has **already joined** (Slack by channel, Teams by team channel or group chat). Everyone in the chat receives the test message.
+- When the channel has several integrations, pick one under **Integration** first; only enabled integrations are listed.
+
+Test message markings:
+
+- The incident title is prefixed with `[Test] ` (Chinese accounts get `[测试] `).
+- A footer is appended: `Test message · Template "<name>" · Sent by <sender>`.
+- Buttons on the card only answer "This is a test message. Its buttons do not change any incident." and neither acknowledge nor close anything; the **Create War Room** button does not appear in a test message.
+
+The result is one of two values:
+
+| Result | Channel | Prompt |
+| :--- | :--- | :--- |
+| `sent` | IM app | `Sent to your Feishu DM` / `Sent to "<chat>"` |
+| `queued` | Group chat bots and email | "Submitted. It usually arrives within seconds; if not, check the address" |
+
+IM apps call the platform's API synchronously, so a success is `sent`; bots and email go to the notification queue and are delivered asynchronously, so `queued` only means submitted — a wrong address does not fail immediately.
+
+Limits and common failures:
+
+- Each member can send at most 5 test messages per minute; beyond that the call returns `rate_limited`.
+- Failures are reported by error code:
+
+| Error code | Meaning |
+| :--- | :--- |
+| `template_invalid` | The template failed to render (parse or execution error). Fix the template first |
+| `channel_not_supported` | This channel does not support test sends |
+| `invalid_target` | The target is incomplete or malformed: no robot address, a Telegram test without a Chat ID, a Zoom test without a Verify token, or a chat that does not belong to the integration |
+| `integration_not_found` | The integration was not found — it may be deleted or disabled, or not an integration of this channel |
+| `im_not_linked` | Your account is not linked to this IM, so it cannot DM you |
+| `rate_limited` | Sending too often |
+| `webhook_url_blocked` | Robot addresses must be public `http`/`https`; a full URL pointing into a private network is refused. A bare token is joined to the vendor's URL by the platform and is not checked |
+| `content_too_large` | The content exceeds the channel's size limit, such as the 30 KB Feishu card |
+| `send_failed` | The channel returned a failure; the message carries the channel's own error |
+
+<Note>
+How test sends differ from real notifications: when the template has a syntax error, a real notification silently falls back to the system default template and is still delivered, while a test send returns `template_invalid` — that is the point, to surface template problems. Conversely, a test send writes no notification record, takes no send lock and adds nothing to the notification feed, so it never acknowledges or closes an incident and never creates a war room.
+
+The console calls `POST /template/preview/send` with `template_id`, `type`, the editor's current `content`, `incident_id` and the channel render switches, and receives either `status` (`sent` / `queued`) or `error_code` + `message`.
+</Note>
+
 ## Channel templates
 
 Different notification channels support different template formats and limitations.
@@ -213,6 +311,33 @@ Requires [Feishu/Lark integration](/en/on-call/integration/instant-messaging/lar
 ```
 
 On Feishu/Lark app cards, **More Actions** at the bottom is a dropdown menu with custom actions, snooze durations, and unacknowledge; the **👥 Create War Room** button sits outside that menu.
+
+### Native tables
+
+**Feishu Card 2.0** adds a **Native tables** switch (off by default, saved with the template). When it is on, GFM Markdown tables in the template are recognised and rendered as the card's native table component, so recipients see a pageable table instead of rows of text with `|`.
+
+Native tables have limits, and when any condition fails **every table on that card** falls back to Markdown text:
+
+| Limit | Value |
+| :--- | :--- |
+| Native tables per card | At most 5 |
+| Columns per table | At most 8 |
+| Rows per table | At most 100 |
+| Cell content | At most 2000 bytes per cell |
+| Rows per page | 10 rows per page; the rest is paged inside the card |
+
+Why a table falls back (shown as a `native_table_fallback` warning in [What the preview tells you](#what-the-preview-tells-you)):
+
+| Reason | Trigger |
+| :--- | :--- |
+| `too_many_tables` | The card would carry more than 5 native tables |
+| `too_many_columns` | A table has more than 8 columns |
+| `too_many_rows` | A table has more than 100 rows |
+| `cell_too_long` | A cell is longer than 2000 bytes |
+| `unsupported_cell` | A cell holds Markdown beyond plain text and `<br>` line breaks, a header cell is empty, or a row's cell count differs from the header's |
+| `card_too_large` | Native tables would push the card past Feishu's size limit |
+
+The whole Feishu card is capped at **30 KB**. Beyond that Feishu refuses the message outright and the preview reports `content_too_large` + `rejected`; trim the template and send again.
 </Tab>
 
 <Tab title="Dingtalk App">
@@ -318,6 +443,10 @@ For the switches on the **Additional info** tab, see [Card Fields and Bottom Act
 ## Bot templates
 
 Template formats supported by group chat bots.
+
+<Note>
+Only the Feishu/Lark app (card 2.0, via **Native tables**) and the WeCom bot's **Markdown v2** render Markdown tables. Every other channel sends tables as raw text with `|`: the Dingtalk, Slack and Telegram bots, the WeCom bot on Markdown v1, and the Dingtalk, Slack, WeCom and Teams apps. The preview flags this. For those channels, rewrite tables as lists.
+</Note>
 
 <Tabs>
 <Tab title="Feishu/Lark Bot">

@@ -1,0 +1,134 @@
+---
+title: "Engine self-monitoring metrics"
+description: "Scrape the Prometheus metrics the alert engine exposes to monitor its connection to the center, rule sync, and rule evaluation health"
+keywords: ["alert engine", "monitedge", "self-monitoring", "Prometheus metrics", "engine health check"]
+---
+
+The alert engine (`monitedge`) exposes a set of Prometheus metrics locally, covering three failures that silently stop monitoring: the connection to the center is down, rule sync has stalled, and rules keep failing to evaluate. Scrape them into your own time series database and you can tell, outside the console, whether this engine is still doing its job.
+
+These metrics are not shown in the console and have no menu entry. You can only read them from the engine's `/metrics`.
+
+## How to scrape
+
+`/metrics` shares the engine's `http.listen` port, `0.0.0.0:6868` by default, and needs no authentication. Point your own Prometheus or VictoriaMetrics at it:
+
+```yaml
+scrape_configs:
+  - job_name: monit-edge
+    static_configs:
+      - targets: ["10.0.0.1:6868"]
+```
+
+Flashduty does not scrape these metrics for you. The **Alert Engine Status** page in the console shows the instance list, heartbeat, and version, but none of these metrics; they exist only in your own time series database.
+
+<Warning>
+**Don't let the engine you are monitoring evaluate alerts on its own metrics.** When the engine process exits, its lease is not `ACTIVE`, or it has lost the connection to the center, rules running on that engine neither evaluate nor deliver events. Use the center-side [engine disconnection alert](/en/monitors/engine/engine-lost-alert) to catch an engine going down; the metric alerts below belong on your own Prometheus/Alertmanager, or on another engine cluster.
+</Warning>
+
+## Connection to the center
+
+| Metric | Type | Labels | Description |
+|------|------|------|------|
+| `monit_edge_websocket_connected` | Gauge | — | Whether the engine currently holds a WebSocket connection to the center: 1 connected, 0 not. Console query previews and entity runtime status go over this connection |
+| `monit_edge_websocket_connects_total` | Counter | — | Successful dials, including the first connection. A steady increase means the connection keeps being rebuilt |
+| `monit_edge_websocket_dial_failures_total` | Counter | — | Failed dials. If this keeps climbing while `connects_total` doesn't, the engine can't reach the center (network, proxy, or the center refusing it) |
+| `monit_edge_lease_info` | Gauge | `session_mode`, `phase` | Always 1; read the lease phase from `phase`: `BOOT`, `INITIALIZING`, `ACTIVE`, `FENCED`. Only `ACTIVE` evaluates rules and delivers events. `session_mode` is currently always `lease_v1` |
+| `monit_edge_lease_renewal_age_seconds` | Gauge | — | Seconds since the last successful heartbeat renewal. Heartbeats default to every 10 seconds, adjustable with `alerter.heartbeatInterval`; the lease lifetime comes from the center |
+| `monit_edge_webapi_access_blocked` | Gauge | — | 1 means the center permanently refused this process on authorization or license grounds, so it has stopped talking to the center. Restart the engine after the authorization is restored |
+
+```promql
+# Connection down for more than 5 minutes
+monit_edge_websocket_connected == 0
+
+# Lease not ACTIVE for more than 2 minutes: the engine neither evaluates nor delivers
+(sum(monit_edge_lease_info{phase="ACTIVE"}) or vector(0)) == 0
+
+# Any dial failure in the last 10 minutes
+increase(monit_edge_websocket_dial_failures_total[10m]) > 0
+```
+
+<Note>
+An engine started with `-alerter.webSocketDisable` never opens a WebSocket connection, so `monit_edge_websocket_connected` stays 0 and `connects_total` never grows. Don't use `monit_edge_websocket_connected` to judge connection health on such an instance; the lease metrics are not affected by this flag.
+</Note>
+
+## Rule sync
+
+The engine syncs rules from the center every 10 seconds by default.
+
+| Metric | Type | Labels | Description |
+|------|------|------|------|
+| `monit_edge_alert_rule_sync_age_seconds` | Gauge | — | Seconds since the last successful sync |
+| `monit_edge_alert_rule_sync_status` | Gauge | `outcome` | Result of the latest sync, always 1, present only on the current `outcome`: `success`, `error`, or `pending` (never synced yet) |
+| `monit_edge_alert_rule_sync_rules` | Gauge | — | Number of rules the center assigned to this engine at the last successful sync. If it drops to 0 or far below what you expect, first check whether rules were disabled and whether datasource bindings or instance sharding changed |
+
+```promql
+# Sync stalled for more than 3 minutes: rules created or changed in the center won't take effect
+monit_edge_alert_rule_sync_age_seconds > 300
+
+# The latest sync failed
+monit_edge_alert_rule_sync_status{outcome="error"} == 1
+```
+
+## Rule evaluation
+
+| Metric | Type | Labels | Description |
+|------|------|------|------|
+| `monit_edge_alert_rule_evaluations_total` | Counter | `outcome`, `error_type` | Cumulative evaluation rounds. `outcome` is `success` or `error`; for successful rounds `error_type` is an empty string, and failed rounds use the values in the table below |
+| `monit_edge_alert_rule_evaluation_duration_seconds_total` | Counter | — | Cumulative evaluation time in seconds. Divide by the sum of `evaluations_total` for `success` and `error` to get the average time per round |
+| `monit_edge_alert_rule_scopes` | Gauge | `datasource_id`, `state` | Latest state of each rule-datasource scope, counted per datasource, always three series per datasource: `ok`, `failing`, and `pending` (first round not finished yet) |
+| `monit_edge_alert_rule_failing_duration_seconds` | Gauge | `datasource_id` | How long the longest currently failing scope on that datasource has been failing, in seconds; 0 when nothing is failing |
+
+The `error_type` of a failed round comes from a fixed set, so you can group alerts on it directly:
+
+| `error_type` | Meaning |
+|------|------|
+| `datasource_unavailable` | No connection to the datasource, so this round didn't run |
+| `query_failed` | The query itself failed: syntax, permission, or timeout |
+| `result_invalid` | The query result can't be mapped to the fields the rule needs |
+| `threshold_failed` | The threshold check failed |
+| `anydata_failed` | The data-exists check failed |
+| `nodata_failed` | The data-missing check failed |
+| `recovery_failed` | The recovery query or recovery check failed, so this round produces no recovery event |
+
+```promql
+# Rules on a datasource have been failing for more than 5 minutes
+max by (datasource_id) (monit_edge_alert_rule_failing_duration_seconds) > 300
+
+# Failed rounds in the last 15 minutes, broken down by error type
+sum by (error_type) (increase(monit_edge_alert_rule_evaluations_total{outcome="error"}[15m])) > 0
+```
+
+<Note>
+When `monit_edge_alert_rule_failing_duration_seconds` climbs, check the scope with `monit_edge_alert_rule_scopes{state="failing"}`. Many scopes failing on one datasource usually means that datasource is unavailable; only one or two failing means the query or threshold of that rule is the problem. Per-rule execution state and error summary are in the console under **Runtime Details**; see [Rule runtime details](/en/monitors/quickstart/quickstart).
+</Note>
+
+## Query concurrency and build
+
+| Metric | Type | Labels | Description |
+|------|------|------|------|
+| `monit_edge_alert_query_admission` | Gauge | `state` | Query concurrency admission shared by ordinary alerts and entity alerts: `waiting` is the number of queries queued for a permit, `in_flight` the number executing |
+| `monit_edge_alert_query_admission_rejected_total` | Counter | `reason` | Cumulative rejections at the admission boundary: `timeout` means the wait expired and that evaluation round was skipped, `canceled` means the caller cancelled |
+| `monit_edge_build_info` | Gauge | `version` | Always 1; `version` is the running engine version. Linux auto-upgrade replaces the process in place, so neither the PID nor `process_start_time_seconds` changes and this metric is the only place a version change shows up |
+
+```promql
+# A query was skipped in the last 10 minutes because its admission wait timed out
+sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0
+```
+
+## Recommended alerts
+
+The table below gives rules you can copy as-is, as a metric plus a sustained condition. With more than one instance, keep `instance` or your own instance label so the same series name on different instances doesn't overwrite itself.
+
+| Alert | PromQL | For | What to do |
+|------|--------|------|------|
+| WebSocket disconnected | `monit_edge_websocket_connected == 0` | 5 minutes | The console can't query through this engine; check the network and proxy to the center, and use the growth of `dial_failures_total` to confirm if it keeps reconnecting |
+| Lease not ACTIVE | `(sum(monit_edge_lease_info{phase="ACTIVE"}) or vector(0)) == 0` | 2 minutes | The engine neither evaluates nor delivers; check `monit_edge_lease_renewal_age_seconds` and heartbeats |
+| Center permanently refused | `monit_edge_webapi_access_blocked == 1` | 1 occurrence | Authorization or license problem; restart the engine once it is restored |
+| Rule sync stalled | `monit_edge_alert_rule_sync_age_seconds > 300` | 3 minutes | Rules created or changed in the center don't take effect; check the network to the center |
+| Rule sync failing | `monit_edge_alert_rule_sync_status{outcome="error"} == 1` | 3 minutes | Same, plus the engine log for the sync error |
+| Rules keep failing to evaluate | `max by (datasource_id) (monit_edge_alert_rule_failing_duration_seconds) > 300` | 1 occurrence | Use `monit_edge_alert_rule_scopes{state="failing"}` to tell an unavailable datasource from a broken rule query |
+| Query admission timed out | `sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0` | 3 minutes | A slow datasource has taken all the query concurrency and an evaluation round was skipped |
+
+<Note>
+Entity tree alerts use a different metric family (`monit_edge_entity_alert_*`) for entity discovery, condition queries, and entity event delivery. This page covers ordinary alert rules only.
+</Note>

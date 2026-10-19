@@ -810,7 +810,7 @@ Beyond the curated commands above, the CLI covers **all** Flashduty Open APIs th
 - **On-call & scheduling**: calendar, schedule
 - **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
 - **Monitoring & RUM**: monit, rum, sourcemap
-- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations), webhook (integrations)
+- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations; secret masking and update rules in "integration — integrations and secrets" below), webhook (integrations)
 
 These generated leaf commands use a `resource-action` naming form (for example, `flashduty safari a2a-agent-get`, `flashduty safari session-list`); Every public API operation is reachable as `flashduty <group> <verb>`, with the name derived from its API path: request fields become typed flags, and `--data` accepts the full JSON request body (typed flags override fields with the same name). This page does not list them all; explore them level by level with `flashduty <resource> --help`:
 
@@ -882,6 +882,40 @@ Public-sharing and signing semantics:
 - The public snapshot is built from the artifact's current `file_id`. If `share_enabled=true` and `share_file_id` differs from `file_id`, the snapshot is stale. Call `artifact-gallery-share-sync` to refresh it before you link to it externally.
 - The `artifact-sign` token is bound to the calling account and person and is valid for 5 minutes (response `expires_in`); `download_url` / `preview_url` are relative paths (`/safari/artifact/stream?...`) — prepend the API base (`https://api.flashcat.cloud`).
 - An artifact's initial scope inherits from its source session (personal-session artifacts belong to the creator; team-bound session artifacts belong to the team); `can_edit` tells whether the caller may rename/transfer/delete/share it (the creator, any member of the owning team, or a manager of the source session).
+
+#### integration — integrations and secrets
+
+The `integration` command family manages account-level public integrations — alert sources, change sources, IM bots and custom webhooks — with 9 subcommands: `list`, `info <integration-id>`, `type-list`, `create`, `update <integration-id>`, `delete <integration-id>`, `enable <integration-id>`, `disable <integration-id>`, and `key-rotate <integration-id>`. Channel-owned integrations (a `ref_id` starting with `c_`) are not included; configure those in the console.
+
+```bash
+flashduty integration type-list --category event.alert # List the integration types the account can configure (only types with supports_api_create: true can be created)
+flashduty integration list --status enabled            # List integrations (filter with --category, --plugin-type, --status, --team-ids, --name, --ref-ids)
+flashduty integration info <integration-id>            # Get one integration, including settings and integration_key
+flashduty integration create --plugin-type standard.alert --name "Production alerts" --is-test --data '{"settings":{}}'
+flashduty integration update <integration-id> --name "Production alerts (primary)"
+flashduty integration key-rotate <integration-id>      # Issue a new key; the previous key stops working immediately
+flashduty integration disable <integration-id>         # Pause event intake, keep the configuration
+flashduty integration enable <integration-id>          # Re-enable
+flashduty integration delete <integration-id>          # Delete; rejected with ReferenceExist while other objects still reference it
+```
+
+Fields available on create and update:
+
+| Flag | Description |
+|------|-------------|
+| `--plugin-type` | Integration type (required on `create`), taken from `integration type-list` entries with `supports_api_create: true`, for example `standard.alert` or `zabbix.alert` |
+| `--name` | Integration name, 2–49 characters; on create, omitting it or sending an empty value uses the integration type name |
+| `--description` | Free-form description, at most 499 characters |
+| `--team-id` | Owning team ID; omitted or `0` means account-level, and a nonzero value must belong to the current account. On update, passing `0` clears the team assignment |
+| `--integration-key` | Only on `create`: an optional pre-generated key, 35 characters, ending with the account ID modulo 1000 padded to three digits, and it must not already be in use; omit it to generate a key |
+| `--is-test` | Runs the plugin connectivity test. Omitted on create means no test; on update it only runs when `settings` is actually submitted, so a name/description-only update performs no test. Read `test.success` and `test.message` from the response: an HTTP success is not a passing test, and an absent `test` means no test was run |
+| `--data` | Full JSON request body; the type-specific `settings` block can only be passed here, and the accepted keys depend on `plugin_type` |
+
+How `settings` reads back, and the secret rules (the same handling as `monit` datasources above):
+
+- In the `settings` returned by `list` and `info`, every **saved secret** — passwords, app secrets, tokens, encryption keys, webhook endpoints, HTTP pull URL and body, headers, custom bodies — is shown as `******`; unset values stay empty. **`integration_key` is the exception and comes back as is** (it authenticates inbound pushes and is not the account-level `app_key`). A script that reads credentials from `integration info --json` therefore gets the mask; for a new key, rotate it with `key-rotate`, which invalidates the previous key immediately.
+- The `settings` submitted by `update` replaces the type-specific configuration as a whole: **a known sensitive field that is omitted or sent as `******` keeps its stored value**, and an explicit empty `headers: {}` clears headers. But **a stored secret cannot be kept while its destination changes** — changing `endpoint`, `url`, or a database host or port, for example, requires sending the real secret in the same call, otherwise the request is rejected.
+- `editable` only reflects object permission (`no_editable: true` marks a read-only integration); write calls additionally require **Integrations Manage**.
 
 ### Utility commands
 
