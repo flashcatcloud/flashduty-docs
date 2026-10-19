@@ -805,7 +805,7 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
 - **监控与 RUM**：monit、rum、sourcemap
-- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换）、webhook（integrations）
+- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换，密钥掩码与更新规则见下文「integration — 集成与密钥」）、webhook（integrations）
 
 这些生成命令的叶子名称采用「资源-动作」形式（如 `flashduty safari a2a-agent-get`、`flashduty safari session-list`），每个公开 API 操作都对应一条 `flashduty <分组> <动作>` 命令，命令名由 API 路径推导，请求字段生成带类型的命令行参数，`--data` 可传完整 JSON 请求体（具名参数覆盖其中的同名字段）。完整清单不在本页展开，用 `flashduty <资源> --help` 逐层探索：
 
@@ -871,6 +871,40 @@ flashduty safari artifact-gallery-share-sync <artifact-id>                      
 - 公开快照按产物当前的 `file_id` 物化：当 `share_enabled=true` 且响应中 `share_file_id` 与 `file_id` 不一致时，公开快照已过期——调用 `artifact-gallery-share-sync` 刷新后再对外引用。
 - `artifact-sign` 的签名 token 绑定调用账户与成员，有效期 5 分钟（响应 `expires_in`）；`download_url` / `preview_url` 是相对路径（`/safari/artifact/stream?...`），使用时需拼接 API base（`https://api.flashcat.cloud`）。
 - 产物初始作用域继承来源会话（个人会话的产物归创建者个人，绑定团队的会话的产物归团队）；`can_edit` 决定调用者能否重命名/转移/删除/分享（创建者、所属团队成员或源会话管理者）。
+
+#### integration — 集成与密钥
+
+`integration` 命令族管理账户级的公开集成——告警源、变更源、IM 机器人与自定义 Webhook，共 9 个子命令：`list`、`info <integration-id>`、`type-list`、`create`、`update <integration-id>`、`delete <integration-id>`、`enable <integration-id>`、`disable <integration-id>`、`key-rotate <integration-id>`。渠道专属的集成（`ref_id` 以 `c_` 开头）不在此列，只在控制台配置。
+
+```bash
+flashduty integration type-list --category event.alert # 列出账户可配置的集成类型（只有 supports_api_create: true 的类型能用 create 创建）
+flashduty integration list --status enabled            # 列出集成（可按 --category、--plugin-type、--status、--team-ids、--name、--ref-ids 过滤）
+flashduty integration info <integration-id>            # 查看单个集成，含 settings 与 integration_key
+flashduty integration create --plugin-type standard.alert --name "生产告警" --is-test --data '{"settings":{}}'
+flashduty integration update <integration-id> --name "生产告警（主）"
+flashduty integration key-rotate <integration-id>      # 签发新密钥，旧密钥立即失效
+flashduty integration disable <integration-id>         # 暂停接收事件，保留配置
+flashduty integration enable <integration-id>          # 重新启用
+flashduty integration delete <integration-id>          # 删除；仍被其他对象引用时以 ReferenceExist 拒绝
+```
+
+创建与更新的可用字段：
+
+| 参数 | 说明 |
+|------|------|
+| `--plugin-type` | 集成类型（`create` 必填），取值来自 `integration type-list` 中 `supports_api_create: true` 的条目，如 `standard.alert`、`zabbix.alert` |
+| `--name` | 集成名称，2–49 字符；创建时省略或传空则使用集成类型名 |
+| `--description` | 备注，最多 499 字符 |
+| `--team-id` | 归属团队 ID；省略或 `0` 表示账户级，非 0 时必须属于当前账户。更新时显式传 `0` 会清除团队归属 |
+| `--integration-key` | 仅 `create` 可用：可选的自定义密钥，长度 35 字符，必须以「账户 ID 对 1000 取模后补零到三位」的数字结尾，且不得与其他集成重复；省略则自动生成 |
+| `--is-test` | 执行插件的连通性测试。创建时省略即不测试；更新时只在确实提交了 `settings` 的调用中测试，只改名称/备注不会发测试。结果看响应的 `test.success` 与 `test.message`：HTTP 调用成功不等于测试通过，响应中没有 `test` 表示本次没有执行测试 |
+| `--data` | 完整 JSON 请求体；类型专属配置 `settings` 只能通过它传入，可接受的键由 `plugin_type` 决定 |
+
+`settings` 的读回与密钥语义：
+
+- `list` 与 `info` 返回的 `settings` 中，每个**已保存的密钥类值**——密码、App Secret、Token、加密密钥、Webhook 地址、HTTP 拉取的 URL 与 Body、Headers、自定义 Body——一律显示为 `******`；未设置的值保持为空。**`integration_key` 是例外，按原值返回**（它用于接入推送，与账户级 `app_key` 不是一回事）。依赖 `integration info --json` 读取凭据的脚本拿到的是掩码；需要新密钥时用 `key-rotate` 轮换，旧密钥会立即失效。
+- `update` 提交的 `settings` 是整体替换：**已知敏感字段被省略或传 `******` 时保留已存密钥**，显式传空 `headers: {}` 会清空 Headers。但**改密钥的发送目标时不能沿用已存密钥**——例如改 `endpoint`、`url`，或改数据库的主机/端口——必须同时传入真实密钥，否则请求被拒。
+- `editable` 只表示对象权限（`no_editable: true` 表示该集成只读）；写操作除此之外还需要**集成管理**权限。
 
 ### 工具命令
 
