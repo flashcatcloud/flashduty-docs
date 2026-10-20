@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  countStepBlocks,
   findPlaceholderErrors,
   findStepErrors,
   findTildeErrors,
@@ -102,4 +103,16 @@ test('findTildeErrors flags ranges written with ~ in prose and headings', () => 
 test('findTildeErrors accepts en dashes, code, and spaced or leading tildes', () => {
   assert.deepEqual(findTildeErrors('适用于 5.x–6.x，路径 ~/bin，`3.x~6.x`'), []);
   assert.deepEqual(findTildeErrors('```\nversion 3.x~6.x\n```\n~~~text\na~b\n~~~'), []);
+});
+
+test('countStepBlocks counts <Steps> blocks, not <Step> items', () => {
+  assert.equal(countStepBlocks('<Steps>\n<Step title="a">x</Step>\n<Step title="b">y</Step>\n</Steps>'), 1);
+  assert.equal(countStepBlocks('<Steps></Steps>\n<Steps></Steps>'), 2);
+  assert.equal(countStepBlocks('no steps'), 0);
+});
+
+test('findStepErrors rejects numbered steps on a page with several <Steps> blocks', () => {
+  assert.deepEqual(findStepErrors('### Step 1: A\n### Step 2: B', 1), []);
+  assert.match(findStepErrors('### Step 1: A\n### Step 2: B', 2)[0], /2 <Steps> blocks/);
+  assert.deepEqual(findStepErrors('### A\n### B', 2), []);
 });

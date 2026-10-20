@@ -14,6 +14,13 @@ const STEP_LABEL_FORMS = [
   /^\*\*(?:步骤|Step)[ \t]*(\d+)[ \t]*[：:、]?[ \t]*(.*?)\*\*[ \t]*$/,
 ];
 
+// Steps form one sequence only when they sit in a single <Steps> block. Several
+// blocks are separate flows or sections (alternatives, per-section setup), so the
+// page keeps plain `### <title>` headings instead of one numbered run.
+export function countStepBlocks(mdx) {
+  return (mdx.match(/<Steps\b/g) || []).length;
+}
+
 export function formatStepHeading(locale, number, title) {
   return locale === 'zh' ? `### 步骤 ${number}：${title}` : `### Step ${number}: ${title}`;
 }
@@ -59,7 +66,7 @@ export function normalizeStepHeadings(markdown, locale) {
     .join('\n');
 }
 
-export function findStepErrors(markdown) {
+export function findStepErrors(markdown, stepBlocks = 1) {
   const numbers = [];
   const strays = [];
   forEachLineOutsideFences(markdown, (line, index) => {
@@ -73,6 +80,9 @@ export function findStepErrors(markdown) {
   if (numbers.length === 0) return [];
 
   const errors = [];
+  if (stepBlocks > 1) {
+    errors.push(`${stepBlocks} <Steps> blocks are separate flows and must not be numbered as one sequence`);
+  }
   if (numbers.some((number, i) => number !== i + 1)) {
     errors.push(`step headings are numbered ${numbers.join(', ')}, expected 1..${numbers.length}`);
   }
