@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { docMap, optionalMissingKeys } from '../src/doc-map.mjs';
+import { findPlaceholderErrors, findStepErrors } from './doc-conventions.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
@@ -180,6 +181,16 @@ function checkLocale(locale, docs) {
     const malformedTables = findMalformedHtmlTables(value);
     if (malformedTables.length > 0) {
       errors.push(`${locale}: ${key} has malformed HTML tables: ${malformedTables.slice(0, 5).join('; ')}`);
+    }
+
+    const stepErrors = findStepErrors(value);
+    if (stepErrors.length > 0) {
+      errors.push(`${locale}: ${key} has inconsistent steps: ${stepErrors.join('; ')}`);
+    }
+
+    const placeholderErrors = findPlaceholderErrors(value);
+    if (placeholderErrors.length > 0) {
+      errors.push(`${locale}: ${key} has non-canonical placeholders: ${placeholderErrors.slice(0, 5).join('; ')}`);
     }
 
     const missingAnchors = getSourceAnchorIds(locale, docMap[key]).filter((id) => !value.includes(`<a id="${id}"></a>`));
