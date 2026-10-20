@@ -271,6 +271,7 @@ function mdxToMarkdown(content, locale) {
   // Steps are numbered only when the page has a single <Steps> block.
   const numberSteps = countStepBlocks(content) <= 1;
   let stepNumber = 0;
+  let inStep = false;
   const description = getFrontmatterAttr(content, 'description');
   let output = convertAnchorSpans(removeHiddenBlocks(stripFrontmatter(content)));
 
@@ -286,13 +287,21 @@ function mdxToMarkdown(content, locale) {
     .replace(/{\s*\/\*[\s\S]*?\*\/\s*}/g, '')
     .replace(/^\s*import\s+.*$/gm, '')
     .replace(/^\s*export\s+.*$/gm, '')
-    .replace(/<Step\b([^>]*)>/g, (_tag, attrs) => {
-      const title = getAttr(attrs, 'title') || 'Step';
+    // A tab inside a step (one tab per product version) is a sub-heading of
+    // that step, so it sits one level below the step heading.
+    .replace(/<Step\b([^>]*)>|<\/Step>|<Tab\b([^>]*)>/g, (tag, stepAttrs, tabAttrs) => {
+      if (tag === '</Step>') {
+        inStep = false;
+        return '\n';
+      }
+      if (tag.startsWith('<Tab')) {
+        return `\n\n${inStep ? '####' : '###'} ${getAttr(tabAttrs, 'title') || 'Tab'}\n\n`;
+      }
+      inStep = true;
+      const title = getAttr(stepAttrs, 'title') || 'Step';
       stepNumber += 1;
       return `\n\n${numberSteps ? formatStepHeading(locale, stepNumber, title) : `### ${title}`}\n\n`;
     })
-    .replace(/<\/Step>/g, '\n')
-    .replace(/<Tab\b([^>]*)>/g, (_tag, attrs) => `\n\n### ${getAttr(attrs, 'title') || 'Tab'}\n\n`)
     .replace(/<\/Tab>/g, '\n')
     .replace(/<Card\b([^>]*)\/>/g, (_tag, attrs) => {
       const title = getAttr(attrs, 'title');
