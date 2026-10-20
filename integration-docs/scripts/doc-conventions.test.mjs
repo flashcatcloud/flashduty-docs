@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   countStepBlocks,
+  findIntegrationUrlSpans,
   findPlaceholderErrors,
   findStepErrors,
   findTildeErrors,
@@ -115,4 +116,9 @@ test('findStepErrors rejects numbered steps on a page with several <Steps> block
   assert.deepEqual(findStepErrors('### Step 1: A\n### Step 2: B', 1), []);
   assert.match(findStepErrors('### Step 1: A\n### Step 2: B', 2)[0], /2 <Steps> blocks/);
   assert.deepEqual(findStepErrors('### A\n### B', 2), []);
+});
+
+test('findIntegrationUrlSpans reports the legacy span in either quote style', () => {
+  assert.deepEqual(findIntegrationUrlSpans("填写<span class='integration_url'>推送地址</span>\nok\n<span class=\"integration_url\">x</span>"), [1, 3]);
+  assert.deepEqual(findIntegrationUrlSpans('<span id="anchor"></span> 推送地址（`{integration_url}`）'), []);
 });

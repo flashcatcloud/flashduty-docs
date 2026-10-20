@@ -148,3 +148,11 @@ export function findTildeErrors(markdown) {
   });
   return errors;
 }
+
+// The build strips <span> tags, so a push URL given only through this span would
+// reach the console as the bare words "push URL". Write {integration_url} instead.
+export function findIntegrationUrlSpans(mdx) {
+  return mdx
+    .split('\n')
+    .flatMap((line, index) => (/class=["']integration_url["']/.test(line) ? [index + 1] : []));
+}
