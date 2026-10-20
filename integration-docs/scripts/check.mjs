@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { docMap, optionalMissingKeys } from '../src/doc-map.mjs';
-import { findPlaceholderErrors, findStepErrors } from './doc-conventions.mjs';
+import { findPlaceholderErrors, findStepErrors, findTildeErrors } from './doc-conventions.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
@@ -191,6 +191,11 @@ function checkLocale(locale, docs) {
     const placeholderErrors = findPlaceholderErrors(value);
     if (placeholderErrors.length > 0) {
       errors.push(`${locale}: ${key} has non-canonical placeholders: ${placeholderErrors.slice(0, 5).join('; ')}`);
+    }
+
+    const tildeErrors = findTildeErrors(value);
+    if (tildeErrors.length > 0) {
+      errors.push(`${locale}: ${key} has strikethrough-prone tildes: ${tildeErrors.slice(0, 5).join('; ')}`);
     }
 
     const missingAnchors = getSourceAnchorIds(locale, docMap[key]).filter((id) => !value.includes(`<a id="${id}"></a>`));

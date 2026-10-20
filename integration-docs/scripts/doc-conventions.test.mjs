@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   findPlaceholderErrors,
   findStepErrors,
+  findTildeErrors,
   formatStepHeading,
   normalizeStepHeadings
 } from './doc-conventions.mjs';
@@ -90,4 +91,15 @@ test('findPlaceholderErrors rejects a token preceded by $ anywhere in the doc', 
 
 test('findPlaceholderErrors only looks inside code blocks', () => {
   assert.deepEqual(findPlaceholderErrors('形如 `<push URL>`，或 <span class="integration_url">推送地址</span>'), []);
+});
+
+test('findTildeErrors flags ranges written with ~ in prose and headings', () => {
+  assert.equal(findTildeErrors('适用于 5.x~6.x\n或 3.x~4.x').length, 2);
+  assert.equal(findTildeErrors('### Version 5.x~6.x').length, 1);
+  assert.equal(findTildeErrors('![5.x~6.x](https://example.com/a.png)').length, 1);
+});
+
+test('findTildeErrors accepts en dashes, code, and spaced or leading tildes', () => {
+  assert.deepEqual(findTildeErrors('适用于 5.x–6.x，路径 ~/bin，`3.x~6.x`'), []);
+  assert.deepEqual(findTildeErrors('```\nversion 3.x~6.x\n```\n~~~text\na~b\n~~~'), []);
 });

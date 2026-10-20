@@ -120,3 +120,21 @@ export function findPlaceholderErrors(markdown) {
   });
   return errors;
 }
+
+// remark-gfm reads a pair of single `~` as strikethrough, so a version or number
+// range such as `5.x~6.x` must use an en dash outside code.
+export function findTildeErrors(markdown) {
+  const errors = [];
+  let inFence = false;
+  markdown.split('\n').forEach((line, index) => {
+    if (/^\s*(?:```|~~~)/.test(line)) {
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+    const prose = line.replace(/`[^`\n]*`/g, '');
+    const match = prose.match(/\S~\S/);
+    if (match) errors.push(`line ${index + 1} has "${match[0]}" between non-space characters; use an en dash for ranges`);
+  });
+  return errors;
+}
