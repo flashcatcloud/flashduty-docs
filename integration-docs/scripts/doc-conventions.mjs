@@ -82,6 +82,10 @@ export function findStepErrors(markdown) {
   return errors;
 }
 
+// The console replaces every occurrence of a token, so `${integration_key}` would
+// become `$<key>` and be expanded by the shell.
+const SHELL_EXPANSION_OF_TOKEN = /\$\{(?:integration_url|integration_key|api_host)\}/;
+
 const CANONICAL_PLACEHOLDERS = new Set(['{integration_url}', '{integration_key}']);
 
 // Spellings of the two placeholders that predate the canonical tokens.
@@ -100,6 +104,10 @@ export function findPlaceholderErrors(markdown) {
     if (line.trimStart().startsWith('```')) {
       inFence = !inFence;
       return;
+    }
+    const shellExpansion = line.match(SHELL_EXPANSION_OF_TOKEN);
+    if (shellExpansion) {
+      errors.push(`line ${index + 1} uses "${shellExpansion[0]}", which the console rewrites to "$<value>"; rename the shell variable`);
     }
     if (!inFence) return;
     for (const pattern of NON_CANONICAL_PLACEHOLDERS) {

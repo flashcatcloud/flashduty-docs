@@ -58,7 +58,7 @@ test('findPlaceholderErrors accepts canonical tokens and unrelated braces', () =
     '```',
     '```bash',
     "curl '{api_host}/event/push/alert/standard?integration_key={integration_key}'",
-    'URL="${address}/event/push/alert/standard?integration_key=${integration_key}"',
+    'URL="${address}/event/push/alert/standard?integration_key=${INTEGRATION_KEY}',
     'echo "${FLASHDUTY_PUSH_URL}" {{ template }}',
     '```'
   ].join('\n');
@@ -78,6 +78,14 @@ test('findPlaceholderErrors rejects old spellings and hard-coded push URLs insid
   ]) {
     assert.equal(findPlaceholderErrors(`\`\`\`\n${line}\n\`\`\``).length, 1, line);
   }
+});
+
+test('findPlaceholderErrors rejects a token preceded by $ anywhere in the doc', () => {
+  for (const token of ['integration_url', 'integration_key', 'api_host']) {
+    assert.equal(findPlaceholderErrors(`URL="\${${token}}/x"`).length, 1, token);
+    assert.equal(findPlaceholderErrors(`\`\`\`\nURL="\${${token}}/x"\n\`\`\``).length, 1, token);
+  }
+  assert.deepEqual(findPlaceholderErrors('```\nURL="${INTEGRATION_KEY}"\n```'), []);
 });
 
 test('findPlaceholderErrors only looks inside code blocks', () => {
