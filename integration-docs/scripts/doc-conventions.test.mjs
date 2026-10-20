@@ -58,7 +58,7 @@ test('findPlaceholderErrors accepts canonical tokens and unrelated braces', () =
     '```',
     '```bash',
     "curl '{api_host}/event/push/alert/standard?integration_key={integration_key}'",
-    'URL="${address}/event/push/alert/standard?integration_key=${INTEGRATION_KEY}',
+    'URL="${address}/event/push/alert/standard?integration_key=${INTEGRATION_KEY}"',
     'echo "${FLASHDUTY_PUSH_URL}" {{ template }}',
     '```'
   ].join('\n');
