@@ -33,18 +33,26 @@ Sensu Go 没有内置的 HTTP 处理器。本集成使用一个 pipe 处理器�
 
 以下步骤基于 Sensu Go 6.x，使用 `sensuctl` 完成，需要能在目标命名空间创建处理器、管道并修改检查的权限。
 
-<Steps>
-<Step title="确认后端可以执行 curl">
+<Step title="确认 Sensu 后端可以执行 curl">
 
-pipe 处理器在 **Sensu 后端**（`sensu-backend`）所在的机器上执行，不在 agent 上执行。确认后端机器安装了 `curl`，并能访问 Flashduty 推送地址。
+**操作路径**：Sensu 后端（`sensu-backend`）所在主机的终端
+
+pipe 处理器在 **Sensu 后端**所在的机器上执行，不在 agent 上执行。确认后端机器安装了 `curl`，并能访问 Flashduty 推送地址。
 
 <Note>官方 Docker 镜像 `sensu/sensu` 不含 `curl`。可以基于该镜像构建自己的镜像并执行 `apk add --no-cache curl`。</Note>
 
 </Step>
 
-<Step title="创建处理器和管道">
+<Step title="在 Sensu Go 中创建处理器和管道">
 
-将下面的内容保存为 `flashduty.yml`，把 `<推送地址>` 替换为 Flashduty 集成的完整推送地址（保留两侧的引号）：
+**操作路径**：Sensu 后端所在主机的终端 › `sensuctl create --file flashduty.yml`
+
+以下步骤基于 Sensu Go 6.x，需要能在目标命名空间创建处理器、管道并修改检查的权限。将下面的内容保存为 `flashduty.yml`：
+
+| 字段 | 必填/可选 | 填写内容 |
+| :--- | :--- | :--- |
+| Handler `spec.command` 中的推送地址 | 必填 | `{integration_url}`（保留两侧的单引号） |
+| Pipeline 的 `filters` | 必填 | 内置过滤器 `is_incident`，不要改成其他过滤器 |
 
 ```yaml
 ---
@@ -74,6 +82,7 @@ spec:
       api_version: core/v2
 ```
 
+
 然后在目标命名空间中创建：
 
 ```bash
@@ -82,7 +91,7 @@ sensuctl create --file flashduty.yml
 
 处理器和管道属于命名空间。有多个命名空间时，在每个命名空间各执行一次（`sensuctl create --file flashduty.yml --namespace <命名空间>`）。
 
-`is_incident` 是 Sensu 内置的过滤器，只放行状态非 0 的事件和恢复事件（状态从非 0 变为 0 的那一次）。不加这个过滤器时，每次检查执行结果为 OK 也会推送到 Flashduty，推送量会随检查间隔持续增长。
+`is_incident` 是 Sensu 内置的过滤器，只放行状态非 0 的事件和恢复事件（状态从非 0 变为 0 的那一次），因此检查恢复时 Flashduty 的告警会自动关闭。不加这个过滤器时，每次检查执行结果为 OK 也会推送到 Flashduty，推送量会随检查间隔持续增长。
 
 <Warning>
 
@@ -98,6 +107,13 @@ sensuctl create --file flashduty.yml
 </Step>
 
 <Step title="把管道添加到检查">
+
+**操作路径**：Sensu 后端所在主机的终端 › `sensuctl check info`；agent 主机 › `/etc/sensu/agent.yml`
+
+| 字段 | 必填/可选 | 填写内容 |
+| :--- | :--- | :--- |
+| 检查的 `spec.pipelines` | 必填 | 引用管道 `flashduty`（`type: Pipeline`、`api_version: core/v2`） |
+| agent 的 `keepalive-pipelines` | 可选 | `core/v2.Pipeline.flashduty`，agent 失联（keepalive）时也推送 |
 
 对需要推送的每个检查，先导出它的定义：
 
@@ -133,14 +149,20 @@ keepalive-pipelines:
 
 </Step>
 
-<Step title="验证生命周期">
+<Step title="验证告警触发与恢复">
+
+**操作路径**：Sensu 后端所在主机的终端 › `sensuctl event resolve <实体名> <检查名>`
 
 Sensu Go 没有「发送测试通知」按钮。让一个检查真正进入 WARNING 或 CRITICAL（例如调低阈值），确认 Flashduty 收到活动告警；再恢复该检查，或执行 `sensuctl event resolve <实体名> <检查名>`，确认原告警关闭。
 
 也可以用 Sensu 事件 API 为一个代理实体手动创建事件：先发送 `status` 为 `2` 的事件，再发送 `status` 为 `0` 的事件，两次请求的实体名和检查名保持一致。
 
+回到 Flashduty，集成显示 **最新事件时间**，说明配置成功。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
+
 </Step>
-</Steps>
 
 ## Alert Key
 
@@ -169,7 +191,7 @@ Flashduty 用实体所在的命名空间 `entity.metadata.namespace`、实体名
 | `3` 及其他非 0 值 | UNKNOWN 或自定义状态 | Info |
 | `0` | OK | 恢复 |
 
-恢复事件的等级取 `check.history` 中最近一次非 0 状态对应的等级。
+恢复事件的等级取 `check.history` 中最近一次非 0 状态对应的等级；`history` 中没有非 0 状态时为 Info。
 
 ## 告警内容
 
