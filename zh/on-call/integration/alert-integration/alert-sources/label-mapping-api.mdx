@@ -7,6 +7,10 @@ keywords: ["标签映射", "API", "告警增强", "CMDB", "标签丰富", "外�
 
 ## 功能概述
 
+<Note>
+映射标签规则类型需要专业版，控制台中显示 PRO 标记，其他版本无法选择。
+</Note>
+
 标签映射 API 允许您构建自定义的外部服务来增强告警标签。工作流程如下：
 
 1. Flashduty 接收到告警事件
@@ -14,6 +18,66 @@ keywords: ["标签映射", "API", "告警增强", "CMDB", "标签丰富", "外�
 3. 您的 API 查询外部数据源（如 CMDB、数据库等）
 4. API 返回计算得到的增强标签
 5. Flashduty 将返回的标签附加到告警上
+
+## 配置步骤
+
+<Steps>
+<Step title="在您的系统中实现标签映射接口">
+
+**操作路径**：您的服务 › 对外暴露的 HTTP 接口（Flashduty 服务端必须能访问）
+
+| 项 | 要求 |
+| :-- | :--- |
+| 方法与格式 | `POST`，`Content-Type: application/json` |
+| 请求体 | `result_label_keys`（期望返回的标签 Key 列表）和 `event`（当前告警事件），字段见下文「API 规范」 |
+| 成功响应 | HTTP `200`，JSON 对象 `{"result_labels": {...}}`，Key 必须是 `result_label_keys` 中的标签名；取不到的标签不要放进响应 |
+| 无结果 | 返回 `404`，或 `200` + 空的 `result_labels: {}` |
+| 认证 | 通过自定义请求头（如 `X-Custom-Auth`）传递，受下文「Header 安全约束」限制 |
+
+接口须在步骤 2 配置的超时时间（1–3 秒）内返回，请求与响应的完整字段、示例见下文「API 规范」。
+
+</Step>
+<Step title="在 Flashduty 中创建映射 API">
+
+**操作路径**：配置中心 › 映射数据 › API › 创建 API
+
+| 字段 | 必填 | 说明 |
+| :--- | :-: | :--- |
+| API名称（`api_name`） | 是 | 服务的可读名称，用于在 UI 中选择和引用，例如 "CMDB 资产查询 API"，不超过 200 个字符 |
+| Endpoint（`url`） | 是 | API 的请求 URL，必须以 `http` 或 `https` 开头，不超过 500 个字符，支持使用模板变量 |
+| 描述（`description`） | 否 | 对该服务的详细描述 |
+| 管理团队 | 是 | 该 API 的管理团队 |
+| 启用TLS验证（`insecure_skip_verify` 的反向开关） | 否 | 默认启用；关闭后请求 HTTPS 时跳过证书验证，仅建议在测试环境或使用自签名证书时关闭 |
+| 超时时间（秒，`timeout`） | 否 | 请求超时时间，可取值：1–3 |
+| 重试次数（`retry_count`） | 否 | 请求失败后的重试次数，可取值：0–1 |
+| 自定义请求头（`headers`） | 否 | HTTP 请求头，用于传递自定义认证信息，受 [安全黑名单](#HeaderBlacklist) 限制 |
+| 状态（`status`） | 否 | 仅 API 字段，服务状态，如 `enabled`、`disabled` |
+
+单个账户最多创建 50 个 API。创建元数据表（Schema）同样需要专业版。
+
+</Step>
+<Step title="在集成中添加标签映射规则">
+
+**操作路径**：集成中心 › 告警事件 › 目标集成 › 标签增强 › 添加标签规则 › 映射标签
+
+配置标签增强规则时，只需要关注以下配置：
+
+| 字段 | 必填 | 说明 |
+| :--- | :-: | :--- |
+| 映射类型 | 是 | 选择 `API`（另一选项为 `元数据表`） |
+| API | 是 | 选择步骤 2 创建的映射 API。找不到时点击 **快速创建** |
+| 新标签（`result_label_keys`） | 是 | 指定期望从 API 获取的标签列表。Flashduty 会自动将此列表和当前的 `event` 对象组合成请求体发送给您的 API，可随时修改，无需修改 API 代码 |
+| 覆盖 | 否 | 结果标签已存在时是否覆盖 |
+
+</Step>
+<Step title="推送测试事件并确认标签">
+
+**操作路径**：Flashduty 控制台中该事件所生成告警的详情页
+
+向该集成推送一条满足规则条件的事件，在对应告警的详情中查看标签：接口返回的 `result_labels`。接口失败（超时、`404`、`5xx`）时告警照常处理，只是不附加增强标签，系统可能按重试次数重试。
+
+</Step>
+</Steps>
 
 <span id="ApiSpec"></span>
 
@@ -129,36 +193,6 @@ POST, Content-Type:"application/json"
 > **提示：** 返回 `200 OK` 状态码 + 空的 `result_labels: {}` 对象也会被视为"无结果"，但使用 `404` 状态码是更规范的做法。
 
 </div>
-
-<span id="ServiceConfig"></span>
-
-## 配置映射服务
-
-在 Flashduty 中配置标签映射时，您需要先创建一个映射服务，然后在标签增强规则中引用该服务。
-
-### 映射服务字段说明
-
-<div class="md-block">
-
-| 字段名 | 类型 | 必填 | 释义 |
-| :--------: | :-------------------: | :--: | :--------- |
-| api_name | string | 是 | 服务的可读名称，用于在 UI 中选择和引用，例如 "CMDB 资产查询 API" |
-| description | string | 否 | 对该服务的详细描述 |
-| url | string | 是 | API 的请求 URL，支持使用模板变量 |
-| headers | map[string]string | 否 | HTTP 请求头，用于传递自定义认证信息，受[安全黑名单](#HeaderBlacklist)限制 |
-| timeout | int | 否 | 请求超时时间（单位：秒），可取值：1–3 |
-| retry_count | int | 否 | 请求失败后的重试次数，可取值：0–1 |
-| insecure_skip_verify | bool | 否 | 请求 HTTPS 时跳过证书验证 |
-| status | string | 否 | 服务状态，如 enabled、disabled |
-
-</div>
-
-### 标签增强规则配置
-
-配置标签增强规则时，只需要关注以下配置：
-
-1. **result_label_keys**：指定期望从 API 获取的标签列表，Flashduty 会自动将此列表和当前的 `event` 对象组合成请求体发送给您的 API
-2. **映射服务**：选择或配置 API 服务的 URL、Headers 等信息
 
 <span id="HeaderBlacklist"></span>
 
