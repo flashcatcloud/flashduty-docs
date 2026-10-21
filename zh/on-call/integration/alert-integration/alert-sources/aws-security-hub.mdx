@@ -31,10 +31,69 @@ AWS Security Hub 把每条发现作为 **Security Hub Findings - Imported** 事�
 
 ## 在 AWS 中配置
 
-1. 按 [AWS EventBridge 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-eventbridge) 中的「方式一：API destination」创建 Connection 和 API destination，endpoint 填 Flashduty 推送地址。也可以用「方式二：SNS 主题」
-2. 在 EventBridge 控制台创建规则：**Rule type** 选择 **Rule with an event pattern**
-3. 用模板构建事件模式时，**Event source** 选择 **AWS services**，**AWS service** 选择 **Security Hub**，**Event type** 选择 **Security Hub Findings - Imported**。也可以选择 **Custom patterns (JSON editor)** 粘贴下面的模式
-4. **Target types** 选择 **EventBridge API destination**，并选择上面创建的 API destination
+<Steps>
+<Step title="在 Amazon EventBridge 中创建指向 Flashduty 的 API destination">
+
+<Tabs>
+<Tab title="API destination（推荐）">
+
+**操作路径**：Amazon EventBridge › Integration › API destinations › Connections › Create connection
+
+| 字段 | 填写 |
+| --- | --- |
+| Connection name（必填） | `Flashduty` |
+| Destination type（必填，位于 Authorization） | `Other` |
+| Authorization type（必填） | `API Key` |
+| API key name（必填） | `Flashduty` |
+| Value（必填） | `{integration_key}`，即推送地址中的 `integration_key` |
+
+点击 **Create** 保存。
+
+**操作路径**：Amazon EventBridge › Integration › API destinations › Create API destination
+
+| 字段 | 填写 |
+| --- | --- |
+| Name（必填） | `Flashduty` |
+| API destination endpoint（必填） | `{integration_url}` |
+| HTTP method（必填） | `POST` |
+| Connection type（必填） | `Use an existing connection`，选择上面创建的 `Flashduty` |
+
+点击 **Create** 保存。
+
+</Tab>
+<Tab title="SNS 主题">
+
+**操作路径**：Amazon SNS › Subscriptions › Create subscription（主题不存在时先到 Topics › Create topic，`Type` 选择 `Standard`）
+
+| 字段 | 填写 |
+| --- | --- |
+| Topic ARN（必填） | 用于转发 EventBridge 事件的 SNS 主题 |
+| Protocol（必填） | `HTTPS` |
+| Endpoint（必填） | `{integration_url}`，须是**本集成**的推送地址 |
+
+点击 **Create subscription**，等待订阅状态变为 `Confirmed`。Flashduty 只访问 `sns.<region>.amazonaws.com`、`sns.<region>.amazonaws.com.cn` 和 `sns.<region>.amazonaws.eu` 上的订阅确认地址。SNS 主题和订阅的完整步骤见 [AWS CloudWatch 集成](/zh/on-call/integration/alert-integration/alert-sources/aws-cloudwatch)。
+
+</Tab>
+</Tabs>
+
+</Step>
+<Step title="在 Amazon EventBridge 中创建 Security Hub 事件规则">
+
+**操作路径**：Amazon EventBridge › Buses › Rules › Create rule
+
+| 字段 | 填写 |
+| --- | --- |
+| Builder（控制台提供选择时） | `Advanced Builder` |
+| Name（必填） | 自定义名称，例如 `Flashduty-SecurityHub` |
+| Event bus | `AWS default event bus` |
+| Rule type（必填） | `Rule with an event pattern`，点击 **Next** |
+| Event source（必填） | `AWS events or EventBridge partner events` |
+| Creation method / Method（必填） | `Custom pattern (JSON editor)` |
+| Event pattern（必填） | 粘贴下方事件模式，点击 **Next** |
+| Target types（必填） | `EventBridge API destination`，选择 `Use an existing API destination` 和上一步创建的 `Flashduty`（SNS 方式选择 `AWS service` › `SNS topic` 和该主题） |
+| Execution role（必填） | `Create a new role for this specific resource` |
+| Input transformer | 不要配置，保持发送完整事件 |
+
 
 事件模式：
 
@@ -44,6 +103,8 @@ AWS Security Hub 把每条发现作为 **Security Hub Findings - Imported** 事�
   "detail-type": ["Security Hub Findings - Imported"]
 }
 ```
+
+用模板构建事件模式时，**Event source** 选择 **AWS services**，**AWS service** 选择 **Security Hub**，**Event type** 选择 **Security Hub Findings - Imported**。也可以选择 **Custom patterns (JSON editor)** 粘贴上面的模式。
 
 如果只想接收部分发现，在 `detail.findings` 中按发现属性过滤。例如只接收 Amazon Inspector 产生的发现：
 
@@ -64,6 +125,27 @@ AWS Security Hub 把每条发现作为 **Security Hub Findings - Imported** 事�
 </Warning>
 
 Security Hub 的规则在每个启用了 Security Hub 的区域分别创建。自定义动作触发的 **Security Hub Findings - Custom Action** 事件也带有发现，Flashduty 用同样的方式处理，把 `detail-type` 加进规则即可。
+
+</Step>
+<Step title="构造一条 Security Hub 测试事件并确认">
+
+**操作路径**：能访问 Flashduty 推送地址的终端
+
+规则只会转发 AWS 真实产生的事件。要立即验证，可以向推送地址 POST 一条按事件格式构造的测试事件：
+
+```bash
+curl -X POST '{integration_url}' \
+  -H 'Content-Type: application/json' \
+  -d '{"version":"0","id":"flashduty-test-1","detail-type":"Security Hub Findings - Imported","source":"aws.securityhub","account":"123456789012","region":"us-east-1","resources":[],"detail":{"findings":[{"ProductArn":"arn:aws:securityhub:us-east-1::product/aws/securityhub","Id":"flashduty-test-finding","ProductName":"Security Hub","AwsAccountId":"123456789012","Title":"Flashduty integration test","Severity":{"Label":"HIGH"},"Workflow":{"Status":"NEW"},"RecordState":"ACTIVE","Resources":[{"Id":"arn:aws:s3:::flashduty-test","Type":"AwsS3Bucket"}]}]}}'
+```
+
+把 `Workflow.Status` 改为 `RESOLVED` 再发送一次，可确认告警自动恢复。几秒后回到 Flashduty，集成显示 **最新事件时间**，说明配置成功。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
+
+</Step>
+</Steps>
 
 ## 字段映射
 

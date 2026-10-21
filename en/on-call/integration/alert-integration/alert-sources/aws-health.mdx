@@ -31,38 +31,120 @@ Get an integration push URL in either of the two ways below. **Choose the AWS Ev
 
 ## Configure in AWS
 
-AWS Health events are forwarded by an EventBridge rule whose target is an API destination that points to the Flashduty push URL (an SNS topic target also works). The steps for both target types are in the [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge); for AWS Health you only need the event pattern below.
+<Steps>
+<Step title="Create an API destination that points to Flashduty in Amazon EventBridge">
 
-1. Create a rule in EventBridge with this event pattern:
+<Tabs>
+<Tab title="API destination (recommended)">
 
-   ```json
-   {
-     "source": ["aws.health"],
-     "detail-type": ["AWS Health Event"]
-   }
-   ```
+**Where**: Amazon EventBridge › Integration › API destinations › Connections › Create connection
 
-2. To narrow the scope, add filters under `detail`. For example, only `issue` events for Amazon EC2:
+| Field | Value |
+| --- | --- |
+| Connection name (required) | `Flashduty` |
+| Destination type (required, under Authorization) | `Other` |
+| Authorization type (required) | `API Key` |
+| API key name (required) | `Flashduty` |
+| Value (required) | `{integration_key}`, the `integration_key` in the push URL |
 
-   ```json
-   {
-     "source": ["aws.health"],
-     "detail-type": ["AWS Health Event"],
-     "detail": {
-       "eventTypeCategory": ["issue"],
-       "service": ["EC2"]
-     }
-   }
-   ```
+Click **Create** to save.
 
-3. Choose the API destination that points to the Flashduty push URL as the rule target and save the rule
-4. While creating the rule, you can pick the AWS Health sample events in the **Test event pattern** panel of the EventBridge console to confirm the pattern matches
+**Where**: Amazon EventBridge › Integration › API destinations › Create API destination
+
+| Field | Value |
+| --- | --- |
+| Name (required) | `Flashduty` |
+| API destination endpoint (required) | `{integration_url}` |
+| HTTP method (required) | `POST` |
+| Connection type (required) | `Use an existing connection`, then select the `Flashduty` connection created above |
+
+Click **Create** to save.
+
+</Tab>
+<Tab title="SNS topic">
+
+**Where**: Amazon SNS › Subscriptions › Create subscription (if the topic does not exist yet, go to Topics › Create topic first and set `Type` to `Standard`)
+
+| Field | Value |
+| --- | --- |
+| Topic ARN (required) | The SNS topic that forwards EventBridge events |
+| Protocol (required) | `HTTPS` |
+| Endpoint (required) | `{integration_url}`, which must be the push URL of **this** integration |
+
+Click **Create subscription** and wait until the subscription status is `Confirmed`. Flashduty only visits subscription confirmation URLs on `sns.<region>.amazonaws.com`, `sns.<region>.amazonaws.com.cn` and `sns.<region>.amazonaws.eu`. For the full SNS topic and subscription steps, see the [AWS CloudWatch integration](/en/on-call/integration/alert-integration/alert-sources/aws-cloudwatch).
+
+</Tab>
+</Tabs>
+
+</Step>
+<Step title="Create a rule for AWS Health events in Amazon EventBridge">
+
+**Where**: Amazon EventBridge › Buses › Rules › Create rule
+
+| Field | Value |
+| --- | --- |
+| Builder (when the console offers a choice) | `Advanced Builder` |
+| Name (required) | A name of your choice, for example `Flashduty-Health` |
+| Event bus | `AWS default event bus` |
+| Rule type (required) | `Rule with an event pattern`, then click **Next** |
+| Event source (required) | `AWS events or EventBridge partner events` |
+| Creation method / Method (required) | `Custom pattern (JSON editor)` |
+| Event pattern (required) | Paste the event pattern below, then click **Next** |
+| Target types (required) | `EventBridge API destination`, choose `Use an existing API destination` and the `Flashduty` one created in the previous step (for the SNS method choose `AWS service` › `SNS topic` and that topic) |
+| Execution role (required) | `Create a new role for this specific resource` |
+| Input transformer | Do not configure; send the full event |
+
+
+Event pattern:
+
+```json
+{
+  "source": ["aws.health"],
+  "detail-type": ["AWS Health Event"]
+}
+```
+
+To narrow the scope, add filters under `detail`. For example, only `issue` events for Amazon EC2:
+
+```json
+{
+  "source": ["aws.health"],
+  "detail-type": ["AWS Health Event"],
+  "detail": {
+    "eventTypeCategory": ["issue"],
+    "service": ["EC2"]
+  }
+}
+```
+
+While creating the rule, pick the AWS Health sample events in **Sample events** and click **Test pattern** (the **Test event pattern** panel in older consoles) to confirm the pattern matches.
 
 Per AWS: rules only receive events for your own account, and public (PUBLIC) events can take up to an hour to start arriving after you create a rule. For events aggregated through AWS Organizations, see the AWS guide [Aggregating AWS Health events](https://docs.aws.amazon.com/health/latest/ug/aggregating-health-events.html).
 
 <Warning>
 Do not filter out `statusCode` in the event pattern, for example by matching only `"statusCode": ["open"]`. Otherwise the notification that the event closed never arrives and the alert cannot recover.
 </Warning>
+
+</Step>
+<Step title="Send a test AWS Health event and confirm">
+
+**Where**: A terminal that can reach the Flashduty push URL
+
+The rule only forwards events that AWS really emits. To verify right away, POST a test event shaped like the real one to the push URL:
+
+```bash
+curl -X POST '{integration_url}' \
+  -H 'Content-Type: application/json' \
+  -d '{"version":"0","id":"flashduty-test-1","detail-type":"AWS Health Event","source":"aws.health","account":"123456789012","region":"us-east-1","resources":[],"detail":{"eventArn":"arn:aws:health:us-east-1::event/EC2/AWS_EC2_OPERATIONAL_ISSUE/flashduty-test","service":"EC2","eventTypeCode":"AWS_EC2_OPERATIONAL_ISSUE","eventTypeCategory":"issue","eventScopeCode":"ACCOUNT_SPECIFIC","statusCode":"open","affectedAccount":"123456789012"}}'
+```
+
+Send it again with `statusCode` set to `closed` to confirm that the alert recovers automatically. A few seconds later, go back to Flashduty. The integration shows a **latest event time**, which means the setup works.
+{/* console:
+The checklist item "Receive the first event" is marked done at the same time.
+*/}
+
+</Step>
+</Steps>
 
 ## Regions and backup rules
 
