@@ -34,29 +34,40 @@ LimaCharlie 检测只在命中时发送一次，没有对应的恢复通知，�
 ## 在 LimaCharlie 中配置
 
 <Steps>
-<Step title="新增 Webhook 输出">
+<Step title="在 LimaCharlie 中新增 Webhook 输出">
 
-1. 登录 LimaCharlie 控制台，选择目标组织，进入 **Outputs**
-2. 点击 **Add Output**，**Stream** 选择 **Detections**，**Destination** 选择 **Webhook**（逐条发送，不要选 Webhook Bulk）
-3. **Name** 填写 `flashduty`
-4. **DESTINATION HOST** 粘贴 Flashduty 集成的完整推送地址，含 `integration_key` 参数
-5. **SECRET KEY** 填写任意字符串。LimaCharlie 会用它计算请求头 `lc-signature`，Flashduty 不校验该请求头
+**操作路径**：LimaCharlie 控制台（选择目标组织） › Outputs › Add Output
+
+| 字段 | 填写内容 | 必填 |
+| :--- | :--- | :--- |
+| **Stream** | **Detections** | 必填 |
+| **Destination** | **Webhook**（逐条发送，不要选 Webhook Bulk） | 必填 |
+| **Name** | `flashduty` | 必填 |
+| **DESTINATION HOST** | `{integration_url}`（完整推送地址，含 `integration_key` 参数） | 必填 |
+| **SECRET KEY** | 任意字符串。LimaCharlie 会用它计算请求头 `lc-signature`，Flashduty 不校验该请求头 | 可选 |
 
 保存后，组织内每条检测都会向该地址发送一次 POST，请求体为 LimaCharlie 的检测 JSON。
 
 </Step>
 
-<Step title="确认有 D&R 规则产生检测">
+<Step title="确认 LimaCharlie 中有 D&R 规则产生检测">
+
+**操作路径**：LimaCharlie 控制台 › Automation › D&R Rules
 
 Webhook 输出只转发检测。请确认组织中已启用会产生检测的 D&R 规则（自建规则或托管规则集）。只想转发部分检测时，可以在输出上设置分类或标签过滤。
 
 </Step>
 
-<Step title="验证连通性">
+<Step title="在 LimaCharlie 中验证连通性">
+
+**操作路径**：LimaCharlie 控制台 › Outputs › Add Output（测试输出）
 
 输出的 Stream 只能在新建时选择，创建后无法修改。要先验证地址可达，可以另建一个测试输出：**Stream** 选择 **Audit Logs**，**Destination** 选择 **Webhook**，**DESTINATION HOST** 填同一个推送地址。然后在组织内做一次管理操作（例如停用再启用一条 D&R 规则）触发审计事件。Flashduty 对非检测的请求返回 200，不创建告警，因此这一步只验证地址可达。验证完成后删除这个测试输出。
 
-真实验证需要让 D&R 规则命中一次，确认 Flashduty 收到对应告警。
+真实验证需要让 D&R 规则命中一次，回到 Flashduty，集成显示 **最新事件时间**，说明配置成功。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
 
 </Step>
 </Steps>
@@ -65,7 +76,7 @@ Webhook 输出只转发检测。请确认组织中已启用会产生检测的 D&
 
 Flashduty 使用检测的 `detect_id` 作为 Alert Key。LimaCharlie 官方文档将其定义为唯一的检测标识；同一条检测被重发时 `detect_id` 不变，会合并到同一条告警，不同检测各自成为独立告警。
 
-`cat`（检测名称）、`priority` 和时间不参与 Alert Key。请求中没有 `detect_id` 但有 `cat` 时，Flashduty 会返回参数错误。
+`cat`（检测名称）、`priority` 和时间不参与 Alert Key。请求中没有 `detect_id` 但有 `cat` 时，Flashduty 会返回参数错误；`detect_id` 和 `cat` 都没有的请求返回成功并被忽略。
 
 ## 状态和告警等级
 
@@ -84,7 +95,7 @@ LimaCharlie 只提供可选的整数 `priority`（0 到 10），没有等级定�
 | :--- | :--- |
 | 标题 | `cat`，有主机名时追加 ` (routing.hostname)` |
 | 描述 | 检测名称、传感器主机名、`source_rule` 和 `link`（处置手册链接） |
-| 标签 | `detect_id`、`source`（`rule_source`）、`source_rule`（`rule`）、`routing` 中的 `sid`、`oid`、`event_type`、`hostname`、`ext_ip`、`int_ip`，以及 `namespace`、`priority`、`link`、`author` |
+| 标签 | `detect_id`、`source`（标签 `rule_source`）、`source_rule`（标签 `rule`）、`routing` 中的 `sid`（标签 `sensor_id`）、`oid`（标签 `org_id`）、`event_type`、`ext_ip`（标签 `external_ip`）、`int_ip`（标签 `internal_ip`），以及 `namespace`、`priority`、`link`、`author`；另有 `check`（检测名称）、`resource` 和 `host`（传感器主机名）、`source=limacharlie` |
 
 命中的原始事件（`detect`）和提取的 IOC（`detect_data`）不写入标签。
 
@@ -109,7 +120,7 @@ LimaCharlie 只提供可选的整数 `priority`（0 到 10），没有等级定�
 
 <Accordion title="Flashduty 返回参数错误">
 
-请求体必须是 JSON，且 `detect_id` 非空。使用了 `custom_transform` 改写请求体时，请保留 `cat` 和 `detect_id` 字段。
+请求体必须是 JSON；有 `cat` 时 `detect_id` 必须非空（两者都没有的请求返回成功并被忽略）。使用了 `custom_transform` 改写请求体时，请保留 `cat` 和 `detect_id` 字段。
 
 </Accordion>
 </AccordionGroup>

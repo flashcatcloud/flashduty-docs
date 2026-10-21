@@ -34,9 +34,17 @@ You can get the integration push URL in either of the following ways.
 You need permission to change the Trivy Operator deployment, and the operator must be able to reach the Flashduty push URL over HTTPS.
 
 <Steps>
-<Step title="Set the webhook broadcast URL">
+<Step title="Set the webhook broadcast URL in Trivy Operator">
 
-When installed with Helm, set `operator.webhookBroadcastURL` to the full Flashduty push URL, including `integration_key`:
+**Where**: Trivy Operator Helm values › operator.webhookBroadcastURL (without Helm: operator deployment › environment variable `OPERATOR_WEBHOOK_BROADCAST_URL`)
+
+| Setting (Helm / environment variable) | Value | Required |
+| :--- | :--- | :--- |
+| `operator.webhookBroadcastURL` / `OPERATOR_WEBHOOK_BROADCAST_URL` | `{integration_url}` (the full push URL, including `integration_key`) | Required |
+| `operator.webhookBroadcastTimeout` / `OPERATOR_WEBHOOK_BROADCAST_TIMEOUT` | Request timeout, default `30s` | Optional |
+| `operator.webhookSendDeletedReports` / `OPERATOR_SEND_DELETED_REPORTS` | Keep the default `false` | Optional |
+
+When installed with Helm:
 
 ```bash
 helm upgrade --install trivy-operator aqua/trivy-operator \
@@ -45,21 +53,32 @@ helm upgrade --install trivy-operator aqua/trivy-operator \
   --set operator.webhookBroadcastURL="{integration_url}"
 ```
 
-Without Helm, set the environment variable `OPERATOR_WEBHOOK_BROADCAST_URL` on the operator deployment. Optionally set `operator.webhookBroadcastTimeout` (request timeout, default `30s`).
-
 Leave `operator.webhookSendDeletedReports` at its default `false`. When it is on, every message is wrapped in `verb` and `operatorObject` (Flashduty parses this), but the object sent for a deleted report has no identifying fields, so Flashduty ignores those messages.
 
 </Step>
 
-<Step title="Turn on auto-close">
+<Step title="Turn on auto-close in Flashduty">
 
-The operator pushes only when a report is created or changes and never sends a "resolved" notification. Flashduty recovers an alert automatically only when the same report is scanned again and its summary has no findings at any severity. A rolling update creates a new ReplicaSet and a new report object, so the alert for the old report does not recover. Turn on [auto-close](/en/on-call/channel/create-edit) in the channel that receives these alerts, start the timer from **Incident triggered**, and set a duration of **7 days**.
+**Where**: Flashduty console › Channels › Edit channel › Auto-resolve timeout
+
+| Setting | Value | Required |
+| :--- | :--- | :--- |
+| Auto-close | On | Required |
+| Timer start | Incident triggered | Required |
+| Duration | 7 days | Required |
+
+The operator pushes only when a report is created or changes and never sends a "resolved" notification. Flashduty recovers an alert automatically only when the same report is scanned again and its summary has no findings at any severity. A rolling update creates a new ReplicaSet and a new report object, so the alert for the old report does not recover. Turn on [auto-close](/en/on-call/channel/create-edit) in the channel that receives these alerts.
 
 </Step>
 
-<Step title="Verify">
+<Step title="Verify that Trivy Operator reports reach Flashduty">
 
-Trivy Operator has no test button. After the operator finishes a scan, check Flashduty for an alert for the scanned workload. To trigger one quickly, deploy a workload with an old image (for example `nginx:1.16`).
+**Where**: kubectl terminal of the cluster running Trivy Operator
+
+Trivy Operator has no test button. Restart the operator or wait for it to finish a scan, then check Flashduty for an alert for the scanned workload. To trigger one quickly, deploy a workload with an old image (for example `nginx:1.16`), then run `kubectl get vulnerabilityreports -n <namespace>` to confirm the report exists.
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
 
 </Step>
 </Steps>
@@ -68,7 +87,7 @@ Trivy Operator has no test button. After the operator finishes a scan, check Fla
 
 Flashduty uses the UID of the report object (`metadata.uid` in the request body) as the Alert Key. The operator re-sends the same object when a report changes, the UID stays the same, and the pushes merge into one alert. Different workloads, containers and report types have different UIDs and do not affect each other. When a workload is recreated or a report object is deleted and generated again, it gets a new UID and opens a new alert.
 
-Changes to the report name, image tag, scanner version or summary counts do not change the Alert Key. Requests without `metadata.uid` are rejected. A request body larger than 4 MiB is rejected with a parameter error; the description lists at most the 10 most severe findings, so a large report does not enlarge the alert.
+Changes to the report name, image tag, scanner version or summary counts do not change the Alert Key. Messages without a severity summary (`report.summary`: SBOM reports, compliance reports, deleted-report notices) get a success response and create no alert; a request that has a summary but no `metadata.uid` is rejected. A request body larger than 4 MiB is rejected with a parameter error; the description lists at most the 10 most severe findings, so a large report does not enlarge the alert.
 
 ## Status and severity
 
@@ -107,6 +126,7 @@ The description holds the summary counts and the 10 most severe findings. For ex
 - **No alerts arrive**: confirm `operator.webhookBroadcastURL` took effect (check `OPERATOR_WEBHOOK_BROADCAST_URL` on the operator pod) and that the operator log shows no push errors. The operator does not check the response status and does not retry a failed request
 - **An alert does not recover**: the operator sends no "resolved" notification. An alert recovers only when the report is scanned again with an all-zero summary, so turn on channel auto-close for the rest
 - **Several alerts for one workload**: each report object (vulnerability, exposed secret, config audit and so on) and each container has its own UID, so each opens its own alert
-- **Rejected with "metadata.uid is required"**: the request body is not a Trivy Operator report object
+- **Rejected with "metadata.uid is required"**: the request body has a severity summary but no `metadata.uid`, so it is not a complete Trivy Operator report object
+- **Push succeeds but no alert appears**: the message has no severity summary (SBOM report, compliance report, deleted report), so Flashduty returns success and ignores it
 
 See [Trivy Operator: Webhook integration](https://aquasecurity.github.io/trivy-operator/latest/tutorials/integrations/webhook/) for more.
