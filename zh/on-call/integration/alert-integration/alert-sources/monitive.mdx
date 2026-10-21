@@ -31,15 +31,55 @@ keywords: ["告警集成", "Monitive", "uptimemonitoring.com", "Uptime", "Webhoo
 
 ## 在 Monitive 中配置
 
-Monitive 的 Webhook 按监控项配置，每个监控项只有一个 Webhook 位置，需要对每个要接入的监控项分别设置。
+Monitive 的 Webhook 收件人在账号级创建一次，可以附加到多个监控项；每个要接入的监控项都需要附加该收件人。
 
 <Steps>
-<Step title="为监控项设置 Webhook">
+<Step title="在 Monitive 中创建 Webhook 收件人">
 
-任选一种方式，把 Flashduty 的完整推送地址设为监控项的 Webhook URL：
+**操作路径**：Monitive 控制台（app.uptimemonitoring.com） › Recipients › Create recipient
 
-- 控制台：登录 [app.uptimemonitoring.com](https://app.uptimemonitoring.com)，打开监控项，在 **Webhook** 区域填入推送地址并保存
-- API：调用 `PUT /api/v1/monitors/{monitorID}/webhook`
+| 字段 | 填写 |
+| --- | --- |
+| 收件人类型（必填） | **Webhook** |
+| URL（必填） | `{integration_url}` |
+| 通知事件（必填） | 勾选 **Down**、**Up**、**Flapping** 三项。缺少 Up 时 Flashduty 无法恢复告警，缺少 Flapping 时抖动通知不会送达 |
+| Default for new monitors（可选） | 开启后，新建的监控项自动附加该收件人 |
+
+点击 **Create recipient**。页面会显示一次 **Your recipient secret**（签名密钥），之后无法再查看；Flashduty 不校验签名，可以不保存。
+
+也可以用 API 创建，省略 `events` 时默认勾选 `down`、`up`、`flapping` 三项：
+
+```bash
+curl -X POST https://api.uptimemonitoring.com/api/v1/recipients \
+  -H "Authorization: Bearer $UPTIMEMONITORING_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"flashduty","type":"webhook","config":{"url":"{integration_url}"}}'
+```
+
+</Step>
+
+<Step title="把收件人附加到监控项">
+
+在 Monitive 中打开要接入的监控项的设置，勾选上一步创建的收件人，点击 **Save**。每个要接入的监控项都需要附加一次；监控项没有任何收件人时，控制台会提示 “No one is listening to this monitor”。
+
+用 API 附加时，`PUT /api/v1/monitors/{monitorID}/recipients` 会替换该监控项的完整收件人集合，而不是追加。请先 `GET` 读取现有集合，加入新收件人后整体提交，否则会解除该监控项上的其他收件人。
+
+</Step>
+
+<Step title="在 Monitive 中让监控项真正宕机并确认">
+
+让监控项真正宕机（例如把它指向一个返回 5xx 的地址），随后回到 Flashduty，集成显示 **最新事件时间**，并出现一条活动告警；再恢复目标，确认原告警恢复。Monitive 在跨区域复检确认后才会切换状态，通常需要一到数分钟。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
+
+调用 `POST /api/v1/recipients/{recipientID}/test` 可以向收件人发送一次测试投递，但只能证明连通性：Monitive 文档没有公开测试请求的内容，如果其中不含 `monitor_id`，Flashduty 会返回参数错误，这不表示配置有误，请以真实宕机验证。
+
+</Step>
+</Steps>
+
+<Note>
+旧版接口 `PUT /api/v1/monitors/{monitorID}/webhook`（每个监控项一个 Webhook 位置）仍可使用，但 Monitive 已将其标记为弃用，新接入请使用上面的收件人方式。已有 Webhook 时，通过旧接口重新设置只替换 URL，签名密钥保持不变。
 
 ```bash
 curl -X PUT https://api.uptimemonitoring.com/api/v1/monitors/$MONITOR_ID/webhook \
@@ -47,17 +87,7 @@ curl -X PUT https://api.uptimemonitoring.com/api/v1/monitors/$MONITOR_ID/webhook
   -H "Content-Type: application/json" \
   -d '{"url":"{integration_url}"}'
 ```
-
-已有 Webhook 时，重新设置只替换 URL，签名密钥保持不变。
-
-</Step>
-
-<Step title="验证生命周期">
-
-让监控项真正宕机（例如把它指向一个返回 5xx 的地址），确认 Flashduty 收到活动告警；再恢复目标，确认原告警恢复。Monitive 在跨区域复检确认后才会切换状态，通常需要一到数分钟。
-
-</Step>
-</Steps>
+</Note>
 
 <Note>
 Monitive 每次投递都带 `X-UptimeMonitoring-Signature`（HMAC-SHA256）请求头。Flashduty 不校验该签名，推送地址中的 `integration_key` 即为凭证，请勿泄露。投递失败（非 2xx 或超时）时，Monitive 会按 1 分钟、5 分钟、30 分钟、2 小时的间隔最多重试 5 次。
@@ -93,7 +123,7 @@ Monitive 的通知不带告警等级。宕机属于服务中断信号，按 Crit
 | :--- | :--- |
 | `monitor.down` | Critical |
 | `monitor.flapping` | Warning |
-| `monitor.up` | 恢复，原等级沿用告警上一次的等级 |
+| `monitor.up` | 恢复事件会关闭告警，告警等级不变 |
 
 ## 常见问题
 
@@ -112,7 +142,7 @@ Monitive 的文档说明抖动记录在流量稳定后结束，但没有说明�
 
 <Accordion title="免费版可以使用吗？">
 
-Webhook 包含在免费版中，每个监控项一个 Webhook，免费版最多 50 个监控项。
+Webhook 包含在免费版中，免费版最多 50 个监控项；一个 Webhook 收件人可以附加到多个监控项。
 
 </Accordion>
 </AccordionGroup>
