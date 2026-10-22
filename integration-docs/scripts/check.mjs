@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { docMap, optionalMissingKeys } from '../src/doc-map.mjs';
+import { countStepBlocks, findIntegrationUrlSpans, findPlaceholderErrors, findStepErrors, findTildeErrors } from './doc-conventions.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, '..');
@@ -49,6 +50,11 @@ function getSourceDescription(locale, entry) {
 
   const match = frontmatter[1].match(/^description:\s*(?:"([^"]*)"|'([^']*)'|(.+?))\s*$/m);
   return (match?.[1] || match?.[2] || match?.[3] || '').trim();
+}
+
+function readSourceIfPresent(locale, entry) {
+  const absolute = path.resolve(repoRoot, locale, entry);
+  return fs.existsSync(absolute) ? fs.readFileSync(absolute, 'utf8') : '';
 }
 
 function getSourceAnchorIds(locale, entry) {
@@ -180,6 +186,26 @@ function checkLocale(locale, docs) {
     const malformedTables = findMalformedHtmlTables(value);
     if (malformedTables.length > 0) {
       errors.push(`${locale}: ${key} has malformed HTML tables: ${malformedTables.slice(0, 5).join('; ')}`);
+    }
+
+    const stepErrors = findStepErrors(value, countStepBlocks(readSourceIfPresent(locale, docMap[key])));
+    if (stepErrors.length > 0) {
+      errors.push(`${locale}: ${key} has inconsistent steps: ${stepErrors.join('; ')}`);
+    }
+
+    const placeholderErrors = findPlaceholderErrors(value);
+    if (placeholderErrors.length > 0) {
+      errors.push(`${locale}: ${key} has non-canonical placeholders: ${placeholderErrors.slice(0, 5).join('; ')}`);
+    }
+
+    const tildeErrors = findTildeErrors(value);
+    if (tildeErrors.length > 0) {
+      errors.push(`${locale}: ${key} has strikethrough-prone tildes: ${tildeErrors.slice(0, 5).join('; ')}`);
+    }
+
+    const spanLines = findIntegrationUrlSpans(readSourceIfPresent(locale, docMap[key]));
+    if (spanLines.length > 0) {
+      errors.push(`${locale}: ${key} gives the push URL through an integration_url span (stripped by the build) at lines ${spanLines.slice(0, 5).join(', ')}; use {integration_url}`);
     }
 
     const missingAnchors = getSourceAnchorIds(locale, docMap[key]).filter((id) => !value.includes(`<a id="${id}"></a>`));

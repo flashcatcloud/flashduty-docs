@@ -34,9 +34,18 @@ Kapacitor 的 [post 事件处理器](https://docs.influxdata.com/kapacitor/v1/re
 以下三种方式任选其一，推送地址都要填写完整（包含 `?integration_key=...`）。
 
 <Steps>
-<Step title="在 TICKscript 中直接写地址">
+<Step title="在 Kapacitor 中添加 post 事件处理器">
 
-在 `alert()` 节点上添加 `post`：
+<Tabs>
+<Tab title="TICKscript 直接写地址">
+
+**操作路径**：TICKscript 文件 › `alert()` 节点 › `.post()`
+
+| 配置项 | 填写 |
+| --- | --- |
+| `.post(url)`（必填） | `{integration_url}` |
+| `.noRecoveries()`（不要使用） | 使用后 Kapacitor 不发送恢复事件，告警无法恢复 |
+| `.captureResponse()`（可选） | 响应状态码不是 2xx 时在 Kapacitor 日志中记录 Flashduty 返回的内容 |
 
 ```javascript
 stream
@@ -45,19 +54,27 @@ stream
         .groupBy('host')
     |alert()
         .crit(lambda: "usage_idle" < 10)
-        .post('https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<集成密钥>')
+        .post('{integration_url}')
 ```
 
-</Step>
+修改脚本后，用 `kapacitor define` 重新定义任务。
 
-<Step title="或使用 kapacitor.conf 中的 endpoint">
+</Tab>
+<Tab title="kapacitor.conf 中的 endpoint">
+
+**操作路径**：kapacitor.conf › `[[httppost]]`，TICKscript 文件 › `alert()` 节点 › `.post().endpoint()`
 
 在 `kapacitor.conf` 中配置 `[[httppost]]`，TICKscript 里用名称引用，避免把集成密钥写进每个脚本：
+
+| 配置项 | 填写 |
+| --- | --- |
+| `endpoint`（必填） | 自定义名称，例如 `flashduty`，TICKscript 中引用 |
+| `url`（必填） | `{integration_url}` |
 
 ```toml
 [[httppost]]
   endpoint = "flashduty"
-  url = "https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<集成密钥>"
+  url = "{integration_url}"
 ```
 
 ```javascript
@@ -67,21 +84,52 @@ stream
         .endpoint('flashduty')
 ```
 
-</Step>
+修改 `kapacitor.conf` 后重启 Kapacitor，再用 `kapacitor define` 重新定义任务。需要在 Kapacitor 日志中看到 Flashduty 返回的错误时，给 `.post()` 加 `.captureResponse()`。
 
-<Step title="或使用 topic 处理器">
+</Tab>
+<Tab title="topic 处理器">
 
-多个任务向同一个 topic 发送告警时，可以只定义一个处理器。处理器文件 `flashduty.yaml`：
+**操作路径**：处理器文件 `flashduty.yaml`，Kapacitor 所在主机的终端
+
+多个任务向同一个 topic 发送告警时，可以只定义一个处理器。
+
+| 配置项 | 填写 |
+| --- | --- |
+| `id`（必填） | 处理器名称，例如 `flashduty` |
+| `topic`（必填） | 告警所属 topic，例如 `cpu-alerts` |
+| `kind`（必填） | `post` |
+| `options.url`（必填） | `{integration_url}` |
+| `options.capture-response`（可选） | `true`，响应状态码不是 2xx 时记录响应内容 |
+
+处理器文件 `flashduty.yaml`：
 
 ```yaml
 id: flashduty
 topic: cpu-alerts
 kind: post
 options:
-  url: https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<集成密钥>
+  url: {integration_url}
 ```
 
 然后执行 `kapacitor define-topic-handler flashduty.yaml`，并在任务的 `alert()` 节点上使用 `.topic('cpu-alerts')`。
+
+</Tab>
+</Tabs>
+
+</Step>
+
+<Step title="让 Kapacitor 发出一次真实告警并确认">
+
+**操作路径**：Kapacitor 所在主机的终端
+
+请让任务的告警条件真正满足一次（例如临时调高 `.crit()` 的阈值），再恢复正常：
+
+1. 确认 Flashduty 收到一条告警，集成显示 **最新事件时间**
+2. 条件回到 `OK` 后，确认原告警恢复（Kapacitor 发送 `level` 为 `OK` 的事件，Flashduty 按相同的 `id` 关闭告警）
+3. 没有收到告警时，在 `.post()` 上加 `.captureResponse()` 查看 Flashduty 的返回
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
 
 </Step>
 </Steps>
