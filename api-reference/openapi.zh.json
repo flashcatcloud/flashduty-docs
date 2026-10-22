@@ -23651,6 +23651,14 @@
             "type": "string",
             "description": "该条目的显示别名；发送时不使用。"
           },
+          "disable_at": {
+            "type": "boolean",
+            "description": "是否关闭该机器人的 @ 提醒：`true` 关闭，`false` 强制开启。不传则沿用原有行为——企业微信默认开启，其他机器人类型仅在设置了 `user_schema_id` 时开启。"
+          },
+          "user_schema_id": {
+            "type": "string",
+            "description": "机器人解析 @ 提醒所用的用户映射规则 ID（24 位 ObjectID 十六进制串）。飞书机器人开启 @ 提醒时必须提供；保存时会转为小写。"
+          },
           "data_source_id": {
             "type": "integer",
             "format": "int64",
@@ -34000,6 +34008,11 @@
             "format": "int64",
             "description": "最近收到事件时间的 Unix 时间戳（秒），尚未收到事件时为 `0`。"
           },
+          "last_source_time": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最近一次从上游工具收到事件的时间戳（Unix 秒），包含随后被丢弃、未成为告警的事件；尚未收到过事件时为 `0`。"
+          },
           "editable": {
             "type": "boolean",
             "description": "当前调用者是否通过集成对象权限校验；执行写操作还需集成中心管理权限。"
@@ -34184,6 +34197,11 @@
             "type": "integer",
             "format": "int64",
             "description": "最近收到事件时间的 Unix 时间戳（秒），尚未收到事件时为 `0`。"
+          },
+          "last_source_time": {
+            "type": "integer",
+            "format": "int64",
+            "description": "最近一次从上游工具收到事件的时间戳（Unix 秒），包含随后被丢弃、未成为告警的事件；尚未收到过事件时为 `0`。"
           },
           "editable": {
             "type": "boolean",
@@ -36229,6 +36247,687 @@
             "$ref": "#/components/schemas/RumDashboardTextViz"
           }
         ]
+      },
+      "AlertEvent": {
+        "type": "object",
+        "description": "一条原始告警事件，与接入管道接收和存储的结构一致。",
+        "required": [
+          "event_status"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "事件标题。未提供 `title_rule` 时必填；两者共同决定告警标题的来源。"
+          },
+          "title_rule": {
+            "type": "string",
+            "description": "标题模板，例如 `$service::$alertname`；`title` 为空时用它从 `labels` 生成标题。"
+          },
+          "description": {
+            "type": "string",
+            "description": "事件描述，超过 2048 字符会被截断。"
+          },
+          "alert_key": {
+            "type": "string",
+            "description": "用于将多个事件合并到同一告警的去重键。可为空：预览会随机生成一个键，因此不会发生合并。"
+          },
+          "event_status": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info",
+              "Ok"
+            ],
+            "description": "事件状态。`Critical`、`Warning`、`Info` 为触发事件，`Ok` 为恢复事件。"
+          },
+          "event_severity": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info"
+            ],
+            "description": "触发事件携带的严重级别。预览会在触发事件上用 `event_status` 覆盖它。"
+          },
+          "event_time": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix 时间戳（秒）。预览使用当前时间，传入值会被忽略。"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "事件标签集合，最多 50 项；键为标签名，值为字符串。"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertImage"
+            },
+            "description": "事件附带的图片。"
+          }
+        }
+      },
+      "EnrichmentPreviewEvent": {
+        "type": "object",
+        "description": "标签增强预览当时的事件。",
+        "required": [
+          "title",
+          "labels"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "执行到当前步骤时的事件标题。"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "执行到当前步骤时的标签集合。"
+          }
+        }
+      },
+      "EnrichmentSample": {
+        "type": "object",
+        "description": "集成收到的一条原始事件，即进入标签增强之前的样子。",
+        "required": [
+          "received_at",
+          "event",
+          "description_truncated"
+        ],
+        "properties": {
+          "received_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "集成收到该事件的时间戳（Unix 秒）。"
+          },
+          "event": {
+            "$ref": "#/components/schemas/AlertEvent",
+            "description": "原始事件，尚未经过任何标签增强规则。"
+          },
+          "description_truncated": {
+            "type": "boolean",
+            "description": "存储的描述被截到样本大小上限时为 `true`。"
+          },
+          "dropped": {
+            "type": "boolean",
+            "description": "集成在事件成为告警之前将其丢弃时为 `true`；为 `false` 时不返回该字段。"
+          }
+        }
+      },
+      "EnrichStep": {
+        "type": "object",
+        "description": "单条标签增强规则对事件做了什么。",
+        "required": [
+          "index",
+          "kind",
+          "matched",
+          "skipped_reason",
+          "detail",
+          "added",
+          "removed",
+          "changed",
+          "mapping_row"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "规则在 `rules` 中的位置，从 0 开始。"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "extraction",
+              "composition",
+              "mapping",
+              "drop"
+            ],
+            "description": "执行过的规则类型。\n| 取值 | 含义 |\n|---|---|\n| `extraction` | 通过正则或 GJson 从事件 `title`、`description` 或 `labels.*` 中提取值并写入标签。 |\n| `composition` | 用模板渲染事件并把结果写入标签。 |\n| `mapping` | 从映射规则或外部映射 API 查询标签。 |\n| `drop` | 从告警中删除指定标签。 |"
+          },
+          "matched": {
+            "type": "boolean",
+            "description": "规则的 `if` 条件是否全部满足；`false` 表示规则没有改变任何标签。"
+          },
+          "skipped_reason": {
+            "type": "string",
+            "description": "规则被跳过的原因：`condition_not_met`、`regex_not_matched`、`source_label_missing`、`mapping_row_not_found`、`result_label_exists` 或 `error`。规则正常执行时为空。"
+          },
+          "detail": {
+            "type": "string",
+            "description": "规则自身的细节：命中的映射行、渲染出的值，`skipped_reason` 为 `error` 时为错误信息。"
+          },
+          "added": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "规则新写入的标签；未新增时为 `null`。"
+          },
+          "removed": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "规则删除的标签；未删除时为 `null`。"
+          },
+          "changed": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "规则改写的标签，每个值为 `[旧值, 新值]` 两元数组；未改写时为 `null`。"
+          },
+          "mapping_row": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "规则命中的映射行；不是映射规则或未命中时为 `null`。"
+          }
+        }
+      },
+      "AlertPipelinePreviewEvent": {
+        "type": "object",
+        "description": "告警处理预览当时的事件。",
+        "required": [
+          "title",
+          "description",
+          "severity",
+          "labels"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "事件标题。"
+          },
+          "description": {
+            "type": "string",
+            "description": "事件描述。"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info",
+              "Ok"
+            ],
+            "description": "此时事件携带的严重级别。"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "标签集合。"
+          }
+        }
+      },
+      "PipelineStep": {
+        "type": "object",
+        "description": "单条告警处理规则对事件做了什么。",
+        "required": [
+          "index",
+          "kind",
+          "result",
+          "detail"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "规则在 `rules` 中的位置，从 0 开始。"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "title_reset",
+              "description_reset",
+              "severity_reset",
+              "alert_drop",
+              "alert_inhibit"
+            ],
+            "description": "执行过的规则类型。\n| 取值 | 含义 |\n|---|---|\n| `title_reset` | 用规则模板改写标题。 |\n| `description_reset` | 用规则模板改写描述。 |\n| `severity_reset` | 把严重级别和状态重置为规则中的 `severity`。 |\n| `alert_drop` | 直接丢弃事件，不产生告警。 |\n| `alert_inhibit` | 存在匹配的活跃源告警时丢弃事件。 |"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "not_matched",
+              "not_executed"
+            ],
+            "description": "规则结果：`applied`（改变了事件或终止了后续处理）、`not_matched`（`if` 条件没有全部满足）、`not_executed`（前面的规则已终止处理，或事件是恢复事件）。"
+          },
+          "detail": {
+            "type": "string",
+            "description": "上述结果对应的 `condition_not_met`、`no_active_source_alert`、`inhibit_not_evaluated` 或 `recovery_event`；其他情况为结果值或错误信息。"
+          }
+        }
+      },
+      "AlertEmailPreviewSettings": {
+        "type": "object",
+        "description": "要预览的邮件集成配置，与保存接口接受的形状一致。",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "alwaysTrigger",
+              "triggerByTitle",
+              "triggerOrCloseByRule"
+            ],
+            "description": "集成判定一封邮件归属的方式；省略时默认 `alwaysTrigger`。\n- `alwaysTrigger`：每封邮件都是独立告警，键随机生成。\n- `triggerByTitle`：每封邮件都是触发事件，告警键由邮件主题哈希得到。\n- `triggerOrCloseByRule`：由 `rules` 决定邮件是触发、关闭还是丢弃，未命中的由 `default` 处理。"
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/AlertEmailRule"
+            },
+            "description": "`mode` 为 `triggerOrCloseByRule` 时按顺序匹配的规则，每条都必须是非空对象，最多 50 条。"
+          },
+          "default": {
+            "type": "string",
+            "enum": [
+              "trigger",
+              "discard"
+            ],
+            "description": "`mode` 为 `triggerOrCloseByRule` 且没有规则命中时的处理方式：`trigger` 转为触发事件，`discard` 丢弃。"
+          }
+        }
+      },
+      "AlertEmailRule": {
+        "type": "object",
+        "description": "匹配一封邮件并从中提取告警键的规则。",
+        "required": [
+          "type",
+          "extract_from",
+          "extract_pattern",
+          "filters"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "trigger",
+              "close"
+            ],
+            "description": "`trigger` 表示命中的邮件转为触发事件，`close` 转为恢复事件。"
+          },
+          "extract_from": {
+            "type": "string",
+            "enum": [
+              "title",
+              "description"
+            ],
+            "description": "告警键从邮件的哪一部分提取：`title` 或 `description`。取 `description` 时依次搜索正文纯文本、带表格的正文、描述。"
+          },
+          "extract_pattern": {
+            "type": "string",
+            "description": "提取告警键的正则表达式，捕获到的分组用 `,` 拼接为键来源；没有捕获到任何内容时回退为邮件主题。"
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilterCondition"
+            },
+            "description": "邮件必须全部满足的条件；传 `[]` 表示匹配所有邮件。"
+          }
+        }
+      },
+      "AlertEmailPreviewEmail": {
+        "type": "object",
+        "description": "要预览的邮件内容。",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "邮件主题。"
+          },
+          "body": {
+            "type": "string",
+            "description": "邮件正文：以 `<` 开头按 HTML 处理，否则按纯文本处理。"
+          },
+          "from": {
+            "type": "string",
+            "description": "发件人地址。"
+          },
+          "eml": {
+            "type": "string",
+            "description": "整封邮件文件（`.eml`）的 base64 内容。提供后它会替代 `subject`、`body` 和 `from`，并按 SMTP 服务端的解析方式解析。"
+          }
+        }
+      },
+      "AlertEmailPreviewEvent": {
+        "type": "object",
+        "description": "这封邮件会产生的告警事件。",
+        "required": [
+          "title",
+          "description",
+          "event_status",
+          "event_severity",
+          "labels"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "事件标题。"
+          },
+          "description": {
+            "type": "string",
+            "description": "事件描述。"
+          },
+          "event_status": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info",
+              "Ok"
+            ],
+            "description": "这封邮件产生的事件状态。"
+          },
+          "event_severity": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info"
+            ],
+            "description": "触发事件的严重级别；恢复事件为空。"
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "从邮件中提取的标签：正文、发件人、收件人和主题都会以标签形式暴露。"
+          }
+        }
+      },
+      "AlertEmailPreviewParsed": {
+        "type": "object",
+        "description": "转换时实际读到的邮件内容。",
+        "required": [
+          "subject",
+          "from",
+          "body",
+          "body_text"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "解析后的邮件主题。"
+          },
+          "from": {
+            "type": "string",
+            "description": "从邮件中取到的发件人地址。"
+          },
+          "body": {
+            "type": "string",
+            "description": "转换使用的正文：存在 HTML 部分时用它，否则用纯文本部分。"
+          },
+          "body_text": {
+            "type": "string",
+            "description": "纯文本正文；从描述中提取告警键时优先在这里搜索。"
+          }
+        }
+      },
+      "EnrichmentPreviewRequest": {
+        "type": "object",
+        "description": "`POST /enrichment/preview` 的请求体。",
+        "required": [
+          "integration_id",
+          "event"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "预览所依据的集成 ID；发送的规则不会被保存。"
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/EnrichRule"
+            },
+            "description": "按顺序尝试的标签增强规则，最多 50 条；不会使用该集成已存的规则。"
+          },
+          "event": {
+            "$ref": "#/components/schemas/AlertEvent",
+            "description": "要跑规则的事件。"
+          }
+        }
+      },
+      "EnrichmentPreviewResponse": {
+        "type": "object",
+        "description": "标签增强预览的结果。",
+        "required": [
+          "before",
+          "after",
+          "steps"
+        ],
+        "properties": {
+          "before": {
+            "$ref": "#/components/schemas/EnrichmentPreviewEvent",
+            "description": "事件进入时的样子。"
+          },
+          "after": {
+            "$ref": "#/components/schemas/EnrichmentPreviewEvent",
+            "description": "规则执行后的事件，触发事件已按接入方式渲染 `[TPL]` 标签、标题和描述。"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichStep"
+            },
+            "description": "每条规则一项，按执行顺序排列。"
+          }
+        }
+      },
+      "EnrichmentSampleListRequest": {
+        "type": "object",
+        "description": "`POST /enrichment/sample/list` 的请求体。",
+        "required": [
+          "integration_id"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "要查看最近原始事件的集成 ID。"
+          }
+        }
+      },
+      "EnrichmentSampleListResponse": {
+        "type": "object",
+        "description": "某个集成最近的原始事件。",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentSample"
+            },
+            "description": "样本列表，最新的在前；尚未收到事件时为空。"
+          }
+        }
+      },
+      "AlertPipelinePreviewRequest": {
+        "type": "object",
+        "description": "`POST /alert/pipeline/preview` 的请求体。",
+        "required": [
+          "integration_id",
+          "event"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "预览所用的集成 ID；该集成已存的标签增强会先执行。"
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/AlertPipeline"
+            },
+            "description": "按顺序尝试的告警处理规则，最多 50 条；不会使用该集成已存的处理规则。"
+          },
+          "event": {
+            "$ref": "#/components/schemas/AlertEvent",
+            "description": "要跑规则的事件。"
+          }
+        }
+      },
+      "AlertPipelinePreviewResponse": {
+        "type": "object",
+        "description": "告警处理预览的结果。",
+        "required": [
+          "is_recovery",
+          "before",
+          "after",
+          "dropped",
+          "inhibited",
+          "steps"
+        ],
+        "properties": {
+          "is_recovery": {
+            "type": "boolean",
+            "description": "事件是恢复事件时为 `true`：接入会直接关闭告警，不执行处理规则。"
+          },
+          "before": {
+            "$ref": "#/components/schemas/AlertPipelinePreviewEvent",
+            "description": "事件进入时的样子。"
+          },
+          "after": {
+            "$ref": "#/components/schemas/AlertPipelinePreviewEvent",
+            "description": "规则执行后、通知模板渲染出的事件。"
+          },
+          "dropped": {
+            "type": "boolean",
+            "description": "某条规则丢弃了该事件、不会产生告警时为 `true`。"
+          },
+          "inhibited": {
+            "type": "boolean",
+            "description": "某条规则因存在匹配的活跃源告警而抑制了该事件时为 `true`。"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipelineStep"
+            },
+            "description": "每条规则一项，按执行顺序排列。"
+          }
+        }
+      },
+      "AlertEmailPreviewRequest": {
+        "type": "object",
+        "description": "`POST /alert/email/preview` 的请求体。",
+        "required": [
+          "settings",
+          "email"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "提供初始配置的邮件集成 ID。传 `0` 或不传等价于控制台在新建页面、集成尚不存在时的场景。"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/AlertEmailPreviewSettings",
+            "description": "要预览的配置，按保存接口的规则校验。"
+          },
+          "email": {
+            "$ref": "#/components/schemas/AlertEmailPreviewEmail",
+            "description": "要转换的邮件。"
+          }
+        }
+      },
+      "AlertEmailPreviewResponse": {
+        "type": "object",
+        "description": "配置对这封邮件的判定，以及转换实际读到的内容。",
+        "required": [
+          "result",
+          "matched_rule",
+          "key_source",
+          "key_fallback",
+          "alert_key",
+          "event",
+          "email"
+        ],
+        "properties": {
+          "result": {
+            "type": "string",
+            "enum": [
+              "trigger",
+              "close",
+              "discard"
+            ],
+            "description": "配置对这封邮件的判定：`trigger`（触发事件）、`close`（恢复事件）、`discard`（丢弃）。"
+          },
+          "matched_rule": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "命中的规则下标，从 0 开始；没有规则命中时为 `null`，`alwaysTrigger` 与 `triggerByTitle` 模式下始终为 `null`。"
+          },
+          "key_source": {
+            "type": "string",
+            "description": "告警键的哈希来源。`alwaysTrigger` 模式下每封邮件各自成为告警，或被丢弃时为空。"
+          },
+          "key_fallback": {
+            "type": "boolean",
+            "description": "规则的正则没有捕获到内容、改用邮件主题作为键来源时为 `true`。"
+          },
+          "alert_key": {
+            "type": "string",
+            "description": "`key_source` 的哈希值。`alwaysTrigger` 模式下每封邮件使用随机键，此字段为空。"
+          },
+          "event": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AlertEmailPreviewEvent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "这封邮件产生的事件；邮件被丢弃时为 `null`。"
+          },
+          "email": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AlertEmailPreviewParsed"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "转换实际读到的邮件内容；无法解析邮件时为 `null`。"
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -74868,6 +75567,522 @@
               },
               "example": {
                 "id": 12
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alert/email/preview": {
+      "post": {
+        "operationId": "alert-read-email-preview",
+        "summary": "预览邮件转告警效果",
+        "description": "用未保存的邮件集成配置，按接入的方式处理一封邮件，返回判定结果与生成的事件。",
+        "tags": [
+          "On-call/集成中心"
+        ],
+        "x-mint": {
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **协作空间管理**（`on-call`）或 **集成中心查看**（`on-call`）或 **集成中心管理**（`on-call`） |\n\n## 使用说明\n\n- 不会写入任何数据：不创建也不修改集成、告警或事件。\n- `integration_id` 只用于带入该集成已存的地址前缀；地址本身不参与处理，因此在新建页面同样可用。\n- `settings` 会走保存接口同一套校验：不支持的 `mode`、规则 `type`、`extract_from` 或非法的 `extract_pattern` 会在解析邮件之前就返回 `InvalidParameter`。\n- 提供 `eml` 时按邮件文件解析，并受 SMTP 邮件大小上限约束；响应中的 `email` 展示解析器实际读到的内容。\n- 配置丢弃该邮件时 `event` 为 `null`；邮件无法解析时 `email` 为 `null`。\n- `alwaysTrigger` 模式下每封邮件都是独立告警，`alert_key` 与 `key_source` 返回空。",
+          "href": "/zh/api-reference/on-call/integrations/alert-read-email-preview",
+          "metadata": {
+            "sidebarTitle": "预览邮件转告警效果"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/AlertEmailPreviewResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "result": "trigger",
+                    "matched_rule": 0,
+                    "key_source": "checkout 5xx rate above 2%",
+                    "key_fallback": false,
+                    "alert_key": "8f14e45fceea167a5a36dedd4bea2543",
+                    "event": {
+                      "title": "[ALERT] checkout 5xx rate above 2%",
+                      "description": "The checkout service 5xx rate is 3.4% over the last 5 minutes.",
+                      "event_status": "Critical",
+                      "event_severity": "Critical",
+                      "labels": {
+                        "from": "alerts@acme.example.com",
+                        "subject": "[ALERT] checkout 5xx rate above 2%"
+                      }
+                    },
+                    "email": {
+                      "subject": "[ALERT] checkout 5xx rate above 2%",
+                      "from": "alerts@acme.example.com",
+                      "body": "The checkout service 5xx rate is 3.4% over the last 5 minutes.",
+                      "body_text": "The checkout service 5xx rate is 3.4% over the last 5 minutes."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertEmailPreviewRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131,
+                "settings": {
+                  "mode": "triggerOrCloseByRule",
+                  "rules": [
+                    {
+                      "type": "trigger",
+                      "extract_from": "title",
+                      "extract_pattern": "^\\[ALERT\\]\\s*(?P<result>.*)$",
+                      "filters": [
+                        {
+                          "key": "title",
+                          "oper": "IN",
+                          "vals": [
+                            "/[ALERT]/"
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "close",
+                      "extract_from": "title",
+                      "extract_pattern": "^\\[OK\\]\\s*(?P<result>.*)$",
+                      "filters": [
+                        {
+                          "key": "title",
+                          "oper": "IN",
+                          "vals": [
+                            "/[OK]/"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "default": "discard"
+                },
+                "email": {
+                  "subject": "[ALERT] checkout 5xx rate above 2%",
+                  "body": "The checkout service 5xx rate is 3.4% over the last 5 minutes.",
+                  "from": "alerts@acme.example.com"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alert/pipeline/preview": {
+      "post": {
+        "operationId": "alert-read-pipeline-preview",
+        "summary": "预览告警处理规则效果",
+        "description": "用未保存的告警处理规则按接入的方式处理一个事件，返回处理前后的差异。",
+        "tags": [
+          "On-call/告警管理"
+        ],
+        "x-mint": {
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **协作空间管理**（`on-call`）或 **集成中心查看**（`on-call`）或 **集成中心管理**（`on-call`） |\n\n## 使用说明\n\n- 不会保存任何内容，也不创建告警或事件。\n- 该集成已存的标签增强规则会先执行，然后按顺序执行你传入的 `rules`，作用在增强后的事件上。\n- 恢复（`Ok`）事件会直接关闭告警、不执行处理规则：`is_recovery` 为 `true`，每一步都是 `not_executed`，`detail` 为 `recovery_event`。\n- `dropped`、`inhibited` 说明是哪类规则中断了事件：`alert_drop` 直接丢弃，`alert_inhibit` 在存在匹配的活跃源告警时丢弃。该规则之后的步骤为 `not_executed`。\n- 没有规则命中时，`after` 是通知模板渲染后的事件，即在协作空间中会看到的内容。",
+          "href": "/zh/api-reference/on-call/alerts/alert-read-pipeline-preview",
+          "metadata": {
+            "sidebarTitle": "预览告警处理规则效果"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/AlertPipelinePreviewResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "is_recovery": false,
+                    "before": {
+                      "title": "Disk usage 95% on db-3",
+                      "description": "Root filesystem is 95% full on db-3.",
+                      "severity": "Warning",
+                      "labels": {
+                        "service": "mysql",
+                        "env": "prod",
+                        "host": "db-3"
+                      }
+                    },
+                    "after": {
+                      "title": "Disk usage 95% on db-3",
+                      "description": "Root filesystem is 95% full on db-3.",
+                      "severity": "Warning",
+                      "labels": {
+                        "service": "mysql",
+                        "env": "prod",
+                        "host": "db-3"
+                      }
+                    },
+                    "dropped": false,
+                    "inhibited": false,
+                    "steps": [
+                      {
+                        "index": 0,
+                        "kind": "severity_reset",
+                        "result": "not_matched",
+                        "detail": "condition_not_met"
+                      },
+                      {
+                        "index": 1,
+                        "kind": "alert_drop",
+                        "result": "not_matched",
+                        "detail": "condition_not_met"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertPipelinePreviewRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131,
+                "rules": [
+                  {
+                    "kind": "severity_reset",
+                    "if": [
+                      {
+                        "key": "labels.env",
+                        "oper": "IN",
+                        "vals": [
+                          "test"
+                        ]
+                      }
+                    ],
+                    "settings": {
+                      "severity": "Info"
+                    }
+                  },
+                  {
+                    "kind": "alert_drop",
+                    "if": [
+                      {
+                        "key": "title",
+                        "oper": "IN",
+                        "vals": [
+                          "/.*noise.*/"
+                        ]
+                      }
+                    ],
+                    "settings": {}
+                  }
+                ],
+                "event": {
+                  "title": "Disk usage 95% on db-3",
+                  "description": "Root filesystem is 95% full on db-3.",
+                  "event_status": "Warning",
+                  "labels": {
+                    "service": "mysql",
+                    "env": "prod",
+                    "host": "db-3"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/enrichment/preview": {
+      "post": {
+        "operationId": "enrichment-read-preview",
+        "summary": "预览标签增强规则效果",
+        "description": "用未保存的标签增强规则按接入的方式处理一个事件，返回规则逐步的结果。",
+        "tags": [
+          "On-call/标签增强"
+        ],
+        "x-mint": {
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **协作空间管理**（`on-call`）或 **集成中心查看**（`on-call`）或 **集成中心管理**（`on-call`） |\n\n## 使用说明\n\n- 不会保存任何内容，也不创建告警或事件。\n- `integration_id` 必须是本账户的集成，且调用方有权读取它。\n- `mapping_type` 为 `api` 的 `mapping` 规则会用已存的请求头调用账户的映射 API，因此还需要编辑该集成的权限，否则请求失败。\n- `before` 是事件进入时的样子，`after` 是规则执行后的事件；`steps` 逐条说明规则是否满足条件、为什么被跳过、新增/删除/改写了哪些标签。\n- 触发事件会按接入在增强后的方式渲染，因此 `after` 中的 `[TPL]` 标签、标题和描述就是最终形态。\n- `if` 的条件键必须来自告警或变更事件的键（`title`、`description`、`labels.<name>` 等），其他键返回 `InvalidParameter`。",
+          "href": "/zh/api-reference/on-call/alert-enrichment/enrichment-read-preview",
+          "metadata": {
+            "sidebarTitle": "预览标签增强规则效果"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/EnrichmentPreviewResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "before": {
+                      "title": "CPU usage 94% on checkout-7",
+                      "labels": {
+                        "check": "cpu",
+                        "env": "prod",
+                        "host": "checkout-7"
+                      }
+                    },
+                    "after": {
+                      "title": "CPU usage 94% on checkout-7",
+                      "labels": {
+                        "check": "cpu",
+                        "env": "prod",
+                        "host": "checkout-7",
+                        "service_name": "checkout"
+                      }
+                    },
+                    "steps": [
+                      {
+                        "index": 0,
+                        "kind": "extraction",
+                        "matched": true,
+                        "skipped_reason": "",
+                        "detail": "checkout",
+                        "added": {
+                          "service_name": "checkout"
+                        },
+                        "removed": null,
+                        "changed": null,
+                        "mapping_row": null
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentPreviewRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131,
+                "rules": [
+                  {
+                    "kind": "extraction",
+                    "if": [
+                      {
+                        "key": "labels.env",
+                        "oper": "IN",
+                        "vals": [
+                          "prod"
+                        ]
+                      }
+                    ],
+                    "settings": {
+                      "source_field": "labels.host",
+                      "result_label": "service_name",
+                      "pattern": "^(?P<result>[a-z0-9-]+)-\\d+$",
+                      "override": false
+                    }
+                  }
+                ],
+                "event": {
+                  "title": "CPU usage 94% on checkout-7",
+                  "description": "CPU usage above 90% for 5 minutes.",
+                  "event_status": "Critical",
+                  "labels": {
+                    "env": "prod",
+                    "host": "checkout-7",
+                    "check": "cpu"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/enrichment/sample/list": {
+      "post": {
+        "operationId": "enrichment-sample-read-list",
+        "summary": "查询事件样本列表",
+        "description": "查询某个集成最近收到的原始事件，最新的在前。",
+        "tags": [
+          "On-call/标签增强"
+        ],
+        "x-mint": {
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | **协作空间管理**（`on-call`）或 **集成中心查看**（`on-call`）或 **集成中心管理**（`on-call`） |\n\n## 使用说明\n\n- 样本是进入标签增强时的事件，因此能看到规则实际匹配的标签。\n- 集成必须存在，且调用方有权读取它。\n- 每个集成只保留最近 20 条原始事件，保存 7 天；该列表用于核对规则，不用于检索历史。\n- 样本保存最多 8 KiB 的描述（被截断时 `description_truncated` 为 `true`）；超过 64 KiB 的事件不会保留。\n- `dropped` 标记集成在事件成为告警之前丢弃的样本。",
+          "href": "/zh/api-reference/on-call/alert-enrichment/enrichment-sample-read-list",
+          "metadata": {
+            "sidebarTitle": "查询事件样本列表"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/EnrichmentSampleListResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "items": [
+                      {
+                        "received_at": 1792657352,
+                        "event": {
+                          "title": "CPU usage 94% on checkout-7",
+                          "title_rule": "$service::$check",
+                          "description": "CPU usage above 90% for 5 minutes.",
+                          "alert_key": "cpu-usage-high:checkout-7",
+                          "event_status": "Critical",
+                          "event_severity": "Critical",
+                          "event_time": 1792657345,
+                          "labels": {
+                            "check": "cpu",
+                            "env": "prod",
+                            "host": "checkout-7"
+                          },
+                          "images": []
+                        },
+                        "description_truncated": false
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentSampleListRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131
               }
             }
           }

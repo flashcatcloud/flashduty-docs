@@ -23651,6 +23651,14 @@
             "type": "string",
             "description": "Display alias for the entry; not used when sending."
           },
+          "disable_at": {
+            "type": "boolean",
+            "description": "Turn @-mentions off for this robot: `true` disables them, `false` forces them on. Omitted keeps the legacy behaviour — on for WeCom, and for other robot types only when `user_schema_id` is set."
+          },
+          "user_schema_id": {
+            "type": "string",
+            "description": "ID of the user mapping schema (24-character ObjectID hex) the robot resolves @-mentions through. Required by Feishu robots that mention users; stored lowercased."
+          },
           "data_source_id": {
             "type": "integer",
             "format": "int64",
@@ -34000,6 +34008,11 @@
             "format": "int64",
             "description": "Unix timestamp in seconds of the most recent event received. `0` when no event has arrived yet."
           },
+          "last_source_time": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp in seconds of the most recent event received from the upstream tool, including events dropped before they became alerts. `0` when none has arrived yet."
+          },
           "editable": {
             "type": "boolean",
             "description": "Whether the current caller passes the integration object-permission check; write calls also require Integrations Manage."
@@ -34184,6 +34197,11 @@
             "type": "integer",
             "format": "int64",
             "description": "Unix timestamp in seconds of the most recent event received. `0` when no event has arrived yet."
+          },
+          "last_source_time": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp in seconds of the most recent event received from the upstream tool, including events dropped before they became alerts. `0` when none has arrived yet."
           },
           "editable": {
             "type": "boolean",
@@ -36229,6 +36247,687 @@
             "$ref": "#/components/schemas/RumDashboardTextViz"
           }
         ]
+      },
+      "AlertEvent": {
+        "type": "object",
+        "description": "One raw alert event, in the shape the ingestion pipeline receives and stores.",
+        "required": [
+          "event_status"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Event title. Required unless `title_rule` is set; the two are the source of the alert title."
+          },
+          "title_rule": {
+            "type": "string",
+            "description": "Title template such as `$service::$alertname`, built from `labels` when `title` is empty."
+          },
+          "description": {
+            "type": "string",
+            "description": "Event description, truncated to 2048 characters."
+          },
+          "alert_key": {
+            "type": "string",
+            "description": "Deduplication key that merges events into one alert. Empty is allowed: the preview mints a random key, so nothing is merged."
+          },
+          "event_status": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info",
+              "Ok"
+            ],
+            "description": "Event status. `Critical`, `Warning` and `Info` are firing events; `Ok` is a recovery."
+          },
+          "event_severity": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info"
+            ],
+            "description": "Severity carried by a firing event. The preview overwrites it with `event_status` for firing events."
+          },
+          "event_time": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp in seconds. The preview stamps the current time, so the value sent is ignored."
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Event labels. Up to 50 entries; keys are label names, values strings."
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertImage"
+            },
+            "description": "Images attached to the event."
+          }
+        }
+      },
+      "EnrichmentPreviewEvent": {
+        "type": "object",
+        "description": "The event as the enrichment preview saw it.",
+        "required": [
+          "title",
+          "labels"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Event title after the steps applied so far."
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Label set after the steps applied so far."
+          }
+        }
+      },
+      "EnrichmentSample": {
+        "type": "object",
+        "description": "One raw event an integration received, as it entered enrichment.",
+        "required": [
+          "received_at",
+          "event",
+          "description_truncated"
+        ],
+        "properties": {
+          "received_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix timestamp in seconds of when the integration received the event."
+          },
+          "event": {
+            "$ref": "#/components/schemas/AlertEvent",
+            "description": "The raw event, before any enrichment rule ran."
+          },
+          "description_truncated": {
+            "type": "boolean",
+            "description": "`true` when the stored description was cut to the sample size limit."
+          },
+          "dropped": {
+            "type": "boolean",
+            "description": "`true` when the integration discarded the event before it became an alert. Omitted when `false`."
+          }
+        }
+      },
+      "EnrichStep": {
+        "type": "object",
+        "description": "What one enrichment rule did to the event.",
+        "required": [
+          "index",
+          "kind",
+          "matched",
+          "skipped_reason",
+          "detail",
+          "added",
+          "removed",
+          "changed",
+          "mapping_row"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "Zero-based position of the rule in `rules`."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "extraction",
+              "composition",
+              "mapping",
+              "drop"
+            ],
+            "description": "Rule type that ran.\n| Value | Meaning |\n|---|---|\n| `extraction` | Extract a value from the alert's `title`, `description` or a `labels.*` key and write it to a label. |\n| `composition` | Render a template against the event and write the result to a label. |\n| `mapping` | Look up labels from a mapping schema or an external mapping API. |\n| `drop` | Remove the listed labels from the alert. |"
+          },
+          "matched": {
+            "type": "boolean",
+            "description": "Whether the rule's `if` conditions all matched. `false` means the rule changed nothing."
+          },
+          "skipped_reason": {
+            "type": "string",
+            "description": "Why the rule was skipped: `condition_not_met`, `regex_not_matched`, `source_label_missing`, `mapping_row_not_found`, `result_label_exists` or `error`. Empty when the rule ran."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Rule-specific detail: the matched mapping row, the rendered value, or the error message when `skipped_reason` is `error`."
+          },
+          "added": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Labels the rule wrote that were not there before. `null` when it added none."
+          },
+          "removed": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels the rule deleted. `null` when it removed none."
+          },
+          "changed": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Labels the rule rewrote, each as a `[old_value, new_value]` pair. `null` when it rewrote none."
+          },
+          "mapping_row": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The mapping row the rule matched. `null` for a rule that is not a mapping rule or matched no row."
+          }
+        }
+      },
+      "AlertPipelinePreviewEvent": {
+        "type": "object",
+        "description": "The event as the pipeline preview saw it.",
+        "required": [
+          "title",
+          "description",
+          "severity",
+          "labels"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Event title."
+          },
+          "description": {
+            "type": "string",
+            "description": "Event description."
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info",
+              "Ok"
+            ],
+            "description": "Severity the event carried at this point."
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Label set."
+          }
+        }
+      },
+      "PipelineStep": {
+        "type": "object",
+        "description": "What one alert processing rule did to the event.",
+        "required": [
+          "index",
+          "kind",
+          "result",
+          "detail"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "Zero-based position of the rule in `rules`."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "title_reset",
+              "description_reset",
+              "severity_reset",
+              "alert_drop",
+              "alert_inhibit"
+            ],
+            "description": "Rule type that ran.\n| Value | Meaning |\n|---|---|\n| `title_reset` | Rewrote the title from the rule's template. |\n| `description_reset` | Rewrote the description from the rule's template. |\n| `severity_reset` | Reset the severity and status to the rule's `severity`. |\n| `alert_drop` | Discarded the event; no alert is created. |\n| `alert_inhibit` | Discarded the event while a matching source alert is active. |"
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "applied",
+              "not_matched",
+              "not_executed"
+            ],
+            "description": "Outcome of the rule: `applied` (it changed the event or stopped the pipeline), `not_matched` (its `if` conditions did not all match), or `not_executed` (an earlier rule stopped the pipeline, or the event is a recovery)."
+          },
+          "detail": {
+            "type": "string",
+            "description": "`condition_not_met`, `no_active_source_alert`, `inhibit_not_evaluated` or `recovery_event` for those outcomes; otherwise the resulting value or the error message."
+          }
+        }
+      },
+      "AlertEmailPreviewSettings": {
+        "type": "object",
+        "description": "Email integration settings to preview, in the shape the save endpoint accepts.",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "alwaysTrigger",
+              "triggerByTitle",
+              "triggerOrCloseByRule"
+            ],
+            "description": "How the integration decides what an email becomes. Omitted defaults to `alwaysTrigger`.\n- `alwaysTrigger`: every email becomes its own alert, keyed randomly.\n- `triggerByTitle`: every email becomes a firing event whose alert key is hashed from the subject.\n- `triggerOrCloseByRule`: `rules` decide whether an email triggers, closes or is discarded, and `default` handles the rest."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/AlertEmailRule"
+            },
+            "description": "Rules tried in order when `mode` is `triggerOrCloseByRule`; each entry must be a non-empty object. At most 50."
+          },
+          "default": {
+            "type": "string",
+            "enum": [
+              "trigger",
+              "discard"
+            ],
+            "description": "What happens to an email that matches no rule when `mode` is `triggerOrCloseByRule`: `trigger` turns it into a firing event, `discard` drops it."
+          }
+        }
+      },
+      "AlertEmailRule": {
+        "type": "object",
+        "description": "One rule that matches an email and extracts the alert key from it.",
+        "required": [
+          "type",
+          "extract_from",
+          "extract_pattern",
+          "filters"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "trigger",
+              "close"
+            ],
+            "description": "`trigger` turns a matching email into a firing event, `close` into a recovery event."
+          },
+          "extract_from": {
+            "type": "string",
+            "enum": [
+              "title",
+              "description"
+            ],
+            "description": "Which part of the email the alert key is extracted from: `title` or `description`. For `description` the body text is searched first, then the body text with tables, then the description."
+          },
+          "extract_pattern": {
+            "type": "string",
+            "description": "Regular expression the key is extracted with; the captured groups are joined by `,` to form the key source. A pattern that captures nothing falls back to the subject."
+          },
+          "filters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FilterCondition"
+            },
+            "description": "AND conditions the email must match for the rule to apply. Send `[]` to match every email."
+          }
+        }
+      },
+      "AlertEmailPreviewEmail": {
+        "type": "object",
+        "description": "The email to run the preview over.",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "Email subject."
+          },
+          "body": {
+            "type": "string",
+            "description": "Email body: HTML when it starts with `<`, otherwise plain text."
+          },
+          "from": {
+            "type": "string",
+            "description": "Sender address."
+          },
+          "eml": {
+            "type": "string",
+            "description": "A whole email file (`.eml`) as base64. When set it stands in for `subject`, `body` and `from` and is parsed the way the SMTP server parses mail."
+          }
+        }
+      },
+      "AlertEmailPreviewEvent": {
+        "type": "object",
+        "description": "The alert event the email would have produced.",
+        "required": [
+          "title",
+          "description",
+          "event_status",
+          "event_severity",
+          "labels"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "Event title."
+          },
+          "description": {
+            "type": "string",
+            "description": "Event description."
+          },
+          "event_status": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info",
+              "Ok"
+            ],
+            "description": "Status of the event this email produces."
+          },
+          "event_severity": {
+            "type": "string",
+            "enum": [
+              "Critical",
+              "Warning",
+              "Info"
+            ],
+            "description": "Severity of a firing event; empty for a recovery."
+          },
+          "labels": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Labels taken from the email: the body, sender, recipients and subject are exposed as labels."
+          }
+        }
+      },
+      "AlertEmailPreviewParsed": {
+        "type": "object",
+        "description": "The email as the conversion read it.",
+        "required": [
+          "subject",
+          "from",
+          "body",
+          "body_text"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "Subject as the parser decoded it."
+          },
+          "from": {
+            "type": "string",
+            "description": "Sender address taken from the email."
+          },
+          "body": {
+            "type": "string",
+            "description": "Body the conversion used: the HTML part when there is one, otherwise the text part."
+          },
+          "body_text": {
+            "type": "string",
+            "description": "Body as plain text; a key extracted from the description is looked for here first."
+          }
+        }
+      },
+      "EnrichmentPreviewRequest": {
+        "type": "object",
+        "description": "Request body of `POST /enrichment/preview`.",
+        "required": [
+          "integration_id",
+          "event"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Integration whose context the preview runs in. The rules you send are not saved."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/EnrichRule"
+            },
+            "description": "Enrichment rules to try, in order. At most 50. The integration's stored rules are not used."
+          },
+          "event": {
+            "$ref": "#/components/schemas/AlertEvent",
+            "description": "The event to run the rules over."
+          }
+        }
+      },
+      "EnrichmentPreviewResponse": {
+        "type": "object",
+        "description": "Result of the enrichment preview.",
+        "required": [
+          "before",
+          "after",
+          "steps"
+        ],
+        "properties": {
+          "before": {
+            "$ref": "#/components/schemas/EnrichmentPreviewEvent",
+            "description": "The event as it arrived."
+          },
+          "after": {
+            "$ref": "#/components/schemas/EnrichmentPreviewEvent",
+            "description": "The event after the rules ran, with the `[TPL]` labels, title and description of a firing event rendered."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichStep"
+            },
+            "description": "One entry per rule, in the order they ran."
+          }
+        }
+      },
+      "EnrichmentSampleListRequest": {
+        "type": "object",
+        "description": "Request body of `POST /enrichment/sample/list`.",
+        "required": [
+          "integration_id"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Integration whose recent raw events to list."
+          }
+        }
+      },
+      "EnrichmentSampleListResponse": {
+        "type": "object",
+        "description": "Recent raw events of one integration.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EnrichmentSample"
+            },
+            "description": "Samples, newest first. Empty when no event has arrived yet."
+          }
+        }
+      },
+      "AlertPipelinePreviewRequest": {
+        "type": "object",
+        "description": "Request body of `POST /alert/pipeline/preview`.",
+        "required": [
+          "integration_id",
+          "event"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Integration whose saved enrichment runs first and whose pipeline context the preview uses."
+          },
+          "rules": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "$ref": "#/components/schemas/AlertPipeline"
+            },
+            "description": "Alert processing rules to try, in order. At most 50. The integration's stored pipeline is not used."
+          },
+          "event": {
+            "$ref": "#/components/schemas/AlertEvent",
+            "description": "The event to run the rules over."
+          }
+        }
+      },
+      "AlertPipelinePreviewResponse": {
+        "type": "object",
+        "description": "Result of the pipeline preview.",
+        "required": [
+          "is_recovery",
+          "before",
+          "after",
+          "dropped",
+          "inhibited",
+          "steps"
+        ],
+        "properties": {
+          "is_recovery": {
+            "type": "boolean",
+            "description": "`true` when the event is a recovery event: ingestion closes the alert without running the pipeline."
+          },
+          "before": {
+            "$ref": "#/components/schemas/AlertPipelinePreviewEvent",
+            "description": "The event as it arrived."
+          },
+          "after": {
+            "$ref": "#/components/schemas/AlertPipelinePreviewEvent",
+            "description": "The event as notification templates would render it once the rules ran."
+          },
+          "dropped": {
+            "type": "boolean",
+            "description": "`true` when a rule dropped the event, so no alert would be created."
+          },
+          "inhibited": {
+            "type": "boolean",
+            "description": "`true` when a rule inhibited the event because a matching source alert is active."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PipelineStep"
+            },
+            "description": "One entry per rule, in the order they ran."
+          }
+        }
+      },
+      "AlertEmailPreviewRequest": {
+        "type": "object",
+        "description": "Request body of `POST /alert/email/preview`.",
+        "required": [
+          "settings",
+          "email"
+        ],
+        "properties": {
+          "integration_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Email integration whose saved settings seed the preview. `0` or omitted is what the console sends on the create page, before the integration exists."
+          },
+          "settings": {
+            "$ref": "#/components/schemas/AlertEmailPreviewSettings",
+            "description": "Settings to preview. They are validated the way the save endpoint validates them."
+          },
+          "email": {
+            "$ref": "#/components/schemas/AlertEmailPreviewEmail",
+            "description": "The email to convert."
+          }
+        }
+      },
+      "AlertEmailPreviewResponse": {
+        "type": "object",
+        "description": "How the settings treated the email, plus what the conversion read.",
+        "required": [
+          "result",
+          "matched_rule",
+          "key_source",
+          "key_fallback",
+          "alert_key",
+          "event",
+          "email"
+        ],
+        "properties": {
+          "result": {
+            "type": "string",
+            "enum": [
+              "trigger",
+              "close",
+              "discard"
+            ],
+            "description": "What the settings make of this email: `trigger` (a firing event), `close` (a recovery event) or `discard` (dropped)."
+          },
+          "matched_rule": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Zero-based index of the rule that matched. `null` when no rule matched, and always `null` in `alwaysTrigger` and `triggerByTitle` modes."
+          },
+          "key_source": {
+            "type": "string",
+            "description": "What the alert key was hashed from. Empty when every email is its own alert (`alwaysTrigger`) or the email is discarded."
+          },
+          "key_fallback": {
+            "type": "boolean",
+            "description": "`true` when the rule's pattern captured nothing and the subject was used as the key source."
+          },
+          "alert_key": {
+            "type": "string",
+            "description": "Hash of `key_source`. Empty in `alwaysTrigger` mode, where each email gets a random key."
+          },
+          "event": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AlertEmailPreviewEvent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The event the email produces. `null` when the email is discarded."
+          },
+          "email": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AlertEmailPreviewParsed"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the conversion read from the email. `null` when the email could not be parsed."
+          }
+        }
       }
     },
     "securitySchemes": {
@@ -74868,6 +75567,522 @@
               },
               "example": {
                 "id": 12
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alert/email/preview": {
+      "post": {
+        "operationId": "alert-read-email-preview",
+        "summary": "Preview email-to-alert conversion",
+        "description": "Run unsaved email integration settings over one email, the way ingestion would.",
+        "tags": [
+          "On-call/Integrations"
+        ],
+        "x-mint": {
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Channels Manage** (`on-call`) or **Integrations Read** (`on-call`) or **Integrations Manage** (`on-call`) |\n\n## Usage\n\n- Nothing is written: no integration, alert or event is created or changed.\n- `integration_id` seeds the preview with the integration's stored address prefix; the address itself is never used, so the preview works on the create page too.\n- `settings` passes the same validator the save endpoint runs, so an unsupported `mode`, rule `type`, `extract_from` or an invalid `extract_pattern` fails with `InvalidParameter` before the email is parsed.\n- When `eml` is set the message is parsed as a mail file, within the SMTP message size limit, and `email` in the response shows what the parser read.\n- `event` is `null` when the settings discard the email, and `email` is `null` when the message cannot be parsed.\n- In `alwaysTrigger` mode every email becomes its own alert: `alert_key` and `key_source` come back empty.",
+          "href": "/en/api-reference/on-call/integrations/alert-read-email-preview",
+          "metadata": {
+            "sidebarTitle": "Preview email-to-alert conversion"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/AlertEmailPreviewResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "result": "trigger",
+                    "matched_rule": 0,
+                    "key_source": "checkout 5xx rate above 2%",
+                    "key_fallback": false,
+                    "alert_key": "8f14e45fceea167a5a36dedd4bea2543",
+                    "event": {
+                      "title": "[ALERT] checkout 5xx rate above 2%",
+                      "description": "The checkout service 5xx rate is 3.4% over the last 5 minutes.",
+                      "event_status": "Critical",
+                      "event_severity": "Critical",
+                      "labels": {
+                        "from": "alerts@acme.example.com",
+                        "subject": "[ALERT] checkout 5xx rate above 2%"
+                      }
+                    },
+                    "email": {
+                      "subject": "[ALERT] checkout 5xx rate above 2%",
+                      "from": "alerts@acme.example.com",
+                      "body": "The checkout service 5xx rate is 3.4% over the last 5 minutes.",
+                      "body_text": "The checkout service 5xx rate is 3.4% over the last 5 minutes."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertEmailPreviewRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131,
+                "settings": {
+                  "mode": "triggerOrCloseByRule",
+                  "rules": [
+                    {
+                      "type": "trigger",
+                      "extract_from": "title",
+                      "extract_pattern": "^\\[ALERT\\]\\s*(?P<result>.*)$",
+                      "filters": [
+                        {
+                          "key": "title",
+                          "oper": "IN",
+                          "vals": [
+                            "/[ALERT]/"
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "close",
+                      "extract_from": "title",
+                      "extract_pattern": "^\\[OK\\]\\s*(?P<result>.*)$",
+                      "filters": [
+                        {
+                          "key": "title",
+                          "oper": "IN",
+                          "vals": [
+                            "/[OK]/"
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "default": "discard"
+                },
+                "email": {
+                  "subject": "[ALERT] checkout 5xx rate above 2%",
+                  "body": "The checkout service 5xx rate is 3.4% over the last 5 minutes.",
+                  "from": "alerts@acme.example.com"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alert/pipeline/preview": {
+      "post": {
+        "operationId": "alert-read-pipeline-preview",
+        "summary": "Preview alert pipeline processing",
+        "description": "Run unsaved alert processing rules over one event, the way ingestion would.",
+        "tags": [
+          "On-call/Alerts"
+        ],
+        "x-mint": {
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Channels Manage** (`on-call`) or **Integrations Read** (`on-call`) or **Integrations Manage** (`on-call`) |\n\n## Usage\n\n- Nothing is saved and no alert or event is created.\n- The integration's saved enrichment rules run first, then your `rules` in order, against the enriched event.\n- A recovery (`Ok`) event closes the alert without running the pipeline: `is_recovery` is `true` and every step comes back `not_executed` with detail `recovery_event`.\n- `dropped` and `inhibited` report which rule stopped the event: `alert_drop` discards it, `alert_inhibit` discards it while a matching source alert is active. Rules after that one are `not_executed`.\n- When no rule matches, `after` is the event as the notification templates render it, so the preview shows what the channel would deliver.",
+          "href": "/en/api-reference/on-call/alerts/alert-read-pipeline-preview",
+          "metadata": {
+            "sidebarTitle": "Preview alert pipeline processing"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/AlertPipelinePreviewResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "is_recovery": false,
+                    "before": {
+                      "title": "Disk usage 95% on db-3",
+                      "description": "Root filesystem is 95% full on db-3.",
+                      "severity": "Warning",
+                      "labels": {
+                        "service": "mysql",
+                        "env": "prod",
+                        "host": "db-3"
+                      }
+                    },
+                    "after": {
+                      "title": "Disk usage 95% on db-3",
+                      "description": "Root filesystem is 95% full on db-3.",
+                      "severity": "Warning",
+                      "labels": {
+                        "service": "mysql",
+                        "env": "prod",
+                        "host": "db-3"
+                      }
+                    },
+                    "dropped": false,
+                    "inhibited": false,
+                    "steps": [
+                      {
+                        "index": 0,
+                        "kind": "severity_reset",
+                        "result": "not_matched",
+                        "detail": "condition_not_met"
+                      },
+                      {
+                        "index": 1,
+                        "kind": "alert_drop",
+                        "result": "not_matched",
+                        "detail": "condition_not_met"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertPipelinePreviewRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131,
+                "rules": [
+                  {
+                    "kind": "severity_reset",
+                    "if": [
+                      {
+                        "key": "labels.env",
+                        "oper": "IN",
+                        "vals": [
+                          "test"
+                        ]
+                      }
+                    ],
+                    "settings": {
+                      "severity": "Info"
+                    }
+                  },
+                  {
+                    "kind": "alert_drop",
+                    "if": [
+                      {
+                        "key": "title",
+                        "oper": "IN",
+                        "vals": [
+                          "/.*noise.*/"
+                        ]
+                      }
+                    ],
+                    "settings": {}
+                  }
+                ],
+                "event": {
+                  "title": "Disk usage 95% on db-3",
+                  "description": "Root filesystem is 95% full on db-3.",
+                  "event_status": "Warning",
+                  "labels": {
+                    "service": "mysql",
+                    "env": "prod",
+                    "host": "db-3"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/enrichment/preview": {
+      "post": {
+        "operationId": "enrichment-read-preview",
+        "summary": "Preview enrichment rule results",
+        "description": "Run unsaved enrichment rules over one event, the way ingestion would.",
+        "tags": [
+          "On-call/Alert enrichment"
+        ],
+        "x-mint": {
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Channels Manage** (`on-call`) or **Integrations Read** (`on-call`) or **Integrations Manage** (`on-call`) |\n\n## Usage\n\n- Nothing is saved and no alert or event is created.\n- `integration_id` must be an integration of the account, and the caller must be allowed to read it.\n- A `mapping` rule with `mapping_type` = `api` calls the account's mapping API with its stored headers, so the request also needs permission to edit the integration; without it the call fails.\n- `before` is the event as it arrived, `after` is the event after the rules; `steps` explains every rule — whether its conditions matched, why it was skipped, and which labels it added, removed or rewrote.\n- A firing event is rendered the way ingestion does after enrichment, so `[TPL]` labels, title and description in `after` are the final ones.\n- `if` keys must come from the alert or change event vocabulary (`title`, `description`, `labels.<name>`, ...); other keys return `InvalidParameter`.",
+          "href": "/en/api-reference/on-call/alert-enrichment/enrichment-read-preview",
+          "metadata": {
+            "sidebarTitle": "Preview enrichment rule results"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/EnrichmentPreviewResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "before": {
+                      "title": "CPU usage 94% on checkout-7",
+                      "labels": {
+                        "check": "cpu",
+                        "env": "prod",
+                        "host": "checkout-7"
+                      }
+                    },
+                    "after": {
+                      "title": "CPU usage 94% on checkout-7",
+                      "labels": {
+                        "check": "cpu",
+                        "env": "prod",
+                        "host": "checkout-7",
+                        "service_name": "checkout"
+                      }
+                    },
+                    "steps": [
+                      {
+                        "index": 0,
+                        "kind": "extraction",
+                        "matched": true,
+                        "skipped_reason": "",
+                        "detail": "checkout",
+                        "added": {
+                          "service_name": "checkout"
+                        },
+                        "removed": null,
+                        "changed": null,
+                        "mapping_row": null
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentPreviewRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131,
+                "rules": [
+                  {
+                    "kind": "extraction",
+                    "if": [
+                      {
+                        "key": "labels.env",
+                        "oper": "IN",
+                        "vals": [
+                          "prod"
+                        ]
+                      }
+                    ],
+                    "settings": {
+                      "source_field": "labels.host",
+                      "result_label": "service_name",
+                      "pattern": "^(?P<result>[a-z0-9-]+)-\\d+$",
+                      "override": false
+                    }
+                  }
+                ],
+                "event": {
+                  "title": "CPU usage 94% on checkout-7",
+                  "description": "CPU usage above 90% for 5 minutes.",
+                  "event_status": "Critical",
+                  "labels": {
+                    "env": "prod",
+                    "host": "checkout-7",
+                    "check": "cpu"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/enrichment/sample/list": {
+      "post": {
+        "operationId": "enrichment-sample-read-list",
+        "summary": "List recent event samples",
+        "description": "List the raw events an integration received most recently, newest first.",
+        "tags": [
+          "On-call/Alert enrichment"
+        ],
+        "x-mint": {
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Channels Manage** (`on-call`) or **Integrations Read** (`on-call`) or **Integrations Manage** (`on-call`) |\n\n## Usage\n\n- Samples are the events as they entered enrichment, so they show exactly the labels your rules match on.\n- The integration must exist and the caller must be allowed to read it.\n- Only the last 20 raw events of an integration are kept, for 7 days; the list is for checking rules, not for searching history.\n- A stored sample keeps its description up to 8 KiB (`description_truncated` marks one that was cut); an event larger than 64 KiB is not kept at all.\n- `dropped` marks a sample the integration discarded before it became an alert.",
+          "href": "/en/api-reference/on-call/alert-enrichment/enrichment-sample-read-list",
+          "metadata": {
+            "sidebarTitle": "List recent event samples"
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/SuccessEnvelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/EnrichmentSampleListResponse"
+                        }
+                      }
+                    }
+                  ]
+                },
+                "example": {
+                  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
+                  "data": {
+                    "items": [
+                      {
+                        "received_at": 1792657352,
+                        "event": {
+                          "title": "CPU usage 94% on checkout-7",
+                          "title_rule": "$service::$check",
+                          "description": "CPU usage above 90% for 5 minutes.",
+                          "alert_key": "cpu-usage-high:checkout-7",
+                          "event_status": "Critical",
+                          "event_severity": "Critical",
+                          "event_time": 1792657345,
+                          "labels": {
+                            "check": "cpu",
+                            "env": "prod",
+                            "host": "checkout-7"
+                          },
+                          "images": []
+                        },
+                        "description_truncated": false
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/ServerError"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrichmentSampleListRequest"
+              },
+              "example": {
+                "integration_id": 6113996590131
               }
             }
           }
