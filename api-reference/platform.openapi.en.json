@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Flashduty Open API",
-    "description": "Public HTTP API for the Flashduty incident management platform — incidents, notification templates, channels, schedules, monitors, RUM, and platform administration. Every operation is authenticated with an `app_key` query parameter issued from the Flashduty console under Account → APP Keys. Responses follow a uniform envelope: `{ request_id, data }` on success, `{ request_id, error }` on failure.",
+    "description": "Public HTTP API for the Flashduty incident management platform — incidents, notification templates, channels, schedules, monitors, RUM, and platform administration. Every operation is authenticated with an `app_key` query parameter created in the Flashduty console under My → APP Key (or sent in the `Fd-App-Key` header). Responses follow a uniform envelope: `{ request_id, data }` on success, `{ request_id, error }` on failure.",
     "version": "1.0.0"
   },
   "servers": [
@@ -48,7 +48,7 @@
           "Platform/Teams"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Filter by `person_id` to return teams that a specific person belongs to.\n- Defaults: p=1, limit=20.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Filter by `person_id` to return only the teams that person belongs to; `query` matches a substring of the team name or description.\n- Deleted teams are never listed.",
           "href": "/en/api-reference/platform/teams/team-read-list",
           "metadata": {
             "sidebarTitle": "List teams"
@@ -79,23 +79,24 @@
                   "data": {
                     "p": 1,
                     "limit": 20,
-                    "total": 5,
+                    "total": 1,
                     "items": [
                       {
                         "account_id": 10023,
                         "team_id": 1001,
                         "team_name": "Backend SRE",
+                        "description": "Backend reliability engineering team",
                         "status": "enabled",
+                        "updated_by_name": "alice",
+                        "updated_by": 80011,
                         "creator_id": 80011,
+                        "creator_name": "",
                         "created_at": 1710000000,
                         "updated_at": 1712000000,
                         "person_ids": [
-                          80011
+                          80011,
+                          80012
                         ],
-                        "description": "",
-                        "updated_by_name": "",
-                        "updated_by": 0,
-                        "creator_name": "alice",
                         "ref_id": ""
                       }
                     ]
@@ -109,6 +110,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -144,7 +148,7 @@
           "Platform/Teams"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Duplicate IDs are deduplicated; IDs that match no team are ignored.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Duplicate IDs are deduplicated; IDs that match no team in the account are ignored.\n- Deleted teams are still returned (with an empty `person_ids`), so team IDs stored in older records still resolve to a name.\n- When no ID matches, `items` is `null`.",
           "href": "/en/api-reference/platform/teams/team-read-infos",
           "metadata": {
             "sidebarTitle": "Batch get teams"
@@ -201,6 +205,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -230,12 +237,12 @@
       "post": {
         "operationId": "role-write-disable",
         "summary": "Disable a role",
-        "description": "Disable a custom role to prevent it from granting permissions.",
+        "description": "Set a custom role's status to disabled without deleting it.",
         "tags": [
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Members who held this role lose its permissions immediately.\n- Built-in roles always remain enabled; enabling or disabling them is a silent no-op.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Only a role in `enabled` status can be disabled; calling it on a role that is already disabled returns `400 InvalidParameter`.\n- The built-in roles (`2`, `6`, `8`) cannot be disabled: the call returns `400 InvalidParameter` (`Preset roles cannot be modified.`).\n- A role ID that does not exist or was deleted is ignored and the call succeeds.\n- Disabling does not revoke the role from the members who hold it, but a disabled role grants no permissions: those members, and the app keys they created, lose the role's permissions until it is enabled again.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/roles-permissions/role-write-disable",
           "metadata": {
             "sidebarTitle": "Disable a role"
@@ -303,12 +310,12 @@
       "post": {
         "operationId": "role-write-delete",
         "summary": "Delete a role",
-        "description": "Delete a custom role. While members still hold the role, the call fails with `ReferenceExist` unless `is_force` is true.",
+        "description": "Delete a custom role, optionally revoking it from every member who still holds it.",
         "tags": [
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Built-in roles are synthetic and are never deleted; the call is a no-op for them.\n- While any member still holds the role, the default (`is_force=false`) call fails with error code `ReferenceExist` and the holders listed in `data.refs`. Set `is_force=true` to revoke the role from all holders and delete it in one call.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- While members still hold the role, the call fails with `400 ReferenceExist` and lists them in `data.refs` (`kind` `member`); set `is_force` to `true` to revoke the role from all of them and then delete it.\n- A role selected as a default role in the SSO configuration cannot be deleted, even with `is_force`; the call fails with `400 ReferenceExist` until it is unselected there.\n- A role ID that does not exist or was already deleted is ignored and the call succeeds.\n- The built-in roles (`2`, `6`, `8`) cannot be deleted: with or without `is_force`, the call returns `400 InvalidParameter` (`Preset roles cannot be modified.`).\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/roles-permissions/role-write-delete",
           "metadata": {
             "sidebarTitle": "Delete a role"
@@ -381,7 +388,7 @@
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Including the account ID returns the account owner, with `as` `account`. Other IDs are looked up among the account's members, including removed ones (`status` `deleted`), so IDs saved in older records still resolve.\n- Duplicate IDs are deduplicated; IDs that match neither are omitted.",
           "href": "/en/api-reference/platform/members/person-infos",
           "metadata": {
             "sidebarTitle": "Batch get persons"
@@ -446,6 +453,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -475,12 +485,12 @@
       "post": {
         "operationId": "memberInfo",
         "summary": "Get current member info",
-        "description": "Return the profile of the member the credential belongs to. Requires a member-scoped credential — calls authenticated as the account principal (e.g. an account-level app key) are rejected with a 400.",
+        "description": "Return the profile and account context of the member who owns the credential.",
         "tags": [
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — but the credential must belong to a member; account-principal credentials (e.g. an account-level app key) are rejected with a 400 |",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — but see the credential requirement under Usage |\n\n## Usage\n\n- Requires a member credential; calls made with the account owner's credentials return `400 BadRequest`. Use `POST /account/info` for the account owner.\n- `time_zone` is the member's own setting (empty string = follow the account), `account_time_zone` is the account's setting, and `resolved_time_zone` is the zone to render times in.",
           "href": "/en/api-reference/platform/members/member-info",
           "metadata": {
             "sidebarTitle": "Get current member info"
@@ -530,7 +540,8 @@
                     "member_name": "Alice",
                     "phone": "+86185****0300",
                     "phone_verified": true,
-                    "time_zone": "Asia/Shanghai"
+                    "time_zone": "Asia/Shanghai",
+                    "resolved_time_zone": "Asia/Shanghai"
                   }
                 }
               }
@@ -541,6 +552,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -566,12 +580,12 @@
       "post": {
         "operationId": "role-read-list-permission",
         "summary": "List permissions",
-        "description": "Return all available permissions, optionally filtered to those granted to specific roles.",
+        "description": "List permission entries and mark which of them the given roles grant.",
         "tags": [
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Pass `role_ids` to filter permissions to those granted to those roles.\n- Pass `with_all: true` to include all permissions regardless of role filter, with `is_granted` set to indicate which are granted to the specified roles.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- With `with_all: true`, every permission is returned and `is_granted` marks the ones granted by any role in `role_ids`.\n- With `with_all` false (the default), only the permissions granted by `role_ids` are returned — a call without `role_ids` returns an empty list.\n- `permission_name`, `description`, and `class` follow the request language (`Accept-Language` header, or the `locale`/`lang` query parameter).",
           "href": "/en/api-reference/platform/roles-permissions/role-read-list-permission",
           "metadata": {
             "sidebarTitle": "List permissions"
@@ -624,6 +638,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -658,7 +675,7 @@
           "Platform/Teams"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- At least one of `team_id`, `team_name`, or `ref_id` must be provided.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Provide one of `team_id`, `team_name`, or `ref_id`; when several are sent, `ref_id` wins over `team_name`, which wins over `team_id`.\n- Lookups by `team_name` or `ref_id` only match non-deleted teams; a lookup by `team_id` also returns a deleted team, with `status` `deleted`.\n- When no team matches, the call returns `400 InvalidParameter`.",
           "href": "/en/api-reference/platform/teams/team-read-info",
           "metadata": {
             "sidebarTitle": "Get team detail"
@@ -695,7 +712,7 @@
                     "updated_by_name": "alice",
                     "updated_by": 80011,
                     "creator_id": 80011,
-                    "creator_name": "alice",
+                    "creator_name": "",
                     "created_at": 1710000000,
                     "updated_at": 1712000000,
                     "person_ids": [
@@ -713,6 +730,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -740,12 +760,12 @@
       "post": {
         "operationId": "team-write-delete",
         "summary": "Delete a team",
-        "description": "Permanently delete a team by ID, name, or external reference ID.",
+        "description": "Delete a team by ID, name, or external reference ID and remove all of its members.",
         "tags": [
           "Platform/Teams"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Teams Manage** (`organization`) |\n\n## Usage\n\n- At least one of `team_id`, `team_name`, or `ref_id` must be provided.\n- Fails with `400 ReferenceExist` if the team is still referenced by schedules, escalation rules, or other resources.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Teams Manage** (`organization`) |\n\n## Usage\n\n- Provide one of `team_id`, `team_name`, or `ref_id`; when several are sent, `team_id` wins, then `team_name`, then `ref_id`.\n- Besides the permission above, the caller must be a member of the team, its creator, the account owner, or hold the Admin role; otherwise the call returns `403 AccessDenied`.\n- Fails with `400 ReferenceExist` while the team is still referenced by escalation rules, schedules, channels, notification templates, mapping schemas, service calendars, or the default teams of the SSO configuration; `data.refs` lists each reference (`kind`, `name`, `href`).\n- Deletion is soft: all members are removed from the team, the team disappears from lists and name/`ref_id` lookups, its name can be reused, and `POST /team/info` by `team_id` still returns it with `status` `deleted`.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/teams/team-write-delete",
           "metadata": {
             "sidebarTitle": "Delete a team"
@@ -818,7 +838,7 @@
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- IDs `2`, `6`, and `8` return the built-in Admin, Responder, and Viewer roles; their `description` follows the request language.\n- A role ID that does not exist or was deleted returns `400 InvalidParameter`.",
           "href": "/en/api-reference/platform/roles-permissions/role-read-info",
           "metadata": {
             "sidebarTitle": "Get role detail"
@@ -848,17 +868,18 @@
                   "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
                   "data": {
                     "role_id": 2,
-                    "role_name": "Account Admin",
-                    "description": "Account admin with all permissions.",
+                    "role_name": "Admin",
+                    "description": "Account Administrator, has all account permissions and can assist the main account in managing all affairs.",
                     "status": "enabled",
                     "permission_ids": [
                       101,
                       102,
-                      201
+                      201,
+                      701
                     ],
                     "editable": false,
-                    "created_at": 1700000000,
-                    "updated_at": 1700000000
+                    "created_at": 1653530940,
+                    "updated_at": 1653530940
                   }
                 }
               }
@@ -869,6 +890,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -901,7 +925,7 @@
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |\n\n## Usage\n\n- `country_code` must be an ISO 3166-1 alpha-2 region code (e.g. \"CN\"). It is validated and normalized to upper case before storage; invalid values are rejected with a 400.\n- When a member's `phone` has no \"+\" prefix, it is parsed with that member's `country_code` as the region hint (defaults to \"CN\" when omitted).",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |\n\n## Usage\n\n- Each entry needs `email`, or `member_name` together with `phone`.\n- Entries whose email or phone already belongs to a member of the account are skipped silently; `items` lists only the members created by this call and is `null` when none were created.\n- New members are created in `pending` status and are sent an invitation by email or SMS.\n- Emails are stored in lower case. If the account restricts member email domains, an address outside the allowlist returns `400`; duplicate emails or phones within one request also return `400`.\n- `country_code` must be an ISO 3166-1 alpha-2 region code (e.g. \"CN\"). It is validated and normalized to upper case before storage; invalid values are rejected with a 400.\n- When a member's `phone` has no \"+\" prefix, it is parsed with that member's `country_code` as the region hint (defaults to \"CN\" when omitted).\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/members/member-invite",
           "metadata": {
             "sidebarTitle": "Invite members"
@@ -951,6 +975,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -999,7 +1026,7 @@
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Built-in roles always remain enabled; enabling or disabling them is a silent no-op.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Only a role in `disabled` status can be enabled; calling it on an enabled role returns `400 InvalidParameter`.\n- The built-in roles (`2`, `6`, `8`) cannot be enabled or disabled: the call returns `400 InvalidParameter` (`Preset roles cannot be modified.`).\n- Once enabled, the role's permissions apply again to the members who hold it and to the app keys those members created.\n- A role ID that does not exist or was deleted is ignored and the call succeeds.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/roles-permissions/role-write-enable",
           "metadata": {
             "sidebarTitle": "Enable a role"
@@ -1072,7 +1099,7 @@
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Built-in roles (`editable: false`) cannot be modified or deleted.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Custom roles (enabled and disabled) come first, sorted by `orderby`/`asc`; the three built-in roles — `2` Admin, `6` Responder, `8` Viewer — are appended at the end unless `no_global` is true, and are counted in `total`.\n- Built-in roles have `editable: false`, and their `description` follows the request language (`Accept-Language` header, or the `locale`/`lang` query parameter).",
           "href": "/en/api-reference/platform/roles-permissions/role-read-list",
           "metadata": {
             "sidebarTitle": "List roles"
@@ -1101,17 +1128,60 @@
                 "example": {
                   "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
                   "data": {
-                    "total": 3,
+                    "total": 4,
                     "items": [
                       {
-                        "role_id": 2,
-                        "role_name": "Account Admin",
-                        "description": "",
+                        "role_id": 150,
+                        "role_name": "On-call Manager",
+                        "description": "Manage on-call rotations and incidents.",
                         "status": "enabled",
-                        "permission_ids": [],
+                        "permission_ids": [
+                          501,
+                          502
+                        ],
+                        "editable": true,
+                        "created_at": 1710000000,
+                        "updated_at": 1712000000
+                      },
+                      {
+                        "role_id": 2,
+                        "role_name": "Admin",
+                        "description": "Account Administrator, has all account permissions and can assist the main account in managing all affairs.",
+                        "status": "enabled",
+                        "permission_ids": [
+                          101,
+                          102,
+                          201,
+                          701
+                        ],
                         "editable": false,
-                        "created_at": 1700000000,
-                        "updated_at": 1700000000
+                        "created_at": 1653530940,
+                        "updated_at": 1653530940
+                      },
+                      {
+                        "role_id": 6,
+                        "role_name": "Responder",
+                        "description": "Responder, has standard permissions except billing center, member management, role management and single sign-on management, suitable for members handling daily operations.",
+                        "status": "enabled",
+                        "permission_ids": [
+                          201,
+                          701
+                        ],
+                        "editable": false,
+                        "created_at": 1653530940,
+                        "updated_at": 1653530940
+                      },
+                      {
+                        "role_id": 8,
+                        "role_name": "Viewer",
+                        "description": "Viewer, has most read-only permissions except audit and onboarding, suitable for members who only need to view data.",
+                        "status": "enabled",
+                        "permission_ids": [
+                          103
+                        ],
+                        "editable": false,
+                        "created_at": 1653530940,
+                        "updated_at": 1653530940
                       }
                     ]
                   }
@@ -1124,6 +1194,9 @@
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
@@ -1157,7 +1230,7 @@
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Identify the member with one of `member_id`, `member_name`, `email`, `phone`, or `ref_id`. If multiple identifiers are present, the server checks them in that order.\n- `updates.country_code` is an ISO 3166-1 alpha-2 region code (e.g. \"CN\", \"US\"). It is an independently updatable field: `updates.phone` is not required, and the new region is stored even when the phone is unchanged. An explicit empty string is rejected with a 400.\n- When `updates.phone` has no \"+\" prefix, it is parsed with `updates.country_code` as the region hint, falling back to the member's stored region and then to \"CN\". Legacy digit calling codes such as \"86\" remain accepted only as parsing hints — stored values are always ISO region codes.\n- The top-level `country_code` is only a parsing hint for the identifying `phone`; it is never stored.\n- Put the profile fields to write under `updates`: `member_name`, `password`, `phone`, `country_code`, `email`, `avatar`, `locale`, `time_zone`, or `ref_id`.\n- Members provisioned by SSO cannot be changed when SSO marks them as externally managed.\n- `updates` must carry at least one field; an object with every field omitted is rejected.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Identify the member with one of `member_id`, `member_name`, `email`, `phone`, or `ref_id`. If multiple identifiers are present, the server checks them in that order.\n- The caller must be the account owner, the member themself, or hold the Admin role; otherwise the call returns `403 AccessDenied`.\n- Put the fields to write under `updates`: `member_name`, `password`, `phone`, `country_code`, `email`, `avatar`, `locale`, `time_zone`, or `ref_id`. Omitted or `null` fields keep their current value; `updates` must carry at least one field.\n- A new `member_name`, `email`, or `phone` must not belong to another member of the account; a conflict returns `400`. A changed `email` or `phone` is marked unverified unless `from` is `api` and the account has member invitations disabled.\n- `updates.time_zone` set to an empty string clears the member's own time zone, so the member follows the account's.\n- `updates.country_code` is an ISO 3166-1 alpha-2 region code (e.g. \"CN\", \"US\"). It is an independently updatable field: `updates.phone` is not required, and the new region is stored even when the phone is unchanged. An explicit empty string is rejected with a 400.\n- When `updates.phone` has no \"+\" prefix, it is parsed with `updates.country_code` as the region hint, falling back to the member's stored region and then to \"CN\". Legacy digit calling codes such as \"86\" remain accepted only as parsing hints — stored values are always ISO region codes.\n- The top-level `country_code` is only a parsing hint for the identifying `phone`; it is never stored.\n- Fields are written one at a time; if a later field fails validation, the fields written before it in the same call stay saved.\n- Members provisioned through SSO cannot be changed while the SSO configuration marks them non-editable.\n- Concurrent profile updates or invitations in the same account can return `429 RequestTooFrequently`; retry after a moment.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/members/member-reset-info",
           "metadata": {
             "sidebarTitle": "Reset member info"
@@ -1196,6 +1269,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -1232,7 +1308,7 @@
           "Platform/Audit logs"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Audit Read** (`organization`) |\n\n## Usage\n\n- Time range is required. Maximum span is 90 days. Both `start_time` and `end_time` are Unix epoch **seconds**.\n- Use `search_after_ctx` from the previous response to fetch the next page. The token is opaque — do not construct it manually.\n- The retention window depends on the account's license. Queries beyond the retention boundary silently return an empty result rather than an error.\n- `limit` accepts 0–99; omitting it (or 0) returns all matching rows in the window with no page-size cap. Rows are returned newest first.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Audit Read** (`organization`) |\n\n## Usage\n\n- Time range is required. Maximum span is 90 days. Both `start_time` and `end_time` are Unix epoch **seconds**.\n- Use `search_after_ctx` from the previous response to fetch the next page. The token is opaque — do not construct it manually.\n- The retention window depends on the account's license. Queries beyond the retention boundary silently return an empty result rather than an error.\n- Pass an explicit `limit` (1–99) for predictable paging; when it is omitted or 0 the server chooses the page size, which may be the whole result set. Entries are returned newest first.",
           "href": "/en/api-reference/platform/audit-logs/audit-read-search",
           "metadata": {
             "sidebarTitle": "Search audit logs"
@@ -1293,6 +1369,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -1330,7 +1409,7 @@
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Members who already have the role are silently skipped.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Every ID in `member_ids` must be a member of the account, with no duplicates; otherwise the call returns `400` and nobody is changed.\n- `role_id` must be a built-in role or a custom role that has not been deleted (disabled roles are accepted, but grant no permissions until enabled); otherwise the call returns `400`.\n- Members provisioned through SSO cannot be changed while the SSO configuration marks them non-editable; the call returns `400`.\n- Members who already hold the role keep it unchanged.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/roles-permissions/role-write-grant-role",
           "metadata": {
             "sidebarTitle": "Grant role to members"
@@ -1402,12 +1481,12 @@
       "post": {
         "operationId": "memberUpdateRole",
         "summary": "Update member roles",
-        "description": "Replace all role assignments for a member at once. Role IDs that do not exist are silently dropped; an empty `role_ids` resets the member to the built-in Viewer role (ID 8).",
+        "description": "Replace a member's role assignments with the given set of roles.",
         "tags": [
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |\n\n## Usage\n\n- An empty or omitted `role_ids` assigns the built-in Viewer role (`8`).\n- Role IDs that do not exist are dropped; if none of the given IDs exist, the member ends up with no roles.\n- Members provisioned through SSO cannot be changed while the SSO configuration marks them non-editable; the call returns `400`.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/members/member-update-role",
           "metadata": {
             "sidebarTitle": "Update member roles"
@@ -1446,6 +1525,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -1481,7 +1563,7 @@
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Omit `role_id` (or set to 0) to create; pass an existing ID to update.\n- `role_name` must be 1–39 characters and unique within the account.\n- `permission_ids` sets the full permission set for the role, replacing any previous assignment.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Omit `role_id` (or set it to 0) to create a role; a new ID is always assigned. Pass the ID of a custom role of your account to update it; any other ID returns `400 InvalidParameter` (`no role found by id`), and a built-in role ID (`2`, `6`, `8`) returns `400 InvalidParameter` (`Preset roles cannot be modified.`).\n- `role_name` must be unique in the account, including the built-in names `Admin`, `Responder`, and `Viewer`; a conflict returns `400`.\n- An update overwrites `role_name`, `description`, and `permission_ids` together: omitting `description` clears it, and omitting `permission_ids` removes every permission from the role.\n- Updating a disabled role keeps it disabled; call `POST /role/enable` to enable it.\n- Every ID in `permission_ids` must be a permission returned by `POST /role/permission/list` (with `with_all: true`); otherwise the call returns `400` and nothing changes.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/roles-permissions/role-write-upsert",
           "metadata": {
             "sidebarTitle": "Create or update a role"
@@ -1557,12 +1639,12 @@
       "post": {
         "operationId": "role-read-list-permission-factor",
         "summary": "List permission factors",
-        "description": "Return all permission factors (API, button, menu, URL, visit) granted to the calling member, optionally filtered by type. Requires a member-scoped credential — calls authenticated as the account principal (e.g. an account-level app key) are rejected with a 400, because the account principal implicitly holds every permission.",
+        "description": "List the permission factors granted to the calling member through their roles.",
         "tags": [
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — but the credential must belong to a member; account-principal credentials (e.g. an account-level app key) are rejected with a 400 |\n\n## Usage\n\n- Permission factors are the fine-grained controls that make up each permission.\n- `factor_types` accepts: `api`, `button`, `visit`, `menu`, `url`.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — but see the credential requirement under Usage |\n\n## Usage\n\n- Requires a member credential: calls made with the account owner's credentials return `400 InvalidParameter`, because the account owner implicitly holds every permission.\n- Factors come from all roles the calling member holds and are deduplicated; the order is not stable. A member with no roles gets an empty array.\n- `factor_types` filters by type (`api`, `button`, `visit`, `menu`, `url`); omit it to return all types. An unsupported type returns `400`.",
           "href": "/en/api-reference/platform/roles-permissions/role-read-list-permission-factor",
           "metadata": {
             "sidebarTitle": "List permission factors"
@@ -1607,6 +1689,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -1640,7 +1725,7 @@
           "Platform/Roles & permissions"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Members who don't have the role are silently skipped.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Roles Manage** (`organization`) |\n\n## Usage\n\n- Every ID in `member_ids` must be a member of the account, with no duplicates; otherwise the call returns `400` and nobody is changed.\n- `role_id` must be a built-in role or a custom role that has not been deleted (disabled roles are accepted); otherwise the call returns `400`.\n- Members provisioned through SSO cannot be changed while the SSO configuration marks them non-editable; the call returns `400`.\n- Members who don't hold the role are left unchanged; revoking a member's last role leaves them with no roles.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/roles-permissions/role-write-revoke-role",
           "metadata": {
             "sidebarTitle": "Revoke role from members"
@@ -1716,7 +1801,7 @@
           "Platform/Audit logs"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Audit Read** (`organization`) |\n\n## Usage\n\n- Use the `name` values from this response as `operations` filter values in `POST /audit/search`.\n- `name_cn` is the human-readable Chinese label shown in the console; `name` is the stable wire value to filter on.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Audit Read** (`organization`) |\n\n## Usage\n\n- Use the `name` values from this response as `operations` filter values in `POST /audit/search`.\n- `name_cn` is the Chinese label shown in the console, returned in Chinese regardless of the request language; `name` is the stable value to filter on.",
           "href": "/en/api-reference/platform/audit-logs/audit-read-operation-list",
           "metadata": {
             "sidebarTitle": "List auditable operation types"
@@ -1770,6 +1855,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -1799,7 +1887,7 @@
           "Platform/Teams"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Teams Manage** (`organization`) |\n\n## Usage\n\n- Omit `team_id` (or set to 0) to create a new team; pass an existing ID to update.\n- `team_name` must be 1–39 characters and unique within the account.\n- Pass `person_ids` to set team membership; this replaces the entire member list.\n- Pass `emails` or `phones` to add existing members by contact; contacts that match no member are ignored — nobody is invited.\n- `ref_id` is an external identifier for integration with third-party HR systems.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Teams Manage** (`organization`) |\n\n## Usage\n\n- Omit `team_id` (or set it to 0) to create a team; pass an existing `team_id` to update it. A `team_id` that matches no team returns `400`.\n- `team_name` must be unique among the account's teams. A name used by another team returns `400`, except when `team_id` is 0 and `reset_if_name_exist` is true — then that team is updated.\n- Membership is always replaced: the team's members become exactly the union of `person_ids`, `emails`, and `phones`. Omitting all three on an update removes every member.\n- Entries that do not resolve to a member of the account (or the account owner) are silently dropped; nobody is invited.\n- On update, `description` and `ref_id` are overwritten as well — omitting them clears the stored values.\n- Updating also requires the caller to be a team member, the team creator, the account owner, or hold the Admin role.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/teams/team-write-upsert",
           "metadata": {
             "sidebarTitle": "Create or update a team"
@@ -1875,12 +1963,12 @@
       "post": {
         "operationId": "memberGrantRole",
         "summary": "Grant role to member",
-        "description": "Add role assignments to a member. Role IDs that do not exist are silently ignored; if none resolve, the call is a no-op success.",
+        "description": "Add one or more roles to a member's existing role assignments.",
         "tags": [
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |\n\n## Usage\n\n- Role IDs that do not exist are ignored; if none of them exist, the call succeeds without changes.\n- Roles the member already holds are kept once; no duplicates are added.\n- Members provisioned through SSO cannot be changed while the SSO configuration marks them non-editable; the call returns `400`.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/members/member-grant-role",
           "metadata": {
             "sidebarTitle": "Grant role to member"
@@ -1919,6 +2007,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -1948,12 +2039,12 @@
       "post": {
         "operationId": "memberRevokeRole",
         "summary": "Revoke role from member",
-        "description": "Remove role assignments from a member. Role IDs that do not exist are silently ignored; if none resolve, the call is a no-op success.",
+        "description": "Remove one or more roles from a member's role assignments.",
         "tags": [
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |\n\n## Usage\n\n- Role IDs that do not exist are ignored; if none of them exist, the call succeeds without changes.\n- Revoking every role leaves the member with no roles; it does not fall back to Viewer.\n- Members provisioned through SSO cannot be changed while the SSO configuration marks them non-editable; the call returns `400`.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/members/member-revoke-role",
           "metadata": {
             "sidebarTitle": "Revoke role from member"
@@ -1992,6 +2083,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -2026,7 +2120,7 @@
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |\n\n## Usage\n\n- By default (`is_force=false`), the system checks whether the member is referenced by other resources (e.g., escalation rules, schedules). If references exist, the API returns error code `ReferenceExist` with the reference list in `data.refs`. Set `is_force=true` to skip the reference check and force delete.\n- Members provisioned via SSO with `sso_user_non_editable=true` cannot be deleted through this API. Disable that SSO restriction first.\n- This operation is recorded in the audit log.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **300 requests/minute**; **20 requests/second** per account |\n| Permissions | **Members Manage** (`organization`) |\n\n## Usage\n\n- Identify the member with one of the lookup fields; when several are sent, the first non-empty one wins in the order `member_id`, `member_name`, `email`, `phone`, `ref_id`.\n- Unless `is_force` is true, the call fails with `400 ReferenceExist` while the member belongs to a team, is a direct target of an escalation rule, or is in a schedule; `data.refs` lists each reference. A forced delete skips this check and leaves those references in place.\n- Deletion is soft: the member's status becomes `deleted`, any license seat the member holds is released, and the member's SSO identity links are removed. The member still resolves through `POST /person/infos`.\n- Members provisioned through SSO cannot be deleted while the SSO configuration marks them non-editable; the call returns `400`.\n- Every call is recorded in the account audit log. Don't put secrets in request fields.",
           "href": "/en/api-reference/platform/members/member-delete",
           "metadata": {
             "sidebarTitle": "Delete member"
@@ -2065,6 +2159,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -2096,7 +2193,7 @@
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — any valid `app_key` can call this operation |\n\n## Usage\n\n- Returns members in `enabled` or `pending` status. Removed members and the account owner are not listed; resolve their IDs with `POST /person/infos`.\n- `role_id` returns the members holding that role; `member_id` returns at most that one member.",
           "href": "/en/api-reference/platform/members/member-list",
           "metadata": {
             "sidebarTitle": "List members"
@@ -2180,6 +2277,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -2258,7 +2358,7 @@
                     "phone": "138****8000",
                     "country_code": "CN",
                     "email": "ops@acme.example",
-                    "avatar": "https://cdn.flashcat.cloud/avatar/acme.png",
+                    "avatar": "https://example.com/avatar/acme.png",
                     "locale": "zh-CN",
                     "time_zone": "Asia/Shanghai",
                     "created_at": 1716960000,
@@ -2282,6 +2382,9 @@
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
           "429": {
             "$ref": "#/components/responses/TooManyRequests"
           },
@@ -2293,7 +2396,7 @@
           "metadata": {
             "sidebarTitle": "Get account detail"
           },
-          "content": "| Permission | Description |\n| --- | --- |\n| None | None — any valid app_key can call this operation. |\n\nFind this operation in the [Platform API reference](/en/api-reference/platform/account/account-read-info).",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **1,000 requests/minute**; **50 requests/second** per account |\n| Permissions | None — but see the credential requirement under Usage |\n\n## Usage\n\n- Requires the account owner's credentials (for example an app key created by the account owner); member credentials return `401 Unauthorized`. Members can use `POST /member/info` instead.\n- `restrictions` is present only when join or access restrictions have been configured; `mp_plat` and `mp_account_id` only for accounts provisioned through a cloud marketplace.",
           "href": "/en/api-reference/platform/account/account-read-info"
         }
       }
@@ -2302,12 +2405,12 @@
       "post": {
         "operationId": "memberNotify",
         "summary": "Notify members",
-        "description": "Send an email to account members on behalf of the caller, with content the caller supplies. Only callable with a credential minted for an AI SRE session; any other credential is rejected with `AccessDenied`. Delivery is asynchronous — `accepted` means the email was queued, not that it was delivered.",
+        "description": "Email account members a message written by the calling AI SRE session.",
         "tags": [
           "Platform/Members"
         ],
         "x-mint": {
-          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **200 requests/minute**; **10 requests/second** per account |\n| Permissions | None — callable only with an AI SRE session credential; any other credential is rejected with `AccessDenied` |\n\n## Usage\n\n- Recipients that are not active members of the caller's account, or that have no email address on file, are skipped rather than failing the whole request.\n- Whether email is included follows each recipient's own notification preferences for this kind of message; a recipient with no preference set defaults to receiving it.\n- Recipients receive exactly the sanitized `html` as the email body, with nothing added around it. The sender name shows the caller's name followed by \"(via AI SRE)\".\n- Before sending, the server inspects the submitted `html` and rejects the request with `400` / `InvalidParameter` when it contains constructs whose removal would change what recipients see (`<style>`, `<svg>`, `<iframe>`, `<object>`, `<embed>`, `<form>`, `<input>`, `<button>`, an `<img>` with a missing or non-`https` `src`, or an `<a>` whose href scheme is not `http`, `https`, or `mailto`); the error message names each construct and what to change, and nothing is queued — neither the hourly limit nor the per-turn duplicate check is consumed. Tags whose removal does not change rendering (`<script>`, `<meta>`, `<link>`, `<base>`, `on*` handlers) are still sanitized silently and never trigger a rejection.\n- At most 20 emails are delivered to the same recipient through this endpoint per hour; further deliveries to that recipient in the same window are skipped with `rate_limited`.\n- Retrying the same call within the same AI SRE session turn does not send a duplicate email to a recipient who already received one; the repeat is skipped with `duplicate`.",
+          "content": "## Restrictions\n\n| Aspect | Value |\n| ------ | ----- |\n| Rate limits | **200 requests/minute**; **10 requests/second** per account |\n| Permissions | None — but see the credential requirement under Usage |\n\n## Usage\n\n- Only callable with a credential minted for an AI SRE session; any other credential is rejected with `AccessDenied`.\n- Delivery is asynchronous — `accepted` means the email was queued, not that it was delivered.\n- Recipients that are not active members of the caller's account, or that have no email address on file, are skipped rather than failing the whole request.\n- Whether email is included follows each recipient's own notification preferences for this kind of message; a recipient with no preference set defaults to receiving it.\n- Recipients receive exactly the sanitized `html` as the email body, with nothing added around it. The sender name shows the caller's name followed by \"(via AI SRE)\".\n- Before sending, the server inspects the submitted `html` and rejects the request with `400` / `InvalidParameter` when it contains constructs whose removal would change what recipients see (`<style>`, `<svg>`, `<iframe>`, `<object>`, `<embed>`, `<form>`, `<input>`, `<button>`, an `<img>` with a missing or non-`https` `src`, or an `<a>` whose href scheme is not `http`, `https`, or `mailto`); the error message names each construct and what to change, and nothing is queued — neither the hourly limit nor the per-turn duplicate check is consumed. Tags whose removal does not change rendering (`<script>`, `<meta>`, `<link>`, `<base>`, `on*` handlers) are still sanitized silently and never trigger a rejection.\n- At most 20 emails are delivered to the same recipient through this endpoint per hour; further deliveries to that recipient in the same window are skipped with `rate_limited`.\n- Retrying the same call within the same AI SRE session turn does not send a duplicate email to a recipient who already received one; the repeat is skipped with `duplicate`.",
           "href": "/en/api-reference/platform/members/member-notify",
           "metadata": {
             "sidebarTitle": "Notify members"
@@ -2409,7 +2512,7 @@
         "type": "apiKey",
         "in": "query",
         "name": "app_key",
-        "description": "App key issued from the Flashduty console under Account → APP Keys. Required on every public API call. Keep it secret — it grants the same access as the owning account."
+        "description": "APP Key created in the Flashduty console under My → APP Key. Send it as the `app_key` query parameter or in the `Fd-App-Key` request header. Its effective access is the intersection of the key's permission scope and the creator's current role permissions. Keep it secret."
       }
     },
     "responses": {
@@ -2456,7 +2559,7 @@
         }
       },
       "Forbidden": {
-        "description": "The app_key is valid but lacks permission for this operation.",
+        "description": "The app_key is valid, but its permission scope or the creator's role does not allow this operation or object.",
         "content": {
           "application/json": {
             "schema": {
@@ -2498,7 +2601,7 @@
         }
       },
       "TooManyRequests": {
-        "description": "Rate limit hit. Either the global API limit, a per-account limit, or a per-integration limit.",
+        "description": "Rate limit hit. Wait for the number of seconds in `Flashcat-Request-Rate-Limit-Delay`, then retry.",
         "content": {
           "application/json": {
             "schema": {
@@ -2514,6 +2617,15 @@
                   }
                 }
               }
+            }
+          }
+        },
+        "headers": {
+          "Flashcat-Request-Rate-Limit-Delay": {
+            "description": "Seconds until the current rate-limit window resets. Absent when the request was rejected by the gateway's global protection limit.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0
             }
           }
         }
@@ -2570,7 +2682,7 @@
           "account_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "ID of the account."
+            "description": "ID of the account the entry belongs to."
           },
           "member_id": {
             "type": "integer",
@@ -2602,7 +2714,10 @@
             "description": "JSON-encoded request body. Bodies containing sensitive fields are base64url-encoded instead; bodies over 10 KB are replaced by a truncation placeholder."
           },
           "params": {
-            "type": "array",
+            "type": [
+              "array",
+              "string"
+            ],
             "items": {
               "type": "object",
               "properties": {
@@ -2616,7 +2731,7 @@
                 }
               }
             },
-            "description": "URL path parameters as an array of key-value pairs, or an empty array when none."
+            "description": "URL path parameters as an array of `Key`/`Value` pairs (an empty array when none). Some deployments return the same array as a JSON-encoded string."
           },
           "is_dangerous": {
             "type": "boolean",
@@ -2632,7 +2747,7 @@
               "member",
               "service"
             ],
-            "description": "Kind of the caller. `member` — an interactive member session; `service` — an app key credential."
+            "description": "Kind of the caller. `member` — a member or account-owner session; `service` — an app key or a short-lived key issued to AI SRE."
           },
           "credential_type": {
             "type": "string",
@@ -2710,7 +2825,7 @@
           },
           "limit": {
             "type": "integer",
-            "description": "Page size, 0–99. Omit or set to 0 for no page-size cap — all matching rows in the window are returned.",
+            "description": "Page size, 0–99. Omit or set to 0 to let the server choose the page size (it may return every matching entry).",
             "minimum": 0,
             "maximum": 99,
             "example": 20
@@ -2787,7 +2902,7 @@
           },
           "message": {
             "type": "string",
-            "description": "Human-readable error message, localized by the caller's Accept-Language. May contain field names, IDs, or other context from the failing request.",
+            "description": "Human-readable error message in the response language (`locale` / `lang` query parameter or `Accept-Language` header). May name the offending field; do not parse it.",
             "example": "The specified parameter template_id is not valid."
           }
         },
@@ -2798,7 +2913,7 @@
       },
       "ErrorCode": {
         "type": "string",
-        "description": "Flashduty error code enum. Every failed API response sets `error.code` to one of these stable wire strings. HTTP status is informational — the authoritative signal is the enum value.\n\n| Code | HTTP | Meaning |\n|---|---|---|\n| `OK` | 200 | Reserved — not returned on real errors. |\n| `InvalidParameter` | 400 | A required parameter is missing or failed validation. |\n| `BadRequest` | 400 | Generic 400 used when no more specific code fits. |\n| `InvalidContentType` | 400 | The `Content-Type` header is not `application/json`. |\n| `ResourceNotFound` | 400 | The referenced resource does not exist. Note: returned as HTTP 400, not 404 (historical choice). |\n| `NoLicense` | 400 | The feature is license-gated and no active license was found. |\n| `ReferenceExist` | 400 | Deletion blocked — other entities still reference this resource. |\n| `Unauthorized` | 401 | `app_key` is missing, invalid, or expired. |\n| `BalanceNotEnough` | 402 | Billing-gated operation with insufficient account balance. |\n| `AccessDenied` | 403 | Authenticated but lacking the permission required for this operation. |\n| `RouteNotFound` | 404 | The request URL path is not a known route. |\n| `MethodNotAllowed` | 405 | The HTTP method is not allowed on this otherwise-known path. |\n| `UndonedOrderExist` | 409 | An outstanding billing order blocks this new one. Wait and retry. |\n| `RequestLocked` | 423 | Operation temporarily locked due to repeated failures. |\n| `EntityTooLarge` | 413 | Request body exceeds the configured max size. |\n| `RequestTooFrequently` | 429 | Rate limit hit — API-global, per-account, or per-integration. |\n| `RequestVerifyRequired` | 428 | Second-factor verification required but not supplied. |\n| `DangerousOperation` | 428 | High-risk operation requires MFA verification. |\n| `InternalError` | 500 | Unhandled server-side error. Include `request_id` in the bug report. |\n| `ServiceUnavailable` | 503 | A backend dependency is unavailable. Try again later. |",
+        "description": "Error code. Every failed response sets `error.code` to one of these stable strings; branch on it rather than on the HTTP status.\n\n| Code | HTTP | Meaning |\n|---|---|---|\n| `OK` | 200 | Reserved; never returned on a failed request. |\n| `InvalidParameter` | 400 | A parameter is missing, has the wrong type, or failed validation; `message` usually names the field. |\n| `BadRequest` | 400 | The request breaks a business rule or conflicts with the current state of an object; `message` says which. |\n| `InvalidContentType` | 400 | The body is not sent as `application/json`. |\n| `ResourceNotFound` | 400 | The referenced object does not exist in this account or was deleted. Returned as HTTP 400, not 404. |\n| `NoLicense` | 400 | The account's plan does not include the feature, a plan quota is used up, the plan has expired, or credits are insufficient. |\n| `ReferenceExist` | 400 | The object is still referenced by other objects, so it cannot be deleted. |\n| `Unauthorized` | 401 | The APP Key is missing, invalid, or deleted. |\n| `BalanceNotEnough` | 402 | Console-only (billing); not returned by Open API operations. |\n| `AccessDenied` | 403 | The APP Key's permission scope or the creator's role does not allow this operation or object. |\n| `RouteNotFound` | 404 | No operation matches the HTTP method and path. |\n| `MethodNotAllowed` | 405 | The path exists but not for this HTTP method. |\n| `UndonedOrderExist` | 409 | Console-only (billing); not returned by Open API operations. |\n| `EntityTooLarge` | 413 | The request body exceeds the size limit. |\n| `RequestLocked` | 423 | Console-only (sign-in protection); not returned by Open API operations. |\n| `RequestVerifyRequired` | 428 | Console-only (verification code); not returned by Open API operations. |\n| `DangerousOperation` | 428 | Console-only (MFA for high-risk actions); not returned by Open API operations. |\n| `RequestTooFrequently` | 429 | A rate limit was hit; wait for the `Flashcat-Request-Rate-Limit-Delay` response header (seconds) before retrying. |\n| `InternalError` | 500 | Unexpected server error; retry with backoff and include `request_id` when reporting. |\n| `ServiceUnavailable` | 503 | A backend dependency is overloaded or unavailable; retry with backoff. |",
         "enum": [
           "OK",
           "InvalidParameter",
@@ -2813,35 +2928,35 @@
           "RouteNotFound",
           "MethodNotAllowed",
           "UndonedOrderExist",
-          "RequestLocked",
           "EntityTooLarge",
-          "RequestTooFrequently",
+          "RequestLocked",
           "RequestVerifyRequired",
           "DangerousOperation",
+          "RequestTooFrequently",
           "InternalError",
           "ServiceUnavailable"
         ],
         "x-enumDescriptions": {
-          "OK": "Reserved — not returned on real errors.",
-          "InvalidParameter": "A required parameter is missing or failed validation.",
-          "BadRequest": "Generic 400 used when no more specific code fits.",
-          "InvalidContentType": "The `Content-Type` header is not `application/json`.",
-          "ResourceNotFound": "The referenced resource does not exist. Note: returned as HTTP 400, not 404 (historical choice).",
-          "NoLicense": "The feature is license-gated and no active license was found.",
-          "ReferenceExist": "Deletion blocked — other entities still reference this resource.",
-          "Unauthorized": "`app_key` is missing, invalid, or expired.",
-          "BalanceNotEnough": "Billing-gated operation with insufficient account balance.",
-          "AccessDenied": "Authenticated but lacking the permission required for this operation.",
-          "RouteNotFound": "The request URL path is not a known route.",
-          "MethodNotAllowed": "The HTTP method is not allowed on this otherwise-known path.",
-          "UndonedOrderExist": "An outstanding billing order blocks this new one. Wait and retry.",
-          "RequestLocked": "Operation temporarily locked due to repeated failures.",
-          "EntityTooLarge": "Request body exceeds the configured max size.",
-          "RequestTooFrequently": "Rate limit hit — API-global, per-account, or per-integration.",
-          "RequestVerifyRequired": "Second-factor verification required but not supplied.",
-          "DangerousOperation": "High-risk operation requires MFA verification.",
-          "InternalError": "Unhandled server-side error. Include `request_id` in the bug report.",
-          "ServiceUnavailable": "A backend dependency is unavailable. Try again later."
+          "OK": "Reserved; never returned on a failed request.",
+          "InvalidParameter": "A parameter is missing, has the wrong type, or failed validation; `message` usually names the field.",
+          "BadRequest": "The request breaks a business rule or conflicts with the current state of an object; `message` says which.",
+          "InvalidContentType": "The body is not sent as `application/json`.",
+          "ResourceNotFound": "The referenced object does not exist in this account or was deleted. Returned as HTTP 400, not 404.",
+          "NoLicense": "The account's plan does not include the feature, a plan quota is used up, the plan has expired, or credits are insufficient.",
+          "ReferenceExist": "The object is still referenced by other objects, so it cannot be deleted.",
+          "Unauthorized": "The APP Key is missing, invalid, or deleted.",
+          "BalanceNotEnough": "Console-only (billing); not returned by Open API operations.",
+          "AccessDenied": "The APP Key's permission scope or the creator's role does not allow this operation or object.",
+          "RouteNotFound": "No operation matches the HTTP method and path.",
+          "MethodNotAllowed": "The path exists but not for this HTTP method.",
+          "UndonedOrderExist": "Console-only (billing); not returned by Open API operations.",
+          "EntityTooLarge": "The request body exceeds the size limit.",
+          "RequestLocked": "Console-only (sign-in protection); not returned by Open API operations.",
+          "RequestVerifyRequired": "Console-only (verification code); not returned by Open API operations.",
+          "DangerousOperation": "Console-only (MFA for high-risk actions); not returned by Open API operations.",
+          "RequestTooFrequently": "A rate limit was hit; wait for the `Flashcat-Request-Rate-Limit-Delay` response header (seconds) before retrying.",
+          "InternalError": "Unexpected server error; retry with backoff and include `request_id` when reporting.",
+          "ServiceUnavailable": "A backend dependency is overloaded or unavailable; retry with backoff."
         },
         "example": "InvalidParameter"
       },
@@ -2875,7 +2990,7 @@
           },
           "email": {
             "type": "string",
-            "description": "Email address. Required when `phone` is not provided."
+            "description": "Email address, stored in lower case. Required when `phone` is not provided."
           },
           "phone": {
             "type": "string",
@@ -2891,7 +3006,7 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Role IDs to assign"
+            "description": "Role IDs to assign: built-in `2` (Admin), `6` (Responder), `8` (Viewer), or custom role IDs from `POST /role/list`. Defaults to Viewer (`8`) when omitted; an ID that does not exist returns `400`."
           },
           "locale": {
             "type": "string",
@@ -2899,15 +3014,15 @@
               "zh-CN",
               "en-US"
             ],
-            "description": "Locale. One of: `zh-CN` (Simplified Chinese), `en-US` (English); other values are rejected with a 400."
+            "description": "Locale: `zh-CN` (Simplified Chinese) or `en-US` (English); other values are rejected with a 400. Defaults to the account's locale when omitted."
           },
           "time_zone": {
             "type": "string",
-            "description": "Time zone"
+            "description": "IANA time zone name such as `Asia/Shanghai`. Omit it to have the member follow the account's time zone; an invalid name returns `400`."
           },
           "ref_id": {
             "type": "string",
-            "description": "External reference ID"
+            "description": "External reference ID (for example an employee ID in an HR system), usable later as a lookup key in `POST /member/delete` and `POST /member/info/reset`."
           }
         }
       },
@@ -2942,7 +3057,7 @@
           },
           "is_force": {
             "type": "boolean",
-            "description": "Force delete. Defaults to false, which checks for references from escalation rules, schedules, etc. Set to true to skip the reference check and delete immediately",
+            "description": "Skip the reference check. When false (default), the call fails with `ReferenceExist` if the member belongs to a team, is targeted by an escalation rule, or is in a schedule. A forced delete does not remove those references.",
             "default": false
           }
         },
@@ -2991,11 +3106,11 @@
           "account_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Account ID"
+            "description": "ID of the account the member belongs to."
           },
           "account_name": {
             "type": "string",
-            "description": "Account name"
+            "description": "Name of the account (organization)."
           },
           "account_avatar": {
             "type": "string",
@@ -3003,7 +3118,7 @@
           },
           "account_email": {
             "type": "string",
-            "description": "Account email"
+            "description": "Contact email of the account owner."
           },
           "account_role_ids": {
             "type": "array",
@@ -3011,7 +3126,7 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Assigned role IDs"
+            "description": "IDs of the roles assigned to the member; resolve them with `POST /role/list`."
           },
           "account_locale": {
             "type": "string",
@@ -3019,16 +3134,20 @@
           },
           "account_time_zone": {
             "type": "string",
-            "description": "Account-level time zone (e.g. Asia/Shanghai). Omitted when the account has none set."
+            "description": "The account's IANA time zone setting; empty string when the account has none. Always present."
+          },
+          "resolved_time_zone": {
+            "type": "string",
+            "description": "Effective time zone to render times in: the member's `time_zone` if valid, otherwise the account's, otherwise `Asia/Shanghai`. Always present."
           },
           "domain": {
             "type": "string",
-            "description": "Account domain"
+            "description": "Account domain, the subdomain used to sign in to the console."
           },
           "member_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Member ID"
+            "description": "ID of the calling member."
           },
           "member_name": {
             "type": "string",
@@ -3064,7 +3183,7 @@
           },
           "time_zone": {
             "type": "string",
-            "description": "Member's IANA time zone. Omitted when the member has none set."
+            "description": "The member's own IANA time zone setting; empty string when the member follows the account's time zone. Always present."
           },
           "is_external": {
             "type": "boolean",
@@ -3077,7 +3196,10 @@
           },
           "mp_plat": {
             "type": "string",
-            "description": "Cloud marketplace platform the account was provisioned from. Omitted when the account did not come from a marketplace."
+            "description": "Cloud marketplace the account was provisioned from: `aws` — AWS Marketplace. Omitted when the account did not come from a marketplace.",
+            "enum": [
+              "aws"
+            ]
           },
           "mp_account_id": {
             "type": "string",
@@ -3100,7 +3222,10 @@
           "country_code",
           "avatar",
           "is_external",
-          "created_at"
+          "created_at",
+          "time_zone",
+          "account_time_zone",
+          "resolved_time_zone"
         ]
       },
       "MemberInviteRequest": {
@@ -3129,11 +3254,14 @@
         "description": "Invite members response",
         "properties": {
           "items": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/components/schemas/NewMemberItem"
             },
-            "description": "Newly created members"
+            "description": "Members created by this call; entries skipped because they already exist are not listed. `null` when no member was created."
           }
         }
       },
@@ -3161,16 +3289,16 @@
           "account_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Account ID"
+            "description": "ID of the account the member belongs to."
           },
           "member_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Member ID"
+            "description": "Member ID; the same value is used as the person ID in other APIs (for example `person_ids`)."
           },
           "member_name": {
             "type": "string",
-            "description": "Display name"
+            "description": "Display name, unique in the account."
           },
           "country_code": {
             "type": "string",
@@ -3178,40 +3306,39 @@
           },
           "phone": {
             "type": "string",
-            "description": "Masked phone number"
+            "description": "Phone number in E.164 form with the middle digits masked (for example `+86151****6519`); empty string when unset."
           },
           "email": {
             "type": "string",
-            "description": "Email address"
+            "description": "Email address in lower case; empty string when unset."
           },
           "locale": {
             "type": "string",
-            "description": "Member's locale preference (e.g. `zh-CN`). Omitted when empty — the list endpoint does not populate it."
+            "description": "Locale preference. Not populated by `POST /member/list`, so it is always omitted there."
           },
           "time_zone": {
             "type": "string",
-            "description": "Member's IANA time zone (e.g. `Asia/Shanghai`). Omitted when empty — the list endpoint does not populate it."
+            "description": "The member's own IANA time zone setting (for example `Asia/Shanghai`). Omitted when unset, which means the member follows the account's time zone; `POST /member/info` returns the effective zone."
           },
           "phone_verified": {
             "type": "boolean",
-            "description": "Phone verified"
+            "description": "`true` once the member has verified the phone number."
           },
           "email_verified": {
             "type": "boolean",
-            "description": "Email verified"
+            "description": "`true` once the member has verified the email address."
           },
           "avatar": {
             "type": "string",
-            "description": "Avatar URL"
+            "description": "Avatar image URL or path; empty string when unset."
           },
           "status": {
             "type": "string",
             "enum": [
               "enabled",
-              "pending",
-              "deleted"
+              "pending"
             ],
-            "description": "Member status. `enabled` — active member; `pending` — invited but not yet accepted; `deleted` — removed from the organization."
+            "description": "Member status. `enabled` — active member; `pending` — invited but has not accepted yet. Removed members are not listed."
           },
           "account_role_ids": {
             "type": "array",
@@ -3219,15 +3346,15 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Role IDs"
+            "description": "IDs of the roles assigned to the member: built-in `2` (Admin), `6` (Responder), `8` (Viewer), or custom role IDs from `POST /role/list`."
           },
           "is_external": {
             "type": "boolean",
-            "description": "Provisioned via SSO"
+            "description": "`true` when the member was provisioned through SSO rather than invited or registered."
           },
           "ref_id": {
             "type": "string",
-            "description": "External reference ID"
+            "description": "External reference ID (for example an employee ID in an HR system); empty string when unset."
           },
           "created_at": {
             "type": "integer",
@@ -3258,7 +3385,7 @@
           "p": {
             "type": "integer",
             "minimum": 1,
-            "description": "Page number, 1-based"
+            "description": "Page number, starting at 1. Defaults to the first page."
           },
           "limit": {
             "type": "integer",
@@ -3281,7 +3408,7 @@
           },
           "query": {
             "type": "string",
-            "description": "Substring match on member name or email; if the keyword parses as a phone number, an exact phone match is also applied"
+            "description": "Keyword. Matches a substring of the member name or email; a numeric keyword also matches an exact member ID, and a keyword that parses as a phone number (without `+`, parsed as a Chinese number) also matches the exact phone."
           }
         }
       },
@@ -3291,22 +3418,22 @@
         "properties": {
           "p": {
             "type": "integer",
-            "description": "Current page"
+            "description": "Page number from the request; `0` when `p` was omitted (the first page is returned)."
           },
           "limit": {
             "type": "integer",
-            "description": "Page size"
+            "description": "Page size applied; 100 when `limit` was omitted."
           },
           "total": {
             "type": "integer",
-            "description": "Total count"
+            "description": "Number of members matching the filters, across all pages."
           },
           "items": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/MemberItem"
             },
-            "description": "Member items"
+            "description": "Members on this page; empty array when none match."
           }
         },
         "required": [
@@ -3396,7 +3523,7 @@
             ],
             "minLength": 2,
             "maxLength": 39,
-            "description": "New display name."
+            "description": "New display name, 2–39 characters, unique in the account."
           },
           "password": {
             "type": [
@@ -3410,7 +3537,7 @@
               "string",
               "null"
             ],
-            "description": "New phone number. Include country_code when the number is not in E.164 format."
+            "description": "New phone number; include `country_code` when it is not in E.164 format. Must not belong to another member; the new number is marked unverified (see `from`)."
           },
           "country_code": {
             "type": [
@@ -3424,7 +3551,7 @@
               "string",
               "null"
             ],
-            "description": "New email address."
+            "description": "New email address. Must not belong to another member; the new address is marked unverified (see `from`)."
           },
           "avatar": {
             "type": [
@@ -3450,14 +3577,14 @@
               "string",
               "null"
             ],
-            "description": "New IANA time zone name, such as Asia/Shanghai."
+            "description": "New IANA time zone name such as `Asia/Shanghai`; an empty string clears it so the member follows the account's time zone. An invalid name returns `400`."
           },
           "ref_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "New external reference ID."
+            "description": "New external reference ID; an empty string clears it."
           }
         }
       },
@@ -3472,7 +3599,7 @@
           "member_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Member ID"
+            "description": "ID of the member whose roles change (from `POST /member/list`)."
           },
           "role_ids": {
             "type": "array",
@@ -3495,7 +3622,7 @@
           "member_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Member ID"
+            "description": "ID of the member whose roles change (from `POST /member/list`)."
           },
           "role_ids": {
             "type": "array",
@@ -3517,7 +3644,7 @@
           "member_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Member ID"
+            "description": "ID of the member whose roles change (from `POST /member/list`)."
           },
           "role_ids": {
             "type": "array",
@@ -3525,7 +3652,7 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "New role ID set. Replaces the member's existing roles entirely (not additive); get IDs from `POST /role/list`. Leave empty to reset to the built-in Viewer role (ID 8)"
+            "description": "New role ID set; replaces the member's existing roles entirely (not additive). Get IDs from `POST /role/list`."
           }
         }
       },
@@ -3536,11 +3663,11 @@
           "member_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Member ID"
+            "description": "ID of the newly created member."
           },
           "member_name": {
             "type": "string",
-            "description": "Member display name"
+            "description": "Display name stored for the member; derived from the email prefix when `member_name` was omitted."
           }
         }
       },
@@ -3738,12 +3865,12 @@
           "account_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Account ID"
+            "description": "ID of the account the person belongs to."
           },
           "person_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Person ID"
+            "description": "Person ID: the account ID for the account owner, otherwise the member ID."
           },
           "person_name": {
             "type": "string",
@@ -3755,11 +3882,11 @@
           },
           "locale": {
             "type": "string",
-            "description": "Locale. Omitted when empty."
+            "description": "Locale preference (`zh-CN` or `en-US`). Omitted when unset."
           },
           "time_zone": {
             "type": "string",
-            "description": "Time zone. Omitted when empty."
+            "description": "IANA time zone setting: the member's own setting, or the account's for the account owner. Omitted when unset (a member without a setting follows the account's time zone)."
           },
           "email": {
             "type": "string",
@@ -3775,7 +3902,7 @@
           },
           "email_verified": {
             "type": "boolean",
-            "description": "Email verified"
+            "description": "`true` when the email address is verified; for the account owner, `true` whenever an email is set."
           },
           "as": {
             "type": "string",
@@ -3815,7 +3942,7 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Member IDs to grant/revoke the role."
+            "description": "IDs of the members to grant the role to or revoke it from (from `POST /member/list`). All must be members of the account; duplicates are rejected."
           },
           "role_id": {
             "type": "integer",
@@ -3867,15 +3994,15 @@
           "role_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Unique role ID."
+            "description": "Role ID. Built-in roles use the fixed IDs `2` (Admin), `6` (Responder), and `8` (Viewer)."
           },
           "role_name": {
             "type": "string",
-            "description": "Role display name."
+            "description": "Role name, unique in the account. The built-in roles are named `Admin`, `Responder`, and `Viewer` in every language."
           },
           "description": {
             "type": "string",
-            "description": "Role description."
+            "description": "Role description. For built-in roles it is localized by the request language."
           },
           "status": {
             "type": "string",
@@ -3883,7 +4010,7 @@
               "enabled",
               "disabled"
             ],
-            "description": "Role status."
+            "description": "Role status. `enabled` — active; `disabled` — turned off with `POST /role/disable`; it grants no permissions to the members who hold it. Built-in roles are always `enabled`; deleted roles are never returned."
           },
           "permission_ids": {
             "type": "array",
@@ -3891,16 +4018,16 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "IDs of permissions granted by this role."
+            "description": "IDs of the permissions the role grants, in ascending order; resolve them with `POST /role/permission/list`. Empty array when none."
           },
           "editable": {
             "type": "boolean",
-            "description": "False for built-in roles which cannot be modified."
+            "description": "`false` for the built-in roles (Admin, Responder, Viewer); `true` for custom roles."
           },
           "created_at": {
             "type": "integer",
             "format": "int64",
-            "description": "Unix epoch seconds the role was created."
+            "description": "Time the role was created, Unix timestamp in seconds. Built-in roles carry a fixed timestamp."
           },
           "updated_at": {
             "type": "integer",
@@ -3941,7 +4068,7 @@
         "properties": {
           "total": {
             "type": "integer",
-            "description": "Total role count."
+            "description": "Number of roles returned: custom roles plus the 3 built-in roles unless `no_global` is true."
           },
           "items": {
             "type": "array",
@@ -3962,11 +4089,11 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Filter to permissions granted to these roles."
+            "description": "Role IDs (built-in or custom) whose granted permissions to return or mark. IDs that do not exist are ignored."
           },
           "with_all": {
             "type": "boolean",
-            "description": "If true, return all permissions with is_granted set to indicate which are granted."
+            "description": "When true, return every permission and use `is_granted` to mark the ones granted by `role_ids`. When false (default), return only the granted permissions."
           }
         }
       },
@@ -3996,7 +4123,7 @@
           "role_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Role ID. Omit or set to 0 to create."
+            "description": "ID of the custom role to update. Omit or set to 0 to create a new role. Do not pass the built-in role IDs `2`, `6`, or `8`."
           },
           "role_name": {
             "type": "string",
@@ -4007,7 +4134,7 @@
           "description": {
             "type": "string",
             "maxLength": 499,
-            "description": "Role description."
+            "description": "Role description, up to 499 characters. Omitting it on update clears the stored description."
           },
           "permission_ids": {
             "type": "array",
@@ -4015,7 +4142,7 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Permission IDs to grant. Replaces the existing set."
+            "description": "IDs of the permissions the role grants (from `POST /role/permission/list`). Replaces the existing set; omitting it or sending an empty array leaves the role with no permissions."
           }
         }
       },
@@ -4048,12 +4175,11 @@
             "example": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4"
           },
           "data": {
-            "description": "Endpoint-specific payload. See each operation's 200 response schema."
+            "description": "Operation-specific payload, documented in each operation's 200 response. Operations without a payload return `{}` or omit `data` entirely."
           }
         },
         "required": [
-          "request_id",
-          "data"
+          "request_id"
         ]
       },
       "TeamBriefItem": {
@@ -4063,11 +4189,11 @@
           "team_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Team ID."
+            "description": "Team ID, one of the requested `team_ids`."
           },
           "team_name": {
             "type": "string",
-            "description": "Team name."
+            "description": "Team name. Deleted teams are included, so this can be the name of a team that no longer appears in `POST /team/list`."
           },
           "person_ids": {
             "type": "array",
@@ -4181,11 +4307,14 @@
         ],
         "properties": {
           "items": {
-            "type": "array",
+            "type": [
+              "array",
+              "null"
+            ],
             "items": {
               "$ref": "#/components/schemas/TeamBriefItem"
             },
-            "description": "Array of brief team info for the matched `team_ids`; may be null when no ID matches."
+            "description": "Brief info for the matched teams, including deleted ones; `null` when no ID matches."
           }
         }
       },
@@ -4236,7 +4365,7 @@
           },
           "updated_by_name": {
             "type": "string",
-            "description": "Display name of the last editor."
+            "description": "Name of the last editor: the member's name, or the account name when the account owner made the change; empty string when unknown."
           },
           "updated_by": {
             "type": "integer",
@@ -4268,7 +4397,7 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Member IDs of team members."
+            "description": "Person IDs of the team's members (member IDs; the account owner's ID when the owner is in the team). Empty array when the team has no members."
           },
           "ref_id": {
             "type": "string",
@@ -4329,15 +4458,15 @@
         "properties": {
           "p": {
             "type": "integer",
-            "description": "Current page number."
+            "description": "Page number from the request; `0` when `p` was omitted (the first page is returned)."
           },
           "limit": {
             "type": "integer",
-            "description": "Page size used."
+            "description": "Page size applied; 20 when `limit` was omitted."
           },
           "total": {
             "type": "integer",
-            "description": "Total number of teams matching the filter."
+            "description": "Number of non-deleted teams matching the filters, across all pages."
           },
           "items": {
             "type": "array",
@@ -4358,7 +4487,7 @@
           "team_id": {
             "type": "integer",
             "format": "uint64",
-            "description": "Team ID. Omit or set to 0 to create a new team."
+            "description": "ID of the team to update. Omit or set to 0 to create a new team; a non-zero ID must belong to an existing team of the account."
           },
           "team_name": {
             "type": "string",
@@ -4369,7 +4498,7 @@
           "description": {
             "type": "string",
             "maxLength": 500,
-            "description": "Free-form description."
+            "description": "Free-form description, up to 500 characters. On update, omitting it clears the stored description."
           },
           "person_ids": {
             "type": "array",
@@ -4377,7 +4506,7 @@
               "type": "integer",
               "format": "uint64"
             },
-            "description": "Member IDs to set as team members. Replaces the existing member list."
+            "description": "Person IDs to place in the team (member IDs, or the account ID for the account owner). Together with `emails` and `phones` they replace the entire member list; IDs that are not members of the account are ignored."
           },
           "emails": {
             "type": "array",
@@ -4385,22 +4514,22 @@
               "type": "string",
               "format": "email"
             },
-            "description": "Add existing members to the team by email. Addresses that don't match an existing member are silently ignored — no invitation is sent."
+            "description": "Emails of existing members to place in the team; merged with `person_ids` and `phones`. Addresses that match no member are ignored and no invitation is sent."
           },
           "phones": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Add existing members to the team by phone number. Numbers not in E.164 format are parsed with `countryCode`; an unparseable number fails the whole request with a 400. Numbers that parse but match no existing member are silently ignored."
+            "description": "Phone numbers of existing members to place in the team; merged with `person_ids` and `emails`. Numbers without a `+` prefix are parsed with `countryCode`; an unparseable number fails the whole request with `400`, and numbers that match no member are ignored."
           },
           "countryCode": {
             "type": "string",
-            "description": "Default country code applied to any `phones` entries that are not in E.164 format."
+            "description": "Region hint for `phones` entries without a `+` prefix: an ISO 3166-1 alpha-2 code such as `CN` (the default when omitted) or a digit calling code such as `86`."
           },
           "ref_id": {
             "type": "string",
-            "description": "External reference ID for HR system integration."
+            "description": "External reference ID (for example a department ID in an HR system), usable as a lookup key in `POST /team/info` and `POST /team/delete`. On update, omitting it clears the stored value."
           },
           "reset_if_name_exist": {
             "type": "boolean",
@@ -4437,7 +4566,7 @@
           },
           "account_name": {
             "type": "string",
-            "description": "Account name."
+            "description": "Account (organization) name shown in the console."
           },
           "domain": {
             "type": "string",
@@ -4468,11 +4597,11 @@
           },
           "locale": {
             "type": "string",
-            "description": "Account language preference (e.g. zh-CN, en-US)."
+            "description": "Account language preference (`zh-CN` or `en-US`); empty string when not set."
           },
           "time_zone": {
             "type": "string",
-            "description": "Account default timezone (IANA name, e.g. Asia/Shanghai)."
+            "description": "Account default time zone (IANA name, e.g. `Asia/Shanghai`); members without their own setting follow it. Empty string when not set."
           },
           "created_at": {
             "type": "integer",
@@ -4484,18 +4613,24 @@
             "description": "Account access restrictions. Omitted when none are configured.",
             "properties": {
               "ips": {
-                "type": "array",
+                "type": [
+                  "array",
+                  "null"
+                ],
                 "items": {
                   "type": "string"
                 },
-                "description": "Allowed source IP/CIDR whitelist."
+                "description": "Source IP addresses or CIDR ranges allowed to call the console and API for this account; `null` or empty when unrestricted."
               },
               "email_domains": {
-                "type": "array",
+                "type": [
+                  "array",
+                  "null"
+                ],
                 "items": {
                   "type": "string"
                 },
-                "description": "Allowed login email domains."
+                "description": "Email domains allowed for new members; invitations to other domains are rejected. `null` or empty when unrestricted."
               },
               "allow_subdomain": {
                 "type": "boolean",
@@ -4505,7 +4640,10 @@
           },
           "mp_plat": {
             "type": "string",
-            "description": "Cloud marketplace platform the account was provisioned from. Omitted when the account did not come from a marketplace."
+            "description": "Cloud marketplace the account was provisioned from: `aws` — AWS Marketplace. Omitted when the account did not come from a marketplace.",
+            "enum": [
+              "aws"
+            ]
           },
           "mp_account_id": {
             "type": "string",
@@ -4541,7 +4679,7 @@
           "is_force": {
             "type": "boolean",
             "default": false,
-            "description": "When false (default), deletion fails with a `ReferenceExist` error listing the members that still hold the role in `data.refs`. When true, the role is first revoked from all holders and then deleted."
+            "description": "When false (default), deletion fails with `ReferenceExist` while members still hold the role, listing them in `data.refs`. When true, the role is first revoked from all holders and then deleted. Does not bypass the SSO default-role check."
           }
         }
       },

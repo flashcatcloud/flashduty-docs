@@ -1,5 +1,6 @@
 ---
 title: "CrowdSec 告警集成"
+sidebarTitle: "CrowdSec"
 description: "通过 HTTP 通知插件将 CrowdSec Security Engine 检测到的攻击来源同步到 Flashduty On-call。"
 keywords: ["告警集成", "CrowdSec", "Security Engine", "入侵防护", "IPS", "HTTP 通知插件", "Webhook"]
 ---
@@ -9,7 +10,6 @@ CrowdSec Security Engine 是开源、可自建的入侵检测与防护引擎。�
 <div className="hide">
 
 ## 在 Flashduty On-call
----
 
 您可通过以下两种方式获取集成推送地址，任选其一即可。
 
@@ -30,12 +30,22 @@ CrowdSec Security Engine 是开源、可自建的入侵检测与防护引擎。�
 </div>
 
 ## 在 CrowdSec 中配置
----
 
 以下操作在运行 CrowdSec 本地 API（LAPI）的机器上完成。HTTP 通知插件随 CrowdSec 一起安装，无需另装。
 
 <Steps>
 <Step title="配置 HTTP 通知插件">
+
+**操作路径**：`/etc/crowdsec/notifications/http.yaml`
+
+| 字段 | 填写 |
+| --- | --- |
+| `type`（必填） | `http` |
+| `name`（必填） | `http_default`，必须与 `profiles.yaml` 中引用的名称一致 |
+| `format`（必填） | 保持下方示例中的默认值 |
+| `url`（必填） | `{integration_url}` |
+| `method`（必填） | `POST` |
+| `group_wait`（可选） | 例如 `30s`，攒一段时间再集中推送 |
 
 编辑 `/etc/crowdsec/notifications/http.yaml`（Docker 部署时是容器内的同名路径），保留默认的 `format`，填入 `url` 和 `method`：
 
@@ -50,15 +60,21 @@ group_wait: 30s
 format: |
   {{.|toJson}}
 
-url: https://api.flashcat.cloud/event/push/alert/crowdsec?integration_key=<your_integration_key>
+url: {integration_url}
 method: POST
 ```
 
-`format` 必须保持 `{{.|toJson}}`：Flashduty 解析的正是 CrowdSec 告警列表的默认 JSON 结构。`url` 换成 Flashduty 集成的完整推送地址。Flashduty 通过地址中的 `integration_key` 识别集成，请像保管密钥一样保管该文件。
+`format` 必须保持下方示例中的默认值：Flashduty 解析的正是 CrowdSec 告警列表的默认 JSON 结构。`url` 换成 Flashduty 集成的完整推送地址。Flashduty 通过地址中的 `integration_key` 识别集成，请像保管密钥一样保管该文件。
 
 </Step>
 
 <Step title="在 profile 中启用通知">
+
+**操作路径**：`/etc/crowdsec/profiles.yaml` › `notifications`
+
+| 字段 | 填写 |
+| --- | --- |
+| `notifications`（必填） | 列表中加入 `http_default`（上一步 `name` 的值） |
 
 编辑 `/etc/crowdsec/profiles.yaml`，在需要通知的 profile 下加入 `notifications`：
 
@@ -80,11 +96,21 @@ on_success: break
 
 <Step title="开启超时自动关闭">
 
+**操作路径**：Flashduty 控制台 › 协作空间 › 新建或编辑协作空间 › 协作空间信息 › 超时自动关闭
+
+| 字段 | 填写 |
+| --- | --- |
+| 超时自动关闭（必填） | 开启 |
+| 超时计时起点（必填） | **故障触发** |
+| 超时时长（必填） | 与封禁时长相同，上例为 4 小时 |
+
 CrowdSec 告警是一次性事件：封禁到期后 CrowdSec 不会再推送任何通知。请在接收这些告警的协作空间中开启 [超时自动关闭](/zh/on-call/channel/create-edit)，建议超时时长与封禁时长（上例为 4 小时）相同，计时起点选择 **故障触发**。故障关闭时，关联的告警一并关闭。
 
 </Step>
 
 <Step title="验证">
+
+**操作路径**：CrowdSec 所在机器的终端
 
 在 CrowdSec 机器上执行：
 
@@ -93,29 +119,30 @@ sudo cscli notifications test http_default
 ```
 
 Flashduty 中会出现一条标题为 `test alert`、等级为 Info 的告警。它不会自动恢复，请手动关闭，或等待超时自动关闭。也可以用 `cscli notifications list` 查看插件是否已加载。
+`cscli notifications test` 发送的是格式正确的测试告警，也可以让 CrowdSec 检测到真实攻击来验证 profile 过滤条件。
+
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
 
 </Step>
 </Steps>
 
 ## 推送内容
----
 
 CrowdSec 每次请求推送一个 JSON 数组，每个元素是一条告警；启用 `group_wait` 或 `group_threshold` 后，CrowdSec 会攒到下一次推送时机再发出，推送最多比检测晚 `group_wait`，一个请求可能包含多条。Flashduty 为数组中的每个元素创建一条告警。事件明细（`events`）和 `meta` 中的原始日志不会进入 Flashduty。
 
 ## Alert Key
----
 
 Flashduty 使用 CrowdSec 为每条告警生成的 `uuid` 作为 Alert Key。请求重试时会带相同的 `uuid`，合并到同一条告警；同一个来源 IP 后续再次触发，会是新的 `uuid`，产生新的告警。
 
-个别没有 `uuid` 的旧版本，Flashduty 用场景、来源类型、来源值和 `start_at` 计算 Alert Key。这些字段缺失时请求会被拒绝。
+个别没有 `uuid` 的旧版本，Flashduty 用场景、来源类型、来源值和 `start_at` 计算 Alert Key。没有 `uuid` 时，缺少 `scenario` 或 `source.value` 的请求会被拒绝；`start_at` 和来源类型为空不会被拒绝，只是参与计算的值为空。
 
-## 告警等级
----
+## 状态和告警等级
 
 CrowdSec 不提供严重程度，所有告警都以 **Warning** 等级触发，处于模拟模式（`simulated`）的告警也是。`cscli notifications test` 发出的测试告警为 **Info**，并使用独立的 Alert Key，不会与真实告警合并。
 
 ## 标签
----
 
 | 标签 | 来源 |
 | :--- | :--- |
@@ -131,12 +158,12 @@ CrowdSec 不提供严重程度，所有告警都以 **Warning** 等级触发，�
 | `machine_id` | 上报告警的机器 |
 | `decision_type` / `decision_duration` / `decision_origin` | 处置类型、时长和来源 |
 | `simulated` / `remediation` | 是否为模拟告警、是否产生处置 |
+| `tags` | CrowdSec 告警的 `labels` 列表，逗号拼接 |
 | `uuid` | CrowdSec 告警 ID，即 Alert Key |
 
 告警标题为 `<场景> from <来源值>`，描述为 CrowdSec 的 `message`。
 
 ## 常见问题
----
 
 <AccordionGroup>
 

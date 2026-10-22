@@ -1,5 +1,6 @@
 ---
 title: "Fail2ban 告警集成"
+sidebarTitle: "Fail2ban"
 description: "在 Fail2ban 中添加自定义 action，用 curl 把封禁和解封事件推送到 Flashduty 的标准告警事件集成，解封时自动关闭告警。"
 keywords: ["告警集成", "Fail2ban", "入侵防御", "封禁 IP", "curl", "标准告警事件"]
 ---
@@ -9,7 +10,6 @@ Fail2ban 没有内置的 Webhook 通知，但它的 action 就是在封禁或解
 <div className="hide">
 
 ## 在 Flashduty On-call
----
 
 您可通过以下两种方式获取集成推送地址，任选其一即可。**集成类型都选择标准告警事件**，不是 Fail2ban。
 
@@ -30,12 +30,20 @@ Fail2ban 没有内置的 Webhook 通知，但它的 action 就是在封禁或解
 </div>
 
 ## 在 Fail2ban 中配置
----
 
 以下操作在运行 Fail2ban 的主机上进行，需要 root 权限。
 
 <Steps>
 <Step title="创建 action 文件">
+
+**操作路径**：`/etc/fail2ban/action.d/flashduty.conf`
+
+| 键 | 填写 |
+| --- | --- |
+| `actionban`（必填） | 封禁时用 `curl` POST，`event_status` 为 `Warning` |
+| `actionunban`（必填） | 解封时用 `curl` POST，`event_status` 为 `Ok`，`alert_key` 与封禁时一致 |
+| `norestored`（可选） | `1`，重启后从数据库恢复的封禁不再通知 |
+| `[Init]` 中的 `flashduty_url`（必填） | 留空，在 jail 里传入 `{integration_url}` |
 
 新建 `/etc/fail2ban/action.d/flashduty.conf`：
 
@@ -64,13 +72,20 @@ flashduty_url =
 
 <Step title="在 jail 中启用">
 
+**操作路径**：`/etc/fail2ban/jail.local` › `[sshd]`（或 `[DEFAULT]`）
+
+| 键 | 填写 |
+| --- | --- |
+| `enabled`（必填） | `true` |
+| `action`（必填） | 保留 `%(action_)s`，另起一行追加 `flashduty[flashduty_url="{integration_url}"]` |
+
 编辑 `/etc/fail2ban/jail.local`，在需要通知的 jail 里追加 `flashduty` action，并把 Flashduty 推送地址传给 `flashduty_url`。`action` 可以写多行；第一行保留默认的封禁 action：
 
 ```ini
 [sshd]
 enabled = true
 action  = %(action_)s
-          flashduty[flashduty_url="https://api.flashcat.cloud/event/push/alert/standard?integration_key=YOUR_INTEGRATION_KEY"]
+          flashduty[flashduty_url="{integration_url}"]
 ```
 
 如果想让所有 jail 都通知，把这两行 `action` 写在 `[DEFAULT]` 段。
@@ -79,6 +94,8 @@ action  = %(action_)s
 
 <Step title="重载并验证">
 
+**操作路径**：Fail2ban 所在主机的终端（root）
+
 ```bash
 fail2ban-client reload
 fail2ban-client set sshd banip 192.0.2.10
@@ -86,12 +103,14 @@ fail2ban-client set sshd unbanip 192.0.2.10
 ```
 
 `banip` 手动封禁一个 IP，`unbanip` 手动解封。第一条命令后 Flashduty 应出现标题为 `Fail2ban sshd banned / 192.0.2.10` 的告警，第二条命令后该告警被关闭。没有收到时，先在主机上用同样的 `curl` 命令手动请求推送地址，响应里会有错误码，Fail2ban 自己的报错在 `/var/log/fail2ban.log`。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
 
 </Step>
 </Steps>
 
 ## 字段映射
----
 
 | Fail2ban | Flashduty |
 | :--- | :--- |
@@ -103,7 +122,6 @@ fail2ban-client set sshd unbanip 192.0.2.10
 | `labels` | 标签 `jail`、`ip`、`failures`、`bantime` |
 
 ## 恢复与去重
----
 
 - Fail2ban 在封禁时间到期后执行 `actionunban`，Flashduty 用相同的 `alert_key` 关闭对应告警。
 - 封禁时间设为永久（`bantime = -1`）时不会解封，告警不会自动关闭。请在接收该集成的协作空间开启 [超时自动关闭](/zh/on-call/channel/create-edit)，或处理完成后手动关闭。
@@ -111,7 +129,6 @@ fail2ban-client set sshd unbanip 192.0.2.10
 - `norestored = 1` 让 Fail2ban 重启后从数据库恢复的封禁不再通知，避免重启时产生一批重复告警。
 
 ## 排查问题
----
 
 - **Flashduty 没有收到告警**：确认 `fail2ban-client reload` 已执行；用 `curl` 在同一台主机上手动请求推送地址，看响应和网络是否可达 api.flashcat.cloud
 - **返回 `InvalidParameter`**：推送地址缺少 `integration_key`，或 JSON 因引号被破坏；确认 `[Definition]` 里没有多余的换行

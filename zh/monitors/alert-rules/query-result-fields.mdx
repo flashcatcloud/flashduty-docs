@@ -4,10 +4,10 @@ description: "说明如何把 SQL 和原文日志查询结果配置为值字段�
 keywords: ["查询结果", "值字段", "标签字段", "附加信息", "阈值表达式", "多查询"]
 ---
 
-MySQL、PostgreSQL、Oracle、ClickHouse、Elasticsearch、SLS 和 Tencent CLS 等表格型查询，以及 Loki、VictoriaLogs、SLS 和 Tencent CLS 的**原始日志**查询，都会返回包含多列数据的结果。你可以通过**值字段**和**标签字段**决定每一列的用途；其余列无需单独配置，会作为附加信息随告警携带。
+MySQL、PostgreSQL、Oracle、ClickHouse、Elasticsearch、SLS 和 Tencent CLS 等表格型查询，以及 Loki、VictoriaLogs、SLS 和 Tencent CLS 的**原始日志**查询，都会返回包含多列数据的结果。您可以通过**值字段**和**标签字段**决定每一列的用途；其余列无需单独配置，会作为附加信息随告警携带。
 
 <Warning>
-本页描述的完整字段映射行为需要 monit-edge `v0.53.0` 或以上版本，尤其是将查询附加信息统一命名为 `$<查询名称>.<字段名称>` 的能力。使用这些配置前，请先将告警引擎升级到 `v0.53.0` 或更高版本。
+本页描述的完整字段映射行为需要告警引擎 `v0.53.0` 或以上版本，更早版本读不到 `$<查询名称>.<字段名称>` 格式的查询附加信息。
 </Warning>
 
 ## 字段如何分类
@@ -27,7 +27,7 @@ MySQL、PostgreSQL、Oracle、ClickHouse、Elasticsearch、SLS 和 Tencent CLS �
 | 附加信息 | `sample_message`、`latest_at` | 自动随告警携带，用于补充排障上下文，但不参与告警身份计算。 |
 
 <Note>
-附加信息不是需要填写的第三组字段。只要你明确选择了标签字段，查询结果中既不是标签字段、也不是值字段的列就会自动成为附加信息。
+附加信息不是需要填写的第三组字段。只要您明确选择了标签字段，查询结果中既不是标签字段、也不是值字段的列就会自动成为附加信息。
 </Note>
 
 ### 值字段
@@ -111,7 +111,7 @@ Critical: $A.error_count > 20 or $A.latency_ms > 1000
 | A | checkout | prod | `error_count=27` |
 | B | checkout | prod | `latency_ms=1350` |
 
-你可以配置：
+您可以配置：
 
 ```text
 Critical: $A.error_count > 20 and $B.latency_ms > 1000
@@ -142,23 +142,50 @@ Critical: $A.error_count > 20 and $B.latency_ms > 1000
 数据缺失告警会携带该告警对象最后一次成功查询时的附加信息。如果查询从未返回过数据，则没有可携带的查询附加信息。
 </Note>
 
+<span id="query-fields-as-labels"></span>
+## 把附加信息作为告警标签推送
+
+附加信息推送到 On-call 时带有 `__alert_rule_annotation_` 前缀，协作空间的通知模板、分派策略和[告警处理](/zh/on-call/integration/alert-integration/alert-pipelines)按普通标签名（例如 `labels.msg`）匹配时读不到它们。需要时，可以在规则的[附加标签](/zh/monitors/quickstart/quickstart#append-label-syntax)中用 Go 模板把附加信息转成普通标签。
+
+例如按服务聚合错误日志，同时在通知中保留最新一条日志：
+
+```sql
+SELECT service, namespace, COUNT(*) AS value,
+       MAX(datetime) AS datetime,
+       MAX_BY(msg, datetime) AS msg,
+       MAX_BY(trace_id, datetime) AS tid
+FROM error_logs
+WHERE datetime >= NOW() - INTERVAL 1 MINUTE
+GROUP BY service, namespace
+```
+
+标签字段选择 `service`、`namespace`，`msg`、`tid`、`datetime` 自动成为附加信息。再配置附加标签：
+
+```text
+msg      = {{ index $annotations "$A.msg" }}
+tid      = {{ index $annotations "$A.tid" }}
+datetime = {{ index $annotations "$A.datetime" }}
+```
+
+这样每个服务只产生一个告警实例，推送给 On-call 的 `msg`、`tid`、`datetime` 是该服务最新一条日志的真实内容，现有通知模板和分派策略无需修改。
+
 ## 查询结果行数上限
 
-Edge 分别限制周期告警查询和交互预览查询。以下是默认值，部署者可以独立调整：
+告警引擎分别限制周期告警查询和交互预览查询。以下是默认值，部署者可以独立调整：
 
-| 场景 | 默认上限 | Edge 参数 | 覆盖范围 |
+| 场景 | 默认上限 | 告警引擎参数 | 覆盖范围 |
 |------|----------|-----------|----------|
 | **周期告警查询** | 1,000,000 行 | `--alerter.alertQueryMaxRows` | 主查询、恢复查询和关联查询 |
 | **数据预览查询** | 1,000 行 | `--alerter.previewMaxRows` | 数据源查询与规则编辑页预览 |
 
 数据源自身的限制可能更严格。例如，SLS、Tencent CLS、Loki 和 VictoriaLogs 的原始日志查询最多允许配置 100 条。实际生效上限取场景上限与数据源限制中的更小值。
 
-查询超过实际生效上限时会直接失败（错误信息 `too many rows`），不会返回部分结果，也不会使用截断后的数据继续判定。
+查询超过实际生效上限时会直接失败（提示 `too many rows`），不会返回部分结果，也不会使用截断后的数据继续判定。
 
-规则编辑页的查询预览表格在前端分页展示：默认每页 100 行，可切换 100 / 200 / 500，结果不足一页时隐藏分页器。分页只影响展示，与 Edge 的 `--alerter.previewMaxRows` 上限相互独立——超过 Edge 上限的查询仍会因 `too many rows` 失败。
+规则编辑页的查询预览表格分页展示：默认每页 100 行，可切换 100 / 200 / 500，结果不足一页时隐藏分页器。分页只影响展示，与告警引擎的 `--alerter.previewMaxRows` 上限相互独立——超过告警引擎上限的查询仍会因 `too many rows` 失败。
 
 <Warning>
-提高 Edge 行数上限不会取消响应字节数、字段大小或结果值数量等资源保护。高基数 Prometheus 查询或大型 SQL 结果仍可能因为其他资源上限而失败。
+提高告警引擎行数上限不会取消响应字节数、字段大小或结果值数量等资源保护。高基数 Prometheus 查询或大型 SQL 结果仍可能因为其他资源上限而失败。
 </Warning>
 
 建议在数据源侧完成聚合，而不是让一条规则查询返回大量行：

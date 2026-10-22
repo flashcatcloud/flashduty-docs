@@ -1,5 +1,6 @@
 ---
 title: "Sensu Go alert integration"
+sidebarTitle: "Sensu Go"
 description: "Send Sensu Go check events to Flashduty On-call through a pipe handler. Alerts close automatically when the check recovers."
 keywords: ["alert integration", "Sensu", "Sensu Go", "pipe handler", "handler", "pipeline"]
 ---
@@ -9,7 +10,6 @@ Sensu Go has no built-in HTTP handler. This integration uses a pipe handler: the
 <div className="hide">
 
 ## In Flashduty On-call
----
 
 You can get the integration push URL in either of the following ways.
 
@@ -18,34 +18,42 @@ You can get the integration push URL in either of the following ways.
 1. In the Flashduty console, select **Channel** and open a channel
 2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
 3. Select **Sensu Go** and click **Save**
-4. Open the new integration card and copy the **Push URL**
+4. Open the generated integration card and copy the **Push URL**
 
 ### Use a shared integration
 
-1. In the Flashduty console, select **Integration Center → Alert Events**
+1. In the Flashduty console, go to **Integration Center → Alert Events**
 2. Select **Sensu Go** and enter an integration name
-3. Configure the default route and select a channel. You can add more rules under **Routes** after creation
+3. Configure the default route and select a channel. You can add more rules under **Routing** after creation
 4. Click **Save** and copy the generated **Push URL**
 
 </div>
 
 ## Configure Sensu Go
----
 
 The steps below are based on Sensu Go 6.x and use `sensuctl`. You need permission to create handlers and pipelines and to edit checks in the target namespace.
 
 <Steps>
-<Step title="Make sure the backend can run curl">
+<Step title="Make sure the Sensu backend can run curl">
 
-Pipe handlers run on the machine that hosts the **Sensu backend** (`sensu-backend`), not on agents. Make sure `curl` is installed on the backend machine and that it can reach the Flashduty push URL.
+**Where**: Terminal on the host that runs the Sensu backend (`sensu-backend`)
+
+Pipe handlers run on the machine that hosts the **Sensu backend**, not on agents. Make sure `curl` is installed on the backend machine and that it can reach the Flashduty push URL.
 
 <Note>The official Docker image `sensu/sensu` does not include `curl`. You can build your own image from it and run `apk add --no-cache curl`.</Note>
 
 </Step>
 
-<Step title="Create the handler and pipeline">
+<Step title="Create the handler and pipeline in Sensu Go">
 
-Save the following as `flashduty.yml` and replace `<push URL>` with the full push URL of the Flashduty integration (keep the quotes around it):
+**Where**: Terminal on the Sensu backend host › `sensuctl create --file flashduty.yml`
+
+The steps are based on Sensu Go 6.x. You need permission to create handlers and pipelines and to edit checks in the target namespace. Save the following as `flashduty.yml`:
+
+| Field | Required/Optional | Value |
+| :--- | :--- | :--- |
+| Push URL in the handler's `spec.command` | Required | `{integration_url}` (keep the single quotes around it) |
+| `filters` of the pipeline | Required | The built-in `is_incident` filter; do not swap it for another filter |
 
 ```yaml
 ---
@@ -55,7 +63,7 @@ metadata:
   name: flashduty
 spec:
   type: pipe
-  command: "curl -sS -f -m 10 -X POST -H 'Content-Type: application/json' --data-binary @- '<push URL>'"
+  command: "curl -sS -f -m 10 -X POST -H 'Content-Type: application/json' --data-binary @- '{integration_url}'"
   timeout: 15
 ---
 type: Pipeline
@@ -75,6 +83,7 @@ spec:
       api_version: core/v2
 ```
 
+
 Then create them in the target namespace:
 
 ```bash
@@ -83,7 +92,7 @@ sensuctl create --file flashduty.yml
 
 Handlers and pipelines belong to a namespace. If you use several namespaces, run the command once in each (`sensuctl create --file flashduty.yml --namespace <namespace>`).
 
-`is_incident` is a built-in Sensu filter. It passes only events with a non-zero status and resolution events (the first event whose status goes from non-zero to 0). Without it, every OK check result is also posted to Flashduty, and the volume grows with every check interval.
+`is_incident` is a built-in Sensu filter. It passes only events with a non-zero status and resolution events (the first event whose status goes from non-zero to 0), so the Flashduty alert closes when the check recovers. Without it, every OK check result is also posted to Flashduty, and the volume grows with every check interval.
 
 <Warning>
 
@@ -99,6 +108,13 @@ After the silence ends, the check stays OK and sends no further resolution event
 </Step>
 
 <Step title="Add the pipeline to your checks">
+
+**Where**: Terminal on the Sensu backend host › `sensuctl check info`; agent host › `/etc/sensu/agent.yml`
+
+| Field | Required/Optional | Value |
+| :--- | :--- | :--- |
+| `spec.pipelines` of the check | Required | A reference to the `flashduty` pipeline (`type: Pipeline`, `api_version: core/v2`) |
+| `keepalive-pipelines` of the agent | Optional | `core/v2.Pipeline.flashduty`; also posts events when an agent stops reporting (keepalive) |
 
 For each check that should send alerts, export its definition:
 
@@ -134,17 +150,23 @@ keepalive-pipelines:
 
 </Step>
 
-<Step title="Verify the lifecycle">
+<Step title="Verify trigger and recovery">
+
+**Where**: Terminal on the Sensu backend host › `sensuctl event resolve <entity name> <check name>`
 
 Sensu Go has no "send test notification" button. Put a check into WARNING or CRITICAL for real (for example by lowering a threshold) and confirm that Flashduty receives an active alert. Then let the check recover, or run `sensuctl event resolve <entity name> <check name>`, and confirm that the alert closes.
 
 You can also create events by hand for a proxy entity through the Sensu events API: first send an event with `status` `2`, then one with `status` `0`, using the same entity name and check name in both requests.
 
+Back in Flashduty, the integration shows **Latest event time**, which means the setup works.
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
+
 </Step>
 </Steps>
 
-## Alert Key
----
+## Alert key
 
 Flashduty computes the Alert Key from the entity's namespace `entity.metadata.namespace`, the entity name `entity.metadata.name`, and the check name `check.metadata.name`. Trigger, repeat, and resolution events for the same check on the same entity carry the same three fields, so they land on the same alert. Events from proxy checks (`proxy_entity_name`) use the proxy entity as their entity, so each proxy entity gets its own alert.
 
@@ -153,7 +175,6 @@ Changes to the status, check output, `occurrences`, time, event ID, or silenced 
 Flashduty rejects a request that lacks `entity` or `check` (for example a metrics-only event), or lacks the namespace, entity name, check name, or `check.status`. `curl` then exits with a non-zero code, and the Sensu backend log records the handler failure.
 
 ## Alert lifecycle
----
 
 | Sensu event | Flashduty action |
 | :--- | :--- |
@@ -163,8 +184,7 @@ Flashduty rejects a request that lacks `entity` or `check` (for example a metric
 
 With the `is_incident` filter, every execution of a check that stays non-zero is posted once, and these events merge into the same alert.
 
-## Severity
----
+## Status and severity
 
 | `check.status` | Sensu meaning | Flashduty severity |
 | :--- | :--- | :--- |
@@ -173,10 +193,9 @@ With the `is_incident` filter, every execution of a check that stays non-zero is
 | `3` and any other non-zero value | UNKNOWN or custom status | Info |
 | `0` | OK | Recovery |
 
-A resolution event takes the severity of the most recent non-zero status in `check.history`.
+A resolution event takes the severity of the most recent non-zero status in `check.history`; if `history` has no non-zero status, it is Info.
 
 ## Alert content
----
 
 - **Title**: `<entity name>: <check name>`
 - **Description**: the check output `check.output`, followed by the namespace, status code, `check.state`, and `occurrences`
@@ -185,7 +204,6 @@ A resolution event takes the severity of the most recent non-zero status in `che
 The check command, secrets, and the entity's `redact` field are not written to labels.
 
 ## Troubleshooting
----
 
 - **Flashduty receives no alert**: search the backend log for runs of the `flashduty` handler (`journalctl -u sensu-backend`), make sure the check's `pipelines` include `flashduty`, and make sure the event status is non-zero
 - **The handler reports `curl: not found`**: `curl` is not installed on the backend machine or container

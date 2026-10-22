@@ -22,23 +22,29 @@ Open API 用于通过 HTTP 接口主动调用 Flashduty，查询和管理故障�
 
 ### 请求地址
 
-所有 API 只接受 **HTTPS** 协议进行访问，且只有一个 Endpoint：
+所有 API 只接受 **HTTPS** 访问，且只有一个 Endpoint：
 
 ```
 https://api.flashcat.cloud
 ```
 
-### Headers
+### 请求方法与 Headers
 
-大部分请求使用 POST 方法，并使用 JSON Payload 传参。请确保设置正确的 Content-Type：
+绝大多数接口使用 `POST` 方法、JSON 请求体，请设置：
 
 ```
 Content-Type: application/json
 ```
 
+少数读接口使用 `GET` 方法和 query 参数（例如状态页的查询接口、Prometheus 兼容的标签查询），以各接口页面标注的方法为准。不需要参数的 `POST` 接口请传 `{}`。
+
 ### 字符编码
 
-所有 API 均使用 **UTF-8** 编码。
+请求与响应均使用 **UTF-8** 编码。
+
+### 响应语言
+
+错误信息会按语言返回。语言依次取自 query 参数 `locale`、query 参数 `lang`、请求头 `Accept-Language`，例如 `Accept-Language: zh-CN` 或 `en-US`。字段名、枚举值和错误码不会被翻译。
 
 ---
 
@@ -53,7 +59,7 @@ Content-Type: application/json
     登录 [Flashduty 控制台](https://console.flashcat.cloud)
   </Step>
   <Step title="创建 APP Key">
-    进入 **我的 → APP Key** 页面，输入名称并选择权限范围后，点击添加按钮完成创建。
+    将鼠标悬停在左下角头像上，在 **个人中心** 一列选择 **APP Key**，输入名称并选择权限范围后，点击添加按钮完成创建。详见[个人设置](/zh/on-call/configuration/personal-settings#app-key)。
 
     - **全部权限**：不额外限制接口范围，但仍受创建者当前角色权限约束。
     - **自定义权限**：从可选 API 权限点中至少选择一项；该 APP Key 只能调用选中的接口范围。
@@ -61,36 +67,65 @@ Content-Type: application/json
 </Steps>
 
 <Warning>
-APP Key 的实际可访问范围同时受其权限范围和创建者当前角色权限限制。创建成功后请立即妥善保存完整密钥；离开创建页面后无法再次查看。
+APP Key 的实际可访问范围同时受其权限范围和创建者当前角色权限限制。创建成功后请立即妥善保存完整密钥；离开创建页面后无法再次查看。不要把 APP Key 硬编码在客户端代码里，请通过环境变量或密钥管理服务注入，并及时删除不再使用的密钥。
 </Warning>
 
-你可以在 APP Key 列表中编辑已有密钥的名称和权限范围。
+您可以在 APP Key 列表中编辑已有密钥的名称和权限范围。
 
-### 使用示例
+### APP Key 泄露了怎么办
 
-将 APP Key 作为 query string 参数传入：
+如果 APP Key 可能已泄露（例如被提交到公开代码仓库，或出现在日志、截图中），请按以下步骤处置：
+
+<Steps>
+  <Step title="创建替代密钥">
+    在 **个人中心 → APP Key** 中创建一个新的 APP Key。
+  </Step>
+  <Step title="切换集成">
+    把使用旧密钥的集成、脚本和配置切换到新密钥，并确认调用正常。
+  </Step>
+  <Step title="禁用或删除旧密钥">
+    在 APP Key 列表中禁用或删除旧密钥。之后使用旧密钥的请求返回 `401 Unauthorized`。
+  </Step>
+</Steps>
+
+### 传递 APP Key
+
+通过 query 参数 `app_key` 传入：
 
 ```bash
-curl -X POST 'https://api.flashcat.cloud/your/api/path?app_key=YOUR_APP_KEY' \
+curl -X POST 'https://api.flashcat.cloud/incident/list?app_key=YOUR_APP_KEY' \
   -H 'Content-Type: application/json' \
-  -d '{"param": "value"}'
+  -d '{"start_time": 1712000000, "end_time": 1712086400, "limit": 20}'
 ```
 
+也可以放在请求头 `Fd-App-Key` 中，避免密钥出现在 URL 和访问日志里：
+
+```bash
+curl -X POST 'https://api.flashcat.cloud/incident/list' \
+  -H 'Fd-App-Key: YOUR_APP_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"start_time": 1712000000, "end_time": 1712086400, "limit": 20}'
+```
+
+两者同时存在时以 query 参数为准。缺少或无效的 APP Key 返回 `401 Unauthorized`。
+
 <Note>
-使用 Go？推荐用官方 [Go SDK](/zh/openapi/go-sdk) 调用 Flashduty，直接获得类型化的请求参数、响应结构和错误码，无需手写 HTTP 请求。
+使用 Go？推荐用官方 [Go SDK](/zh/developer/go-sdk) 调用 Flashduty，直接获得类型化的请求参数、响应结构和错误码，无需手写 HTTP 请求。
 </Note>
 
 ---
 
 ## 响应结构
 
-所有请求响应均为 JSON 格式，遵循统一结构：
+所有响应均为 JSON，遵循统一结构：
 
-| 字段 | 类型 | 必选 | 描述 |
+| 字段 | 类型 | 必定返回 | 描述 |
 | --- | --- | :---: | --- |
-| `request_id` | string | ✅ | 请求 ID，用于链路追踪 |
-| `error` | object | | 错误描述，仅当出现错误时返回 |
-| `data` | any | | 数据内容，具体格式参考各 API 定义 |
+| `request_id` | string | ✅ | 请求 ID，同时通过响应头 `Flashcat-Request-Id` 返回。联系技术支持时请提供。 |
+| `data` | any | | 接口返回的数据，格式见各接口页面。没有返回数据的接口会返回 `{}` 或完全不带 `data`，请不要依赖该字段一定存在。出错时不返回。 |
+| `error` | object | | 仅在请求失败时返回。 |
+
+成功时 HTTP 状态码为 `200`。失败时返回[错误码列表](/zh/openapi/rate-limits#错误码)中对应的 HTTP 状态码，但请以 `error.code` 而不是状态码做判断。
 
 ### 响应示例
 
@@ -98,10 +133,10 @@ curl -X POST 'https://api.flashcat.cloud/your/api/path?app_key=YOUR_APP_KEY' \
   <Tab title="成功响应">
 ```json
 {
-  "request_id": "abc123456",
+  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
   "data": {
-    "id": "user_001",
-    "name": "example"
+    "team_id": 1467226103121,
+    "team_name": "SRE"
   }
 }
 ```
@@ -109,10 +144,10 @@ curl -X POST 'https://api.flashcat.cloud/your/api/path?app_key=YOUR_APP_KEY' \
   <Tab title="错误响应">
 ```json
 {
-  "request_id": "abc123456",
+  "request_id": "01HK8XQE3Z7JM2NTFQ5YJ8P9R4",
   "error": {
     "code": "InvalidParameter",
-    "message": "参数 name 不能为空"
+    "message": "The specified parameter team_name is not valid."
   }
 }
 ```
@@ -121,114 +156,23 @@ curl -X POST 'https://api.flashcat.cloud/your/api/path?app_key=YOUR_APP_KEY' \
 
 ### Error 对象结构
 
-| 字段 | 类型 | 必选 | 描述 |
+| 字段 | 类型 | 必定返回 | 描述 |
 | --- | --- | :---: | --- |
-| `code` | string | ✅ | 错误码，详见下方[错误码列表](#错误码列表) |
-| `message` | string | | 错误描述 |
+| `code` | string | ✅ | 稳定的错误码，见[错误码列表](/zh/openapi/rate-limits#错误码) |
+| `message` | string | ✅ | 按响应语言返回的错误描述，可能包含出错的字段名。请不要解析它。 |
 
 ---
 
-## 使用限制
+## 数据约定
 
-### 频率限制
-
-为保证服务稳定性，API 对请求频率有一定限制。当请求过于频繁时，将返回 `429` 状态码和 `RequestTooFrequently` 错误。
-
-<Warning>
-请合理控制请求频率，避免在短时间内发送大量请求。建议实现重试机制，在收到 429 错误时进行指数退避重试。
-</Warning>
-
-### 权限限制
-
-- 选择 **全部权限** 的 APP Key 不额外限制接口范围，但仍受创建者当前角色权限约束
-- 选择 **自定义权限** 时，必须至少选择一个 API 权限点，APP Key 只能调用选中的接口范围
-- 操作超出 APP Key 权限范围或创建者角色权限时，将返回 `403` 状态码和 `AccessDenied` 错误
-- 建议为不同用途创建独立的 APP Key，遵循最小权限原则
-
-### 错误码列表
-
-| 错误码 | HTTP Status | 描述 |
-| --- | :---: | --- |
-| `InvalidParameter` | 400 | 参数错误，请检查请求参数是否正确 |
-| `InvalidContentType` | 400 | Content-Type 不支持，请使用 `application/json` |
-| `MethodNotAllowed` | 400 | HTTP Method 不支持 |
-| `Unauthorized` | 401 | 登录认证未通过，请检查 APP Key 是否正确 |
-| `AccessDenied` | 403 | 权限认证未通过，当前用户无此操作权限 |
-| `RouteNotFound` | 404 | 请求 Method + Path 未匹配，请检查 API 地址 |
-| `RequestTooFrequently` | 429 | 请求过于频繁，请稍后重试 |
-| `ResourceNotFound` | 400 | 账户未购买资源，请前往费用中心下单 |
-| `NoLicense` | 400 | 账户无充足订阅 License，请前往费用中心升级或购买订阅 |
-| `InternalError` | 500 | 内部或未知错误，请联系技术支持 |
+- **时间戳**均为 Unix 时间戳整数。大多数以**秒**为单位；部分（AI SRE 和 RUM 的大多数时间字段、故障动态、审计日志）以**毫秒**为单位。每个时间字段的描述都会写明单位。
+- **枚举**区分大小写，可能是字符串或整数；每个字段都会列出可选值及含义。
+- **ID** 按各字段标注的类型（整数或字符串）返回，回传时请保持相同类型。
+- **列表**均分页返回，见[关于分页](/zh/openapi/pagination)。
+- **更新接口**会逐字段说明：不传某字段时是保留原值还是清空。
 
 ---
 
-## 错误处理建议
+## 限制与错误
 
-<AccordionGroup>
-  <Accordion title="400 参数错误">
-    **可能原因**：
-    - 缺少必填参数
-    - 参数格式不正确
-    - Content-Type 未设置为 `application/json`
-    
-    **解决方案**：
-    检查请求参数和 Headers 设置，参考 API 文档确认参数要求。
-  </Accordion>
-
-  <Accordion title="401 认证失败">
-    **可能原因**：
-    - APP Key 未提供
-    - APP Key 不正确或已失效
-    
-    **解决方案**：
-    1. 确认请求 URL 中包含 `app_key` 参数
-    2. 前往控制台检查 APP Key 是否有效
-  </Accordion>
-
-  <Accordion title="403 权限不足">
-    **可能原因**：
-    - 当前用户无权执行此操作
-    - APP Key 对应用户权限不足
-    
-    **解决方案**：
-    联系账户管理员提升权限，或使用具有相应权限的 APP Key。
-  </Accordion>
-
-  <Accordion title="429 请求过频">
-    **可能原因**：
-    - 短时间内发送了过多请求
-    
-    **解决方案**：
-    1. 降低请求频率
-    2. 实现指数退避重试机制
-    3. 合并多个请求（如使用批量接口）
-  </Accordion>
-
-  <Accordion title="500 内部错误">
-    **可能原因**：
-    - 服务端内部异常
-    
-    **解决方案**：
-    1. 稍后重试
-    2. 如持续出现，请联系技术支持并提供 `request_id`
-  </Accordion>
-</AccordionGroup>
-
----
-
-## 最佳实践
-
-<CardGroup cols={2}>
-  <Card title="实现重试机制" icon="rotate">
-    对于网络错误和 5xx 错误，建议实现指数退避重试，初始间隔 1 秒，最大重试 3 次。
-  </Card>
-  <Card title="记录 request_id" icon="clipboard-list">
-    保存每次请求返回的 `request_id`，便于问题排查和技术支持。
-  </Card>
-  <Card title="保护 APP Key" icon="shield-check">
-    不要在客户端代码中硬编码 APP Key，建议通过环境变量或配置中心管理。
-  </Card>
-  <Card title="定期轮换密钥" icon="key">
-    定期更换 APP Key，及时删除不再使用的密钥，降低泄露风险。
-  </Card>
-</CardGroup>
+频率限制、权限校验、完整错误码列表和重试建议见[使用限制与错误码](/zh/openapi/rate-limits)。每个接口页面的 **限制说明** 部分也列出了该接口自己的频率限制和所需权限。

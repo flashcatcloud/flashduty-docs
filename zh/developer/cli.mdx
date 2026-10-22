@@ -18,7 +18,7 @@ Flashduty CLI（`flashduty`）是一款命令行工具，可在终端中完成�
 curl -sSL https://static.flashcat.cloud/flashduty-cli/install.sh | sh
 ```
 
-默认安装到 `/usr/local/bin`，可通过环境变量 `FLASHDUTY_INSTALL_DIR` 自定义。
+默认安装到 `PATH` 上已有的那份 `flashduty` 所在目录，便于就地升级替换掉旧副本；`PATH` 上没有 `flashduty` 时才安装到 `/usr/local/bin`。可通过环境变量 `FLASHDUTY_INSTALL_DIR` 自定义安装目录。
 </Tab>
 
 <Tab title="Windows (PowerShell)">
@@ -39,12 +39,14 @@ irm https://static.flashcat.cloud/flashduty-cli/install.ps1 | iex
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
 | `FLASHDUTY_VERSION` | 安装指定版本，如 `v1.5.12` | 最新版本 |
-| `FLASHDUTY_INSTALL_DIR` | 安装目录 | `/usr/local/bin`（Shell）、`~\.flashduty\bin`（PowerShell） |
+| `FLASHDUTY_INSTALL_DIR` | 安装目录 | `PATH` 上已有 `flashduty` 所在目录，否则 `/usr/local/bin`（Shell）；`~\.flashduty\bin`（PowerShell） |
 | `MIRROR_URL` | 覆盖安装脚本的 Release 资产下载镜像前缀，需以 `https://` 开头 | `https://static.flashcat.cloud/flashduty-cli` |
 | `FLASHDUTY_UPDATE_BASE_URL` | 覆盖 `flashduty update` 及自动更新检查的下载基础 URL | `https://static.flashcat.cloud/flashduty-cli` |
 | `INSTALLED_NAME` | 安装后的命令名，例如 `fduty` | `flashduty` |
 
 以自定义命令名安装的副本，在帮助、错误信息与 Shell 自动补全中都使用该名称；`flashduty update` 按正在运行的可执行文件名与所在目录就地替换自身，而不是另装一份默认命名的副本。
+
+安装脚本结束时会再核对一次 `PATH`：若当前 Shell 实际运行的 `flashduty` 不是刚装的那份（被更靠前的旧副本抢占），会在输出里提示删掉旧副本或把新目录提前。若当前进程由 flashduty-runner 托管（`FLASHDUTY_MANAGED_BY_RUNNER=1`），脚本会拒绝执行并提示改为升级 runner——runner 自带一份与它一同验证过的 CLI，就地替换会让两者失配。
 
 ## 认证
 
@@ -54,7 +56,7 @@ irm https://static.flashcat.cloud/flashduty-cli/install.ps1 | iex
 flashduty login
 ```
 
-按提示输入 APP Key。获取方式：登录 [Flashduty 控制台](https://console.flashcat.cloud)，进入 **个人中心 > 个人信息**，复制 APP Key。
+按提示输入 APP Key。获取方式：登录 [Flashduty 控制台](https://console.flashcat.cloud)，进入 **个人中心 → APP Key** 创建并复制，详见[个人设置](/zh/on-call/configuration/personal-settings#app-key)。
 
 ### 凭证解析顺序
 
@@ -94,14 +96,16 @@ flashduty config set base_url URL  # 覆盖 API 地址
 
 ## 全局参数
 
-所有子命令均支持以下参数：
+以下参数注册在根命令上；除 `--version` 外，其余所有子命令均可使用：
 
 | 参数 | 说明 |
 |------|------|
 | `--output-format` | 输出格式：`table`（默认）、`json` 或 `toon`（紧凑、更省 token） |
 | `--json` | 以 JSON 格式输出，是 `--output-format json` 的别名，便于通过 `jq` 等工具解析 |
 | `--no-trunc` | 表格输出时不截断长字段 |
+| `--fields` | `json`/`toon` 输出时只保留指定的顶层字段（逗号分隔），作用于列表的每一行或单个记录；表格输出忽略该参数，并在 stderr 提示它未生效。字段名未命中时 stderr 会列出实际可用的键；输出不是对象或对象列表时命令直接报错。详见下文「结构化输出的字段投影」 |
 | `--base-url` | 覆盖 API 地址（私有部署场景） |
+| `--version` | 打印版本信息，与 `flashduty version` 输出相同的一行。这个含义只在根命令上有；个别命令自己定义了 `--version`（例如变更类命令的乐观锁版本号），那些命令按自己的说明生效 |
 
 ## 命令清单
 
@@ -116,7 +120,7 @@ flashduty incident ack <id> [<id2>...]  # 认领故障
 flashduty incident close <id> [<id2>...] # 关闭（解决）故障
 flashduty incident merge <target-id> --source <ids> # 将多个故障合并到目标故障
 flashduty incident timeline <id>        # 查看故障时间线
-flashduty incident alerts <id>          # 查看故障关联的告警
+flashduty incident alerts <id>          # 查看故障关联的告警（--limit 默认 10、--page）
 flashduty incident similar <id>         # 查找相似的历史故障
 flashduty incident feed <id> [flags]   # 查看故障的分页动态流（时间线条目）
 ```
@@ -141,7 +145,7 @@ flashduty incident feed <id> [flags]   # 查看故障的分页动态流（时间
 | `--is-rare` | 仅看新奇故障 | `false` |
 | `--is-snoozed` | 仅看已暂缓的故障 | `false` |
 | `--ever-muted` | 仅看曾被静默的故障 | `false` |
-| `--since` | 起始时间（时长、日期、日期时间或 Unix 时间戳），与 `--until` 的窗口须小于 31 天 | `24h` |
+| `--since` | 起始时间（时长、日期、日期时间或 Unix 时间戳），与 `--until` 的窗口须小于 31 天 | `24h`；`--progress` 只含 `Triggered,Processing` 时为 `30d` |
 | `--until` | 截止时间 | `now` |
 | `--asc` | 按时间升序（最早的在前） | `false`（最新在前） |
 | `--limit` | 最大结果数（上限 100） | `20` |
@@ -150,6 +154,8 @@ flashduty incident feed <id> [flags]   # 查看故障的分页动态流（时间
 时间格式示例：`5m`、`1h`、`24h`、`168h`、`2026-04-01`、`2026-04-01 10:00:00`、`1712000000`。
 
 `incident feed <id>` 按页读取故障的动态流（时间线条目）：`--asc` 让最旧的条目在前（默认最新在前），`--types` 按逗号分隔的条目类型过滤（如 `i_comm,i_assign`，条目的 `type` 字段给出实际类型），另有 `--limit`（最大 100）与 `--page`。
+
+`incident alerts <id>` 列出该故障关联的告警，支持 `--limit`（默认 `10`）与 `--page`（默认 `1`）。
 
 #### 创建、更新与合并
 
@@ -184,6 +190,8 @@ flashduty incident work-item-post-mortem-bind [flags]            # 将已转换�
 ```
 
 `work-item-create` 关键参数：`--item-type`（必填，`action` 或 `follow_up`）、`--title`（必填，最多 512 字符）、`--idempotency-key`（必填幂等键，最多 128 字符）、`--post-mortem-id`（`follow_up` 必填，`action` 禁止）、`--assignee-ids`（初始负责人，旧别名）。更新类操作（`update`/`complete`/`convert`/`delete`/`assignees-reset`）均需传 `--version`（乐观锁，必须与当前存储版本一致）。
+
+工作项状态只接受 `open` / `in_progress` / `done` / `cancelled` 四个取值：`work-item-create --status` 省略或留空时默认 `open`，`work-item-update --status` 只能改成这四个值之一，`work-item-complete --target-status` 只接受 `done`（其它取值会被拒绝），`work-item-convert --target-status` 可传这四个值之一。
 
 工作项的负责人可以是成员，也可以是**本账户的 AI SRE**：
 
@@ -283,7 +291,7 @@ flashduty channel list [flags]   # 列出协作空间
 
 ### channel escalate-rule-list — 分派策略查询
 
-分派策略现已并入 `channel` 命令组，通过位置参数传入协作空间 ID：
+分派策略查询属于 `channel` 命令组，通过位置参数传入协作空间 ID：
 
 ```bash
 flashduty channel escalate-rule-list <channel-id>   # 列出指定协作空间下的所有分派策略
@@ -304,7 +312,7 @@ flashduty channel silence-rule-disable --channel-id <id> --rule-id <id>  # 停�
 flashduty channel silence-rule-delete --channel-id <id> --rule-id <id>   # 删除
 ```
 
-`inhibit-rule-*` 与 `unsubscribe-rule-*` 用法相同；`inhibit-rule-create` 需 `--equals`（源与目标告警的配对标签键）。silence / inhibit 均可加 `--is-directly-discard` 让被抑制的告警直接丢弃而非合并。注意 `*-rule-create` 与 `*-rule-list` 的 `channel-id` 是位置参数，`*-rule-update`/`delete`/`enable`/`disable` 使用 `--channel-id` 标志；`--rule-id` 为 MongoDB ObjectID 字符串。
+`inhibit-rule-*` 与 `unsubscribe-rule-*` 用法相同；`inhibit-rule-create` 需 `--equals`（源与目标告警的配对标签键）。silence / inhibit 均可加 `--is-directly-discard` 让被抑制的告警直接丢弃而非合并。注意 `*-rule-create` 与 `*-rule-list` 的 `channel-id` 是位置参数，`*-rule-update`/`delete`/`enable`/`disable` 使用 `--channel-id` 标志；`--rule-id` 为规则 ID 字符串。
 
 ### field — 自定义字段查询
 
@@ -330,11 +338,11 @@ flashduty status-page draft-create [flags]                            # 创建�
 
 ```bash
 flashduty status-page draft-create \
-  --source 'ai_sre:sess_xxx' \
+  --source 'my-script' \
   --data '{"draft":{"page_id":5750613685214,"type":"incident","name":"Web Console Degraded Performance","message":"We are investigating degraded performance affecting the web console.","status":"investigating","affected_components":[{"component_id":"01KC3GAZ6ZJE40H55GM31RPWZE","status":"degraded"}]}}'
 ```
 
-- `--source`：起草来源的不透明标记（如 `ai_sre:sess_xxx`），最多 64 字符。
+- `--source`：起草来源标记（如 `my-script`），最多 64 字符。
 - `--data` 中的 `draft` 对象（必填，序列化后最多 64 KB，原样存储）。必填字段：`page_id`、`type`（`incident` 或 `maintenance`）、`name`、`message`；可选 `change_id`（大于 0 时表示向已有事件追加更新）、`status`、`affected_components`、`start_time`/`end_time`（Unix 秒，仅新建维护窗口使用）。
 - 响应返回 `draft_id`（形如 `draft_[A-Za-z0-9]{22}`）与 `created_at`，控制台审阅链接携带 `draft_id`。
 
@@ -492,7 +500,25 @@ flashduty rum resource-info [--no-cache]   # 查看 RUM 套餐版本、配额与
 flashduty oncall license-list # 列出当前账户中持有有效 On-call 许可证的成员
 ```
 
-该命令只读，返回成员 ID、名称及许可证类型：`fixed` 表示固定分配，`temporary` 表示当前临时许可证窗口内生效。
+该命令只读，返回成员 ID、名称及许可证类型：`fixed` 表示固定分配，`temporary` 表示当前临时许可证窗口内生效。响应还带 `release_limited`：本账户在本计费周期内的 License 释放次数已用尽时为 `true`，此时释放成员席位会以错误码 `NoLicense` 失败；该额度即[每个计费周期的释放次数上限](/zh/platform/pricing)。
+
+### calendar — 服务日历
+
+服务日历是分派策略与静默规则判断工作日/休息日的依据，控制台侧的配置与层级优先级见[服务日历](/zh/on-call/configuration/service-calendar)。该命令组由 OpenAPI 生成（见下文「全量命令覆盖」）：`<cal-id>`（形如 `cal.<uuid>`）为位置参数，取自 `calendar list` 响应 `items[]` 里的 `cal_id`；`list` 默认只列账户自有日历，列公共节假日日历要加 `--kind region.official.holiday`（默认按调用者所在地区过滤，加 `--no-locale` 取消过滤）。
+
+```bash
+flashduty calendar list [--kind personal|region.official.holiday] [--no-locale]   # 列出日历
+flashduty calendar info|update|delete <cal-id>                                    # 查看 / 修改 / 删除日历
+flashduty calendar event-list <cal-id> [--year <y>] [--month <m>] [--day <d>]     # 列出事件，响应另带 days
+flashduty calendar event-upsert <cal-id> --start-at <date> --end-at <date> --is-off <bool> [--event-id <id>] [--summary <text>]
+flashduty calendar event-delete <cal-id> [--event-id <id> | --start-at <date> --end-at <date>]
+```
+
+以下三点只能从 `--help` 和响应本身看出来：
+
+- **`event-delete` 兼具删除单条事件与清空日期区间两种用法**。传 `--event-id` 删除一条事件；或传 `--start-at` 与 `--end-at`（均为 `YYYY-MM-DD`，`end_at` 为开区间、必须晚于 `start_at`）清空该日历自身在 `[start_at, end_at)` 内的全部事件。被清空的日期回落到关联的节假日日历与每周工作日，效果相当于在控制台里对这些日期点击**恢复默认**。
+- **`event-upsert` 会裁剪同区间内该日历自身的其他事件**：完全落在区间内的被删除、部分重叠的被缩短、跨越区间的被拆成两条，因此这些天以最后一次写入为准（`--summary` 可选）。
+- **`event-list` 的响应除行数组 `items` 外还有 `days`**：按 `YYYY-MM-DD` 给出请求范围内每一天的解析结果，含 `is_off`、决定该天的 `event_id` 与层级 `layer`——`custom`（日历自有事件）优先于 `holiday`（关联的节假日日历），再优先于 `weekly`（每周工作日）；同一层级内工作日事件优先于休息日；`layer` 缺失表示没有任何事件覆盖该天，按工作日计。判断某天是否休息请读 `days`，不要从 `items` 反推：同一天可能同时存在多层事件。
 
 ### template — 通知模板
 
@@ -545,7 +571,7 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 
 ### monit-query — 监控数据源统一工具调用
 
-`monit-query` 对已配置的数据源执行**单个命名工具**，是查询与诊断的统一入口：查询工具（`<type>.query`，覆盖 `prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`）与诊断工具（如 `mysql.overview`、`redis_node.slowlog`）都走它，无需经过告警规则层。旧 `monit-query data` 子命令已退役。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
+`monit-query` 对已配置的数据源执行**单个命名工具**，是查询与诊断的统一入口：查询工具（`<type>.query`，覆盖 `prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`）与诊断工具（如 `mysql.overview`、`redis_node.slowlog`）都走它，无需经过告警规则层。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
 
 ```bash
 flashduty monit datasource-list --type prometheus --json | jq '.[] | {id, name, type_ident, address}'
@@ -560,13 +586,13 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `--tool` | 工具名（必填），以数据源类型为前缀，如 `prometheus.query`、`mysql.overview`、`redis_node.slowlog`；1–128 字符 |
 | `--params` | 工具参数 JSON（可省略，省略即 `{}`；参数较长时传 `-` 从标准输入读取；显式 `null` 不合法） |
 
-查询工具与诊断工具的 Edge 版本门禁不同：查询工具经 Explore 执行路径提交，要求所选集群内**全部**当前在线可路由的 Edge 会话支持 Explore 查询协议 **v0.68.0**；诊断工具经基础调用协议提交，要求 **v0.71.0**（详见下文 `monit datasource-tools-invoke`）。版本不满足时命令直接失败并返回错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合，只有部分会话支持）、`edge_version_unknown`（集群内存在版本无法识别的 Edge）、`no_active_edge`（没有可用的在线 Edge）；收到这些错误时不要轮换 Edge、也不要回退到旧版入口。
+查询工具要求集群内所有在线 Edge 版本不低于 v0.68.0，诊断工具要求不低于 v0.71.0。版本不满足时命令直接失败并返回错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合）、`edge_version_unknown`（集群内存在版本无法识别的 Edge）、`no_active_edge`（没有可用的在线 Edge）。请先升级 Edge，不要轮换 Edge 重试。
 
 查询工具返回完整的 `explore_result.v1` 结构化结果：`format` 固定为 `explore_result.v1`，`result.kind` 为 `samples`（带完整标签集的即时样本）、`frames`（类型化表格/时序帧）或 `logs`（原始日志，含 `applied_limit` 与 `has_more`）三者之一。诊断工具的返回结构见下文 `monit datasource-tools-invoke`。
 
 ### monit datasource-tools-invoke — 数据源诊断工具
 
-`monit datasource-tools-invoke` 对已配置的数据源执行**一次确定性的只读工具调用**，是结构化数据源诊断的现行路径（取代 `monit-query diagnose`），与上文 `monit-query` 命令等价，`monit-query` 为推荐路径。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
+`monit datasource-tools-invoke` 对已配置的数据源执行**一次确定性的只读工具调用**，与上文 `monit-query` 命令等价，推荐使用 `monit-query`。数据源 ID 从 `monit datasource-list` 的 `id` 字段获取：
 
 ```bash
 flashduty monit datasource-list --type redis_node --json | jq '.[] | {id, name, type_ident, address}'
@@ -584,12 +610,11 @@ flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowl
 语义与限制：
 
 - **无工具目录、无自动重试、无回退**：一次调用只执行一个命名工具，参数需按各数据源工具约定填写，不要从命令行列表猜测。除诊断工具外，入口还支持 `<type>.query` 查询工具（`prometheus`、`mysql`、`postgres`、`oracle`、`clickhouse`、`elasticsearch`、`loki`、`victorialogs`、`sls`、`tencent_cls`）。
-- 要求所选集群内**全部**当前在线可路由的 Edge 会话支持 v0.71.0 基础调用协议（个别工具可能要求更新的实现）；查询工具（`<type>.query`）走 Explore 执行路径，另有 Explore 查询协议 v0.68.0 的下限——集群只支持旧版时查询工具同样失败，不会回退到旧入口。
 - 请求体 ≤128 KiB；完整成功响应 ≤10 MiB；工具超时 ≤25 秒。
 - 需要数据源 `enabled=true`；`alerting_enabled=false` 不阻塞诊断。
-- 返回值：`data`（工具特定的 JSON 证据，原样保留、永不为 null，不含旧 diagnose 信封）、`tool`、`datasource_id`、可选 `summary`，以及 `truncated` 对象（含 `reason`，存在即表示结果被截断）。
+- 返回值：`data`（工具特定的 JSON 证据，原样保留、永不为 null）、`tool`、`datasource_id`、可选 `summary`，以及 `truncated` 对象（含 `reason`，存在即表示结果被截断）。
 
-错误按原样返回，常见错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合）、`edge_version_unknown`（集群内存在版本无法识别的 Edge，查询工具路径返回）、`no_active_edge`（无可用在线 Edge）、`tool_not_supported`（工具不支持）、`invalid_request`（修正参数）、`source_too_large` / `result_too_large`（收窄请求范围）。出现 Edge 版本问题时不要轮换 Edge 或回退到旧版 diagnose。
+出现上述 Edge 版本类错误码或 `tool_not_supported`（工具不支持）时按上文处理；出现 `invalid_request` 时修正参数，出现 `source_too_large` / `result_too_large` 时收窄请求范围。
 
 ### monit — 数据源、仪表盘与规则分组
 
@@ -630,12 +655,17 @@ flashduty monit datasource-delete --id <datasource-id>  # 删除数据源（引�
 - `kafka`：`sasl_mechanism`（`none` 默认 / `plain` / `scram-sha-256` / `scram-sha-512`，后三者需用户名与密码）、`username` / `password`、`timeout_ms`（默认 5000）、TLS 字段（`tls_min_version` 默认 1.2，最高 1.3）。
 - 密码与 `kafka.tls_key` 支持 `${env:NAME}` 引用（在 Edge 上解析）；字面值不会出现在响应中，仅 `${env:...}` 引用会回显。**更新时省略这些字段以保留已存密钥，显式传空字符串表示清除**。
 
-#### 仪表盘与规则分组（dashboard-* / folder-list）
+#### 仪表盘与规则分组（dashboard-* / folder-*）
 
 `monit dashboard-*` 命令族管理监控仪表盘（由 OpenAPI 生成命令提供）。仪表盘本身是一份 `dashboard.v1` 文档，创建与更新时通过 `--data` 传入 `definition`；`update` / `delete` / `move` / `restore` 都要求 `--expected-revision`——传入的版本不是当前版本时以 `DashboardRevisionConflict` 拒绝，需要重新读取后再提交。
 
 ```bash
 flashduty monit folder-list                                       # 列出全部监控规则分组，用于取 folder-id（返回顶层数组，用 jq '.[]'）
+flashduty monit folder-health                                     # 查看分组健康摘要，含后代分组中的问题（分页信封，用 jq '.items[]'）
+flashduty monit folder-create --name <folder-name> [flags]        # 创建分组（--name 必填且不能含 . / ,；--parent-id 父分组，0=根；--note 备注；--team-id 团队，0=账户级）
+flashduty monit folder-update --id <folder-id> --name <folder-name> # 更新分组的名称、备注与团队归属（--id 与 --name 必填）
+flashduty monit folder-move <dest-parent-id> --id <folder-id>     # 移动分组及其后代（dest-parent-id 是位置参数，必须显式给出，0=移到根）
+flashduty monit folder-delete --id <folder-id>                    # 删除分组（仅限空分组：内部还有子分组、规则或仪表盘时会被拒绝）
 flashduty monit dashboard-list <folder-id>                        # 列出某个分组下的仪表盘（分页信封，用 jq '.items[]'）
 flashduty monit dashboard-search --query "支付"                    # 按标题与描述搜索仪表盘（至少一个词）
 flashduty monit dashboard-get <dashboard-id>                      # 读取仪表盘详情，含 definition 与当前 revision
@@ -655,7 +685,11 @@ flashduty monit dashboard-runtime-variables-preview               # 预览草稿
 flashduty monit dashboard-runtime-queries-resolve <panel-id> [<id2>...]  # 解析面板查询：变量替换后的表达式与绑定到的数据源
 ```
 
+`monit folder-*` 是分组本身的增删改查：`folder-health` 返回 `{items:[...]}` 分页信封（每项只有 `folder_id` 与 `has_issue`，`has_issue` 表示该分组或其可见后代存在活跃告警或规则运行问题），`folder-list` 返回顶层数组，用法都是 `--json | jq`；`folder-create` 与 `folder-update` 返回更新后的单个分组对象；`folder-move` 与 `folder-delete` 不返回分组对象。分组名不能含 `.`、`/`、`,`；`folder-move` 的 `dest-parent-id` 即使移到根（`0`）也必须显式给出；`folder-delete` 只接受空分组——内部还有子分组、规则或仪表盘时会被拒绝，需要先自行清空。
+
 面板运行时与变量解析的时间窗口、变量选择都以 JSON 对象放在 `--data` 里（时间用 `from_ms` / `to_ms` 的毫秒时间戳）。`dashboard-panel-preview` 与 `dashboard-runtime-variables-preview` 需要一个 `context`：`kind: existing` 配 `dashboard_id` 指向已存仪表盘，`kind: new` 配 `folder_id` 指向尚未落库的分组。
+
+`dashboard-runtime-queries-resolve` 另有两个影响解析结果的参数：`--max-data-points`（整数，取值 2–5000；既作降采样目标，也决定解析出的表达式里内置时间变量渲染出的步长，省略或传 `null` 时取服务端默认值 100）与 `--preserve-builtin-variables`（布尔，默认关）：开启后**内置时间变量**在解析结果里原样保留，交由自带执行窗口的调用方自行渲染，用户变量仍会被解析。兄弟命令 `dashboard-panel-run` 与 `dashboard-panel-preview` 早已带 `--max-data-points`，同为 2–5000 的降采样目标。
 
 #### `prometheus-api-v1-label-{label_name}-values` — 查询 Prometheus 标签值
 
@@ -680,14 +714,19 @@ flashduty monit prometheus-api-v1-label-{label_name}-values job --data-source-id
 ### alert — 告警与告警事件查询
 
 ```bash
-flashduty alert list [flags]        # 列出告警（默认最近 24 小时）
+flashduty alert list [flags]        # 列出告警（默认最近 24 小时；--active 时为 30 天）
 flashduty alert get <alert_id>      # 查看单条告警详情；detail 是同一命令的别名
+flashduty alert events <alert_id>   # 列出组成该告警的原始事件（--limit、--page）
 flashduty alert-event list [flags]  # 列出告警事件（默认最近 1 小时）
 ```
 
-两个 `list` 命令常用过滤参数：`--severity`（`Critical,Warning,Info`）、`--channel`（逗号分隔协作空间 ID）、`--integration`（逗号分隔的集成 ID）、`--since`/`--until`、`--limit`（最大 100）、`--page`。`alert-event list` 另有 `--integration-type`，按逗号分隔的**插件键**过滤（如 `AliCloud,Prometheus`）——注意它取插件键而非集成 ID，按集成 ID 过滤请使用 `--integration`。
+两个 `list` 命令常用过滤参数：`--severity`（`Critical,Warning,Info`）、`--channel`（逗号分隔协作空间 ID）、`--integration`（逗号分隔的集成 ID）、`--since`/`--until`、`--limit`（最大 100）、`--page`。`--since` 与 `--until` 之间的窗口须小于 31 天（与 `incident list`、`change list` 相同）。`alert-event list` 另有 `--integration-type`，按逗号分隔的**插件键**过滤（如 `AliCloud,Prometheus`）——注意它取插件键而非集成 ID，按集成 ID 过滤请使用 `--integration`。
 
 `alert list` 另有 `--alert-ids`（逗号分隔的告警 ID）、`--alert-keys`（逗号分隔的告警去重键）、`--asc`（按开始时间升序，默认最新在前）、`--by-updated-at`（把 `--since`/`--until` 应用到最近更新时间，而不是开始时间）；`alert-event list` 也支持 `--asc`（升序，默认最新在前），但没有 `--by-updated-at`。
+
+`alert list` 还用 `--active`（只看活跃告警）与 `--recovered`（只看已恢复告警）筛选状态：二者互斥，同时传入会报错；只传其中一个时，`--active` 对应活跃、`--recovered` 对应已恢复，都不传则不加状态过滤。活跃告警可能早于一天，因此 `--active` 且未指定 `--since` 时默认窗口放宽到 30 天（实际生效的窗口见 stderr 的窗口提示）。
+
+`alert events <alert_id>` 列出组成该告警的原始事件：`--limit` 默认取服务端默认的 20 条（上限 100），`--page` 从 1 开始。它按单个告警取事件，跨告警的时间窗查询用 `alert-event list`。
 
 ### automation — AI SRE 自动化规则
 
@@ -709,11 +748,12 @@ flashduty automation fire <trigger_id>            # 经 HTTP POST 触发器触�
 | 参数 | 说明 |
 |------|------|
 | `--name` | 规则名称（必填） |
-| `--team-id` | 归属团队 ID；`0` 表示个人范围（默认）。作用域创建后不可变更 |
+| `--team-id` | 归属团队 ID；显式 `0` 表示个人范围，`>0` 表示该团队；省略时不发送该字段，由服务端在可用时继承当前 IM 会话的作用域，否则取常规默认值。`--run-in current-chat` 时传入的团队 ID 必须与该会话的作用域一致，不能把会话改到别的个人或团队范围。作用域创建后不可变更 |
+| `--run-in` | 执行位置：`current-chat` 把规则绑定到当前的 IM 会话，`web` 在 Web 控制台运行；省略时由服务端决定——在 IM 会话里发起选 `current-chat`，否则选 `web`。在非 IM 会话里传 `current-chat` 会被服务端拒绝 |
 | `--schedule` | 节奏辅助：`hourly`、`daily`、`weekly` 或 `cron`；省略时默认 `daily` |
 | `--at` | `HH:MM` 本地时间（按规则时区）；`hourly` 只取分钟（默认 0 分），`daily`/`weekly` 取小时与分钟（默认 09:00） |
 | `--weekday` | `weekly` 的星期：`sun`–`sat` 或 `0`–`7`（`0` 与 `7` 均表示周日，默认周一） |
-| `--cron-expr` | 精确的 5 段 cron 表达式（按规则时区解释），优先级高于 `--schedule` 辅助参数 |
+| `--cron-expr` | 支持的 5 段 cron 表达式（按规则时区解释），优先级高于 `--schedule` 辅助参数。分钟位必须是 `0`–`59` 的单一整数，因此最快只能每小时触发一次；分钟位的通配符、范围、列表与步长都不支持，`*/15 * * * *`、`0,30 * * * *` 这类写法会被拒绝 |
 | `--timezone` | IANA 时区名（如 `Asia/Shanghai`），`--at` 与 `--cron-expr` 按该时区解释；省略时由服务端依次取调用者的成员时区、账户时区，最后回退 `Asia/Shanghai`。服务端无法加载的时区会被拒绝 |
 | `--disabled` | 以停用状态创建（默认启用） |
 | `--schedule-enabled` | 是否启用周期触发器（默认 `true`） |
@@ -721,9 +761,11 @@ flashduty automation fire <trigger_id>            # 经 HTTP POST 触发器触�
 | `--prompt` / `--prompt-file` | 任务提示词，二选一必填；`--prompt-file` 从文件读取（`-` 表示 stdin） |
 | `--environment-kind` / `--environment-id` | 运行环境：`cloud` 或 `byoc`（`byoc` 需配合 `--environment-id`）；留空表示自动 |
 
-`update` 可改字段：`--name`、`--prompt`/`--prompt-file`、`--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`、`--enable`/`--disable`、`--enable-schedule`/`--disable-schedule`、`--enable-http-post-trigger`/`--disable-http-post-trigger`、`--rotate-http-post-token`、`--environment-kind`/`--environment-id`。个人 / 团队作用域创建后不可变更，`update` 不提供改作用域的参数。
+从 IM 会话里创建规则时，省略 `--run-in` 即让服务端把规则绑定到当前会话，同时继承该会话的作用域；不需要（也不应该）自己传 chat、平台、集成或会话 ID——服务端负责解析并鉴权当前会话。绑定当前会话之后，每次普通运行都会新建一个执行会话，IM 集成建线程时也会新建线程，并始终留在创建时捕获的那个会话与不可变作用域上，而不是复用旧会话或旧线程；同一次运行的重试复用该次运行的执行身份。若运行发生时绑定会话的作用域已与规则不符，本次运行会被跳过，规则不会被搬到别的会话里执行。作战室触发的规则行为不变。由于每次运行都是全新上下文，提示词必须自带所需的聊天上下文（服务对象、团队、投递目标等），不要写「上文/上述」这类指代。执行位置与作用域一样创建后不可变更。
 
-`runs` 支持 `--status`（`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`）、`--trigger-kind`（`schedule`/`debug`/`http_post`）、`--since`/`--until`、`--page`、`--limit`。`fire` 用触发器的 Token 鉴权（`--token`，或环境变量 `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN`），`--text` 传本次运行的上下文，`--data` 传完整 JSON 请求体（内联 JSON 或 `-` 读 stdin）。
+`update` 可改字段：`--name`、`--prompt`/`--prompt-file`、`--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`、`--enable`/`--disable`、`--enable-schedule`/`--disable-schedule`、`--enable-http-post-trigger`/`--disable-http-post-trigger`、`--rotate-http-post-token`、`--environment-kind`/`--environment-id`。个人 / 团队作用域与执行位置（`--run-in`）创建后不可变更，`update` 不提供这两类参数。`update` 的 `--cron-expr` 与 `create` 同一约束：分钟位必须是 `0`–`59` 的单一整数，最快每小时一次，不支持分钟位的通配符、范围、列表与步长。
+
+`runs` 支持 `--status`（`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`）、`--trigger-kind`（服务端取值 `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`，其中 `war_room_created` 表示由作战室创建触发的运行）、`--since`/`--until`、`--page`、`--limit`。`fire` 用触发器的 Token 鉴权（`--token`，或环境变量 `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN`），`--text` 传本次运行的上下文，`--data` 传完整 JSON 请求体（内联 JSON 或 `-` 读 stdin）。
 
 <Warning>
 **时区语义**：`--at` 与 `--cron-expr` 均按**规则时区**的本地挂钟时间理解。`create` 省略 `--timezone` 时由服务端决定规则时区——依次取调用者的成员时区、账户时区，最后回退 `Asia/Shanghai`；需要固定其它时区时传入 IANA 名称（如 `--timezone Asia/Shanghai`），服务端无法加载的时区会被拒绝。`update` 省略 `--timezone` 时保留已存储的时区（包括历史遗留的空字符串），显式传空值 `--timezone ""` 会按 UTC 发送并存储，而不是账户默认时区。请直接传用户的本地时间，**不要**预先换算成 UTC。`update` 会立即重算下次触发时间，请以响应中的 `schedule_next_fire_at_ms` 为准。
@@ -756,14 +798,14 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 现已通过 spec 驱动的代码生成实现对 Flashduty OpenAPI 的**全量覆盖**。CLI 生成器读取的 OpenAPI 规范含 **365 个 API 操作**，CLI 为其中 **361 个** 生成对应命令，其余 4 个以手工实现命令提供——流式导出的 `session-read-export`（`session export`）、multipart 表单上传的 `mapping-data-write-upload` 与 `skill-write-upload`（`enrichment mapping-data-upload`、`safari skill-upload`）、带路径参数的 `monit-prometheus-read-label-values`（`monit prometheus-api-v1-label-{label_name}-values`，见下文「查询 Prometheus 标签值」）——并与生成命令一并按资源组织为顶层命令组。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 通过 spec 驱动的代码生成覆盖**全部** Flashduty Open API，按资源组织为顶层命令组，可用 `flashduty <命令组> --help` 查看。其中 `session export`、`enrichment mapping-data-upload`、`safari skill-upload` 和 `monit prometheus-api-v1-label-{label_name}-values`（见下文「查询 Prometheus 标签值」）为手工实现。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
 - **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
 - **监控与 RUM**：monit、rum、sourcemap
-- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换）、webhook（integrations）
+- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换，密钥掩码与更新规则见下文「integration — 集成与密钥」）、webhook（integrations）
 
 这些生成命令的叶子名称采用「资源-动作」形式（如 `flashduty safari a2a-agent-get`、`flashduty safari session-list`），每个公开 API 操作都对应一条 `flashduty <分组> <动作>` 命令，命令名由 API 路径推导，请求字段生成带类型的命令行参数，`--data` 可传完整 JSON 请求体（具名参数覆盖其中的同名字段）。完整清单不在本页展开，用 `flashduty <资源> --help` 逐层探索：
 
@@ -772,6 +814,8 @@ flashduty --help                 # 查看全部顶层命令组
 flashduty safari --help          # 查看 AI SRE 相关的生成命令
 flashduty alert --help           # 查看告警相关的生成命令
 ```
+
+`--data` 里的字段若在当前 CLI 版本的 SDK 中没有对应字段，这些字段**不会**被发出去：绑定请求体后 CLI 会在 stderr 打印一行 `warning: --data fields not sent, unknown to this CLI version: <字段路径>`（路径以点号分隔、数组元素以 `[]` 结尾，如 `labels.k.note`、`targets[].purpose`，多个字段用逗号分隔）。调用本身照常成功，stdout 不受影响——出现这行警告说明所传字段比本机 CLI 版本更新，依赖这些字段生效的脚本应先升级 CLI。
 
 生成命令的时间窗口参数（`--start-time` / `--end-time`）与精选命令一样支持人性化的时间格式：相对时长（`7d`、`24h`，表示从当前往前推）、`+7d`（从当前往后推，即未来时间）、`now`、日期或日期时间（如 `2026-05-01`、`2026-05-01 10:00:00`）、Unix 秒级时间戳。此外，`--since` 和 `--until` 分别是 `--start-time` 和 `--end-time` 的别名，可互换使用；若两种写法同时传入且取值不同，CLI 会报冲突错误。
 
@@ -828,6 +872,40 @@ flashduty safari artifact-gallery-share-sync <artifact-id>                      
 - `artifact-sign` 的签名 token 绑定调用账户与成员，有效期 5 分钟（响应 `expires_in`）；`download_url` / `preview_url` 是相对路径（`/safari/artifact/stream?...`），使用时需拼接 API base（`https://api.flashcat.cloud`）。
 - 产物初始作用域继承来源会话（个人会话的产物归创建者个人，绑定团队的会话的产物归团队）；`can_edit` 决定调用者能否重命名/转移/删除/分享（创建者、所属团队成员或源会话管理者）。
 
+#### integration — 集成与密钥
+
+`integration` 命令族管理账户级的公开集成——告警源、变更源、IM 机器人与自定义 Webhook，共 9 个子命令：`list`、`info <integration-id>`、`type-list`、`create`、`update <integration-id>`、`delete <integration-id>`、`enable <integration-id>`、`disable <integration-id>`、`key-rotate <integration-id>`。渠道专属的集成（`ref_id` 以 `c_` 开头）不在此列，只在控制台配置。
+
+```bash
+flashduty integration type-list --category event.alert # 列出账户可配置的集成类型（只有 supports_api_create: true 的类型能用 create 创建）
+flashduty integration list --status enabled            # 列出集成（可按 --category、--plugin-type、--status、--team-ids、--name、--ref-ids 过滤）
+flashduty integration info <integration-id>            # 查看单个集成，含 settings 与 integration_key
+flashduty integration create --plugin-type standard.alert --name "生产告警" --is-test --data '{"settings":{}}'
+flashduty integration update <integration-id> --name "生产告警（主）"
+flashduty integration key-rotate <integration-id>      # 签发新密钥，旧密钥立即失效
+flashduty integration disable <integration-id>         # 暂停接收事件，保留配置
+flashduty integration enable <integration-id>          # 重新启用
+flashduty integration delete <integration-id>          # 删除；仍被其他对象引用时以 ReferenceExist 拒绝
+```
+
+创建与更新的可用字段：
+
+| 参数 | 说明 |
+|------|------|
+| `--plugin-type` | 集成类型（`create` 必填），取值来自 `integration type-list` 中 `supports_api_create: true` 的条目，如 `standard.alert`、`zabbix.alert` |
+| `--name` | 集成名称，2–49 字符；创建时省略或传空则使用集成类型名 |
+| `--description` | 备注，最多 499 字符 |
+| `--team-id` | 归属团队 ID；省略或 `0` 表示账户级，非 0 时必须属于当前账户。更新时显式传 `0` 会清除团队归属 |
+| `--integration-key` | 仅 `create` 可用：可选的自定义密钥，长度 35 字符，必须以「账户 ID 对 1000 取模后补零到三位」的数字结尾，且不得与其他集成重复；省略则自动生成 |
+| `--is-test` | 执行插件的连通性测试。创建时省略即不测试；更新时只在确实提交了 `settings` 的调用中测试，只改名称/备注不会发测试。结果看响应的 `test.success` 与 `test.message`：HTTP 调用成功不等于测试通过，响应中没有 `test` 表示本次没有执行测试 |
+| `--data` | 完整 JSON 请求体；类型专属配置 `settings` 只能通过它传入，可接受的键由 `plugin_type` 决定 |
+
+`settings` 的读回与密钥语义：
+
+- `list` 与 `info` 返回的 `settings` 中，每个**已保存的密钥类值**——密码、App Secret、Token、加密密钥、HTTP 拉取的 URL 与 Body、Headers 的值——一律显示为 `******`；Webhook 与自定义操作的地址和自定义 Body 按原值返回；未设置的值保持为空。**`integration_key` 是例外，按原值返回**（它用于接入推送，与账户级 `app_key` 不是一回事）。依赖 `integration info --json` 读取凭据的脚本拿到的是掩码；需要新密钥时用 `key-rotate` 轮换，旧密钥会立即失效。
+- `update` 提交的 `settings` 是整体替换：**已知敏感字段被省略或传 `******` 时保留已存密钥**，显式传空 `headers: {}` 会清空 Headers。但**改密钥的发送目标时不能沿用已存密钥**——例如改 `endpoint`、`url`，或改数据库的主机/端口——必须同时传入真实密钥，否则请求被拒。
+- `editable` 只表示对象权限（`no_editable: true` 表示该集成只读）；写操作除此之外还需要**集成管理**权限。
+
 ### 工具命令
 
 ```bash
@@ -865,6 +943,8 @@ inc_abc123   DB connection timeout    Critical   Triggered    Production    2026
 inc_def456   High memory usage        Warning    Processing   Staging       2026-04-10 09:15
 Showing 2 results (page 1, total 2).
 ```
+
+生成命令的列表响应若在行数组（`items` / `docs` / `list`）之外还带其它字段（如 `calendar event-list` 的 `days`、`oncall license-list` 的 `release_limited`），表格会在行表格之后额外打印一行 `Also in the response: <字段> (use --json to see it).`，提示这些字段不在表格里，要看它们请用 `--json` 或 `--output-format toon`。
 </Tab>
 
 <Tab title="JSON（--json / --output-format json）">
@@ -892,7 +972,15 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 </Tab>
 </Tabs>
 
-#### 生成命令的输出上限
+### 时间窗口提示
+
+查询时间范围的命令会把本次实际发送的窗口按本地时区写到 stderr，例如 `note: window 2026-10-08T14:00:00+08:00..2026-10-09T14:00:00+08:00 (1d, ended now)`。括号里是窗口跨度与结束时间相对当前的位置（`ended 3m ago` / `ends in 2h`）；若窗口来自某个默认值而非你显式传入的 `--since`/`--until`，还会说明是哪个默认值（如 `--progress` 只含开放状态、`--active`）。
+
+覆盖范围包括 `incident list`、`alert list`、`alert-event list`、`change list`、`audit search`、`insight`、`oncall`、`monit-query`（工具参数带执行窗口时），以及所有解析出 `--start-time`/`--end-time` 的生成命令（只给出一侧、另一侧交给 `--data` 或服务端默认的命令不输出该提示，因为窗口没有被完整确定）。只有一个时间点的查询写成 `note: instant <时刻> (…)`。
+
+它用来核对窗口是否就是你要的那个：默认值可能比你预期的宽（例如 `--active` 会把默认窗口放宽到 30 天），把时间戳按错误时区解读会让窗口落到未来，此时提示形如 `ends in 7h`。提示只写 stderr，stdout 保持原样，`jq` 与 toon 消费方不受影响。
+
+### 生成命令的输出上限
 
 由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari session-list`、`monit datasource-list`、`safari a2a-agent-list` 等），其 `json` / `toon` 输出对**列表形态**的响应按 16 KiB 上限处理。缩减分三级，另外会有一个机读标记：
 
@@ -903,15 +991,19 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 **列表信封会被重建并写入缩减标记**。列表信封指行数组名为 `items` / `docs` / `list`、同级只有 `total`、`has_next_page`、`search_after_ctx` 等标量字段的响应（如 `monit datasource-list`、`safari session-list`）；一旦发生缩减，CLI 会重建该信封并在 payload 中补写字段，脚本无需解析 stderr 也能发现缩减：
 
 - **整行被丢弃**：写入 `truncated: true` 与 `emitted_rows: N`（N 为实际输出的行数）。此时信封中的 `total`、`has_next_page`、`search_after_ctx` 仍是服务端原始分页的原样回显，**不能**用来判断是否已取全——被截成「100 行中前 7 行」的一页照样带着原来的分页字段。要取全请按实际收到的行数收窄 `--limit` 重新请求，再沿返回的游标继续翻页。
-- **只有长值被截短**（没有丢行）：只写 `truncated: true`，stderr 会点名被截字段。重新请求无法找回这些值，请收窄筛选条件、减少每页行数，或改用支持字段投影的精选命令。
+- **只有长值被截短**（没有丢行）：只写 `truncated: true`，stderr 会点名被截字段。重新请求无法找回这些值，请收窄筛选条件、减少每页行数，或用全局 `--fields` 只保留需要的字段。
+
+**行数组还带非标量同级字段的响应不做缩减**。行数组为 `items` / `docs` / `list`、但同级还有对象或数组字段的响应（如 `calendar event-list` 的 `days` 地图），无法在不丢字段的前提下压进 16 KiB，因此整包原样输出、处理方式同本节末段的**明细形态的单个对象**：既不写 `truncated` / `emitted_rows`，也不截短任何值。
 
 **顶层数组形态**的响应（如精选命令 `incident list`、`insight incidents`）没有信封可承载标记，缩减仍只写 stderr。
 
-**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令大多没有可收窄输出的标志（个别命令的 `--fields` 是请求体的字段选择器，不作用于输出）；需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
+**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令可以用全局 `--fields` 收窄输出的字段（见「全局参数」与下文「结构化输出的字段投影」；个别命令的 `--fields` 是请求体的字段选择器，如 `monit rule-update-fields`，不作用于输出）；需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
 
 ### 结构化输出的字段投影
 
-以下命令在 `json` 或 `toon` 输出时支持 `--fields`。用逗号分隔顶层响应字段；未知字段会直接报错，表格输出会忽略此参数。
+`--fields` 是全局参数（见「全局参数」）：任意命令在 `json` 或 `toon` 输出时都能用它，逗号分隔要保留的顶层字段，作用于列表的每一行或单个记录。投影在返回结果上执行：列表信封（行数组为 `items`、`docs` 或 `list`，同级只有标量分页字段）只收窄其中的行数组，分页字段原样保留；某个字段在整个响应里都不存在时不会被写入输出，stderr 会提示该字段未匹配到任何键、并列出实际存在的键；输出既不是对象也不是对象列表时，命令报错并要求去掉 `--fields`。表格输出忽略 `--fields`，此时 stderr 会提示它未生效。
+
+下表列出的精选命令在省略 `--fields` 时按默认紧凑投影输出，并受大小上限约束；它们各自定义了自己的 `--fields`（含义与全局一致），字段名写错会直接报错并列出具名可用的字段。其它命令——包括全部生成命令——不带默认投影，`--fields` 直接作用在接口返回的原始字段上，字段名未命中只会得到上面那条 stderr 提示。
 
 | 命令 | 未指定 `--fields` 时的结构化输出 | 上限 |
 | --- | --- | --- |

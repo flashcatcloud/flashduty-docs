@@ -1,5 +1,6 @@
 ---
 title: "Firebase Crashlytics 告警集成"
+sidebarTitle: "Firebase Crashlytics"
 description: "通过一段 Cloud Functions 代码，把 Firebase Crashlytics 的新增致命问题、回归和速率告警同步到 Flashduty On-call。"
 keywords: ["告警集成", "Firebase", "Crashlytics", "Cloud Functions", "Eventarc", "崩溃", "移动应用"]
 ---
@@ -19,7 +20,6 @@ Firebase 还会发送**稳定性摘要**（`onStabilityDigestPublished`），按
 <div className="hide">
 
 ## 在 Flashduty On-call
----
 
 您可通过以下两种方式获取集成推送地址，任选其一即可。
 
@@ -40,14 +40,15 @@ Firebase 还会发送**稳定性摘要**（`onStabilityDigestPublished`），按
 </div>
 
 ## 在 Firebase 中配置
----
 
 Crashlytics 告警函数运行在 Cloud Functions（2nd gen）之上，Firebase 项目需要在 **Blaze（按量付费）** 方案下才能部署，即使实际用量落在免费额度内也需要绑定结算账号。
 
 <Steps>
 <Step title="准备 Cloud Functions 项目">
 
-如果项目还没有初始化 Cloud Functions，在项目根目录执行：
+**操作路径**：Firebase 项目根目录的终端
+
+如果项目还没有初始化 Cloud Functions，执行：
 
 ```bash
 firebase init functions
@@ -57,9 +58,16 @@ firebase init functions
 
 </Step>
 
-<Step title="写入转发函数">
+<Step title="在 Cloud Functions 中写入转发函数">
 
-把 `functions/index.js`（或对应的入口文件）替换或追加为以下内容，将 `FLASHDUTY_URL` 换成上一步复制的推送地址（包含 `?integration_key=...`）：
+**操作路径**：functions/index.js（或对应的入口文件）
+
+把 `functions/index.js` 替换或追加为以下内容，`FLASHDUTY_URL` 为 Flashduty 集成的推送地址（`{integration_url}`，包含 `?integration_key=...`）：
+
+| 项 | 填写 |
+| --- | --- |
+| `FLASHDUTY_URL`（必填） | `{integration_url}` |
+| `onXxxPublished(appId, handler)` 中的 `appId`（可选） | 只接入某一个应用时填写，见下文 |
 
 ```js
 const {
@@ -70,7 +78,7 @@ const {
   onNewAnrIssuePublished,
 } = require("firebase-functions/v2/alerts/crashlytics");
 
-const FLASHDUTY_URL = "<推送地址>";
+const FLASHDUTY_URL = "{integration_url}";
 
 async function forwardToFlashduty(event) {
   const issue = event.data.payload.issue;
@@ -111,15 +119,13 @@ exports.flashdutyOnNewAnrIssue = onNewAnrIssuePublished((event) => forwardToFlas
 
 如果只想接入其中几类事件，删掉不需要的 `require` 项和对应的 `exports` 行即可；不要修改保留下来的字段名。
 
-</Step>
-
-<Step title="按需限定应用">
-
-如果 Firebase 项目下有多个应用（iOS、Android、Web 各一个 App ID），且只想接入其中一个，把 `onXxxPublished(handler)` 换成 `onXxxPublished(appId, handler)`，`appId` 取自 **项目设置 → 常规 → 应用的应用 ID**。不传 `appId` 时，项目下所有应用的事件都会转发。
+**按需限定应用**：如果 Firebase 项目下有多个应用（iOS、Android、Web 各一个 App ID），且只想接入其中一个，把 `onXxxPublished(handler)` 换成 `onXxxPublished(appId, handler)`，`appId` 取自 Firebase 控制台 **项目设置 → 常规 → 应用的应用 ID**。不传 `appId` 时，项目下所有应用的事件都会转发。
 
 </Step>
 
-<Step title="部署">
+<Step title="部署函数">
+
+**操作路径**：Firebase 项目根目录的终端
 
 ```bash
 firebase deploy --only functions:flashdutyOnNewFatalIssue,functions:flashdutyOnRegression,functions:flashdutyOnVelocity,functions:flashdutyOnNewNonfatalIssue,functions:flashdutyOnNewAnrIssue
@@ -131,12 +137,14 @@ firebase deploy --only functions:flashdutyOnNewFatalIssue,functions:flashdutyOnR
 
 <Step title="验证">
 
+**操作路径**：Firebase 项目根目录的终端（curl）；Firebase 控制台 › Crashlytics
+
 Crashlytics 告警没有测试按钮，用以下两种方式分别验证：
 
 - **验证 Flashduty 一侧**：用上面模板中的字段结构，向推送地址发一次 curl 请求确认能建立告警：
 
   ```bash
-  curl -X POST "<推送地址>" \
+  curl -X POST "{integration_url}" \
     -H "Content-Type: application/json" \
     -d '{"alert_type":"crashlytics.newFatalIssue","app_id":"test","issue_id":"test-issue","issue_title":"Test issue","app_version":"1.0.0"}'
   ```
@@ -145,17 +153,20 @@ Crashlytics 告警没有测试按钮，用以下两种方式分别验证：
 
 - **验证完整链路**：在一个 Debug 构建中触发一次真实崩溃（例如调用 `Crashlytics.crash()` / `FirebaseCrashlytics.getInstance().log(...)` 后强制抛异常），等待该问题出现在 Crashlytics 控制台（可能有几分钟延迟），确认 Flashduty 收到对应告警。
 
-</Step>
+告警不会自动恢复，请继续阅读下方「开启超时自动关闭」。
 
-<Step title="开启超时自动关闭">
-
-Crashlytics 不会为这些事件发送“已解决”通知，Flashduty 中的告警不会自动恢复。请在接收该集成告警的协作空间中开启 **超时自动关闭**，超时计时起点选择 **故障触发**，超时时长建议设置为 **72 小时**（崩溃问题的排查和发版周期通常比一般基础设施故障更长），配置方法参阅 [配置协作空间](/zh/on-call/channel/create-edit)。问题修复并发布新版本后，可以在 Flashduty 中手动关闭告警。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
 
 </Step>
 </Steps>
 
+## 开启超时自动关闭
+
+Crashlytics 不会为这些事件发送“已解决”通知，Flashduty 中的告警不会自动恢复。请在接收该集成告警的协作空间中开启 **超时自动关闭**，超时计时起点选择 **故障触发**，超时时长建议设置为 **72 小时**（崩溃问题的排查和发版周期通常比一般基础设施故障更长），配置方法参阅 [配置协作空间](/zh/on-call/channel/create-edit)。问题修复并发布新版本后，可以在 Flashduty 中手动关闭告警。
+
 ## Alert Key
----
 
 Flashduty 使用事件类型 `alert_type`、应用 ID `app_id` 和 Crashlytics 的问题 ID `issue_id`（对应官方 `Issue.id`）共同计算 Alert Key。一个 Cloud Function 部署（一个推送地址）可以转发项目下所有应用的事件（见上文“按需限定应用”），而 Firebase 并未说明 `issue_id` 在不同应用之间也互不重复，因此 `app_id` 也参与计算，避免两个应用凑巧拿到相同的问题 ID 时被合并成一条告警。因此：
 
@@ -166,8 +177,7 @@ Flashduty 使用事件类型 `alert_type`、应用 ID `app_id` 和 Crashlytics �
 
 请求缺少 `issue_id` 时，Flashduty 会拒绝该请求。
 
-## 告警等级
----
+## 状态和告警等级
 
 Crashlytics 的告警事件不携带等级，Flashduty 按事件类型确定等级：
 
@@ -182,7 +192,6 @@ Crashlytics 的告警事件不携带等级，Flashduty 按事件类型确定等�
 如需统一改为其他等级，在推送地址后追加 `&severity=Critical`（或 `Warning`、`Info`）。
 
 ## 告警内容
----
 
 告警标题为 `Firebase Crashlytics <事件类型>: <issue_title>`，如 `Firebase Crashlytics new fatal issue: java.lang.NullPointerException`。描述包含问题副标题（崩溃发生的类和方法）、应用版本号；回归事件额外包含上次被标记解决的时间，速率告警额外包含崩溃会话数、崩溃率和首次出现的版本号。
 
@@ -198,7 +207,6 @@ Crashlytics 的告警事件不携带等级，Flashduty 按事件类型确定等�
 | `crash_count` / `crash_percentage` / `first_version` | 仅速率告警：崩溃会话数、崩溃率、首次出现的版本号 |
 
 ## 排查问题
----
 
 - **函数部署失败或报权限错误**：确认 Firebase 项目已开通 Blaze 方案，且执行部署的账号对该项目有 Cloud Functions 部署权限
 - **崩溃已发生，但迟迟没有告警**：Crashlytics 处理崩溃日志和触发告警函数通常有几分钟延迟；用 `firebase functions:log` 查看对应函数有没有被触发、`fetch` 有没有抛错

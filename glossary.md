@@ -123,6 +123,7 @@ Chinese-English terminology mapping. Maintain consistency during translation.
 | 解决办法 | resolution |
 | 推送地址 | push URL |
 | 跳转链接 | jump link |
+| 产物 | Artifact / Artifacts |
 
 ## Actions
 
@@ -257,3 +258,86 @@ When a permission's `classEn` is set in `permission_test.go`, trust it over any 
 - **Don't translate product names.** "On-call", "RUM", "Monitors", "Flashduty" stay English in both languages.
 - **Don't translate wire values.** Enum values like `"enabled"`, `"InvalidParameter"`, `"updated_at"` are wire-format identifiers and must appear identically in both EN and ZH specs. Only their descriptions get localized.
 - **Verb tense** — English uses imperative ("Create a template", "Delete an incident"), Chinese uses short noun phrases ("创建模板", "删除故障"). Don't prefix Chinese summaries with verbs like "创建一个" when "创建" alone reads naturally.
+
+## Do Not Translate (AI SRE domain)
+
+These terms stay in English even inside Chinese copy. Used by the `i18n-review`
+skill in bootstrap mode to decide which substrings of a hardcoded English
+string to preserve verbatim when generating Chinese translations.
+
+Style rule: when a DNT term appears mid-sentence in Chinese, surround it with
+a single half-width space on either side (e.g., `管理你的 Routines`, not
+`管理你的Routines`). For multi-word terms, keep them together verbatim
+(e.g., `创建 A2A Agent`).
+
+| Term | Notes |
+|------|-------|
+| MCP | Model Context Protocol |
+| Agent | AI agent — distinct from Subagent |
+| Subagent | Delegated agent spawned by a parent Agent |
+| Skill | Reusable behavior bundle (in the `superpowers` / Claude Code sense) |
+| Routine | Scheduled / recurring agent run |
+| Automation | User-defined automation trigger + action |
+| Runner | Agent execution backend (e.g., `flashduty-runner`) |
+| A2A | Agent-to-Agent protocol |
+| Tool call | A single tool invocation inside an Agent turn |
+| Slash command | UI slash-prefixed command (e.g., `/help`) |
+| Reasoning | The reasoning / chain-of-thought block of a model response |
+| Connector | Integration with an external system (Slack, GitHub, etc.) |
+| Todo | The Todo list shown in agent UI |
+| Mermaid | Mermaid diagram syntax |
+| Prompt | System or user prompt sent to a model |
+
+Translatable companions (do NOT belong in DNT — translate to Chinese):
+
+| English | Chinese |
+|---------|---------|
+| Artifact / Artifacts | 产物 |
+| Knowledge | 知识 — the DUTY.md-rooted file tree an account or team maintains for AI SRE. Formerly "Knowledge Pack"; do not use that name in copy. Running text uses lowercase "knowledge" (e.g., "team knowledge"); API identifiers such as `pack_id` and `knowledge-pack-*` CLI commands stay unchanged |
+| Memory | 记忆 |
+| Context | 上下文 — the Customize group holding Knowledge and Memory |
+| Customize | 自定义 — the AI SRE sidebar entry that opens Context, Plugins, and Environments |
+| Plugins | 插件 |
+| Environment / Environments | 环境 |
+| Self-hosted | 自托管 |
+| Cloud | 云端 |
+
+## Intentional Variants (per-context wording)
+
+These Chinese terms intentionally map to more than one English wording depending
+on UI context. Every listed variant is correct — do not "unify" them.
+Translators: pick the variant whose context matches.
+
+| Chinese | Variants (context) |
+|---------|--------------------|
+| 全屏 | Enter fullscreen (verb tooltip; pairs with "Exit fullscreen") / Fullscreen (compact label) |
+| 来源 | Referrer (RUM view-referrer tag) / Source (generic origin) |
+| 异常 | Error (metric label) / Issue (RUM Error Tracking entity, Datadog convention) |
+| 状态 | Status (issue/alert status) / State (technical thread-dump state) |
+| 成功 | Succeeded (run-status filter) / OK (compact badge) |
+| 对话 | Chat (singular) / Chats (section header, plural) |
+| 环境 | Environment (field label) / Environments (nav or page title, plural) |
+| 产物 | Artifact (singular) / Artifacts (plural) |
+| 文档 | Document (artifact kind) / Documentation (docs link) |
+| 邮件 | Email (channel label, pairs with "SMS") / Email us (CTA, pairs with "Call us") |
+| 我的 | Personal (user menu) / My teams (team selector) |
+| 团队 | Team (singular tag after a team name) / Teams (multi-select or group labels) |
+| 关闭 | Close (button or rule action) / Closed (timeline event) / Dismiss (banner) |
+| 天 | Day (picker label) / days (count unit) / d (compact) |
+| 小时 | Hour (picker label) / hour(s) (form or count) / h (compact) |
+| 条 | items (generic count) / alerts (alert count) |
+| 行动项 | action (field label) / Actions (title) |
+| 计划维护 | schedule maintenance (verb) / scheduled (adjective) |
+| 订阅规则 | singular / plural by count context |
+| 协作空间 | Channel (standalone label) / channels (plural base) |
+
+Plural-pair convention (zh-as-key frontends): a count-bearing Chinese key may
+have English `_one` / `_other` splits (e.g. "Ran {{count}} search" / "Ran
+{{count}} searches"). These pairs are intentional — never merge them into one
+English value. The zh locale needs only the base key (Chinese has no plural
+inflection); do not add `_one` / `_other` entries to zh locale files.
+
+Scope note: the "Incident Status" table above (待处理 → triggered, etc.) applies
+to the incident console only. RUM dashboards follow Datadog-style triage wording
+(For Review / Reviewed / Occurred At) — do not rewrite RUM strings to match that
+table.

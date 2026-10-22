@@ -1,10 +1,10 @@
 ---
 title: "HarmonyOS SDK advanced configuration"
-description: "Configure HarmonyOS RUM SDK sampling, tracking consent, event mapping, Trace, crash reporting, and symbol upload"
-keywords: ["RUM", "HarmonyOS SDK", "advanced configuration", "Trace", "Crash", "Sourcemap"]
+description: "Configure HarmonyOS RUM SDK sampling and remote configuration, tracking consent, event mapping, Trace, crash reporting, and symbol upload"
+keywords: ["RUM", "HarmonyOS SDK", "advanced configuration", "remote configuration", "Trace", "Crash", "Sourcemap"]
 ---
 
-This page describes core configuration, RUM configuration, privacy controls, Trace correlation, crash reporting, and symbol upload for the HarmonyOS SDK. All options come from the current ArkTS SDK public API.
+This page describes core configuration, RUM configuration, remote configuration, privacy controls, Trace correlation, crash reporting, and symbol upload for the HarmonyOS SDK. All options come from the current ArkTS SDK public API.
 
 ## Core configuration
 
@@ -43,8 +43,6 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 
 <Note>
 These three settings share their names and values with the Android, iOS and Flutter SDKs, so tuning advice transfers between platforms unchanged.
-
-Since SDK 0.5.0, `setBatchUploadFrequencyMs(5000)` is replaced by `setUploadFrequency(UploadFrequency.RARE)`. Two defaults changed at the same time, both to match the other platforms: the upload interval went from 5 s to 2 s, and the batch window from 5 s to 10 s.
 </Note>
 
 <Note>
@@ -88,7 +86,7 @@ If the event volume itself is high, use [event mapping](#event-mapping-and-redac
 
 ## Tracking consent
 
-To comply with privacy regulations such as GDPR and CCPA, the SDK requires a tracking consent state at initialization (the third argument of `Flashcat.initialize()`), and lets you change it at any time afterwards.
+To comply with privacy regulations such as GDPR and CCPA, the SDK requires a tracking consent state at initialization, passed as the third argument of `Flashcat.initialize()`. You can change it at any time afterward.
 
 ### Consent states
 
@@ -99,7 +97,7 @@ To comply with privacy regulations such as GDPR and CCPA, the SDK requires a tra
 | `TrackingConsent.PENDING` | Collects data but does not send it | Waiting for the user's decision |
 
 <Info>
-When initialized with `TrackingConsent.PENDING`, the SDK writes events to a separate local buffer and sends nothing until consent changes to `GRANTED` — at which point the buffered data is migrated and uploaded automatically. Changing to `NOT_GRANTED` clears the buffer instead.
+With `TrackingConsent.PENDING`, the SDK writes events to a separate local buffer and sends nothing. When consent changes to `GRANTED`, the buffered data is migrated and uploaded automatically. Changing to `NOT_GRANTED` clears the buffer instead.
 </Info>
 
 ### The application owns the consent state
@@ -110,11 +108,11 @@ When initialized with `TrackingConsent.PENDING`, the SDK writes events to a sepa
 If your application initializes the SDK with a hard-coded value (for example `GRANTED`) on every launch, collection resumes after a restart even for a user who revoked consent. Call `setTrackingConsent` at the moment the user makes a choice, persist that choice yourself, and pass it to `initialize` on the next launch.
 </Warning>
 
-The consent state is also persisted locally, but it serves **exactly one purpose**: the `WorkSchedulerExtensionAbility` used for background upload runs in a separate process with no user in front of it and no access to the application's decision, so it reads the main process's last recorded state. See [Background and deferred upload](#background-and-deferred-upload).
+The consent state is also stored locally for **exactly one purpose**. The `WorkSchedulerExtensionAbility` that handles background upload runs in a separate process with no user and no access to the app's decision. It reads the main process's last recorded state. See [Background and deferred upload](#background-and-deferred-upload).
 
-When consent is revoked (changed to `NOT_GRANTED`), the SDK clears the unsent pre-consent buffer *and* **deletes batches already written to disk but not yet uploaded**. On 0.2.0 and earlier only the buffer was cleared, so collected batches were still sent once consent came back.
+When consent is revoked (changed to `NOT_GRANTED`), the SDK clears the unsent pre-consent buffer *and* **deletes batches already written to disk but not yet uploaded**.
 
-Starting in `0.3.2`, revoking consent also deletes the local view snapshot used for [crash attribution](/en/rum/sdk/harmony/data-collection#crash-attribution). That snapshot is a whole view event — user id, name, email, and any custom context — so it is just as personal as a collected batch.
+Revoking consent also deletes the local view snapshot used for [crash attribution](/en/rum/sdk/harmony/data-collection#crash-attribution). That snapshot is a whole view event — user id, name, email, and any custom context — so it is just as personal as a collected batch.
 
 ### Setting and changing consent
 
@@ -126,7 +124,7 @@ import { Flashcat, TrackingConsent } from '@flashcatcloud/core';
 Flashcat.initialize(this.context, coreConfig, TrackingConsent.PENDING);
 ```
 
-After initialization, via the `setTrackingConsent` API (for example once the user responds to your privacy dialog):
+After initialization, through the `setTrackingConsent` API (for example once the user responds to your privacy dialog):
 
 ```ts
 Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
@@ -164,7 +162,6 @@ FlashcatRum.enable(
 | `setTrackNavigation(enabled)` | boolean | `false` | Controls whether `FlashcatRum.startViewTracking()` registers the ArkUI `routerPageUpdate` observer |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | Controls whether network lifecycle events published by Trace become RUM resources |
 | `setTrackErrors(enabled)` | boolean | `true` | Controls **automatic** capture of uncaught errors and unhandled Promise rejections |
-| `setTrackFrustrations(enabled)` | boolean | `false` | Reserved toggle; the current version does not generate frustration events |
 | `setEventMapper(mapper)` | function | `null` | Modifies or drops view, action, error, and resource events before disk write |
 
 <Note>
@@ -204,6 +201,51 @@ const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
 <Warning>
 The event mapper runs on the SDK write path. Keep it fast, synchronous, and non-throwing. The SDK catches mapper errors and preserves the original event, but expensive logic increases client overhead.
 </Warning>
+
+## Remote configuration
+
+The session sample rate can be adjusted online in the console under **Application Management → Remote Configuration**, with no code change and no new release. The feature is off by default and has to be enabled at initialization:
+
+```ts
+import { FlashcatRum, RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+FlashcatRum.enable(
+  new RumConfigurationBuilder('<APPLICATION_ID>')
+    .setSessionSampleRate(100)             // the rate used until the console publishes one
+    .setRemoteConfigurationEnabled(true)   // let the console adjust the sample rate and on-error capture
+    .build()
+);
+```
+
+Once enabled:
+
+- The SDK requests the configuration once at start-up and once whenever a new session begins. What it receives applies to the **next new session**; a session already running is unaffected, and the request never blocks session creation.
+- A sample rate **crossing zero** (from 0 to a non-zero rate, or the other way round) ends the current session immediately so the new rate redraws it — an emergency stop or restart does not have to wait for the session to rotate. Any other change waits for the next new session.
+- Fetched values are persisted locally, so the first session after a cold start is drawn under what was last published. When nothing has ever been fetched, or the console switched remote configuration off, the value set at initialization with `setSessionSampleRate` applies.
+- A request that fails, times out or comes back unreadable keeps the values already in force; nothing is wiped. The SDK retries twice shortly afterward, then waits for the next session or the next launch.
+- The HarmonyOS SDK reads only the **session sample rate**, **Capture additional sessions on error** (`sessionOnError`) and **custom configuration keys**; the other fields have no effect. There is no Session Replay, so the replay and Trace switches never appear for a HarmonyOS application.
+- On-error capture is the same switch as `setSessionOnError` at initialization: a value published from the console overrides the init value for the sessions drawn afterwards.
+
+Sessions kept by on-error capture report a session sample rate of `0` and carry `session.sampled_for_error: true`; candidate sessions that never report an error are not uploaded and are not billed. See `session_sampled_for_error` in [Data query syntax guide](/en/rum/explorer/data-query) for how to filter them.
+
+<Note>
+On a private deployment the configuration endpoint sits beside the RUM intake address at the `/api/v2/rum/config` path (if the intake address is `https://host/api/v2/rum`, the configuration endpoint is `https://host/api/v2/rum/config`). With `setCustomEndpoint()`, make sure your gateway lets that path through.
+</Note>
+
+Custom configuration keys are read with `GlobalRumMonitor.get().getRemoteConfig()`, which returns a decoded object; it returns `null` when remote configuration is off, when the console has not set the field, or before a configuration has arrived:
+
+```ts
+import { GlobalRumMonitor } from '@flashcatcloud/rum';
+
+const custom = GlobalRumMonitor.get().getRemoteConfig();
+const debugUsers = custom?.['debugUsers'] as string[] | undefined;
+```
+
+<Warning>
+Custom entries are delivered to clients and are readable by anyone holding the client token. Never put secrets, access tokens, or personally sensitive information in them.
+</Warning>
+
+The console-side fields, publishing, and activation are covered in [Application Management · Remote Configuration](/en/rum/quickstart/app-management#remote-configuration).
 
 ## Global attributes and user information
 
@@ -258,7 +300,7 @@ Flashcat.getInstance().setUserInfo({
 
 ## Trace configuration
 
-The Trace module generates W3C `traceparent` and `tracestate`, then correlates the generated trace id and span id to RUM resources through `_dd.trace_id` and `_dd.span_id`. `tracestate` carries the Datadog vendor entry `dd=s:{0|1};o:rum`.
+The Trace module generates W3C `traceparent` and `tracestate`, then correlates the generated trace id and span id to RUM resources through `_dd.trace_id` and `_dd.span_id`.
 
 ```ts
 import {
@@ -320,7 +362,7 @@ FlashcatCrash.enable(
 | `setCrashLoopCooldownMs(cooldownMs)` | number | `300000` | Crash-free duration required to reset persisted history after the guard trips, in milliseconds; treats values below `1` as `1` |
 
 <Warning>
-Starting in `0.2.0`, the default changes from the legacy keep-alive behavior to `REPORT_THEN_EXIT`. Merely initializing an earlier SDK suppressed host application exit after an uncaught ArkTS exception, leaving the application running with undefined business state. The new default synchronously persists the crash and restores platform exit semantics. To restore the old behavior, explicitly set `JsCrashPolicy.OBSERVE_ONLY` and confirm that retaining a damaged process matches your business requirements.
+The default policy, `REPORT_THEN_EXIT`, exits the process after an uncaught ArkTS exception. To keep the application running, explicitly set `JsCrashPolicy.OBSERVE_ONLY` and confirm that retaining a damaged process matches your business requirements.
 </Warning>
 
 ### `REPORT_THEN_EXIT`
@@ -331,11 +373,11 @@ This is the default policy. When an uncaught synchronous or asynchronous main-th
 
 The SDK synchronously persists the crash incident, checks the persisted crash-loop guard, then calls `appRecovery.saveAppState()` and `restartApp()`. The old process exits and a new process starts. The incident replayed on the next launch includes `crash.recovered: true`.
 
-If recovery cannot be enabled, loop history cannot be persisted, the guard trips, the incident cannot be marked as recoverable, or the restart request fails, the SDK degrades to exit behavior.
+The SDK falls back to exit behavior if any of these happens: recovery can't be enabled, loop history can't be persisted, the guard trips, the record can't be marked recoverable, or the restart request fails.
 
 ### `OBSERVE_ONLY`
 
-The SDK reports the exception asynchronously and leaves the current process running. This policy restores the pre-`0.2.0` keep-alive behavior and does not exit or restart the process. The event loop may remain responsive, but the uncaught exception may have left the application in a broken or inconsistent business state.
+The SDK reports the exception asynchronously and leaves the current process running. This policy does not exit or restart the process. The event loop may remain responsive, but the uncaught exception may have left the application in a broken or inconsistent business state.
 
 ### Crash-loop protection
 
@@ -442,7 +484,7 @@ The plugin ships as an npm package (on **npm**, not ohpm). Declare it in `hvigor
 }
 ```
 
-You can install it with npm instead. But a HarmonyOS project root has no `package.json`, and `npm install` walks *up* the directory tree looking for one — so it ends up installing into whatever unrelated project it finds in a parent directory (often your home directory). Create one first:
+You can install it with npm instead. A HarmonyOS project root has no `package.json`, so `npm install` walks *up* the directory tree to find one. It then installs into whatever unrelated project it finds in a parent directory, often your home directory. Create one first:
 
 ```bash
 npm init -y                                  # only if the project root has no package.json
@@ -450,7 +492,7 @@ npm install -D @flashcatcloud/hvigor-plugin
 ```
 
 <Warning>
-Use **0.1.5 or later** (0.1.4 was withdrawn from npm and can no longer be installed). 0.1.3 registered the upload task with dependencies on both `assembleHap` and `assembleHar`; a module has at most one of them, so the build fails outright with `Cannot find hvigor task 'assembleHar' in module 'entry'`.
+Use **0.1.5 or later** (0.1.4 was withdrawn from npm and can no longer be installed). 0.1.3 made the upload task depend on both `assembleHap` and `assembleHar`. A module has at most one of them, so the build fails with `Cannot find hvigor task 'assembleHar' in module 'entry'`.
 </Warning>
 
 Then register the plugin in the module's `hvigorfile.ts`:
@@ -472,7 +514,7 @@ export default {
 ```
 
 <Note>
-On SaaS, omit `endpoint` — **hvigor-plugin ≥ 0.1.3** defaults to `https://ci.flashcat.cloud` (**not** the RUM ingest host `browser.flashcat.cloud`). For a private deployment set `FLASHCAT_SOURCEMAP_INTAKE_URL` (scheme + host, no path; also requires ≥ 0.1.3), or pass `endpoint: 'https://rum.example.com'`. Plugin 0.1.2 does not honour `FLASHCAT_SOURCEMAP_INTAKE_URL` — set `endpoint` explicitly, or use the legacy `FLASHCAT_ENDPOINT` env var (deprecated in 0.1.3 but still honoured). `flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, which defaults to the plugin's own version). **From 0.1.5 the build directory follows the product being built** (`-p product=beta` → `build/beta`), so pass `buildDir` only when the artifacts are somewhere else; 0.1.3 and earlier always used `build/default` and silently scanned the wrong directory for any other product.
+On SaaS, omit `endpoint` — **hvigor-plugin ≥ 0.1.3** defaults to `https://ci.flashcat.cloud` (**not** the RUM ingest host `browser.flashcat.cloud`). For a private deployment set `FLASHCAT_SOURCEMAP_INTAKE_URL` (scheme + host, no path; also requires ≥ 0.1.3), or pass `endpoint: 'https://rum.example.com'`. Plugin 0.1.2 does not honour `FLASHCAT_SOURCEMAP_INTAKE_URL` — set `endpoint` explicitly, or use the legacy `FLASHCAT_ENDPOINT` env var (deprecated in 0.1.3 but still honoured). `flashcatSymbolUploadPlugin()` also accepts two optional fields: `buildDir` and `pluginVersion` (the version sent in the `DD-EVP-ORIGIN-VERSION` upload header, which defaults to the plugin's own version). **From 0.1.5, the build directory follows the product being built** (`-p product=beta` → `build/beta`). Pass `buildDir` only when the artifacts are elsewhere. 0.1.3 and earlier always used `build/default` and silently scanned the wrong directory for other products.
 </Note>
 
 After a release build, run the upload task as its own hvigor invocation:
@@ -484,7 +526,7 @@ FLASHCAT_API_KEY=*** \
 ```
 
 <Warning>
-`--no-daemon` is not optional when you configure the plugin from environment variables. hvigor builds through a long-lived daemon process, which **copies the environment once, when it is created**, and afterwards refreshes only a fixed allowlist (`DEVECO_SDK_HOME`, `OHOS_BASE_SDK_HOME`, and two incremental-build flags). A reused daemon therefore hands the plugin the environment of whoever started it — an IDE build, or an earlier command — not the one you just typed.
+`--no-daemon` is not optional when you configure the plugin from environment variables. hvigor builds through a long-lived daemon that **copies the environment once, when it starts**. After that it refreshes only a fixed allowlist: `DEVECO_SDK_HOME`, `OHOS_BASE_SDK_HOME`, and two incremental-build flags. A reused daemon therefore hands the plugin the environment of whoever started it — an IDE build, or an earlier command — not the one you just typed.
 
 The failure is silent: `FLASHCAT_API_KEY` reads as unset and the upload is skipped with a single log line, or a stale key ends in a 401 — either way the build still succeeds. Values written directly into `hvigorfile.ts` are not affected.
 </Warning>

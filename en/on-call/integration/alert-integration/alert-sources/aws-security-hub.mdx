@@ -1,5 +1,6 @@
 ---
-title: "AWS Security Hub Alert Integration"
+title: "AWS Security Hub alert integration"
+sidebarTitle: "AWS Security Hub"
 description: "Send AWS Security Hub findings to Flashduty's AWS EventBridge integration through an EventBridge rule; findings merge per finding and recover when their workflow status changes."
 keywords: ["alert integration", "AWS Security Hub", "Security Hub", "ASFF", "EventBridge", "cloud security", "AWS"]
 ---
@@ -9,7 +10,6 @@ AWS Security Hub sends each finding to Amazon EventBridge as a **Security Hub Fi
 <div className="hide">
 
 ## In Flashduty On-call
----
 
 Get an integration push URL in either of the two ways below. **Choose the AWS EventBridge integration type** in both, not AWS Security Hub.
 
@@ -24,18 +24,76 @@ Get an integration push URL in either of the two ways below. **Choose the AWS Ev
 
 1. In the Flashduty console, go to **Integration Center → Alert Events**
 2. Select **AWS EventBridge** and enter an integration name
-3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+3. Configure the default route and select a channel. You can add more rules under **Routing** after creation
 4. Click **Save** and copy the generated **Push URL**
 
 </div>
 
 ## Configure in AWS
----
 
-1. Follow "Option 1: API destination" in the [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge) to create the Connection and API destination, using the Flashduty push URL as the endpoint. "Option 2: SNS topic" also works
-2. In the EventBridge console, create a rule and choose **Rule with an event pattern** for **Rule type**
-3. To build the pattern from a template, choose **AWS services** for **Event source**, **Security Hub** for **AWS service** and **Security Hub Findings - Imported** for **Event type**. Or choose **Custom patterns (JSON editor)** and paste the pattern below
-4. For **Target types** choose **EventBridge API destination** and select the API destination created above
+<Steps>
+<Step title="Create an API destination that points to Flashduty in Amazon EventBridge">
+
+<Tabs>
+<Tab title="API destination (recommended)">
+
+**Where**: Amazon EventBridge › Integration › API destinations › Connections › Create connection
+
+| Field | Value |
+| --- | --- |
+| Connection name (required) | `Flashduty` |
+| Destination type (required, under Authorization) | `Other` |
+| Authorization type (required) | `API Key` |
+| API key name (required) | `Flashduty` |
+| Value (required) | `{integration_key}`, the `integration_key` in the push URL |
+
+Click **Create** to save.
+
+**Where**: Amazon EventBridge › Integration › API destinations › Create API destination
+
+| Field | Value |
+| --- | --- |
+| Name (required) | `Flashduty` |
+| API destination endpoint (required) | `{integration_url}` |
+| HTTP method (required) | `POST` |
+| Connection type (required) | `Use an existing connection`, then select the `Flashduty` connection created above |
+
+Click **Create** to save.
+
+</Tab>
+<Tab title="SNS topic">
+
+**Where**: Amazon SNS › Subscriptions › Create subscription (if the topic does not exist yet, go to Topics › Create topic first and set `Type` to `Standard`)
+
+| Field | Value |
+| --- | --- |
+| Topic ARN (required) | The SNS topic that forwards EventBridge events |
+| Protocol (required) | `HTTPS` |
+| Endpoint (required) | `{integration_url}`, which must be the push URL of **this** integration |
+
+Click **Create subscription** and wait until the subscription status is `Confirmed`. Flashduty only visits subscription confirmation URLs on `sns.<region>.amazonaws.com`, `sns.<region>.amazonaws.com.cn` and `sns.<region>.amazonaws.eu`. For the full SNS topic and subscription steps, see the [AWS CloudWatch integration](/en/on-call/integration/alert-integration/alert-sources/aws-cloudwatch).
+
+</Tab>
+</Tabs>
+
+</Step>
+<Step title="Create a rule for Security Hub events in Amazon EventBridge">
+
+**Where**: Amazon EventBridge › Rules › Create rule › Advanced Builder
+
+| Field | Value |
+| --- | --- |
+| Builder (when the console offers a choice) | `Advanced Builder` |
+| Name (required) | A name of your choice, for example `Flashduty-SecurityHub` |
+| Event bus | `AWS default event bus` |
+| Rule type (required) | `Rule with an event pattern`, then click **Next** |
+| Event source (required) | `AWS events or EventBridge partner events` |
+| Creation method / Method (required) | `Custom pattern (JSON editor)` |
+| Event pattern (required) | Paste the event pattern below, then click **Next** |
+| Target type (required) | `EventBridge API destination`, choose `Use an existing API destination` and the `Flashduty` one created in the previous step (for the SNS method choose `AWS service` › `SNS topic` and that topic) |
+| Execution role (required) | `Create a new role for this specific resource` |
+| Input transformer | Do not configure; send the full event |
+
 
 Event pattern:
 
@@ -45,6 +103,8 @@ Event pattern:
   "detail-type": ["Security Hub Findings - Imported"]
 }
 ```
+
+Paste the JSON pattern below; the optional **Event pattern form** opens it in the Pattern Builder.
 
 To receive only some findings, filter on finding attributes under `detail.findings`. For example, only findings produced by Amazon Inspector:
 
@@ -66,8 +126,28 @@ Do not filter on `Workflow.Status`, `RecordState`, `Compliance.Status` or `Sever
 
 Create the rule in every Region where Security Hub is enabled. **Security Hub Findings - Custom Action** events, sent by custom actions, also carry findings and are handled the same way; add that `detail-type` to the rule if you use them.
 
+</Step>
+<Step title="Send a test Security Hub event and confirm">
+
+**Where**: A terminal that can reach the Flashduty push URL
+
+The rule only forwards events that AWS really emits. To verify right away, POST a test event shaped like the real one to the push URL:
+
+```bash
+curl -X POST '{integration_url}' \
+  -H 'Content-Type: application/json' \
+  -d '{"version":"0","id":"flashduty-test-1","detail-type":"Security Hub Findings - Imported","source":"aws.securityhub","account":"123456789012","region":"us-east-1","resources":[],"detail":{"findings":[{"ProductArn":"arn:aws:securityhub:us-east-1::product/aws/securityhub","Id":"flashduty-test-finding","ProductName":"Security Hub","AwsAccountId":"123456789012","Title":"Flashduty integration test","Severity":{"Label":"HIGH"},"Workflow":{"Status":"NEW"},"RecordState":"ACTIVE","Resources":[{"Id":"arn:aws:s3:::flashduty-test","Type":"AwsS3Bucket"}]}]}}'
+```
+
+Send it again with `Workflow.Status` set to `RESOLVED` to confirm that the alert recovers automatically. A few seconds later, go back to Flashduty. The integration shows a **latest event time**, which means the setup works.
+{/* console:
+The checklist item "Receive the first event" is marked done at the same time.
+*/}
+
+</Step>
+</Steps>
+
 ## Field mapping
----
 
 The `detail.findings` array of a **Security Hub Findings - Imported** event holds a single finding. The mapping below is how Flashduty processes these AWS EventBridge events:
 
@@ -82,14 +162,12 @@ The `detail.findings` array of a **Security Hub Findings - Imported** event hold
 | Event `source`, `region`, `account`, `detail-type`, `detail` | Labels `source`, `region`, `account`, `check`, `detail` |
 
 ## Recovery and deduplication
----
 
-- Changing a finding's workflow status to **Resolved** or **Suppressed** in Security Hub, or archiving the finding, produces a new **Security Hub Findings - Imported** event, and Flashduty closes the alert with the same Alert Key.
+- Setting a finding's workflow status to **Resolved** or **Suppressed**, or archiving the finding, produces a new **Security Hub Findings - Imported** event. Flashduty then closes the alert with the same Alert Key.
 - When an event contains several findings, each finding becomes its own alert.
 - If an event lacks `Id` or `ProductArn`, Flashduty returns HTTP 400.
 
 ## Troubleshooting
----
 
 - **The API destination call fails**: confirm the endpoint is the full push URL including `integration_key` and that `HTTP method` is `POST`
 - **Alerts do not recover**: check whether the rule's event pattern filters on `Workflow.Status` or `RecordState`, and whether the target has an Input transformer (the full event must be sent)

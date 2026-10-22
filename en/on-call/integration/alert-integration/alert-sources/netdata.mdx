@@ -1,5 +1,6 @@
 ---
 title: "Netdata alert integration"
+sidebarTitle: "Netdata"
 description: "Send Netdata alert raises, escalations, and recoveries to Flashduty On-call through the Netdata Agent custom notification (custom_sender)."
 keywords: ["alert integration", "Netdata", "Netdata Agent", "health_alarm_notify.conf", "custom_sender", "webhook"]
 ---
@@ -11,16 +12,15 @@ This integration works with the open-source Netdata Agent, including Docker depl
 <div className="hide">
 
 ## In Flashduty On-call
----
 
-You can obtain an integration push URL in either of the following ways.
+You can get the integration push URL in either of the following ways.
 
 ### Use a dedicated integration
 
-Choose this method when you do not need to route alerts to different channels.
+Choose this option if all alerts go to one channel. It's the simpler setup.
 
 <AccordionGroup>
-  <Accordion title="Expand">
+  <Accordion title="View dedicated integration setup steps">
 
   1. In the Flashduty console, select **Channel** and open a channel
   2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
@@ -32,14 +32,14 @@ Choose this method when you do not need to route alerts to different channels.
 
 ### Use a shared integration
 
-Choose this method when you need to route alerts to different channels based on the payload.
+Choose this option if you need to route alerts to different channels based on the alert payload.
 
 <AccordionGroup>
-  <Accordion title="Expand">
+  <Accordion title="View shared integration setup steps">
 
-  1. In the Flashduty console, select **Integration Center → Alert Events**
+  1. In the Flashduty console, go to **Integration Center → Alert Events**
   2. Select **Netdata** and enter an integration name
-  3. Configure the default route and select a channel; after creation, add more rules under **Route** if needed
+  3. Configure the default route and select a channel. You can add more rules under **Routing** after creation
   4. Click **Save** and copy the generated **Push URL**
 
   </Accordion>
@@ -48,17 +48,17 @@ Choose this method when you need to route alerts to different channels based on 
 </div>
 
 ## Prerequisites
----
 
 - **Network**: the host running the Netdata Agent must be able to reach the Flashduty push URL (for example `https://api.flashcat.cloud`).
 - **curl**: the notification script sends requests with `curl`. The official Netdata packages and Docker image already include it.
 - **Permissions**: you need to be able to edit files in the Netdata configuration directory (usually `/etc/netdata`).
 
 ## In Netdata
----
 
 <Steps>
-<Step title="Open the notification configuration file">
+<Step title="Open the notification configuration file on the Netdata host">
+
+**Where**: Terminal on the Netdata host › /etc/netdata (/opt/netdata/etc/netdata for a static installation)
 
 Go to the Netdata configuration directory and open `health_alarm_notify.conf` with `edit-config`:
 
@@ -81,14 +81,23 @@ cd /etc/netdata
 
 </Step>
 
-<Step title="Add the Flashduty notification">
+<Step title="Add the Flashduty notification in Netdata">
 
-Append the template below to the **end** of the file, replace `FLASHDUTY_PUSH_URL` with the full push URL of your Flashduty integration (including the `integration_key` parameter), and save the file.
+**Where**: /etc/netdata/health_alarm_notify.conf › end of file
+
+| Field | Value | Required |
+| :--- | :--- | :--- |
+| `SEND_CUSTOM` | `"YES"` | Required |
+| `DEFAULT_RECIPIENT_CUSTOM` | `"flashduty"`; any non-empty string works | Required |
+| `FLASHDUTY_PUSH_URL` | `"{integration_url}"` (the URL includes the `integration_key` parameter) | Required |
+| `custom_sender()` | The full function below, appended as is | Required |
+
+Append the template below to the **end** of the file and save it. Recovery needs no separate setting: the template sends both `status` and `old_status`, and Flashduty recovers the alert after Netdata sends CLEAR.
 
 ```bash
 SEND_CUSTOM="YES"
 DEFAULT_RECIPIENT_CUSTOM="flashduty"
-FLASHDUTY_PUSH_URL="https://api.flashcat.cloud/event/push/alert/netdata?integration_key=<integration key>"
+FLASHDUTY_PUSH_URL="{integration_url}"
 
 custom_sender() {
   local httpcode
@@ -125,7 +134,9 @@ Netdata reads this file again for every notification, so you do not need to rest
 
 </Step>
 
-<Step title="Send a test notification">
+<Step title="Send a test notification and wait for a real alert">
+
+**Where**: Terminal on the Netdata host › alarm-notify.sh test
 
 Run the test command that ships with Netdata as the `netdata` user:
 
@@ -142,13 +153,13 @@ docker exec -u netdata netdata /usr/libexec/netdata/plugins.d/alarm-notify.sh te
 
 For a static installation (`/opt/netdata`), the script is at `/opt/netdata/usr/libexec/netdata/plugins.d/alarm-notify.sh`.
 
-The test command sends WARNING, CRITICAL, and CLEAR notifications in turn. When each prints `# OK`, the push URL and integration key are correct. Flashduty recognizes these as test notifications (alert `test_alarm` on chart `test.chart`) and only returns success without creating an alert.
+The test command sends WARNING, CRITICAL, and CLEAR notifications in turn. When each prints `# OK`, the push URL and integration key are correct. Flashduty recognizes these as test notifications (alert `test_alarm` on chart `test.chart`) and only returns success without creating an alert, so the test only proves the push URL and key work. Wait for (or cause) a real Netdata alert, confirm Flashduty shows an active alert, and that it recovers after CLEAR.
+The checklist item "Receive the first event" is then complete as well.
 
 </Step>
 </Steps>
 
-## Alert Key
----
+## Alert key
 
 Flashduty builds the Alert Key from the `host`, `chart`, and `alarm` fields.
 
@@ -161,7 +172,6 @@ Changes to the alert status, value, description, or duration do not change the A
 The `alarm_id` in Netdata notifications is unique only within one Agent (the test command, for example, sends `alarm_id` `1` on every Agent), so Flashduty does not use it.
 
 ## Status and severity
----
 
 Netdata sends notifications only for the WARNING, CRITICAL, and CLEAR states.
 
@@ -171,12 +181,11 @@ Netdata sends notifications only for the WARNING, CRITICAL, and CLEAR states.
 | `CRITICAL` | Triggered | Critical |
 | `CLEAR` | Recovered | The severity before recovery (taken from `old_status`) |
 
-When an alert rises from WARNING to CRITICAL, Flashduty opens a new Critical alert and keeps the Warning alert open. When it drops from CRITICAL to WARNING, the event merges into the existing Critical alert. The CLEAR notification closes both.
+When an alert rises from WARNING to CRITICAL or drops from CRITICAL to WARNING, the events share one Alert Key, so they merge into the same alert and its severity is updated. The CLEAR notification recovers that alert with the severity it had before recovery.
 
 Netdata sends CLEAR only when an alert changes from WARNING or CRITICAL to CLEAR.
 
 ## Labels
----
 
 | Label | Source |
 | :--- | :--- |
@@ -193,7 +202,6 @@ Netdata sends CLEAR only when an alert changes from WARNING or CRITICAL to CLEAR
 The alert title is `<host>: <summary>`. Older Netdata versions that do not send `summary` use the alert name instead.
 
 ## FAQ
----
 
 <AccordionGroup>
 <Accordion title="Is the Netdata Cloud webhook notification supported?">

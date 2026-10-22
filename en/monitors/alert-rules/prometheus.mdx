@@ -3,9 +3,9 @@ title: "Prometheus"
 description: "Configure alert rules for Prometheus data sources with PromQL query syntax support"
 ---
 
-Monitors is compatible with Prometheus PromQL query syntax and provides flexible alert evaluation and recovery mechanisms. In addition to PromQL, query statements also support MetricsQL (VictoriaMetrics' extension syntax, a PromQL-compatible superset), because a Prometheus datasource may point at VictoriaMetrics, so you can use MetricsQL-specific functions and syntax directly.
+Monitors is compatible with Prometheus PromQL query syntax and provides flexible alert evaluation and recovery mechanisms. Query statements also support MetricsQL, the VictoriaMetrics extension syntax that is a PromQL-compatible superset. A Prometheus datasource may point at VictoriaMetrics, so you can use MetricsQL functions and syntax directly.
 
-## Core Concepts
+## Core concepts
 
 The alert engine supports three core evaluation modes:
 
@@ -21,9 +21,9 @@ Used for monitoring data reporting interruption scenarios
 </Card>
 </CardGroup>
 
-## 1. Threshold Evaluation Mode
+## Threshold evaluation mode
 
-This mode is suitable for scenarios requiring multi-level alerts on the same metric (e.g., Info/Warning/Critical) or needing precise recovery values.
+This mode is suitable for scenarios requiring multi-level alerts on the same metric (for example, Info/Warning/Critical) or needing precise recovery values.
 
 ### Configuration
 
@@ -36,9 +36,9 @@ This mode is suitable for scenarios requiring multi-level alerts on the same met
   - **Critical**: `$A > 90` (Memory usage exceeds 90% triggers critical alert)
   - **Warning**: `$A > 80` (Memory usage exceeds 80% triggers warning alert)
 
-### Multi-Query Support and Data Correlation
+### Multi-query support and data correlation
 
-Monitors supports configuring multiple query statements in one alert rule (named A, B, C...) and referencing these query results simultaneously in threshold expressions (e.g., `$A > 90 and $B < 50`).
+One alert rule can have multiple query statements, named A, B, C, and so on. Threshold expressions can reference several results at once, for example `$A > 90 and $B < 50`.
 
 <Warning>
 A query name must begin with an English letter and contain only English letters and numbers, such as `A` or `B2`. `R` and `__all__` are reserved and cannot be used.
@@ -47,29 +47,22 @@ A query name must begin with an English letter and contain only English letters 
 - **Auto Correlation**: The alert engine automatically correlates results from different query statements based on **labels**.
 - **Alignment Requirements**: Only when two query statements return data with **exactly the same** label sets can they be correlated to the same context for calculation.
   - Example: Query A returns `cpu_usage_percent{instance="host-1", job="node"}`, Query B returns `mem_usage_percent{instance="host-1", job="node"}`, then `$A` and `$B` can be successfully correlated.
-  - Note: If Query A has an extra label (e.g., `disk="/"`), while Query B doesn't, they cannot be correlated. It's recommended to use aggregation operations like `sum by (...)` or `avg by (...)` in PromQL to explicitly control returned labels, ensuring consistent labels across multiple query results.
+  - Note: If Query A has an extra label (for example, `disk="/"`), while Query B doesn't, they cannot be correlated. It's recommended to use aggregation operations like `sum by (...)` or `avg by (...)` in PromQL to explicitly control returned labels, ensuring consistent labels across multiple query results.
 - **Expression references**: With Threshold evaluation enabled, the Critical, Warning, and Info expressions collectively must reference every query. Each severity does not need to use every query—for example, Critical may use A while Warning uses B.
 
-### How It Works
+### How it works
 
 The alert engine periodically executes PromQL to get current values for all Series. Then, the engine iterates through each Series, matching Critical, Warning, Info conditions in order. Once a condition is met, an alert event of the corresponding severity is generated.
 
-### Recovery Logic
+### Recovery logic
 
-Supports multiple recovery strategies:
-
-| Strategy | Description |
-|------|------|
-| **Auto Recovery** | When the latest query result no longer satisfies any alert threshold, automatically generates a recovery event |
-| **Specific Recovery Condition** | Configurable additional recovery expressions (e.g., `$A < 75`) to avoid frequent oscillation near thresholds |
-| **Recovery Query** | Customize a PromQL for recovery evaluation; recovery triggers when data is found |
-| **Manual Close** | Keep the alert active until it is closed manually |
+See [Alert recovery](/en/monitors/quickstart/quickstart#alert-recovery) for the recovery options. A recovery query is a separate PromQL statement; recovery triggers when it finds data.
 
 <Note>
 Recovery query statements support embedded variables (format `${label_name}`), which are automatically replaced with corresponding label values from the alert event, enabling precise detection for specific alert objects.
 </Note>
 
-## 2. Data Exists Mode
+## Data exists mode
 
 This mode behaves consistently with Prometheus native alerting rules. Suitable for users who prefer defining thresholds directly in PromQL, or scenarios requiring high-performance processing of large numbers of Series.
 
@@ -82,26 +75,15 @@ This mode behaves consistently with Prometheus native alerting rules. Suitable f
     ```
 - **Evaluation Rules**: No additional threshold expressions needed. As long as the engine finds query results, it considers an alert triggered; the number of alert events equals the number of data rows found.
 
-### Recovery Logic
+### Recovery logic
 
-- **Recovery When Data Disappears**: The engine queries periodically; if some data is no longer found, the engine determines the corresponding alert has recovered. Note: Data identification is based on label sets.
-- **Recovery Query (Optional)**: Configure an independent query statement for recovery evaluation (e.g., query `up{instance="${instance}"} == 1` to confirm service recovery); recovery only when data is found. This QL introduces variable `${instance}`, which will be replaced with the specific label value from the alert event.
-- **Manual Close**: Keep the alert active until it is closed manually.
+See [Alert recovery](/en/monitors/quickstart/quickstart#alert-recovery) for the recovery options. Data is identified by label set; when the data of a label set is no longer found, the corresponding alert recovers.
 
-### Pros and Cons Analysis
+You can configure a separate recovery query to confirm recovery (for example `up{instance="${instance}"} == 1`); recovery only happens when it finds data. `${instance}` is replaced with the label value from the alert event.
 
-<Tabs>
-<Tab title="Pros">
-- **Better Performance**: Filter logic is pushed down to the Prometheus server, reducing data transmitted to the alert engine
-- **Low Migration Cost**: Can directly reuse existing Prometheus Rule statements
-</Tab>
-<Tab title="Cons">
-- **Single Level**: One rule typically corresponds to one severity level (to differentiate >90 and >80, two rules needed)
-- **Getting Current Value**: Cannot directly get the specific value at recovery time (can use related query to get it)
-</Tab>
-</Tabs>
+Trade-offs of data exists mode: filtering runs on the Prometheus server, and you can reuse existing Prometheus alerting rules directly. However, one rule typically corresponds to one level (distinguishing >90 from >80 takes two rules), and the value at recovery time is not directly available (use a related query to get it).
 
-## 3. No Data Mode
+## No data mode
 
 This mode is specifically for monitoring whether monitored objects are alive or whether data reporting pipelines are normal.
 
@@ -112,59 +94,49 @@ This mode is specifically for monitoring whether monitored objects are alive or 
 - **Evaluation Rules**: If the Series data cannot be queried for N consecutive cycles (note: completely no data found, not value being 0), triggers a "No Data" alert.
 - **Engine Restart**: If the alert engine (monitedge) restarts, in-memory state is lost. If data that was queryable before restart happens to not be queryable after restart, alerts cannot trigger. After restart, the missing cycle count starts over.
 
-### Typical Applications
+### Typical applications
 
 - Monitor Exporter downtime.
 - Monitor instrumentation reporting service interruption.
 - Monitor batch jobs not executing on time.
 
-### Sub-mode 1: Per-Series Monitoring
+### Sub-mode 1: Per-series monitoring
 
 Triggers an alert when a Series that **was previously queryable becomes absent for N consecutive cycles**. This is the default no-data detection mode.
 
 - Requirement: The target Series must have been observed by the engine at least once to establish a baseline.
-- Limitation: If a monitored target has never reported data at all (e.g., an Exporter installed but never successfully scraped), this mode cannot fire.
-- Fields: `enabled: true`, `severity` (`Critical | Warning | Info`).
+- Limitation: If a monitored target has never reported data at all (for example, an Exporter installed but never successfully scraped), this mode cannot fire.
+- Enable "Alert if previously found data is now missing" and choose the alert level (`Critical`, `Warning`, or `Info`).
 
-### Sub-mode 2: Alert on Empty Result
+### Sub-mode 2: Alert on empty result
 
 Triggers an alert when **all queries return empty results for N consecutive checks**. This mode specifically covers the "data was never reported" scenario, filling the blind spot of per-series mode.
 
-- Use cases: A newly deployed Exporter has never successfully collected any metrics; a batch job has never produced any output; you want an immediate alert when a target is completely absent.
-- Fields: `alert_on_empty_result: true`, `alert_on_empty_result_severity` (`Critical | Warning | Info`).
-- Recovery: Once any query returns a non-empty result, the alert auto-recovers after `recovery_check_times` consecutive confirmations.
+- Use cases: A newly deployed Exporter has never successfully collected any metrics. A batch job has never produced any output. You want an immediate alert when a target is completely absent.
+- Enable "Alert if all queries return no data" and choose the alert level (`Critical`, `Warning`, or `Info`).
+- Recovery: once any query returns a non-empty result for the number of consecutive checks set in **Recovery condition**, the alert recovers automatically.
 
 <Note>
 Both sub-modes can be enabled simultaneously and run independently.
 </Note>
 
-### Recovery Mode
+### Recovery mode
 
-The **recovery mode** (field `end_mode`) appears only inside Sub-mode 1 (Per-Series Monitoring, the card labelled "Alert if previously found data is now missing") and applies only to the condition in that card. Sub-mode 2's recovery mode is not configurable: the engine fixes it to "Recovers automatically once any query returns data again", shown as read-only text with no dropdown.
+See [Alert recovery](/en/monitors/quickstart/quickstart#alert-recovery) for the recovery options. A selectable recovery mode appears only in Sub-mode 1 (the card labeled "Alert if previously found data is now missing"). Sub-mode 2 is fixed to "Recovers automatically once any query returns data again", shown as read-only text.
 
-The recovery modes selectable inside Sub-mode 1:
-
-| Recovery mode | Description |
-|------|------|
-| **End automatically when data reappears** | Default. The alert ends automatically once the data reappears |
-| **End when data reappears or the timeout expires** | The alert ends when the data reappears or the automatic close timeout is reached. The timeout is in seconds with a minimum of 1 (field `auto_close_after_seconds`) |
-| **Manual close only** | The alert stays active until you close it manually |
-
-The recovery mode belongs to a single condition rather than being a tab-wide shared setting, so it is not part of the **Trigger & recovery conditions** card — that card holds only the fields shared by all enabled conditions (`Trigger mode`, `Trigger condition`, `Recovery condition`).
-
-### Comparison with Prometheus Native `absent()` Function
+### Comparison with Prometheus native `absent()` function
 
 | Method | Description |
 |------|------|
 | Prometheus `absent()` | Requires listing all identifying label combinations; multiple instances need multiple statements |
 | Monitors Per-Series Mode | Only needs one query statement, automatically monitors all previously-seen Series |
-| Monitors Alert on Empty Result (new) | Fires even when data was never reported — no prior Series presence required |
+| Monitors Alert on Empty Result | Fires even when data was never reported — no prior Series presence required |
 
-## Advanced Configuration
+## Advanced configuration
 
-### Save-Time Validation
+### Save-time validation
 
-When creating or updating an alert rule, the query statements in the following fields are syntax-checked before saving. If validation fails, the save is rejected with an error message containing the specific parse error (e.g., `invalid Prometheus-compatible query: PromQL: ...; MetricsQL: ...`):
+When creating or updating an alert rule, the query statements in the following fields are syntax-checked before saving. If validation fails, saving fails and the message names the specific parse error (for example, `invalid Prometheus-compatible query: PromQL: ...; MetricsQL: ...`):
 
 - **Primary Queries**: All query statements configured in the rule (Queries).
 - **Related Queries**: All related query statements (Relate Queries).
@@ -173,15 +145,15 @@ When creating or updating an alert rule, the query statements in the following f
 
 The validator tries to parse the expression as PromQL first, then as MetricsQL; if both fail, the expression is rejected. Also note:
 
-- **Variables must be closed**: The `${label_name}` variables in a query statement must be properly closed. An unterminated variable (e.g., `${host`) fails with `query contains an unterminated label variable`.
-- **Variables must not be empty**: An empty variable like `${}` fails with `query contains an empty label variable`.
+- **Variables must be closed**: The `${label_name}` variables in a query statement must be properly closed. An unterminated variable (for example, `${host`) cannot be saved and fails with `query contains an unterminated label variable`.
+- **Variables must not be empty**: An empty variable like `${}` cannot be saved and fails with `query contains an empty label variable`.
 - **Length limit**: A single query statement is limited to 64KB; exceeding this limit also prevents saving.
 
 <Note>
-Save-time validation is a conservative syntax-level check only. Passing the check does not guarantee that the backend Prometheus/VictoriaMetrics instance can execute the statement.
+Save-time validation is a conservative syntax-level check only. Passing the check does not guarantee that the data source (the Prometheus/VictoriaMetrics instance) can execute the statement.
 </Note>
 
-### Labels and Variables
+### Labels and variables
 
 Monitors automatically parses Labels returned by Prometheus. In **Recovery Query** or **Related Query**, you can use `${label_name}` to reference label values.
 
@@ -191,12 +163,47 @@ For example, if an alert rule's query statement returns results containing label
 up{instance="${instance}", job="${job}"} == 1
 ```
 
-When the alert engine executes, it will replace `${instance}` with `host-1` and `${job}` with `node`, i.e., the specific values in the alert event labels.
+When the alert engine executes, it will replace `${instance}` with `host-1` and `${job}` with `node`, that is, the specific values in the alert event labels.
 
-### Related Query (Enrichment)
+#### Go template variables
+
+Besides `${label_name}`, the expressions of **Recovery Query** and **Related Query** also accept the Go template syntax `{{ $labels.<label_name> }}`. A single expression can only use one of the two: if an expression contains both `${...}` and `{{...}`, saving is rejected with `query expression mixes ${label} placeholders with Go template; use {{ $labels.name }} only`. Different expressions are independent of each other and may each pick a different syntax.
+
+Templates are supported in the following three field kinds, and **not in main queries** — the alert engine never renders labels in main queries, so a `{{ ... }}` written there is treated as query text itself (in PromQL it fails save-time validation as invalid syntax):
+
+- **Related Queries**: every related query statement configured on the rule.
+- **Threshold recovery query**: in threshold mode, the recovery query used when the recovery method is "query statement".
+- **Data exists / data missing recovery query**: in those modes, the recovery query used when the recovery method is "query statement".
+
+The template context is only `$labels` (the labels of the current alert instance): recovery and related queries run before the alert event is assembled, so `$values`, `$relates` and friends are not available there. The only available functions are `len`, `index`, `regexQuoteMeta`, `replace`, `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `and`, `or` and `not`, plus the `if`/`else` control structure; formatting functions such as `printf`, the Sprig function set, `range` loops, `define`/`block` and the `.`/`.Field` form are all rejected (the `.` form fails with `use $labels to access instance labels`).
+
+A label name that itself contains a dot (such as `service.name`) cannot be written as `$labels.service.name`; use `index $labels "service.name"` instead.
+
+Assuming an alert instance carries `host="host-1"`, the recovery query can be written like this:
+
+```
+up{host=~"{{ regexQuoteMeta $labels.host }}"} == 1
+```
+
+which renders to `up{host=~"host-1"} == 1`. The value a template produces must be quoted by the expression itself: in the example the `"` characters belong to PromQL strings and `{{ ... }}` only produces the value.
+
+<Warning>
+Go templates require alert engine `v0.75.4` or later; if any instance in the cluster is older, saving is rejected with an error that starts with `Go template relate or recovery queries require` and names the required version. The `${label_name}` syntax is not subject to this version requirement.
+</Warning>
+
+#### Rendering timing and failure handling
+
+Templates are rendered **per alert instance**: each instance is rendered once with its own labels, so the same rule yields different query statements for different instances.
+
+**The expression owns its quoting and escaping.** Template output is inserted verbatim and is not escaped — `{{ $labels.host }}` produces the label value alone, so the quotes must be written by the expression itself (as in the `host=~"{{ ... }}"` above); when a label value may contain quotes or other special characters, handle it yourself with `regexQuoteMeta` or `replace`. This differs from `${label_name}`: in a recovery query the engine escapes `${label_name}` and places it inside the query's string literal, while in a related query `${label_name}` is substituted verbatim and an unmatched placeholder is left as is.
+
+**Render failures**: when a related query fails to render (for example it references a label that is not present on the alert event, or the template syntax is invalid), that related query is skipped while the remaining related queries still run. A recovery query expression that contains `{{` is treated as "has variables" and rendered per instance instead of being executed once as a static expression.
+
+### Related query (enrichment)
 
 To enrich alert notification content, you can configure "Related Query". Related queries don't participate in alert evaluation, only used to get additional information.
 
 - **Scenario**: During CPU alert, simultaneously query that machine's `mem_usage_percent` load situation, displaying it in alert details to assist troubleshooting.
-- **Variables**: Related queries support `${label_name}` variables for querying specific alert objects.
+- **Variables**: Related queries support `${label_name}` variables and the Go template `{{ $labels.<label_name> }}` (requires alert engine `v0.75.4` or later) for querying specific alert objects; see "Labels and variables" above for the restrictions and rendering rules of both syntaxes.
+- **Render failure**: when a related query expression fails to render, that query is skipped, the remaining related queries still run.
 - **Result Display**: Related query results can be referenced in the alert rule's notes description using the `$relates` variable. You can check the detailed usage instructions for **Notes Description**.

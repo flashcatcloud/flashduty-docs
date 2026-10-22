@@ -3,9 +3,9 @@ title: Filter Conditions
 description: Filter specific alerts or incidents through condition matching, used in escalation rules, silence rules, inhibit rules, routing rules, label enhancement, and more
 ---
 
-## Where Are Filter Conditions Used?
+Filter conditions select alerts or incidents by field value; only those that match are handled by the rule they belong to. For how to write one, see [How to configure filter conditions?](#how-to-configure-filter-conditions).
 
----
+## Where are filter conditions used?
 
 Filter conditions apply to the following scenarios:
 
@@ -19,25 +19,19 @@ Filter conditions apply to the following scenarios:
 | **Label Enhancement** | Set filter conditions to match specific alerts; matching alerts generate labels according to rules |
 | **Alert Processing** | Set filter conditions to match specific alerts; matching alerts are processed according to rules |
 
-## How to Configure Filter Conditions?
+## How to configure filter conditions?
 
----
+### Rule design
 
-### Rule Design
-
-Flashduty On-call abstracts the entire filter condition system, aiming for minimal configuration while meeting most scenario requirements.
-
-The overall judgment logic consists of multiple condition groups:
+A filter consists of one or more condition groups:
 - **Conditions within a group**: `AND` relationship—each condition must match for the group to match
 - **Between groups**: `OR` relationship—any group matching means overall match
 
-Within each condition, there's a field, operator (oper), and target values:
-- **Match** (`IN`): Target can have multiple values; if any value satisfies the condition, that condition matches
-- **Not Match** (`NOTIN`): Target can have multiple values; if all values don't satisfy the condition, that condition matches
+Each condition has a field, an operator, and target values. There are two operators:
+- **Match**: Target can have multiple values; if any value satisfies the condition, that condition matches
+- **Not Match**: Target can have multiple values; if all values don't satisfy the condition, that condition matches
 
-<Tip>
-Only the two operators above are supported: **match** (`IN`) and **not match** (`NOTIN`). There are no separate `equal`, `regex`, or `contains` operators. The specific matching semantics are determined by the target-value format described below.
-</Tip>
+The specific matching method is decided by the target-value format. See [Matching methods](#matching-methods).
 
 #### Available fields
 
@@ -45,45 +39,29 @@ Filter condition keys fall into two categories:
 
 | Category | Key | Meaning |
 | --- | --- | --- |
-| Built-in attribute | `data_source_id` | Integration; value is the integration instance ID |
-| Built-in attribute | `integration_id` | Integration source (first alert); value is the integration instance ID of the incident's first alert, used in the escalation rule's incident filter |
+| Built-in attribute | `data_source_id` | Integration; matches the integration an alert itself comes from, used in scenarios that filter alerts by integration, such as subscription/exclusion rules. Value is the integration instance ID, picked from a multi-select dropdown in the UI |
+| Built-in attribute | `integration_id` | Integration source (first alert); matches the integration that produced the incident's first alert, used in the escalation rule's incident filter. Value is the integration instance ID, picked from a multi-select dropdown in the UI |
 | Built-in attribute | `severity` | Severity (Critical / Warning / Info) |
 | Built-in attribute | `title` | Alert / incident title |
 | Built-in attribute | `description` | Alert / incident description |
-| Dynamic label | `labels.<name>` | Any label key prefixed with `labels.`, e.g., `labels.service`, `labels.host` |
-
-<Tip>
-The difference between `data_source_id` (Integration) and `integration_id` (Integration Source (First Alert)):
-
-- `data_source_id` matches the integration that an alert itself comes from, used in scenarios that filter alerts by integration, such as subscription/exclusion rules
-- `integration_id` matches the integration that produced the incident's first alert, used in the escalation rule's incident filter
-
-Both take integration instance IDs as values; in the UI you pick integrations from a multi-select dropdown.
-</Tip>
-
-<Note>
-Historically, `alert_severity` (alert severity) and `incident_severity` (incident severity) were used as two separate fields. They are now unified as `severity`. When loading legacy rules, the system automatically migrates both keys to `severity` — you don't need to edit anything manually; simply saving the rule will persist the new key.
-</Note>
-
-<Tip>
-Target values in conditions are all strings, supporting **exact**, **regex**, **wildcard**, **IP range**, and **numeric comparison** matching methods.
-</Tip>
+| Dynamic label | `labels.<name>` | Any label key prefixed with `labels.`, for example, `labels.service`, `labels.host` |
 
 ![Filter Condition Example](https://download.flashcat.cloud/flashduty/kb/filter.png)
 
-As shown above, we have two condition groups, each with two conditions, and conditions have multiple match values. The expression is:
+As shown above, there are two condition groups, each with two conditions, and the conditions have multiple match values:
 
-```
-( severity == Critical|Warning && labels.check == Binlog Sync Delay )
-or
-( labels.check == /cpu/|/io/|/disk/ && labels.value == num:gt:90 )
-```
+- **Group 1**: `severity` matches `Critical` or `Warning`, and `labels.check` matches `Binlog Sync Delay`
+- **Group 2**: `labels.check` matches any of `/cpu/`, `/io/`, or `/disk/`, and `labels.value` matches `num:gt:90`
 
-### Matching Methods
+The filter matches when either group matches.
+
+### Matching methods
+
+Target values are always strings; the format decides the matching method: **regex**, **wildcard**, **CIDR (IP range)**, or **numeric comparison**, and anything else is an **exact** match. The condition editor lists the available methods directly under the input; the fourth one is labelled **CIDR Matching** in the UI.
 
 <Tabs>
   <Tab title="Regex Matching">
-    When a value string has `/` as prefix and suffix, the entire value is recognized as **regex**.
+    When a value string has `/` as prefix and suffix, Flashduty treats the entire value as **regex**.
     
     **Example**:
     - `labels.check`: `/outage/` — matches when check label contains "outage"
@@ -94,10 +72,12 @@ or
   </Tab>
   
   <Tab title="Wildcard Matching">
-    When a value string contains `*` or `?` without `/` prefix and suffix, the entire value is recognized as **wildcard**.
+    When a value string contains `*` or `?` without `/` prefix and suffix, Flashduty treats the entire value as **wildcard**.
     
     - `*` matches zero or more characters
     - `?` matches a single character
+    
+    Every other character matches **literally** and is never treated as a regular expression: the `[` and `]` in `host[0-9]*`, the `(`, `)` and `|` in `(a|b)*`, and the `.` in `host.*` are ordinary characters, so `host[0-9]*` only matches values that start with the literal text `host[0-9]`. To use a character class or a group, write a regular expression instead, for example `/^host[0-9]+.*$/`.
     
     **Example**:
     - `labels.check`: `outage*` — matches when check label starts with "outage"
@@ -109,19 +89,15 @@ or
     </Tip>
   </Tab>
   
-  <Tab title="IP Range Matching">
-    When a value has `cidr` as prefix, the entire value is recognized as **IP range**.
+  <Tab title="CIDR Matching">
+    When a value has `cidr` as prefix, Flashduty treats the entire value as **CIDR (IP range)**.
     
     **Example**:
-    - `labels.host`: `cidr:10.0.0.206/24` — matches when ip label is within "10.0.0.206/24" range
-    
-    <Warning>
-    This filter condition doesn't apply in: incident list filtering by labels, alert list filtering by labels, and alert inhibit rule filtering for active alerts.
-    </Warning>
+    - `labels.host`: `cidr:10.0.0.206/24` — matches when the host label is within "10.0.0.206/24" range
   </Tab>
   
   <Tab title="Numeric Matching">
-    When a value has `num:[gt|ge|lt|le]:` as prefix, the entire value is recognized as **numeric comparison**.
+    When a value has `num:[gt|ge|lt|le]:` as prefix, Flashduty treats the entire value as **numeric comparison**.
     
     | Prefix | Meaning |
     | --- | --- |
@@ -132,10 +108,6 @@ or
     
     **Example**:
     - `labels.value`: `num:ge:90` — matches when value label is greater than or equal to 90
-    
-    <Warning>
-    This filter condition doesn't apply in: incident list filtering by labels, alert list filtering by labels, and alert inhibit rule filtering for active alerts.
-    </Warning>
   </Tab>
   
   <Tab title="Exact Matching">
@@ -143,18 +115,16 @@ or
   </Tab>
 </Tabs>
 
-## FAQ
+<Warning>
+CIDR and numeric matching don't apply in: incident list filtering by labels, alert list filtering by labels, and alert inhibit rule filtering for active alerts.
+</Warning>
 
----
+## FAQ
 
 <AccordionGroup>
   <Accordion title="Why doesn't the system suggest available labels?">
     Flashduty On-call receives large volumes of data. To ensure system stability, the system only searches the most recent 500 alert events from the past 24 hours for label deduplication. Therefore, extracted labels may change dynamically, or no labels may be extracted if there's no new data in the past 24 hours.
     
     In this case, **you can manually enter labels**.
-  </Accordion>
-  
-  <Accordion title="My regex passed validation offline, why won't it match in the system?">
-    Flashduty uses `RE2` regex specification platform-wide. Some `Perl` syntax may not match. You can use AI Chatbot to generate expressions and verify at [RE2 Playground](https://re2js.leopard.in.ua/).
   </Accordion>
 </AccordionGroup>

@@ -1,120 +1,70 @@
 ---
-title: "使用限制"
-description: "Flashduty Open API 使用限制与错误码说明"
-keywords: ["API限流", "错误码", "频率限制", "权限限制", "最佳实践"]
+title: "使用限制与错误码"
+description: "Flashduty Open API 频率限制、权限校验、错误码与重试建议"
+keywords: ["API限流", "错误码", "频率限制", "权限限制", "重试"]
 ---
 
-## 请求限制
+## 频率限制
 
----
+每个接口都有频率限制。限制按账户计算（同一账户下的所有 APP Key 和控制台会话共用一份额度），分每秒和每分钟两个窗口。某个接口的具体数值见其页面的 **限制说明**。
 
-### 频率限制
+每个账户的默认限制：
 
-为保证服务稳定性，API 对请求频率有一定限制。当请求过于频繁时，将返回 `429` 状态码和 `RequestTooFrequently` 错误。
+| 接口类型 | 每秒 | 每分钟 |
+| --- | :---: | :---: |
+| 读（列表、详情、查询） | 50 | 1,000 |
+| 写（创建、更新、删除、启用等） | 20 | 300 |
+
+部分接口的限制更严，例如导出和较重的统计分析查询，以其 **限制说明** 中的数值为准。
+
+### 触发限制时
+
+请求返回 HTTP `429` 和错误码 `RequestTooFrequently`，响应头 `Flashcat-Request-Rate-Limit-Delay` 给出距当前窗口重置还有多少秒。请至少等待这么久再重试；没有该响应头时按指数退避（1 秒、2 秒、4 秒……）。
 
 <Warning>
-请合理控制请求频率，避免在短时间内发送大量请求。建议实现重试机制，在收到 429 错误时进行指数退避重试。
+在循环里立即重试只会让窗口一直处于打满状态。批量任务请分散执行，并优先使用一次可传多个 ID 的接口，而不是逐个对象调用。
 </Warning>
 
-### 权限限制
+---
 
-- 选择 **全部权限** 的 APP Key 不额外限制接口范围，但仍受创建者当前角色权限约束
-- 选择 **自定义权限** 时，必须至少选择一个 API 权限点，APP Key 只能调用选中的接口范围
-- 操作超出 APP Key 权限范围或创建者角色权限时，将返回 `403` 状态码和 `AccessDenied` 错误
-- 建议为不同用途创建独立的 APP Key，遵循最小权限原则
+## 权限校验
+
+- **全部权限**的 APP Key 不额外限制接口范围，但仍受创建者当前角色权限约束。
+- **自定义权限**的 APP Key 只能调用选中的接口范围。
+- 超出 APP Key 权限范围或创建者角色权限的调用返回 HTTP `403` 和 `AccessDenied`。每个接口所需权限见其页面的 **限制说明**。
+- 部分接口还会校验对象级权限（例如只有协作空间所属团队的成员才能修改它），具体规则写在接口页面的 **使用说明** 中。
+- 建议按用途分别创建 APP Key，每个只授予所需的最小范围。
 
 ---
 
-## 错误码列表
+## 错误码
+
+所有失败响应都使用 `{ "request_id": "…", "error": { "code": "…", "message": "…" } }` 结构。请以稳定的 `error.code` 做判断；`message` 会按语言变化，也可能调整措辞。
+
+| 错误码 | HTTP 状态码 | 含义 | 处理方式 |
+| --- | :---: | --- | --- |
+| `InvalidParameter` | 400 | 参数缺失、类型错误或未通过校验，`message` 通常会指出字段名。 | 修正请求，不要原样重试。 |
+| `BadRequest` | 400 | 请求违反业务规则，或与对象当前状态冲突，`message` 会说明原因。 | 根据 `message` 修正请求或对象状态。 |
+| `InvalidContentType` | 400 | 请求体没有以 `application/json` 发送。 | 设置 `Content-Type: application/json`。 |
+| `ResourceNotFound` | 400 | 引用的对象在本账户中不存在或已删除。注意返回 400 而不是 404。 | 检查 ID。 |
+| `ReferenceExist` | 400 | 对象仍被其他对象引用，无法删除。 | 先解除引用。 |
+| `NoLicense` | 400 | 账户套餐不包含该功能、套餐配额已用完、套餐已过期或额度不足。 | 在费用中心升级套餐、购买 License 或充值额度。 |
+| `Unauthorized` | 401 | APP Key 缺失、无效或已删除。 | 检查 `app_key` 参数或 `Fd-App-Key` 请求头。 |
+| `AccessDenied` | 403 | APP Key 的权限范围或创建者角色不允许该操作或该对象。 | 授予权限或换用其他 APP Key。 |
+| `RouteNotFound` | 404 | 没有与该方法和路径匹配的接口。 | 对照接口页面检查路径和 HTTP 方法。 |
+| `MethodNotAllowed` | 405 | 路径存在，但不支持该 HTTP 方法。 | 使用接口页面标注的方法。 |
+| `EntityTooLarge` | 413 | 请求体超出大小限制。 | 减少单次请求的数据量。 |
+| `RequestTooFrequently` | 429 | 触发频率限制。 | 等待 `Flashcat-Request-Rate-Limit-Delay` 秒后重试。 |
+| `InternalError` | 500 | 服务端意外错误。 | 退避后重试；持续出现请携带 `request_id` 联系技术支持。 |
+| `ServiceUnavailable` | 503 | 后端依赖过载或不可用。 | 退避后重试。 |
+
+API 参考中 `ErrorCode` 枚举的其他取值（`RequestVerifyRequired`、`DangerousOperation`、`RequestLocked`、`BalanceNotEnough`、`UndonedOrderExist`）只用于 MFA、计费等控制台流程，Open API 接口不会返回。
 
 ---
 
-| 错误码 | HTTP Status | 描述 |
-| --- | :---: | --- |
-| `InvalidParameter` | 400 | 参数错误，请检查请求参数是否正确 |
-| `InvalidContentType` | 400 | Content-Type 不支持，请使用 `application/json` |
-| `MethodNotAllowed` | 400 | HTTP Method 不支持 |
-| `Unauthorized` | 401 | 登录认证未通过，请检查 APP Key 是否正确 |
-| `AccessDenied` | 403 | 权限认证未通过，当前用户无此操作权限 |
-| `RouteNotFound` | 404 | 请求 Method + Path 未匹配，请检查 API 地址 |
-| `RequestTooFrequently` | 429 | 请求过于频繁，请稍后重试 |
-| `ResourceNotFound` | 400 | 账户未购买资源，请前往费用中心下单 |
-| `NoLicense` | 400 | 账户无充足订阅 License，请前往费用中心升级或购买订阅 |
-| `InternalError` | 500 | 内部或未知错误，请联系技术支持 |
+## 重试建议
 
----
-
-## 错误处理建议
-
----
-
-<AccordionGroup>
-  <Accordion title="400 参数错误">
-    **可能原因**：
-    - 缺少必填参数
-    - 参数格式不正确
-    - Content-Type 未设置为 `application/json`
-    
-    **解决方案**：
-    检查请求参数和 Headers 设置，参考 API 文档确认参数要求。
-  </Accordion>
-
-  <Accordion title="401 认证失败">
-    **可能原因**：
-    - APP Key 未提供
-    - APP Key 不正确或已失效
-    
-    **解决方案**：
-    1. 确认请求 URL 中包含 `app_key` 参数
-    2. 前往控制台检查 APP Key 是否有效
-  </Accordion>
-
-  <Accordion title="403 权限不足">
-    **可能原因**：
-    - 当前用户无权执行此操作
-    - APP Key 对应用户权限不足
-    
-    **解决方案**：
-    联系账户管理员提升权限，或使用具有相应权限的 APP Key。
-  </Accordion>
-
-  <Accordion title="429 请求过频">
-    **可能原因**：
-    - 短时间内发送了过多请求
-    
-    **解决方案**：
-    1. 降低请求频率
-    2. 实现指数退避重试机制
-    3. 合并多个请求（如使用批量接口）
-  </Accordion>
-
-  <Accordion title="500 内部错误">
-    **可能原因**：
-    - 服务端内部异常
-    
-    **解决方案**：
-    1. 稍后重试
-    2. 如持续出现，请联系技术支持并提供 `request_id`
-  </Accordion>
-</AccordionGroup>
-
----
-
-## 最佳实践
-
----
-
-<CardGroup cols={2}>
-  <Card title="实现重试机制" icon="rotate">
-    对于网络错误和 5xx 错误，建议实现指数退避重试，初始间隔 1 秒，最大重试 3 次。
-  </Card>
-  <Card title="记录 request_id" icon="clipboard-list">
-    保存每次请求返回的 `request_id`，便于问题排查和技术支持。
-  </Card>
-  <Card title="保护 APP Key" icon="shield-check">
-    不要在客户端代码中硬编码 APP Key，建议通过环境变量或配置中心管理。
-  </Card>
-  <Card title="定期轮换密钥" icon="key">
-    定期更换 APP Key，及时删除不再使用的密钥，降低泄露风险。
-  </Card>
-</CardGroup>
+- **只重试** `429`、`500`、`503` 和网络错误，使用指数退避（从 1 秒开始，最多重试 3 次）。`429` 请遵循 `Flashcat-Request-Rate-Limit-Delay`。
+- **不要原样重试**其他 `4xx` 错误，结果不会改变。
+- **创建类接口按非幂等处理。**创建请求超时后重试前，先通过列表或查询接口确认上一次是否已经成功。
+- **记录失败调用的 `request_id`**，技术支持需要它来定位请求。

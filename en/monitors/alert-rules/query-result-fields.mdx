@@ -1,5 +1,5 @@
 ---
-title: "Query Result Field Mapping"
+title: "Query result field mapping"
 description: "Map SQL and raw log query results to value fields, label fields, and additional alert information."
 keywords: ["query results", "value fields", "label fields", "additional information", "threshold expressions", "multiple queries"]
 ---
@@ -7,7 +7,7 @@ keywords: ["query results", "value fields", "label fields", "additional informat
 Table-shaped queries for MySQL, PostgreSQL, Oracle, ClickHouse, Elasticsearch, SLS, and Tencent CLS, as well as **raw log** queries for Loki, VictoriaLogs, SLS, and Tencent CLS, return rows with multiple fields. Use **Value fields** and **Label fields** to assign each field a purpose. Any remaining fields are automatically carried with the alert as additional information.
 
 <Warning>
-The complete field-mapping behavior described on this page requires monit-edge `v0.53.0` or later, especially the `$<query name>.<field name>` convention for query-provided additional information. Upgrade the alert engine to `v0.53.0` or later before using these settings.
+The field mapping on this page requires alert engine `v0.53.0` or later; earlier versions cannot read query-provided additional information in the `$<query name>.<field name>` form.
 </Warning>
 
 ## How fields are classified
@@ -54,7 +54,7 @@ Avoid using these values as labels:
 
 Frequently changing labels can create a separate alert for every row or prevent multiple queries from matching. Keep these fields as additional information instead.
 
-### When Label fields is empty
+### When label fields is empty
 
 For compatibility with existing rules, if Label fields is empty, every returned field except the value fields becomes a label. The query does not produce additional information in this case.
 
@@ -136,17 +136,44 @@ Query-provided additional information is available through `$annotations` and al
 {{ index $annotations "$B.sample_message" }}
 ```
 
-The `$` prefix identifies query-provided fields. A custom field configured on the rule cannot begin with `$`. See [Description Template](/en/monitors/alert-rules/description-template) for more variables and examples.
+The `$` prefix identifies query-provided fields. A custom field configured on the rule cannot begin with `$`. See [Description template](/en/monitors/alert-rules/description-template) for more variables and examples.
 
 <Note>
 A No data alert carries the additional information from the last successful result for that alert object. If the query has never returned data, no query-provided additional information is available.
 </Note>
 
+<span id="query-fields-as-labels"></span>
+## Sending additional information as alert labels
+
+Additional information reaches On-call with the `__alert_rule_annotation_` prefix, so channel notification templates, escalation rules, and [Alert pipeline](/en/on-call/integration/alert-integration/alert-pipelines) conditions that match ordinary label names (for example `labels.msg`) can't read it. When you need it, use a Go template in the rule's [Additional Labels](/en/monitors/quickstart/quickstart#append-label-syntax) to turn additional information into ordinary labels.
+
+For example, to group error logs by service and still keep the latest log line in notifications:
+
+```sql
+SELECT service, namespace, COUNT(*) AS value,
+       MAX(datetime) AS datetime,
+       MAX_BY(msg, datetime) AS msg,
+       MAX_BY(trace_id, datetime) AS tid
+FROM error_logs
+WHERE datetime >= NOW() - INTERVAL 1 MINUTE
+GROUP BY service, namespace
+```
+
+Select `service` and `namespace` as label fields, so `msg`, `tid`, and `datetime` become additional information. Then configure these additional labels:
+
+```text
+msg      = {{ index $annotations "$A.msg" }}
+tid      = {{ index $annotations "$A.tid" }}
+datetime = {{ index $annotations "$A.datetime" }}
+```
+
+Each service then produces one alert instance, and the `msg`, `tid`, and `datetime` sent to On-call carry the latest log line for that service. Existing notification templates and escalation rules keep working without changes.
+
 ## Query result row limits
 
-Edge limits scheduled alert queries and interactive preview queries separately. The following defaults can be configured independently by the deployer:
+The alert engine limits scheduled alert queries and interactive preview queries separately. The following defaults can be configured independently by the deployer:
 
-| Scenario | Default limit | Edge parameter | Applies to |
+| Scenario | Default limit | Alert engine parameter | Applies to |
 |----------|---------------|----------------|------------|
 | **Scheduled alert queries** | 1,000,000 rows | `--alerter.alertQueryMaxRows` | Main, recovery, and related queries |
 | **Data preview queries** | 1,000 rows | `--alerter.previewMaxRows` | Data source queries and rule editor previews |
@@ -155,10 +182,10 @@ A data source can impose a stricter limit. For example, raw log queries for SLS,
 
 When a query exceeds its effective limit, it fails with `too many rows`. Monitors does not return a partial result or evaluate alerts with truncated data.
 
-The query preview table on the rule editor page paginates in the frontend: 100 rows per page by default, with options of 100 / 200 / 500, and the paginator is hidden when the results fit in a single page. This pagination affects display only and is independent of the Edge `--alerter.previewMaxRows` limit — a query that exceeds the Edge limit still fails with `too many rows`.
+The query preview table on the rule editor page is paginated. It shows 100 rows per page by default, with options of 100 / 200 / 500. The paginator is hidden when the results fit on one page. This pagination affects display only and is independent of the alert engine `--alerter.previewMaxRows` limit — a query that exceeds the alert engine limit still fails with `too many rows`.
 
 <Warning>
-Increasing the Edge row limit does not disable safeguards for response bytes, field size, or total result values. High-cardinality Prometheus queries and large SQL results can still fail on another resource limit.
+Increasing the alert engine row limit does not disable safeguards for response bytes, field size, or total result values. High-cardinality Prometheus queries and large SQL results can still fail on another resource limit.
 </Warning>
 
 Aggregate in the data source instead of letting a single rule query return many rows:

@@ -1,7 +1,7 @@
 ---
 title: "Electron SDK advanced configuration"
-description: "Configure Electron RUM upload endpoints, batching, user identity, manual error reporting, and other advanced options"
-keywords: ["RUM", "Electron SDK", "advanced configuration", "proxy", "user identity", "manual reporting"]
+description: "Configure Electron RUM session sampling, remote configuration, upload endpoints, batching, user identity, manual error reporting, and other advanced options"
+keywords: ["RUM", "Electron SDK", "advanced configuration", "session sampling", "on-error session capture", "remote configuration", "proxy", "user identity", "manual reporting"]
 ---
 
 This page covers optional settings and public APIs for the main-process `@flashcatcloud/electron-sdk`. The renderer uses the Browser SDK; see [Web SDK advanced configuration](/en/rum/sdk/web/advanced-config) for its general options.
@@ -34,6 +34,9 @@ if (!initialized) {
 | `proxy` | `string` | No | — | Custom forwarding endpoint for regular RUM events |
 | `env` | `string` | No | — | Environment. Main-process RUM events do not currently contain this field; configure it separately in the renderer |
 | `version` | `string` | No | — | Application version; use the same value when uploading source maps |
+| `sessionSampleRate` | `number` | No | `100` | Session sample rate from 0–100; an out-of-range value fails `init()`. See [Session sampling](#session-sampling). SDK 0.4.0 or later |
+| `sessionOnError` | `boolean` | No | `false` | On-error session capture: sessions the sample rate did not select are held in memory and uploaded only if they report an error. See [On-error session capture](#on-error-session-capture). SDK 0.4.0 or later |
+| `remoteConfigurationEnabled` | `boolean` | No | `false` | Lets the console adjust sampling and deliver custom configuration keys. See [Remote configuration](#remote-configuration). SDK 0.4.0 or later |
 | `telemetrySampleRate` | `number` | No | `20` | SDK telemetry sample rate from 0–100; set it to `0` to disable telemetry |
 | `batchSize` | `'SMALL' \| 'MEDIUM' \| 'LARGE'` | No | `MEDIUM` | Batch size for regular RUM events |
 | `uploadFrequency` | `'RARE' \| 'NORMAL' \| 'FREQUENT'` | No | `NORMAL` | Upload interval for regular RUM events |
@@ -44,6 +47,88 @@ if (!initialized) {
 | `normalizeStackPath` | `(path: string) => string \| undefined` | No | — | Custom mapping for an individual stack frame path |
 
 `init()` returns `false` when validation fails. The SDK prints the reason in the main-process console and does not start collection, but it does not prevent the application from starting.
+
+## Session sampling
+
+Starting with Electron SDK 0.4.0, you can sample sessions. `sessionSampleRate` sets the share of sessions collected and defaults to `100` (every session):
+
+```ts main.ts
+await init({
+  // other options
+  sessionSampleRate: 20, // collect 20% of sessions
+});
+```
+
+- Each session is drawn once, in the main process, and the result decides for the renderers too: renderer events reach the intake through the main process over the bridge, and the main process drops the events of sessions it did not select.
+- The `sessionSampleRate` in the renderer's `flashcatRum.init()` does not apply to events sent over the bridge. Set it in the main process only.
+- A session resumed after the application restarts keeps the decision it was created with.
+- Every RUM event carries the sample rate its session was drawn at (`_dd.configuration.session_sample_rate`), which the platform uses to extrapolate totals.
+
+## On-error session capture
+
+With `sessionOnError` on, sessions the sample rate did not select are not dropped right away. Their events are held in memory and uploaded only if the session reports an error:
+
+```ts main.ts
+await init({
+  // other options
+  sessionSampleRate: 0, // no session is collected unconditionally...
+  sessionOnError: true, // ...but every session that reports an error is
+});
+```
+
+- Events from the main process and the renderers alike are held, up to the 60 seconds before the error (also capped at 64 KiB of detail, 200 events, and 50 views). The buffer stays in memory and is never written to disk.
+- At the session's first error, what is held is uploaded together with the error within a few seconds. The session then reports like any sampled session.
+- When the application may be about to exit (an uncaught main-process exception, `before-quit`, `will-quit`, and the process `exit` event), content already released by an error is written to disk first and uploaded on the next launch. For an uncaught main-process exception to count, register your own `uncaughtException` listener after `await init(...)` completes.
+- A session that ends without an error is discarded whole, and nothing is uploaded at quit either.
+- Only errors your application reports count: an error dropped by a renderer's `beforeSend`, or one the SDK reports about itself, does not. A native crash counts too, and is reported on the next launch together with the view it happened in.
+
+A captured session reports a session sample rate of `0` and carries `session.sampled_for_error: true` on its views, so it is counted as itself rather than extrapolated by the sample rate. To filter these sessions, see `session_sampled_for_error` in the [data query syntax guide](/en/rum/explorer/data-query).
+
+<Warning>
+**Session Replay is not withheld by on-error session capture.** The renderer uploads replay directly, bypassing the main process. With `sessionReplayDirectUpload` on, the replay of a session held by `sessionOnError` is uploaded whether or not the session ever reports an error. Do not combine `sessionOnError` with Session Replay.
+</Warning>
+
+## Remote configuration
+
+Starting with Electron SDK 0.4.0, the session sample rate, **Capture additional sessions on error**, and custom configuration keys can be adjusted online on the **Application management → Remote Configuration** tab in the console, without code changes or a new release. The feature is off by default; enable it when you initialize the main process:
+
+```ts main.ts
+await init({
+  // other options
+  sessionSampleRate: 100, // used until the console delivers a value
+  remoteConfigurationEnabled: true, // let the console adjust sampling and on-error capture
+});
+```
+
+When the **Allow remote configuration** switch in the console's Electron setup guide is on, the generated main-process initialization code includes this line.
+
+Once enabled:
+
+- The main process requests the configuration at `init()` and whenever a new session starts; `init()` does not wait for the request. A received configuration applies from the **next new session**, and running sessions are unaffected.
+- A value set in the console takes precedence over the initialization value. Values the console does not set, or every value while remote configuration is turned off in the console, fall back to the initialization options.
+- The last accepted configuration is kept in the application's `userData` directory, so new sessions after a cold start are drawn with it before the network answers, even offline. The cache applies only to the same intake, application, `env`, and `version`.
+- Network failures, timeouts, and unrecognized responses keep the configuration in force; the SDK retries twice shortly afterward.
+- The Electron SDK reads only the **session sample rate**, **Capture additional sessions on error**, and **custom configuration keys**. Session Replay is recorded and sampled by the renderer's own Browser SDK, which remote configuration does not reach, so replay and trace options do not appear for Electron applications.
+- The renderers need no remote configuration of their own; the main process owns the sessions and their sampling.
+
+<Note>
+The configuration endpoint sits next to the intake at `/api/v2/rum/config`: `https://<site>/api/v2/rum/config` when you set `site`. When you set `proxy`, the request also goes to `proxy`, with the target path `/api/v2/rum/config` carried in the `ddforward` parameter. For private deployments, make sure your forwarding service allows this path.
+</Note>
+
+Read custom configuration keys with `getRemoteConfig()`, which returns a copy, or `undefined` when remote configuration is off, no configuration has been received yet, or the console set none. Until the server answers, it reads from the cache on disk, so you can call it as soon as `init()` resolves:
+
+```ts main.ts
+import { getRemoteConfig } from '@flashcatcloud/electron-sdk';
+
+const custom = getRemoteConfig();
+const debugUsers = custom?.['debugUsers'] as string[] | undefined;
+```
+
+<Warning>
+Custom configuration keys are delivered to clients, and anyone holding the Client Token can read them. Never put secrets, access tokens, or personally sensitive information in them.
+</Warning>
+
+For the console-side options, publishing, and activation, see [Application management · Remote configuration](/en/rum/quickstart/app-management#remote-configuration).
 
 ## Custom upload endpoints
 
@@ -88,7 +173,7 @@ In this configuration, `proxy` is a **RUM forwarding endpoint that you provide**
 
 After you set `proxy`, the main process no longer uses `site` to build the upload URL.
 
-### Configure a self-hosted Session Replay endpoint
+### Configure a self-hosted session replay endpoint
 
 Regular RUM events go through the main process, but the renderer uploads Session Replay directly. As a result, the main-process `site` or `proxy` does not apply to replay segments.
 

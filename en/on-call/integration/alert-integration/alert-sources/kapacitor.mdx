@@ -1,5 +1,6 @@
 ---
-title: "Kapacitor Alert Integration"
+title: "Kapacitor alert integration"
+sidebarTitle: "Kapacitor"
 description: "Receive Kapacitor alerts through Kapacitor's post event handler using a Flashduty InfluxData integration; alerts close automatically when they recover."
 keywords: ["alert integration", "Kapacitor", "InfluxData", "TICKscript", "post event handler", "time series alerting"]
 ---
@@ -9,7 +10,6 @@ Kapacitor's [post event handler](https://docs.influxdata.com/kapacitor/v1/refere
 <div className="hide">
 
 ## In Flashduty On-call
----
 
 Get an integration push URL in either of the two ways below. **Choose the InfluxData integration type** in both.
 
@@ -24,20 +24,28 @@ Get an integration push URL in either of the two ways below. **Choose the Influx
 
 1. In the Flashduty console, go to **Integration Center → Alert Events**
 2. Select **InfluxData** and enter an integration name
-3. Configure the default route and select a channel; you can add more rules under **Routes** after creation
+3. Configure the default route and select a channel. You can add more rules under **Routing** after creation
 4. Click **Save** and copy the generated **Push URL**
 
 </div>
 
 ## Configure in Kapacitor
----
 
 Use any one of the three ways below. Always enter the full push URL, including `?integration_key=...`.
 
 <Steps>
-<Step title="Put the URL in the TICKscript">
+<Step title="Add a post event handler in Kapacitor">
 
-Add `post` to the `alert()` node:
+<Tabs>
+<Tab title="URL in the TICKscript">
+
+**Where**: TICKscript file › `alert()` node › `.post()`
+
+| Setting | Value |
+| --- | --- |
+| `.post(url)` (Required) | `{integration_url}` |
+| `.noRecoveries()` (Do not use) | With it Kapacitor sends no recovery events, so the alert cannot recover |
+| `.captureResponse()` (Optional) | Logs Flashduty's response in the Kapacitor log when the status code is not 2xx |
 
 ```javascript
 stream
@@ -46,19 +54,27 @@ stream
         .groupBy('host')
     |alert()
         .crit(lambda: "usage_idle" < 10)
-        .post('https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<integration key>')
+        .post('{integration_url}')
 ```
 
-</Step>
+After editing the script, redefine the task with `kapacitor define`.
 
-<Step title="Or use an endpoint from kapacitor.conf">
+</Tab>
+<Tab title="Endpoint in kapacitor.conf">
+
+**Where**: kapacitor.conf › `[[httppost]]`, TICKscript file › `alert()` node › `.post().endpoint()`
 
 Define an `[[httppost]]` in `kapacitor.conf` and refer to it by name, so the integration key is not written into every script:
+
+| Setting | Value |
+| --- | --- |
+| `endpoint` (Required) | A name you choose, such as `flashduty`, referenced from the TICKscript |
+| `url` (Required) | `{integration_url}` |
 
 ```toml
 [[httppost]]
   endpoint = "flashduty"
-  url = "https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<integration key>"
+  url = "{integration_url}"
 ```
 
 ```javascript
@@ -68,21 +84,52 @@ Define an `[[httppost]]` in `kapacitor.conf` and refer to it by name, so the int
         .endpoint('flashduty')
 ```
 
-</Step>
+After editing `kapacitor.conf`, restart Kapacitor, then redefine the task with `kapacitor define`. To see Flashduty's error in the Kapacitor log, add `.captureResponse()` to `.post()`.
 
-<Step title="Or use a topic handler">
+</Tab>
+<Tab title="Topic handler">
 
-When several tasks send alerts to one topic, define the handler once. Handler file `flashduty.yaml`:
+**Where**: handler file `flashduty.yaml`, a terminal on the Kapacitor host
+
+When several tasks send alerts to one topic, define the handler once.
+
+| Setting | Value |
+| --- | --- |
+| `id` (Required) | Handler name, such as `flashduty` |
+| `topic` (Required) | The topic the alerts belong to, such as `cpu-alerts` |
+| `kind` (Required) | `post` |
+| `options.url` (Required) | `{integration_url}` |
+| `options.capture-response` (Optional) | `true`; logs the response when the status code is not 2xx |
+
+Handler file `flashduty.yaml`:
 
 ```yaml
 id: flashduty
 topic: cpu-alerts
 kind: post
 options:
-  url: https://api.flashcat.cloud/event/push/alert/influxdata?integration_key=<integration key>
+  url: {integration_url}
 ```
 
 Then run `kapacitor define-topic-handler flashduty.yaml` and use `.topic('cpu-alerts')` on the task's `alert()` node.
+
+</Tab>
+</Tabs>
+
+</Step>
+
+<Step title="Fire a real alert from Kapacitor and confirm">
+
+**Where**: a terminal on the Kapacitor host
+
+Make the task's alert condition actually match once (for example, temporarily raise the `.crit()` threshold), then let it return to normal:
+
+1. Confirm Flashduty receives an alert and the integration shows a **Latest event time**
+2. Once the condition returns to `OK`, confirm the original alert recovers (Kapacitor sends an event with `level` `OK`, and Flashduty closes the alert with the same `id`)
+3. If no alert arrives, add `.captureResponse()` to `.post()` to see Flashduty's response
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
 
 </Step>
 </Steps>
@@ -90,7 +137,6 @@ Then run `kapacitor define-topic-handler flashduty.yaml` and use `.topic('cpu-al
 Adding a `post` handler in the Chronograf 1.x Alert Rule Builder uses this same Kapacitor handler; see the [InfluxData integration](/en/on-call/integration/alert-integration/alert-sources/influxdata) for those steps.
 
 ## Field mapping
----
 
 | Kapacitor field | Flashduty |
 | :--- | :--- |
@@ -105,14 +151,12 @@ Adding a `post` handler in the Chronograf 1.x Alert Rule Builder uses this same 
 For any other `level`, Flashduty rejects the event with `level ... is not supported`.
 
 ## Recovery and deduplication
----
 
 - When the level returns to `OK`, Kapacitor sends an event with `level` `OK`, and Flashduty closes the alert with the same `id`. Do not use `.noRecoveries()` on `alert()`, or Kapacitor sends no recovery events.
 - The default `id` is `{{ .Name }}:{{ .Group }}` (measurement name and group). If you set a custom `.id()`, make sure the trigger and the recovery of one object use the same value.
 - To see Flashduty's error in the Kapacitor log, add `.captureResponse()` to `.post()` (`capture-response: true` for a topic handler); the response is logged when the status is not 2xx.
 
 ## Troubleshooting
----
 
 - **Flashduty returns `Invalid parameters`**: the push URL is incomplete, `integration_key` is missing, or the integration type is not InfluxData
 - **`level ... is not supported`**: the `level` in the body is not `CRITICAL`, `WARNING`, `INFO` or `OK`; make sure the original Kapacitor alert data is sent, not a forwarded or rewritten body

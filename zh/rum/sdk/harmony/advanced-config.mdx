@@ -1,10 +1,10 @@
 ---
 title: "HarmonyOS SDK 高级配置"
-description: "配置 HarmonyOS RUM SDK 的采样、隐私同意、事件过滤、Trace、崩溃采集和符号上传"
-keywords: ["RUM", "HarmonyOS SDK", "高级配置", "Trace", "Crash", "Sourcemap"]
+description: "配置 HarmonyOS RUM SDK 的采样率与远程配置、隐私同意、事件过滤、Trace、崩溃采集和符号上传"
+keywords: ["RUM", "HarmonyOS SDK", "高级配置", "远程配置", "Trace", "Crash", "Sourcemap"]
 ---
 
-本文介绍 HarmonyOS SDK 的核心配置、RUM 配置、隐私控制、Trace 关联、崩溃采集和符号上传。所有配置均来自当前 ArkTS SDK 公开 API。
+本文介绍 HarmonyOS SDK 的核心配置、RUM 配置、远程配置、隐私控制、Trace 关联、崩溃采集和符号上传。所有配置均来自当前 ArkTS SDK 公开 API。
 
 ## 核心配置
 
@@ -43,8 +43,6 @@ const config = new ConfigurationBuilder('<CLIENT_TOKEN>', 'production')
 
 <Note>
 这三个参数与 Android、iOS、Flutter SDK 同名同值，调优结论可以跨平台直接套用。
-
-SDK 0.5.0 起，`setBatchUploadFrequencyMs(5000)` 由 `setUploadFrequency(UploadFrequency.RARE)` 取代。同时两个默认值有变化：上传间隔由 5 秒改为 2 秒、批次时长由 5 秒改为 10 秒，均与其他平台对齐。
 </Note>
 
 <Note>
@@ -104,17 +102,17 @@ HarmonyOS SDK 在其他平台需要额外关闭的几项上天然没有开销，
 
 ### 应用是同意状态的唯一权威
 
-**每次启动都以你传给 `Flashcat.initialize` 的值为准。** SDK 不会用历史状态覆盖它——这一点与 Android、iOS SDK 完全一致。你的应用负责保存用户的选择，并在每次初始化时传回给 SDK。
+**每次启动都以您传给 `Flashcat.initialize` 的值为准。** SDK 不会用历史状态覆盖它——这一点与 Android、iOS SDK 完全一致。您的应用负责保存用户的选择，并在每次初始化时传回给 SDK。
 
 <Warning>
-如果你的应用在每次启动时都用固定值（例如 `GRANTED`）初始化 SDK，那么用户撤销授权后重启，采集会重新开启。请在用户做出选择的那一刻调用 `setTrackingConsent`，并把该选择保存下来、下次启动时传给 `initialize`。
+如果您的应用在每次启动时都用固定值（例如 `GRANTED`）初始化 SDK，那么用户撤销授权后重启，采集会重新开启。请在用户做出选择的那一刻调用 `setTrackingConsent`，并把该选择保存下来、下次启动时传给 `initialize`。
 </Warning>
 
 同意状态同时会被持久化到本地，但**只服务于一个用途**：后台上传使用的 `WorkSchedulerExtensionAbility` 是独立进程，它面前没有用户、也拿不到应用的判断，只能读取主进程最后一次记录的决定。详见[后台和延迟上传](#后台和延迟上传)。
 
-撤销授权时（变更为 `NOT_GRANTED`），SDK 不仅清空未发送的 pre-consent 缓冲区，还会**删除已经落盘、尚未上传的批次**。0.2.0 及更早版本只清空缓冲区，已采集批次仍会在恢复授权后发出。
+撤销授权时（变更为 `NOT_GRANTED`），SDK 不仅清空未发送的 pre-consent 缓冲区，还会**删除已经落盘、尚未上传的批次**。
 
-`0.3.2` 起，撤销授权还会删除用于[崩溃归因](/zh/rum/sdk/harmony/data-collection#崩溃归因)的本地 view 快照。该快照是一份完整的 view 事件，包含用户 ID、姓名、邮箱和自定义上下文，与已采集批次同样敏感。
+撤销授权还会删除用于[崩溃归因](/zh/rum/sdk/harmony/data-collection#崩溃归因)的本地 view 快照。该快照是一份完整的 view 事件，包含用户 ID、姓名、邮箱和自定义上下文，与已采集批次同样敏感。
 
 ### 设置与更改同意状态
 
@@ -164,7 +162,6 @@ FlashcatRum.enable(
 | `setTrackNavigation(enabled)` | boolean | `false` | 控制 `FlashcatRum.startViewTracking()` 是否注册 ArkUI `routerPageUpdate` 监听 |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | 控制 Trace 发布的网络生命周期是否转换为 RUM resource |
 | `setTrackErrors(enabled)` | boolean | `true` | 控制是否**自动**采集未捕获错误和未处理的 Promise rejection |
-| `setTrackFrustrations(enabled)` | boolean | `false` | 保留开关；当前版本尚未生成 frustration 事件 |
 | `setEventMapper(mapper)` | function | `null` | 在事件写入磁盘前修改或丢弃 view、action、error、resource 事件 |
 
 <Note>
@@ -204,6 +201,51 @@ const rumConfig = new RumConfigurationBuilder('<APPLICATION_ID>')
 <Warning>
 事件过滤函数运行在 SDK 写入路径上，应保持快速、同步且不抛异常。SDK 会兜底处理异常并保留原始事件，但复杂逻辑会增加端侧开销。
 </Warning>
+
+## 远程配置
+
+会话采样率可以在控制台 **应用管理 → 远程配置** 页签在线调整，无需改代码、重新发版。该功能默认关闭，需要在初始化时开启：
+
+```ts
+import { FlashcatRum, RumConfigurationBuilder } from '@flashcatcloud/rum';
+
+FlashcatRum.enable(
+  new RumConfigurationBuilder('<APPLICATION_ID>')
+    .setSessionSampleRate(100)             // 控制台未下发时使用的采样率
+    .setRemoteConfigurationEnabled(true)   // 允许控制台调整采样率与异常补采
+    .build()
+);
+```
+
+开启后的行为：
+
+- SDK 在启动时与每次新建会话时各请求一次配置，拿到的配置对**下一个新会话**生效，进行中的会话不受影响；请求不会阻塞会话创建。
+- 采样率**跨过 0**（由 0 调为非 0，或由非 0 调为 0）时当前会话会立即结束，由新配置重新抽样，紧急关停或重新开启不必等会话自然轮换；其余变化都等到下一个新会话。
+- 下发的值会持久化到本地，冷启动后的第一个会话即按上次下发的配置抽样；从未成功拿到过配置、或控制台停用了远程配置时，恢复使用初始化时的 `setSessionSampleRate`。
+- 请求失败、超时或响应无法识别时，沿用已生效的值，不会清空；SDK 会短暂重试两次，之后等到下一个新会话或下次启动才再请求。
+- HarmonyOS SDK 只读取**会话采样率**、**错误会话补充采集**（`sessionOnError`）与**自定义配置项**三项，其余配置项不生效。没有 Session Replay，回放与 Trace 相关的开关不会在 HarmonyOS 应用里出现。
+- 异常补采与初始化时的 `setSessionOnError` 是同一个开关：控制台下发的值覆盖初始化值，对之后抽样的会话生效。
+
+被异常补采保留的会话上报的会话采样率为 `0`，并带 `session.sampled_for_error: true` 标记；没有报错的候选会话不会上传、不产生费用。筛选方式见[数据查询语法指南](/zh/rum/explorer/data-query)中的 `session_sampled_for_error`。
+
+<Note>
+私有化部署时配置接口位于 RUM 上报地址旁的 `/api/v2/rum/config` 路径（如上报地址是 `https://host/api/v2/rum`，配置接口就是 `https://host/api/v2/rum/config`）。使用 `setCustomEndpoint()` 时，请确认网关放行了该路径。
+</Note>
+
+自定义配置项通过 `GlobalRumMonitor.get().getRemoteConfig()` 读取，返回已解析好的对象；未开启远程配置、控制台未设置该项，或尚未拿到配置时返回 `null`：
+
+```ts
+import { GlobalRumMonitor } from '@flashcatcloud/rum';
+
+const custom = GlobalRumMonitor.get().getRemoteConfig();
+const debugUsers = custom?.['debugUsers'] as string[] | undefined;
+```
+
+<Warning>
+自定义配置项会下发到客户端，任何持有 Client Token 的人都能读到。请勿在其中存放密钥、访问令牌或个人敏感信息。
+</Warning>
+
+控制台侧的配置项、发布与生效方式见 [应用管理 · 远程配置](/zh/rum/quickstart/app-management#远程配置)。
 
 ## 全局属性和用户信息
 
@@ -258,7 +300,7 @@ Flashcat.getInstance().setUserInfo({
 
 ## Trace 配置
 
-Trace 模块负责生成 W3C `traceparent` 和 `tracestate`，并把生成的 trace id 和 span id 关联到 RUM resource 的 `_dd.trace_id` 和 `_dd.span_id` 字段。`tracestate` 会携带 Datadog vendor entry：`dd=s:{0|1};o:rum`。
+Trace 模块负责生成 W3C `traceparent` 和 `tracestate`，并把生成的 trace id 和 span id 关联到 RUM resource 的 `_dd.trace_id` 和 `_dd.span_id` 字段。
 
 ```ts
 import {
@@ -320,7 +362,7 @@ FlashcatCrash.enable(
 | `setCrashLoopCooldownMs(cooldownMs)` | number | `300000` | 已触发保护后，重置持久化记录所需的无崩溃时长，单位为毫秒；小于 `1` 的值按 `1` 处理 |
 
 <Warning>
-从 `0.2.0` 开始，默认策略由旧版的进程存活行为改为 `REPORT_THEN_EXIT`。仅初始化旧版 SDK 会在未捕获 ArkTS 异常后抑制宿主应用退出，使应用在业务状态未定义的情况下继续运行。新默认行为会同步保存崩溃并恢复平台退出语义。如需恢复旧行为，请显式设置 `JsCrashPolicy.OBSERVE_ONLY`，并确认保留受损进程符合你的业务预期。
+默认策略 `REPORT_THEN_EXIT` 会在未捕获 ArkTS 异常后退出进程。如需让应用继续运行，请显式设置 `JsCrashPolicy.OBSERVE_ONLY`，并确认保留受损进程符合您的业务预期。
 </Warning>
 
 ### `REPORT_THEN_EXIT`
@@ -335,7 +377,7 @@ SDK 会同步持久化崩溃记录，检查持久化的崩溃循环保护，然�
 
 ### `OBSERVE_ONLY`
 
-SDK 会异步上报异常并让当前进程继续运行。该策略恢复 `0.2.0` 之前的存活行为，不会退出或重启进程。事件循环可能仍能响应，但未捕获异常可能已经使应用处于损坏或不一致的业务状态。
+SDK 会异步上报异常并让当前进程继续运行。该策略不会退出或重启进程。事件循环可能仍能响应，但未捕获异常可能已经使应用处于损坏或不一致的业务状态。
 
 ### 崩溃循环保护
 
@@ -417,7 +459,7 @@ async onWorkStart(workInfo: workScheduler.WorkInfo): Promise<void> {
 - **只读。** 它不会写回同意状态、设备标识或任务注册信息。HarmonyOS Preferences 是按进程的整文件缓存，扩展进程的写入可能覆盖主进程正在进行的撤销操作。
 
 <Warning>
-不要在扩展进程里调用 `Flashcat.initialize()`。它会用你传入的字面值覆盖持久化的同意状态，从而在用户已经撤销授权后仍然上传数据。`setTrackingConsent` 在扩展进程中也会被忽略并打印错误日志。
+不要在扩展进程里调用 `Flashcat.initialize()`。它会用您传入的字面值覆盖持久化的同意状态，从而在用户已经撤销授权后仍然上传数据。`setTrackingConsent` 在扩展进程中也会被忽略并打印错误日志。
 </Warning>
 
 ## 上传 HarmonyOS 崩溃符号
@@ -484,7 +526,7 @@ FLASHCAT_API_KEY=*** \
 ```
 
 <Warning>
-用环境变量配置插件时，`--no-daemon` 不是可选项。hvigor 默认通过常驻的守护进程构建，该进程**只在创建时拷贝一次环境变量**，之后仅刷新固定白名单（`DEVECO_SDK_HOME`、`OHOS_BASE_SDK_HOME` 及两个增量构建开关）。因此复用守护进程时，插件读到的是**启动那个守护进程的人**的环境变量——可能来自 IDE 构建，也可能来自你上一条命令——而不是你刚敲进去的这份。
+用环境变量配置插件时，`--no-daemon` 不是可选项。hvigor 默认通过常驻的守护进程构建，该进程**只在创建时拷贝一次环境变量**，之后仅刷新固定白名单（`DEVECO_SDK_HOME`、`OHOS_BASE_SDK_HOME` 及两个增量构建开关）。因此复用守护进程时，插件读到的是**启动那个守护进程的人**的环境变量——可能来自 IDE 构建，也可能来自您上一条命令——而不是您刚敲进去的这份。
 
 失败是静默的：`FLASHCAT_API_KEY` 读不到就跳过上传（只打一行日志），旧的 Key 则会以 401 结束——两种情况构建都照样成功。直接写在 `hvigorfile.ts` 里的值不受影响。
 </Warning>
@@ -505,5 +547,5 @@ FLASHCAT_API_KEY=*** \
 | `harmony_symbol_file` | `event`、`symbol_file` |
 
 <Tip>
-Native 符号依赖 `.so` 的 GNU build-id。HarmonyOS NDK 默认会生成 build-id；如果你的构建链路关闭了该能力，请为 `.so` 增加 `-Wl,--build-id`。
+Native 符号依赖 `.so` 的 GNU build-id。HarmonyOS NDK 默认会生成 build-id；如果您的构建链路关闭了该能力，请为 `.so` 增加 `-Wl,--build-id`。
 </Tip>

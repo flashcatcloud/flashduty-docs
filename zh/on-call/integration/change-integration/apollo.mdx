@@ -1,5 +1,6 @@
 ---
 title: "Apollo 配置中心变更集成"
+sidebarTitle: "Apollo 配置中心"
 description: "通过 Apollo Portal 的配置发布 Webhook，将每次配置发布、回滚、灰度发布和全量发布同步到 Flashduty On-call，作为变更事件与告警、故障关联。"
 keywords: ["变更集成", "Apollo", "携程 Apollo", "配置中心", "配置发布", "Webhook"]
 ---
@@ -15,7 +16,6 @@ Apollo 只在操作完成后推送，没有开始事件，因此变更没有 Pro
 <div className="hide">
 
 ## 在 Flashduty On-call
----
 
 1. 进入 Flashduty 控制台，选择 **集成中心 → 变更事件**
 2. 选择 **Apollo**，填写集成名称
@@ -25,7 +25,6 @@ Apollo 只在操作完成后推送，没有开始事件，因此变更没有 Pro
 </div>
 
 ## 在 Apollo 中配置
----
 
 Apollo 从 1.8.0 版本开始支持配置发布 Webhook。配置项存放在 `ApolloPortalDB.ServerConfig` 表中，也可以在 Apollo Portal 的 **管理员工具 → 系统参数** 页面修改，修改后约一分钟生效。
 
@@ -47,7 +46,7 @@ DEV,FAT,UAT,PRO
 新增或修改配置项 `config.release.webhook.service.url`，值为 Flashduty 的 **推送地址**：
 
 ```
-https://api.flashcat.cloud/event/push/change/apollo/<integration_key>
+{api_host}/event/push/change/apollo/{integration_key}
 ```
 
 请原样粘贴 Flashduty 显示的推送地址。推送地址把集成 key 放在路径里，而不是 `?integration_key=` 查询参数，因为 Apollo 会在配置的地址末尾追加 `?env=<环境>`，如果地址里已有查询参数，集成 key 会被破坏，推送无法通过鉴权。
@@ -63,19 +62,14 @@ Apollo 没有测试推送：在 Portal 中对任一已开启 Webhook 的环境�
 </Step>
 </Steps>
 
-## 一条变更是什么
----
+## 变更如何合并
 
-一条变更对应 Apollo 的一次发布操作，变更标识（change_key）为 `<环境>/<发布历史 ID>`，例如 `PRO/1234`。
+一条变更对应 Apollo 的一次发布操作。
 
-发布历史 ID 是 Apollo 为每次发布操作生成的记录 ID，同一个环境内不重复，不同环境的 ID 可能相同，因此标识中带有环境名。
-
-不使用推送内容中的 `releaseId` 作为标识：回滚时 Apollo 推送的 `releaseId` 是回滚后生效的那个旧版本的 ID，与该版本当初发布时推送的 `releaseId` 相同。以 `releaseId` 区分会把回滚合并进旧的发布记录。
-
-同一个命名空间的两次发布是两条变更；发布后回滚也是两条变更。
+- 同一个命名空间的两次发布是两条变更；发布后回滚也是两条变更，回滚不会并入原来的发布记录
+- 不同环境的发布互不合并
 
 ## 状态映射
----
 
 Apollo 推送的 `operation` 决定变更的类型，状态为 Done（废弃的发布除外，见表后说明）：
 
@@ -91,7 +85,6 @@ Apollo 推送的 `operation` 决定变更的类型，状态为 Done（废弃的�
 出现以上四种之外的 `operation` 值时，推送返回 InvalidParameter，不生成变更。
 
 ## 变更内容
----
 
 | 字段 | 内容 |
 |---|---|
@@ -112,11 +105,10 @@ Apollo 推送的 `operation` 决定变更的类型，状态为 Done（废弃的�
 | `operation` | `release`、`rollback`、`gray` 或 `full` |
 | `operator` | 发布人（登录名；如果是邮箱则不记录） |
 | `release_id` | Apollo 的发布 ID（`releaseId`） |
-| `history_id` | 发布历史 ID（变更标识的组成部分） |
+| `history_id` | 发布历史 ID |
 | `emergency` | 紧急发布时为 `true` |
 
 ## 常见问题
----
 
 <AccordionGroup>
 <Accordion title="为什么看不到配置项的内容？">
@@ -140,9 +132,7 @@ Apollo 的推送内容带有发布后的全部配置，其中可能有密码和�
 <Accordion title="推送返回 InvalidParameter 错误？">
 
 - `env is missing`：请求中没有 `env` 参数。请确认 `config.release.webhook.service.url` 的值是 Flashduty 显示的推送地址，没有额外添加查询参数
-- `id is missing`：推送内容不完整，请确认推送来自 Apollo Portal 的配置发布 Webhook
-- `operation is missing` 或 `unknown operation`：推送中的 `operation` 缺失或不在 `0`、`1`、`2`、`4` 之内
-- `invalid releaseTime`：推送中的发布时间格式不正确
+- 其他 `… is missing`、`unknown operation` 或 `invalid releaseTime`：推送内容不完整，请确认推送来自 Apollo Portal 的配置发布 Webhook，且 `operation` 为 `0`、`1`、`2`、`4` 之一
 
 Apollo 不会展示推送的响应，请在 Portal 日志中查看 `Notify webHook server failed` 获取失败信息。
 
@@ -150,7 +140,7 @@ Apollo 不会展示推送的响应，请在 Portal 日志中查看 `Notify webHo
 
 <Accordion title="多个环境共用一个集成可以吗？">
 
-可以。变更标识中带有环境名，不同环境的发布不会合并。如果想把不同环境分派到不同协作空间，可以在集成的路由中按 `environment` 标签配置规则。
+可以。不同环境的发布是各自独立的变更。如果想把不同环境分派到不同协作空间，可以在集成的路由中按 `environment` 标签配置规则。
 
 </Accordion>
 </AccordionGroup>

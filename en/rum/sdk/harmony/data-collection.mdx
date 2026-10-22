@@ -209,7 +209,7 @@ The Crash module collects faults through live and post-mortem paths:
 - On the next launch, the Crash module replays its own pending incident into RUM, marks it as consumed, and deletes the persisted file
 - HarmonyOS `hiAppEvent` replays `APP_CRASH` and `APP_FREEZE` on a later launch to capture ArkTS crashes, native C/C++ crashes, and hangs
 
-One ArkTS crash can reach `onUnhandledException`, `onException`, and the later `hiAppEvent.APP_CRASH`. The SDK deduplicates the two live callbacks by fingerprint and uses a persisted consumed record to deduplicate the system replay, ensuring that one policy-managed crash produces exactly one crash error event in the RUM pipeline.
+One ArkTS crash produces exactly one crash error event, never duplicates.
 
 Unhandled Promise rejections are collected separately as ordinary, non-crashing RUM errors with `error.source_type: promise`. They do not terminate the process or enter the crash-policy path.
 
@@ -218,14 +218,14 @@ Unhandled Promise rejections are collected separately as ordinary, non-crashing 
 Crashes and hangs are attributed to **the session and view the application was actually in when the fault happened**, not to the launch that replays them. The two kinds of fault are attributed from different sources:
 
 - Faults the SDK can observe in-process (uncaught main-thread ArkTS exceptions) record their RUM session and view into the pending incident before the process exits, and the next launch replays them against that record
-- Faults the SDK cannot observe in-process (native signal crashes, hangs) kill the process with no chance to record anything. Starting in `0.3.2`, the SDK snapshots every view event it writes to local storage, then reads that snapshot on the next launch (deleting it immediately after the read) to recover the session and view the crash belongs to. On `0.3.1` and earlier these faults landed in the live post-restart session at replay time, which put the crash in a session the user never crashed in and left the session that actually died reading crash-free
+- Faults the SDK cannot observe in-process (native signal crashes, hangs) kill the process with no chance to record anything. The SDK snapshots every view event it writes to local storage. On the next launch, it reads and then deletes the snapshot to recover the crash's session and view
 
-When replaying such a fault, the SDK writes two documents: an `is_crash` error stamped with the real fault time, and an updated view document (`document_version` incremented, `is_active` set to `false`, `crash` and `error` counts each incremented by one). The pending incident is deleted only after both are persisted; if only one write succeeds the incident is retained and retried on the next launch, so the session never settles as crash-free.
+When replaying such a fault, the SDK writes an `is_crash` error stamped with the real fault time into the original session and increments the view's `crash` and `error` counts by one. The replay completes only when both succeed. Otherwise it is retried on the next launch, so the original session never shows as crash-free.
 
 The SDK falls back to reporting into the **current session** at the current time — preserving the real fault time in the `crash.crashed_at_ms` attribute — in these cases:
 
-- The view behind the snapshot started more than 4 hours ago. That is the maximum session lifetime, so the session has already closed on the backend and its document must not be rewritten
-- The fault happened more than 23 hours ago. The intake silently discards events older than 24 hours, so a backdated crash would be marked delivered yet actually lost
+- The view started more than 4 hours ago (the maximum session length, so the original session is already closed)
+- The fault happened more than 23 hours ago (events older than 24 hours are discarded, so a crash must be reported within a day to land in its original session)
 - The crash happened before the first session was established, or no view snapshot is available locally
 
 Crash events are reported through the RUM error pipeline:
@@ -243,11 +243,10 @@ The SDK uploads events as NDJSON batches.
 | Upload URL | `{site}/api/v2/rum`; the default site is `https://browser.flashcat.cloud` |
 | Request method | `POST` |
 | Content-Type | `text/plain;charset=UTF-8` |
-| Content-Encoding | `deflate` (since 0.3.0 the request body is zlib-compressed by default; the SDK falls back to an uncompressed upload if compression fails) |
+| Content-Encoding | `deflate` (the request body is compressed by default; the SDK falls back to an uncompressed upload if compression fails) |
 | Authentication | `DD-API-KEY: <clientToken>` request header |
-| User-Agent | `flashcat-sdk-harmony/0.3.2` |
-| Query parameters | `ddsource=harmony`; `ddtags` includes `sdk_version:0.3.2` and appends `env`, `service`, and `version` when present |
-| Default upload interval | 5 seconds |
+| Query parameters | `ddsource=harmony`; `ddtags` includes `sdk_version` and appends `env`, `service`, and `version` when present |
+| Default upload interval | 2 seconds (adjust with `setUploadFrequency()`) |
 | Network timeout | 30-second connect timeout and 30-second read timeout |
 | Retry | Network errors, `401`, `403`, `408`, `429`, and `5xx` keep the batch and retry with exponential backoff |
 | Drop | Other `4xx` responses are treated as permanent errors and drop the current batch |

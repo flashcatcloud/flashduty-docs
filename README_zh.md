@@ -77,6 +77,8 @@ description: "简洁说明页面目的"
 - 英文标题使用 sentence case（仅首字母大写）
 - 善用 Mintlify 组件：`<Steps>`、`<Tabs>`、`<Note>`、`<Tip>`、`<Warning>`、`<Frame>`、`<CodeGroup>`
 
+完整的写作、页面设计与合并前检查规范见 [AGENTS.md](AGENTS.md)。
+
 ---
 
 ## 目录结构

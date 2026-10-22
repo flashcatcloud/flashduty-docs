@@ -18,7 +18,7 @@ The tool is open source at [flashcatcloud/flashduty-cli](https://github.com/flas
 curl -sSL https://static.flashcat.cloud/flashduty-cli/install.sh | sh
 ```
 
-Installs to `/usr/local/bin` by default. Override with the `FLASHDUTY_INSTALL_DIR` environment variable.
+Installs to the directory of the `flashduty` already on your `PATH` by default, so an upgrade replaces that copy in place; when there is no `flashduty` on `PATH`, it installs to `/usr/local/bin`. Override the directory with the `FLASHDUTY_INSTALL_DIR` environment variable.
 </Tab>
 
 <Tab title="Windows (PowerShell)">
@@ -38,13 +38,15 @@ Read the latest version from the [CDN latest version pointer](https://static.fla
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `FLASHDUTY_VERSION` | Install a specific version, e.g. `v1.5.12` | latest |
-| `FLASHDUTY_INSTALL_DIR` | Custom install directory | `/usr/local/bin` (shell), `~\.flashduty\bin` (PowerShell) |
+| `FLASHDUTY_VERSION` | Install a specific version, for example, `v1.5.12` | latest |
+| `FLASHDUTY_INSTALL_DIR` | Custom install directory | the directory of the `flashduty` already on `PATH`, else `/usr/local/bin` (shell); `~\.flashduty\bin` (PowerShell) |
 | `MIRROR_URL` | Override the release asset download mirror prefix used by the installer script; must use `https://` | `https://static.flashcat.cloud/flashduty-cli` |
 | `FLASHDUTY_UPDATE_BASE_URL` | Override the base URL used by `flashduty update` and the automatic update check | `https://static.flashcat.cloud/flashduty-cli` |
-| `INSTALLED_NAME` | Command name to install as, e.g. `fduty` | `flashduty` |
+| `INSTALLED_NAME` | Command name to install as, for example, `fduty` | `flashduty` |
 
 A copy installed under another command name uses that name in help output, error messages, and shell completion scripts; `flashduty update` replaces the running binary in place, under its own name and directory, instead of installing a default-named copy elsewhere.
+
+After installing, the script re-checks `PATH`: if the `flashduty` your shell actually runs is not the copy it just installed (an older copy earlier on `PATH` shadows it), it tells you to remove that copy or move the new directory ahead of it. When the current process is managed by flashduty-runner (`FLASHDUTY_MANAGED_BY_RUNNER=1`), the script refuses to run and tells you to upgrade the runner instead — the runner ships a CLI copy it was built and verified against, and replacing it in place desyncs the two.
 
 ## Authentication
 
@@ -54,7 +56,7 @@ A copy installed under another command name uses that name in help output, error
 flashduty login
 ```
 
-When prompted, paste your APP Key. To obtain one, sign in to the [Flashduty console](https://console.flashcat.cloud) and copy your APP Key from **Profile > Personal Info**.
+When prompted, paste your APP Key. To obtain one, sign in to the [Flashduty console](https://console.flashcat.cloud) and create and copy an APP Key from **Personal center → APP Key**. See [Personal settings](/en/on-call/configuration/personal-settings#app-key).
 
 ### Credential resolution order
 
@@ -94,14 +96,16 @@ flashduty config set base_url URL  # Override the API endpoint
 
 ## Global flags
 
-All subcommands accept these flags:
+These flags are registered on the root command; every subcommand accepts them except `--version`:
 
 | Flag | Description |
 |------|-------------|
 | `--output-format` | Output format: `table` (default), `json`, or `toon` (compact, token-efficient) |
 | `--json` | Alias for `--output-format json`; emit JSON for parsing with `jq` or similar tools |
 | `--no-trunc` | Disable column truncation in table output |
+| `--fields` | In `json`/`toon` output, keep only the named top-level fields (comma-separated): each row of a list, or the keys of a single record. Table output ignores it and a stderr note says so; a name that matches no key is reported on stderr together with the keys the output does carry, and output that is neither an object nor a list of objects fails the command. See "Field projections for structured output" below |
 | `--base-url` | Override the API endpoint (for private deployments) |
+| `--version` | Print the version — the same single line as `flashduty version`. That meaning exists only on the root command; a command that defines its own `--version` (for example the optimistic-locking version on mutating verbs) follows its own description |
 
 ## Command catalog
 
@@ -116,7 +120,7 @@ flashduty incident ack <id> [<id2>...]   # Acknowledge incidents
 flashduty incident close <id> [<id2>...] # Close (resolve) incidents
 flashduty incident merge <target-id> --source <ids> # Merge incidents into a target incident
 flashduty incident timeline <id>         # View an incident timeline
-flashduty incident alerts <id>           # List alerts associated with an incident
+flashduty incident alerts <id>           # List alerts associated with an incident (--limit default 10, --page)
 flashduty incident similar <id>          # Find similar historical incidents
 flashduty incident feed <id> [flags]    # View an incident's paginated feed (timeline entries)
 ```
@@ -141,7 +145,7 @@ Common filter flags for `incident list`:
 | `--is-rare` | Only outlier incidents | `false` |
 | `--is-snoozed` | Only snoozed incidents | `false` |
 | `--ever-muted` | Only incidents that were ever silenced | `false` |
-| `--since` | Start time (duration, date, datetime, or unix timestamp); the `--since` to `--until` window must be under 31 days | `24h` |
+| `--since` | Start time (duration, date, datetime, or unix timestamp); the `--since` to `--until` window must be under 31 days | `24h` (`30d` when `--progress` lists only `Triggered,Processing`) |
 | `--until` | End time | `now` |
 | `--asc` | Sort ascending (oldest first) | `false` (newest first) |
 | `--limit` | Max results (max 100) | `20` |
@@ -149,7 +153,9 @@ Common filter flags for `incident list`:
 
 Time format examples: `5m`, `1h`, `24h`, `168h`, `2026-04-01`, `2026-04-01 10:00:00`, `1712000000`.
 
-`incident feed <id>` reads an incident's feed (timeline entries) page by page: `--asc` puts the oldest entries first (newest first by default), `--types` filters by comma-separated entry types (e.g. `i_comm,i_assign`; the `type` field of each entry gives the actual type), and `--limit` (max 100) and `--page` paginate the result.
+`incident feed <id>` reads an incident's feed (timeline entries) page by page. `--asc` lists the oldest entries first (the default is newest first). `--types` filters by comma-separated entry types, for example `i_comm,i_assign`; each entry's `type` field gives its actual type. `--limit` (max 100) and `--page` paginate the result.
+
+`incident alerts <id>` lists the alerts attached to that incident; `--limit` defaults to `10` and `--page` starts at `1`.
 
 #### Create, update, and merge
 
@@ -162,7 +168,7 @@ flashduty incident create --title "Payment API timeouts" --severity Critical --c
   --assign-emails alice@example.com --field env=prod --field tags=db,cache
 ```
 
-`incident merge <target-id>` merges the incidents in `--source` (comma-separated source incident IDs, at most 100) into the target. By default the source incidents are closed and kept, and a merge entry is added to the target timeline; with `--remove-source-incidents` they are deleted and no longer appear in the incident list. `--title` renames the target, and `--comment-file` reads an optional merge comment from a file (`-` reads stdin).
+`incident merge <target-id>` merges the incidents in `--source` (comma-separated source incident IDs, at most 100) into the target. By default, the source incidents are closed and kept, and a merge entry is added to the target timeline. With `--remove-source-incidents`, they're deleted and no longer appear in the incident list. `--title` renames the target, and `--comment-file` reads an optional merge comment from a file (`-` reads stdin).
 
 ```bash
 flashduty incident merge <target-id> --source <id1>,<id2> --title "Database outage (merged)"
@@ -185,11 +191,13 @@ flashduty incident work-item-post-mortem-bind [flags]            # Bind converte
 
 Key flags for `work-item-create`: `--item-type` (required, `action` or `follow_up`), `--title` (required, up to 512 characters), `--idempotency-key` (required idempotency key, up to 128 characters), `--post-mortem-id` (required for `follow_up`, forbidden for `action`), `--assignee-ids` (initial assignees, a legacy alias). Mutating verbs (`update`/`complete`/`convert`/`delete`/`assignees-reset`) require `--version` (optimistic locking — it must match the stored version).
 
+A work item's status accepts only four values — `open`, `in_progress`, `done`, `cancelled`: `work-item-create --status` defaults to `open` when omitted or blank, `work-item-update --status` can only move it to one of those four, `work-item-complete --target-status` accepts `done` alone (any other value is rejected), and `work-item-convert --target-status` takes one of the four.
+
 A work item's assignees can be members or the account's **AI SRE**:
 
-- `work-item-create` and `work-item-assignees-reset` accept an `assignees` field (each entry shaped `{type, id?}`, where `type` is `person` or `ai_sre`; an `ai_sre` entry carries no `id`, and at most 20 entries are allowed), which can only be passed as JSON via `--data`. `--assignee-ids` is the equivalent legacy alias (an all-`person` list); the two are mutually exclusive and sending both returns an error.
+- `work-item-create` and `work-item-assignees-reset` accept an `assignees` field (each entry shaped `{type, id?}`, where `type` is `person` or `ai_sre`; an `ai_sre` entry carries no `id`, and at most 20 entries are allowed), which can only be passed as JSON through `--data`. `--assignee-ids` is the equivalent legacy alias (an all-`person` list); the two are mutually exclusive and sending both returns an error.
 - `work-item-list` gains `--assignee-type person|ai_sre`: `ai_sre` returns items assigned to AI SRE (an AI caller uses it to list its own tasks) and needs no `--assignee-id`, which is ignored in that case; `person` combined with `--assignee-id` returns only that member's items. Omitting the flag with a positive `--assignee-id` filters by `person`.
-- In a work item response, `assignee_ids` now holds only the person assignees (AI SRE is not included) and the full list is in `assignees`; items executed by AI SRE also return `agent_session_id` and `agent_session_venue` (`web` or `im`), both omitted when no session is recorded.
+- In a work item response, `assignee_ids` holds only person assignees (not AI SRE), and `assignees` holds the full list. Items executed by AI SRE also return `agent_session_id` and `agent_session_venue` (`web` or `im`). Both are omitted when no session is recorded.
 
 #### Post-mortem reports (post-mortem-*)
 
@@ -239,9 +247,9 @@ flashduty member invite [flags]     # Invite new members (up to 20 per call)
 
 `member list` supports `--query` (free-text search by name or email), `--role-id`, `--member-id` (return only the member with this ID), `--page`, `--limit`, `--orderby`, `--asc`.
 
-`member info-reset` identifies the member by exactly one of `--member-id`, `--member-name`, `--email`, `--phone`, or `--ref-id`; the fields to change go into the required body via `--data '{"updates":{...}}'`. With `--from api`, an updated email or phone is marked verified directly when the account has member invites disabled.
+`member info-reset` identifies the member by exactly one of `--member-id`, `--member-name`, `--email`, `--phone`, or `--ref-id`; the fields to change go into the required body through `--data '{"updates":{...}}'`. With `--from api`, an updated email or phone is marked verified directly when the account has member invites disabled.
 
-`member invite` takes the member list via `--data '{"members":[...]}'`. When the account has member invites disabled and `--from api` is set, members are created directly in the enabled state with email/phone marked verified — no invitation is sent.
+`member invite` takes the member list through `--data '{"members":[...]}'`. When the account has member invites disabled and `--from api` is set, members are created directly in the enabled state with email/phone marked verified — no invitation is sent.
 
 ### team — Team management
 
@@ -283,7 +291,7 @@ flashduty channel list [flags]   # List channels
 
 ### channel escalate-rule-list — Escalation rule queries
 
-Escalation rule management has moved into the `channel` command group. Pass the channel ID as a positional argument:
+Escalation rule queries belong to the `channel` command group. Pass the channel ID as a positional argument:
 
 ```bash
 flashduty channel escalate-rule-list <channel-id>   # List all escalation rules for a channel
@@ -330,11 +338,11 @@ flashduty status-page draft-create [flags]                            # Create a
 
 ```bash
 flashduty status-page draft-create \
-  --source 'ai_sre:sess_xxx' \
+  --source 'my-script' \
   --data '{"draft":{"page_id":5750613685214,"type":"incident","name":"Web Console Degraded Performance","message":"We are investigating degraded performance affecting the web console.","status":"investigating","affected_components":[{"component_id":"01KC3GAZ6ZJE40H55GM31RPWZE","status":"degraded"}]}}'
 ```
 
-- `--source`: opaque marker of the drafting origin (e.g. `ai_sre:sess_xxx`), up to 64 characters.
+- `--source`: opaque marker of the drafting origin (for example, `my-script`), up to 64 characters.
 - The `draft` object in `--data` (required, stored verbatim, up to 64 KB serialized). Required fields: `page_id`, `type` (`incident` or `maintenance`), `name`, `message`; optional `change_id` (append an update to an existing event when > 0), `status`, `affected_components`, and `start_time`/`end_time` (Unix epoch seconds, new maintenance only).
 - The response returns `draft_id` (matching `draft_[A-Za-z0-9]{22}`) and `created_at`; the console review link carries `draft_id`.
 
@@ -398,7 +406,7 @@ Core fields for `application-create` / `application-update`:
 | `--no-ip` | Disable IP collection |
 | `--data` | Add `alerting` (notification configuration), `links` (external-link integration), `repositories` (linked source repositories), and `tracing` (trace-link configuration) objects |
 
-`repositories` inside `--data` links the application to the source code repositories that build it: an ordered array whose first entry is the primary repository, at most 10 entries, each entry a `repo` (GitHub repository in `owner/name` form, required) plus an optional `subdir` (the directory holding the application inside the repository, relative to the repository root — `.` is the repository root, and an empty value is saved as `.`). Passing it on create establishes the links; on update the field is presence-based — passing it replaces the whole list, an empty array clears every link, and omitting it leaves them unchanged. `application-info`, `application-infos`, and `application-list` all echo the field back. Linking grants no access by itself: AI sessions can only read repositories granted to the account's GitHub App installations (see [Apps](/en/ai-sre/apps)). This field is currently available through the API and CLI only; the console's application management page does not expose repository links.
+`repositories` inside `--data` links the application to the source code repositories that build it: an ordered array whose first entry is the primary repository, at most 10 entries, each entry a `repo` (GitHub repository in `owner/name` form, required) plus an optional `subdir` (the directory holding the application inside the repository, relative to the repository root — `.` is the repository root, and an empty value is saved as `.`). On create, the field sets the links. On update, it's presence-based: passing it replaces the whole list, an empty array clears every link, and omitting it leaves them unchanged. `application-info`, `application-infos`, and `application-list` all echo the field back. Linking grants no access by itself: AI sessions can only read repositories granted to the account's GitHub App installations (see [Apps](/en/ai-sre/apps)). This field is currently available through the API and CLI only; the console's application management page does not expose repository links.
 
 <Note>
 `application-webhook-test` returns `ok`, `status_code`, and `message`, which makes it suitable for verifying that a RUM alert webhook really accepts a sample delivery from Flashduty.
@@ -416,17 +424,17 @@ flashduty rum application-remote-config-history-revert <application-id> --versio
 flashduty rum application-remote-config-update <application-id> [flags]  # Publish a complete new configuration
 ```
 
-The complete configuration (a `config` object with `enabled`, `activation`, `default`, `rules`, `custom`, and `refresh_on_foreground`) goes in via `--data`; `--data` may also carry the whole request body, and positional arguments and typed flags override fields of the same name in it.
+The complete configuration (a `config` object with `enabled`, `activation`, `default`, `rules`, `custom`, and `refresh_on_foreground`) goes in through `--data`; `--data` may also carry the whole request body, and positional arguments and typed flags override fields of the same name in it.
 
 | Command | Key arguments |
 |---------|---------------|
 | `application-remote-config-get` | None (`<application-id>` is positional); returns the live configuration plus `version` and `updated_at`, where a `version` of 0 means the application has never been configured |
 | `application-remote-config-history-list` | `--page` (0-based page index), `--limit` (default 20, max 100), `--orderby` (`updated_at`, the default, or `version`), `--asc` |
-| `application-remote-config-preview` | `--env`, `--app-version`, and `--sdk` describe the simulated client; the draft `config` goes in via `--data` and, when omitted, the live configuration is previewed instead. Returns the index of the rule that decided the result (`hit_rule_index`, `-1` when only the default applied) and the `values` finally delivered |
+| `application-remote-config-preview` | `--env`, `--app-version`, and `--sdk` describe the simulated client; the draft `config` goes in through `--data` and, when omitted, the live configuration is previewed instead. Returns the index of the rule that decided the result (`hit_rule_index`, `-1` when only the default applied) and the `values` finally delivered |
 | `application-remote-config-history-revert` | `--version` (required, the history version to republish, min 1); `--reason` (optional note, up to 255 characters — the console fills in `rolled back to vN` when it is empty) |
 | `application-remote-config-update` | `config` in `--data` (required, a full replacement rather than a patch); `--reason` (optional note on why, up to 255 characters, stored verbatim) |
 
-Both a publish and a revert allocate a new version number (a revert never reuses the old one). A change lands on new sessions: with `activation` set to `next_session` (the default), running sessions are untouched, while `immediate` makes a client end its current session as soon as the change arrives so a new session starts under the new configuration; publishing `enabled: false` turns configuration delivery off, and clients fall back to their SDK initialization settings.
+Both a publish and a revert allocate a new version number (a revert never reuses the old one). A change applies to new sessions. With `activation` set to `next_session` (the default), running sessions are untouched. With `immediate`, a client ends its current session as soon as the change arrives, and a new session starts under the new configuration. Publishing `enabled: false` turns delivery off, and clients fall back to their SDK initialization settings.
 
 #### Session replay
 
@@ -462,7 +470,7 @@ flashduty rum error-ingestion-rules-history-list <application-id>         # View
 flashduty rum error-ingestion-rules-history-revert <application-id> --version <v>  # Revert to a history version
 ```
 
-`--description` is capped at 512 characters. `create`/`list`/`history-list`/`history-revert` take `application-id` as a positional argument; `update`/`enable`/`disable`/`delete` target rules via the `--application-id` and `--rule-id` flags.
+`--description` is capped at 512 characters. `create`/`list`/`history-list`/`history-revert` take `application-id` as a positional argument; `update`/`enable`/`disable`/`delete` target rules through the `--application-id` and `--rule-id` flags.
 
 #### Preset severity rules (issue-preset-severity-rules-*)
 
@@ -492,7 +500,25 @@ flashduty rum resource-info [--no-cache]   # View the RUM plan version, quotas, 
 flashduty oncall license-list # List people with active On-call licenses in the current account
 ```
 
-This read-only command returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window.
+This read-only command returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window. The response also carries `release_limited`, which is `true` once the account has used up its license-release quota for the current billing period; while it is `true`, releasing a member's seat fails with the error code `NoLicense`. That quota is the [limit on the number of License releases in each billing period](/en/platform/pricing).
+
+### calendar — Service calendars
+
+A service calendar is what escalation rules and silence rules use to tell working days from rest days; the console-side configuration and layer precedence are described in [Service Calendar](/en/on-call/configuration/service-calendar). The group is generated from the OpenAPI (see "Full command coverage" below): `<cal-id>` (shaped `cal.<uuid>`) is positional and comes from the `cal_id` of the `items[]` rows returned by `calendar list`; `list` returns account-created calendars only, so pass `--kind region.official.holiday` for public-holiday calendars (they are filtered by the caller's locale unless you add `--no-locale`).
+
+```bash
+flashduty calendar list [--kind personal|region.official.holiday] [--no-locale]   # List calendars
+flashduty calendar info|update|delete <cal-id>                                    # Get / update / delete a calendar
+flashduty calendar event-list <cal-id> [--year <y>] [--month <m>] [--day <d>]     # List events; the response also carries days
+flashduty calendar event-upsert <cal-id> --start-at <date> --end-at <date> --is-off <bool> [--event-id <id>] [--summary <text>]
+flashduty calendar event-delete <cal-id> [--event-id <id> | --start-at <date> --end-at <date>]
+```
+
+Three things only `--help` and the responses themselves reveal:
+
+- **`event-delete` both deletes a single event and clears a date range.** Pass `--event-id` to delete one event, or `--start-at` and `--end-at` (both `YYYY-MM-DD`; `end_at` is exclusive and must be later than `start_at`) to clear every event the calendar itself holds over `[start_at, end_at)`. The cleared days fall back to the linked holiday calendars and the weekly workdays — the same effect as clicking **Reset to default** on those dates in the console.
+- **`event-upsert` trims the calendar's other own events off the same days**: an event fully inside the range is deleted, one partly inside is shortened, and one spanning the range is split in two, so the latest write decides those days (`--summary` is optional).
+- **The `event-list` response carries `days` beside the `items` row array**: keyed by `YYYY-MM-DD`, it gives every day in the requested scope its `is_off`, the `event_id` that decided it, and the `layer` that decided it — `custom` (the calendar's own events) beats `holiday` (a linked holiday calendar), which beats `weekly` (the weekly workdays); inside one layer a working-day event beats a rest day; a missing `layer` means no event covers that day, which counts as a working day. Read `days` to tell whether a day is a rest day; do not infer it from `items`, since one day can hold events from several layers.
 
 ### template — Notification templates
 
@@ -522,7 +548,7 @@ Common flags for `session list`:
 | `--scope` | Visibility: `all` (your own + your teams, default), `personal`, `team` | `all` |
 | `--status` | Archive status: `active` (default), `archived`, `all` | `active` |
 | `--team-id` | Keep only sessions for the given team ID | - |
-| `--since` | Keep only sessions updated within the window (client-side filter), e.g. `30d`, `24h`, `2026-05-01` | - |
+| `--since` | Keep only sessions updated within the window (client-side filter), for example, `30d`, `24h`, `2026-05-01` | - |
 | `--limit` | Max sessions to fetch | `200` |
 | `--page` | Start page (1-based) | `1` |
 | `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope; subject to the 16 KiB output bound — see "Output formats"), `toon` (compact) | `jsonl` |
@@ -531,7 +557,7 @@ Common flags for `session list`:
 The server endpoint `/safari/session/list` caps each page at 100 rows; when `--limit` exceeds that, the CLI paginates automatically — no manual paging required. The API has no time-window filter, so `--since` is applied client-side against each session's `updated_at` after fetching.
 </Note>
 
-`session export` streams session events as newline-delimited JSON (NDJSON) to stdout: the first line is always a `session_meta` envelope, and each subsequent line is one event (`user_message`, `llm_call`, `tool_call`, `subagent_dispatch`, `final_answer`, `agent_text`, `error`). Exports can be large, so redirect to a file instead of printing to the terminal:
+`session export` streams session events to stdout as newline-delimited JSON (NDJSON). The first line is always a `session_meta` envelope. Each later line is one event: `user_message`, `llm_call`, `tool_call`, `subagent_dispatch`, `final_answer`, `agent_text`, or `error`. Exports can be large, so redirect to a file instead of printing to the terminal:
 
 ```bash
 flashduty session export <session_id> > session.ndjson
@@ -545,7 +571,7 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 
 ### monit-query — Unified datasource tool invocation
 
-`monit-query` executes **a single named tool** against a configured datasource — the unified entry for both query tools (`<type>.query`, covering `prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`) and diagnostic tools (e.g. `mysql.overview`, `redis_node.slowlog`), bypassing the alert-rule layer. The legacy `monit-query data` subcommand is retired. Get the datasource ID from the `id` field of `monit datasource-list`:
+`monit-query` executes **a single named tool** against a configured datasource — the unified entry for both query tools (`<type>.query`, covering `prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`) and diagnostic tools (for example, `mysql.overview`, `redis_node.slowlog`), bypassing the alert-rule layer. Get the datasource ID from the `id` field of `monit datasource-list`:
 
 ```bash
 flashduty monit datasource-list --type prometheus --json | jq '.[] | {id, name, type_ident, address}'
@@ -557,16 +583,16 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | Flag | Description |
 |------|-------------|
 | `<datasource-id>` | Datasource ID (positional, required, from `monit datasource-list`, min 1) |
-| `--tool` | Tool name (required), prefixed by the datasource type, e.g. `prometheus.query`, `mysql.overview`, `redis_node.slowlog`; 1–128 chars |
+| `--tool` | Tool name (required), prefixed by the datasource type, for example, `prometheus.query`, `mysql.overview`, `redis_node.slowlog`; 1–128 chars |
 | `--params` | Tool parameters JSON (may be omitted, meaning `{}`; pass `-` to read a larger payload from standard input; an explicit `null` is invalid) |
 
-Query tools and diagnostic tools sit behind different Edge version gates: query tools submit through the Explore execution path and require **all** currently online routable Edge sessions in the cluster to support the Explore query protocol **v0.68.0**, while diagnostic tools submit through the base invoke protocol and require **v0.71.0** (see `monit datasource-tools-invoke` below). When the versions do not qualify, the command fails with an error code: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed versions in the cluster, with only some sessions qualifying), `edge_version_unknown` (an Edge session reports a version the platform cannot recognize), or `no_active_edge` (no routable online Edge). On any of these, do not rotate Edges or fall back to the legacy entry point.
+Query tools require every online Edge in the cluster to be v0.68.0 or later, and diagnostic tools require v0.71.0 or later. If the versions don't match, the command fails with one of these error codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `edge_version_unknown` (an Edge version in the cluster can't be identified), `no_active_edge` (no online Edge available). Upgrade Edge first; do not rotate Edge and retry.
 
-Query tools return a complete `explore_result.v1` structured result: `format` is always `explore_result.v1`, and `result.kind` is one of `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
+Query tools return a complete `explore_result.v1` structured result. `format` is always `explore_result.v1`. `result.kind` is `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
 
 ### monit datasource-tools-invoke — Datasource diagnostics
 
-`monit datasource-tools-invoke` executes **one deterministic read-only tool** against a configured datasource — the current path for structured datasource diagnostics (replacing `monit-query diagnose`). It is equivalent to the `monit-query` command above, which is the recommended path. Get the datasource ID from the `id` field of `monit datasource-list`:
+`monit datasource-tools-invoke` executes **one deterministic read-only tool** against a configured datasource. It is equivalent to the `monit-query` command above, which is the recommended path. Get the datasource ID from the `id` field of `monit datasource-list`:
 
 ```bash
 flashduty monit datasource-list --type redis_node --json | jq '.[] | {id, name, type_ident, address}'
@@ -577,19 +603,18 @@ flashduty monit datasource-tools-invoke <datasource-id> --tool 'redis_node.slowl
 | Flag | Description |
 |------|-------------|
 | `--datasource-id` | Datasource ID (required, from `monit datasource-list`, min 1) |
-| `--tool` | Tool name (required), prefixed by the datasource type, e.g. `mysql.overview`, `postgres.activity`, `redis_node.slowlog`, `kafka.consumer_lag`, `elasticsearch.cat`, `prometheus.metric_trends`, `loki.log_patterns`, `victorialogs.log_patterns`; 1–128 chars |
+| `--tool` | Tool name (required), prefixed by the datasource type, for example, `mysql.overview`, `postgres.activity`, `redis_node.slowlog`, `kafka.consumer_lag`, `elasticsearch.cat`, `prometheus.metric_trends`, `loki.log_patterns`, `victorialogs.log_patterns`; 1–128 chars |
 | `--data` | Tool parameters JSON (`{"params":{...}}`; may be omitted, meaning `{}`; an explicit `null` is invalid) |
 | `--account-id` | Optional consistency check; must equal the authenticated account |
 
 Semantics and limits:
 
 - **No tool catalog, no auto-replay, no fallback**: one call runs exactly one named tool; fill parameters according to the datasource tool's contract rather than guessing from the command list. Alongside diagnostic tools, the entry also supports `<type>.query` query tools (`prometheus`, `mysql`, `postgres`, `oracle`, `clickhouse`, `elasticsearch`, `loki`, `victorialogs`, `sls`, `tencent_cls`).
-- Requires **all** currently online routable Edge sessions in the cluster to support the v0.71.0 base invoke protocol (individual tools may require a newer implementation); query tools (`<type>.query`) go through the Explore execution path instead and carry an additional floor of the Explore query protocol v0.68.0 — a cluster that only supports older versions fails the query tool too, with no fallback.
 - Request body limit 128 KiB; complete success response limit 10 MiB; tool timeout at most 25 seconds.
 - The datasource must have `enabled=true`; `alerting_enabled=false` does not block diagnostics.
-- Response: `data` (tool-specific JSON evidence, preserved without conversion, never null, no legacy diagnose envelope), `tool`, `datasource_id`, optional `summary`, and a `truncated` object (with `reason`; its presence indicates truncation).
+- Response: `data` (tool-specific JSON evidence, preserved without conversion, never null), `tool`, `datasource_id`, optional `summary`, and a `truncated` object (with `reason`; its presence indicates truncation).
 
-Errors are returned as-is; common codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `edge_version_unknown` (an Edge session reports an unrecognized version; returned on the query-tool path), `no_active_edge` (no routable online Edge), `tool_not_supported` (tool unavailable), `invalid_request` (fix the parameters), `source_too_large` / `result_too_large` (narrow the request). On Edge version issues, do not rotate Edges or fall back to the legacy diagnose.
+On the Edge version error codes above or `tool_not_supported` (tool not supported), act as described above; on `invalid_request`, fix the parameters; on `source_too_large` or `result_too_large`, narrow the request.
 
 ### monit — Datasources, dashboards, and rule groups
 
@@ -618,7 +643,7 @@ Core fields for `datasource-create` / `datasource-update`:
 | `--note` | Optional description |
 | `--enabled` | **Business execution** switch. Omitted on create: `true`; omitted on update: preserve the current value. Explicit `false` disables execution (disabled datasources reject business queries and tools); `null` is invalid. **Does not change `alerting_enabled`** |
 | `--alerting-enabled` | Whether this datasource may evaluate alerts. Omitted on create: `true` for alerting types, `false` for diagnostic-only types; omitted on update: preserve the current value; `null` is invalid. The 5 diagnostic types reject `true`; disabling is rejected with a conflict when enabled rules reference the datasource |
-| `--data` | The `payload` configuration block (required), whose key must match `type_ident`, e.g. `{"payload":{"redis_node":{"database":0,"password":"..."}}}` |
+| `--data` | The `payload` configuration block (required), whose key must match `type_ident`, for example, `{"payload":{"redis_node":{"database":0,"password":"..."}}}` |
 
 `enabled` and `alerting_enabled` are independent: alert evaluation requires both `enabled=true` and an alerting-capable type; `alerting_enabled=false` does not block non-alerting queries or tools, and `monit datasource-list` always reports `alerting_enabled=false` for diagnostic-only types.
 
@@ -630,12 +655,17 @@ Core fields for `datasource-create` / `datasource-update`:
 - `kafka`: `sasl_mechanism` (`none` default / `plain` / `scram-sha-256` / `scram-sha-512`, the latter three require username and password), `username` / `password`, `timeout_ms` (default 5000), TLS fields (`tls_min_version` defaults to 1.2, max 1.3).
 - Passwords and `kafka.tls_key` support `${env:NAME}` references (resolved on the edge); literal values are omitted from responses, only `${env:...}` references are echoed. **On update, omit those fields to preserve stored secrets; explicitly send an empty string to clear**.
 
-#### Dashboards and rule folders (dashboard-* / folder-list)
+#### Dashboards and rule folders (dashboard-* / folder-*)
 
 The `monit dashboard-*` family manages monitor dashboards (provided by generated OpenAPI commands). A dashboard is a `dashboard.v1` document: pass the `definition` in `--data` when creating or updating. `update`, `delete`, `move`, and `restore` all require `--expected-revision` — if the revision you send is not the current one, the call is rejected with `DashboardRevisionConflict`, so re-read and submit again.
 
 ```bash
 flashduty monit folder-list                                       # List every monitor rule folder, to get a folder-id (top-level array, use jq '.[]')
+flashduty monit folder-health                                     # Read folder health summaries, including issues in descendant folders (paged envelope, use jq '.items[]')
+flashduty monit folder-create --name <folder-name> [flags]        # Create a folder (--name required, no . / ,; --parent-id parent folder, 0 = root; --note note; --team-id team, 0 = account-wide)
+flashduty monit folder-update --id <folder-id> --name <folder-name> # Update a folder's name, note, and team assignment (--id and --name required)
+flashduty monit folder-move <dest-parent-id> --id <folder-id>     # Move a folder and its descendants (dest-parent-id is positional and always required; 0 moves it to the root)
+flashduty monit folder-delete --id <folder-id>                    # Delete a folder (empty folders only: child folders, rules, or dashboards make the call fail)
 flashduty monit dashboard-list <folder-id>                        # List the dashboards in one folder (paged envelope, use jq '.items[]')
 flashduty monit dashboard-search --query "payments"               # Search dashboards by title and description (at least one word)
 flashduty monit dashboard-get <dashboard-id>                      # Read a dashboard, including its definition and current revision
@@ -655,11 +685,15 @@ flashduty monit dashboard-runtime-variables-preview               # Preview draf
 flashduty monit dashboard-runtime-queries-resolve <panel-id> [<id2>...]  # Resolve panel queries: expressions with variables substituted, and the bound datasource
 ```
 
+The `monit folder-*` commands manage the folders themselves. `folder-health` returns a `{items:[...]}` paged envelope in which each entry carries only `folder_id` and `has_issue` (`has_issue` marks a folder whose visible descendants include active alerts or rule runtime issues), and `folder-list` returns a top-level array — read both with `--json | jq`. `folder-create` and `folder-update` return the updated folder object; `folder-move` and `folder-delete` return no folder object. A folder name may not contain `.`, `/`, or `,`. `folder-move` requires `dest-parent-id` even when moving to the root (`0`), and `folder-delete` accepts only an empty folder — child folders, rules, or dashboards inside it make the call fail, so empty it yourself first.
+
 Panel runtime and variable resolution take their time window and variable selections as JSON objects in `--data` (time uses millisecond `from_ms` / `to_ms` timestamps). `dashboard-panel-preview` and `dashboard-runtime-variables-preview` need a `context`: `kind: existing` with a `dashboard_id` targets a stored dashboard, `kind: new` with a `folder_id` targets a folder that does not hold one yet.
+
+`dashboard-runtime-queries-resolve` takes two further flags that shape the result: `--max-data-points` (int, 2–5000; both the downsampling target and what decides the step the built-in time variables render with — omit it or send `null` for the server default of 100) and `--preserve-builtin-variables` (bool, off by default): when set, the **built-in time variables** stay verbatim in the resolved expressions so a caller with its own execution window can render them, while user variables are still resolved. The sibling commands `dashboard-panel-run` and `dashboard-panel-preview` already carried `--max-data-points`, likewise a 2–5000 downsampling target.
 
 #### `prometheus-api-v1-label-{label_name}-values` — Query Prometheus label values
 
-`GET /monit/prometheus/api/v1/label/{label_name}/values` (operationId `monit-prometheus-read-label-values`) carries a path parameter, so it is excluded from code generation and provided by a hand-written command. The command name follows the generated path-derived naming (the `monit` group plus the remaining path segments joined by hyphens), so it shows up under `flashduty monit --help` but cannot be guessed intuitively — use it as written here:
+`GET /monit/prometheus/api/v1/label/{label_name}/values` (operationId `monit-prometheus-read-label-values`) carries a path parameter, so it is excluded from code generation and provided by a hand-written command. The command name is derived from the API path: the `monit` group plus the remaining path segments joined by hyphens. It appears under `flashduty monit --help` but is hard to guess, so use it as written here:
 
 ```bash
 flashduty monit prometheus-api-v1-label-{label_name}-values <label_name> --data-source-id <datasource-id>
@@ -671,7 +705,7 @@ flashduty monit prometheus-api-v1-label-{label_name}-values job --data-source-id
 | `<label_name>` | Positional argument (required, exactly one), such as `job` or `instance` |
 | `--data-source-id` | Datasource ID (required, minimum 1), from `monit datasource-list`; must be a Prometheus-compatible datasource owned by the current account |
 
-The response body is the **datasource's native Prometheus payload**, not the Flashduty `{request_id, error, data}` envelope: on success it is `{"status":"success","data":["api","db","worker"]}`. When the datasource itself rejects a query (an unknown label name, say), the command fails with a non-zero exit code and the error text is whatever the datasource (or the Monitors proxy) returned verbatim — Prometheus's own error looks like `{"status":"error","errorType":"bad_data","error":"unknown label name"}` and is unrelated to Flashduty's error-code scheme.
+The response body is the **datasource's native Prometheus payload**, not the Flashduty `{request_id, error, data}` envelope: on success it is `{"status":"success","data":["api","db","worker"]}`. If the datasource rejects a query, for example because of an unknown label name, the command exits non-zero. The error text is exactly what the datasource (or the Monitors proxy) returned. A Prometheus error looks like `{"status":"error","errorType":"bad_data","error":"unknown label name"}` and is unrelated to Flashduty's error codes.
 
 <Note>
 This command only reads the value set of one label; to fetch time series from an expression or run richer PromQL queries, use `monit-query <datasource-id> --tool 'prometheus.query'` as described above.
@@ -680,14 +714,24 @@ This command only reads the value set of one label; to fetch time series from an
 ### alert — Alert and alert-event queries
 
 ```bash
-flashduty alert list [flags]        # List alerts (default: last 24h)
+flashduty alert list [flags]        # List alerts (default: last 24h; 30d with --active)
 flashduty alert get <alert_id>      # Get full detail of one alert; detail is an alias
+flashduty alert events <alert_id>   # List the raw events that make up one alert (--limit, --page)
 flashduty alert-event list [flags]  # List alert events (default: last 1h)
 ```
 
-Common filter flags for both `list` commands: `--severity` (`Critical,Warning,Info`), `--channel` (comma-separated channel IDs), `--integration` (comma-separated integration IDs), `--since`/`--until`, `--limit` (max 100), `--page`. `alert-event list` also takes `--integration-type`, which filters by comma-separated **plugin keys** (e.g. `AliCloud,Prometheus`) — note these are plugin keys, not integration IDs; use `--integration` to filter by integration ID.
+Common filter flags for both `list` commands: `--severity` (`Critical,Warning,Info`), `--channel` (comma-separated channel IDs), `--integration` (comma-separated integration IDs), `--since`/`--until`, `--limit` (max 100), `--page`. The `--since`/`--until` window must span under 31 days, as on `incident list` and `change list`. `alert-event list` also takes `--integration-type`, which filters by comma-separated **plugin keys** (for example, `AliCloud,Prometheus`) — note these are plugin keys, not integration IDs; use `--integration` to filter by integration ID.
 
-`alert list` also takes `--alert-ids` (comma-separated alert IDs), `--alert-keys` (comma-separated alert deduplication keys), `--asc` (sort oldest first by start time; newest first by default), and `--by-updated-at` (apply `--since`/`--until` to the last-updated time instead of the start time). `alert-event list` also supports `--asc` (oldest first; newest first by default), but has no `--by-updated-at` counterpart.
+`alert list` also takes these flags:
+
+- `--alert-ids`: comma-separated alert IDs.
+- `--alert-keys`: comma-separated alert deduplication keys.
+- `--asc`: sort oldest first by start time (the default is newest first).
+- `--by-updated-at`: apply `--since`/`--until` to the last-updated time instead of the start time. `alert-event list` also supports `--asc` (oldest first; newest first by default), but has no `--by-updated-at` counterpart.
+
+`alert list` also filters by state through `--active` (active alerts only) and `--recovered` (recovered alerts only). They are mutually exclusive — passing both is an error — and passing neither applies no state filter. Active alerts can be older than a day, so with `--active` and no `--since` the window widens to 30 days by default (the window actually sent is reported by the stderr note).
+
+`alert events <alert_id>` lists the raw events that make up one alert: leave `--limit` unset to take the server default of 20 (max 100), and `--page` starts at 1. It reads events for a single alert; for a time-window query across alerts use `alert-event list`.
 
 ### automation — AI SRE automation rules
 
@@ -709,24 +753,27 @@ Common `create` flags:
 | Flag | Notes |
 |------|-------|
 | `--name` | Rule name (required) |
-| `--team-id` | Scope team ID; `0` means personal scope (default). The scope is immutable after creation |
+| `--team-id` | Scope team ID; an explicit `0` means personal scope and `>0` means that team; when omitted the field is not sent, so the server inherits the authenticated IM conversation's scope when one is available and otherwise applies its normal default. With `--run-in current-chat`, the team ID you pass must match that conversation's scope — it cannot switch the conversation to a different personal or team scope. The scope is immutable after creation |
+| `--run-in` | Execution destination: `current-chat` binds the rule to the current IM conversation, `web` runs it in the web console. When omitted the server decides — it selects `current-chat` for an authenticated IM invocation and `web` otherwise. The server rejects `current-chat` outside a live IM conversation |
 | `--schedule` | Schedule helper: `hourly`, `daily`, `weekly`, or `cron`; defaults to `daily` when omitted |
 | `--at` | `HH:MM` local time (in the rule's timezone); for `hourly` only the minute is used (default 0), for `daily`/`weekly` both hour and minute (default 09:00) |
 | `--weekday` | Weekday for `weekly`: `sun`–`sat` or `0`–`7` (`0` and `7` both mean Sunday; defaults to Monday) |
-| `--cron-expr` | Exact 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers |
-| `--timezone` | IANA timezone name (e.g. `Asia/Shanghai`) that `--at` and `--cron-expr` are interpreted in; when omitted the server uses the caller's member timezone, then the account timezone, then `Asia/Shanghai`. A timezone the server cannot load is rejected |
+| `--cron-expr` | A supported 5-field cron expression (interpreted in the rule's timezone); overrides the `--schedule` helpers. The minute must be a fixed `0`–`59` integer, so the fastest schedule is hourly; minute wildcards, ranges, lists, and steps are unsupported, and expressions such as `*/15 * * * *` or `0,30 * * * *` are rejected |
+| `--timezone` | IANA timezone name (for example, `Asia/Shanghai`) that `--at` and `--cron-expr` are interpreted in; when omitted the server uses the caller's member timezone, then the account timezone, then `Asia/Shanghai`. A timezone the server cannot load is rejected |
 | `--disabled` | Create the rule disabled (enabled by default) |
 | `--schedule-enabled` | Whether the schedule trigger is enabled (default `true`) |
 | `--http-post-trigger` | Create and enable an HTTP POST trigger; when passed alone without any schedule flags, the CLI writes a placeholder cron and disables the schedule trigger |
 | `--prompt` / `--prompt-file` | Task prompt, exactly one required; `--prompt-file` reads from a file (`-` for stdin) |
 | `--environment-kind` / `--environment-id` | Runtime environment: `cloud` or `byoc` (`byoc` requires `--environment-id`); empty means automatic |
 
-`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope is immutable after creation, so `update` exposes no scope flag.
+When you create a rule from an IM conversation, omitting `--run-in` lets the server bind the rule to that conversation and inherit its scope; you neither need to nor should pass a chat, platform, integration, or session ID — the server resolves and authorizes the current conversation. Once bound to a conversation, every ordinary run starts a fresh execution session and, where the IM integration creates threads, a fresh IM thread, and it stays on the conversation and immutable scope captured at creation rather than reusing an old session or thread; a retry of the same run reuses that run's execution identity. If the bound conversation's scope no longer matches the rule when it runs, the run is skipped — the rule is never moved or run in another conversation. War-room Automations keep their existing behavior. Because each run starts from a fresh context, write the prompt so it carries the chat context it needs (the service, the team, the delivery target) and do not refer to "above" or to an earlier session. Like the scope, the execution destination is immutable after creation.
 
-`runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (`schedule`/`debug`/`http_post`), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
+`update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, and `--environment-kind`/`--environment-id`. The personal/team scope and the execution destination (`--run-in`) are both immutable after creation, so `update` exposes neither. `update`'s `--cron-expr` carries the same constraint as `create`: the minute must be a fixed `0`–`59` integer, so the fastest schedule is hourly, and minute wildcards, ranges, lists, and steps are unsupported.
+
+`runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (server-side values `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`, where `war_room_created` is a run triggered by a war room being created), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
 
 <Warning>
-**Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**. When `create` omits `--timezone`, the server picks the rule's timezone: the caller's member timezone, then the account timezone, then `Asia/Shanghai`. Pass an IANA name to pin another one (e.g. `--timezone Asia/Shanghai`); a timezone the server cannot load is rejected. When `update` omits `--timezone`, the stored timezone stays, including a legacy empty string; an explicit empty `--timezone ""` is sent and stored as UTC, not the account default. Pass the user's local time directly — do **not** convert it to UTC. `update` recalculates the next fire immediately, so read `schedule_next_fire_at_ms` from the response.
+**Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**. When `create` omits `--timezone`, the server picks the rule's timezone: the caller's member timezone, then the account timezone, then `Asia/Shanghai`. Pass an IANA name to pin another one (for example, `--timezone Asia/Shanghai`); a timezone the server cannot load is rejected. When `update` omits `--timezone`, the stored timezone stays, including a legacy empty string; an explicit empty `--timezone ""` is sent and stored as UTC, not the account default. Pass the user's local time directly — do **not** convert it to UTC. `update` recalculates the next fire immediately, so read `schedule_next_fire_at_ms` from the response.
 </Warning>
 
 ### insight — Insight queries
@@ -746,26 +793,26 @@ Common flags for `insight incidents`:
 | `--since` / `--until` | Time window (same human-friendly formats as `incident list`) | `7d` / `now` |
 | `--limit` | Max results (capped at 100) | `20` |
 | `--page` | Page number | `1` |
-| `--fields` | Field projection for `json`/`toon` output (comma-separated, e.g. `incident_id,title,severity`); ignored in table mode; at least one field required | default compact projection |
+| `--fields` | Field projection for `json`/`toon` output (comma-separated, for example, `incident_id,title,severity`); ignored in table mode; at least one field required | default compact projection |
 
 In `json`/`toon` mode the rows default to the compact fields `incident_id`, `title`, `severity`, `channel_name`, `seconds_to_ack`, `seconds_to_close`, `notifications` (a stderr note announces the default projection and that `--fields` can change it); output is bounded at 16 KiB — overflowing rows are dropped or shortened, with all notes on stderr (see "Field projections for structured output" under "Output formats" below).
 
 `insight top-alerts`: `--label` is required (`check` or `resource`), `--since`/`--until` as above, `--limit` defaults to `10` (top-K), returning the alert count and event count per label value.
 
-`insight incident-export`: writes the filtered incident list as a CSV of header row plus data rows (redirect to a file; `--start-time`/`--end-time` take Unix seconds). The export endpoint returns a one-shot CSV and caps its row count server-side, so the command verifies the CSV data-row count against the `incident-list` total for the same filter after writing: on a shortfall the CSV is still written (a `rows=N` line goes to stderr) and the command exits non-zero stating written vs total — narrow the time window and retry.
+`insight incident-export`: writes the filtered incident list as a CSV of header row plus data rows (redirect to a file; `--start-time`/`--end-time` take Unix seconds). The export endpoint returns a one-shot CSV with a server-side row cap. After writing, the command compares the CSV row count with the `incident-list` total for the same filter. On a shortfall, the CSV is still written, a `rows=N` line goes to stderr, and the command exits non-zero with the written and total counts. Narrow the time window and retry.
 
 ### Full command coverage
 
-Beyond the curated commands above, the CLI now provides **full coverage** of the Flashduty OpenAPI through a spec-driven code generator. The OpenAPI spec the generator reads contains **365 API operations**, and the CLI generates resource-organized commands for **361** of them; the remaining four are provided by hand-written commands — the streaming export `session-read-export` (`session export`), the multipart uploads `mapping-data-write-upload` and `skill-write-upload` (`enrichment mapping-data-upload`, `safari skill-upload`), and the path-parameterized `monit-prometheus-read-label-values` (`monit prometheus-api-v1-label-{label_name}-values`, see "Query Prometheus label values" below) — and are organized into top-level command groups alongside the generated ones. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI covers **all** Flashduty Open APIs through a spec-driven code generator, organized into top-level command groups by resource. Run `flashduty <group> --help` to browse them. `session export`, `enrichment mapping-data-upload`, `safari skill-upload`, and `monit prometheus-api-v1-label-{label_name}-values` (see "Query Prometheus label values" below) are hand-written. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
 - **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
 - **On-call & scheduling**: calendar, schedule
 - **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
 - **Monitoring & RUM**: monit, rum, sourcemap
-- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations), webhook (integrations)
+- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations; secret masking and update rules in "integration — integrations and secrets" below), webhook (integrations)
 
-These generated leaf commands use a `resource-action` naming form (e.g. `flashduty safari a2a-agent-get`, `flashduty safari session-list`); Every public API operation is reachable as `flashduty <group> <verb>`, with the name derived from its API path: request fields become typed flags, and `--data` accepts the full JSON request body (typed flags override fields with the same name). This page does not list them all; explore them level by level with `flashduty <resource> --help`:
+These generated leaf commands use a `resource-action` naming form (for example, `flashduty safari a2a-agent-get`, `flashduty safari session-list`); Every public API operation is reachable as `flashduty <group> <verb>`, with the name derived from its API path: request fields become typed flags, and `--data` accepts the full JSON request body (typed flags override fields with the same name). This page does not list them all; explore them level by level with `flashduty <resource> --help`:
 
 ```bash
 flashduty --help                 # List all top-level command groups
@@ -773,9 +820,17 @@ flashduty safari --help          # AI SRE generated commands
 flashduty alert --help           # Alert-related generated commands
 ```
 
-Time-window parameters on generated commands (`--start-time` / `--end-time`) accept the same human-friendly formats as the curated commands: relative durations (`7d`, `24h` — interpreted as "now minus duration"), `+7d` ("now plus duration", i.e. a future time), `now`, dates and datetimes (such as `2026-05-01` or `2026-05-01 10:00:00`), and unix timestamps in seconds. In addition, `--since` and `--until` are aliases for `--start-time` and `--end-time` respectively and can be used interchangeably; passing both spellings with different values is an error.
+If the body you pass in `--data` carries a field the installed CLI version's SDK has no field for, that field is **not** sent: once the request body is bound, the CLI prints `warning: --data fields not sent, unknown to this CLI version: <field paths>` on stderr (paths are dotted, array elements end in `[]`, for example `labels.k.note` or `targets[].purpose`; several are comma-separated). The call itself still succeeds and stdout is unaffected — the warning means the fields you sent are newer than the installed CLI, so a script that depends on them taking effect should upgrade the CLI first.
 
-#### knowledge — AI SRE Knowledge
+Time-window flags on generated commands (`--start-time` / `--end-time`) accept the same formats as the curated commands:
+
+- Relative durations such as `7d` or `24h`, meaning "now minus duration".
+- `+7d`, meaning "now plus duration" (a future time).
+- `now`.
+- Dates and datetimes, such as `2026-05-01` or `2026-05-01 10:00:00`.
+- Unix timestamps in seconds. In addition, `--since` and `--until` are aliases for `--start-time` and `--end-time` respectively and can be used interchangeably; passing both spellings with different values is an error.
+
+#### knowledge — AI SRE knowledge
 
 The `safari knowledge-*` command family manages AI SRE **Knowledge** — versioned, account/team-scoped file trees (`DUTY.md` plus runbooks, FAQs, service catalogs, and similar files) staged into every AI SRE sandbox at session start. See [Manage Knowledge](/en/ai-sre/knowledge) for the full feature model (`DUTY.md` structure, `@references`, account/team scope, file constraints).
 
@@ -796,7 +851,7 @@ Common flags:
 | Flag | Description |
 |------|-------------|
 | `--pack-id` | Knowledge ID; defaults to the caller's account-scope knowledge when omitted |
-| `--rel-path` | File path relative to the knowledge root (required; subdirectories allowed, e.g. `runbooks/api-5xx.md`) |
+| `--rel-path` | File path relative to the knowledge root (required; subdirectories allowed, for example, `runbooks/api-5xx.md`) |
 | `--scope` | Knowledge scope: `account` or `team` (required for `knowledge-pack-ensure`) |
 | `--scope-id` | Team ID; required for `team` scope, ignored for `account` scope |
 | `--force` | On file delete, skip the "still referenced" check; referrers are then returned as warnings |
@@ -824,9 +879,43 @@ flashduty safari artifact-gallery-share-sync <artifact-id>                      
 Public-sharing and signing semantics:
 
 - `public_url` is a console `/share/artifact/<artifact-id>` page served **entirely from the CDN**; it exists only while sharing is on, and anyone with the link can view the content without logging in.
-- The public snapshot is materialized from the artifact's current `file_id`: when `share_enabled=true` and the response's `share_file_id` differs from `file_id`, the public snapshot is stale — call `artifact-gallery-share-sync` to refresh it before referencing it externally.
+- The public snapshot is built from the artifact's current `file_id`. If `share_enabled=true` and `share_file_id` differs from `file_id`, the snapshot is stale. Call `artifact-gallery-share-sync` to refresh it before you link to it externally.
 - The `artifact-sign` token is bound to the calling account and person and is valid for 5 minutes (response `expires_in`); `download_url` / `preview_url` are relative paths (`/safari/artifact/stream?...`) — prepend the API base (`https://api.flashcat.cloud`).
 - An artifact's initial scope inherits from its source session (personal-session artifacts belong to the creator; team-bound session artifacts belong to the team); `can_edit` tells whether the caller may rename/transfer/delete/share it (the creator, any member of the owning team, or a manager of the source session).
+
+#### integration — integrations and secrets
+
+The `integration` command family manages account-level public integrations — alert sources, change sources, IM bots and custom webhooks — with 9 subcommands: `list`, `info <integration-id>`, `type-list`, `create`, `update <integration-id>`, `delete <integration-id>`, `enable <integration-id>`, `disable <integration-id>`, and `key-rotate <integration-id>`. Channel-owned integrations (a `ref_id` starting with `c_`) are not included; configure those in the console.
+
+```bash
+flashduty integration type-list --category event.alert # List the integration types the account can configure (only types with supports_api_create: true can be created)
+flashduty integration list --status enabled            # List integrations (filter with --category, --plugin-type, --status, --team-ids, --name, --ref-ids)
+flashduty integration info <integration-id>            # Get one integration, including settings and integration_key
+flashduty integration create --plugin-type standard.alert --name "Production alerts" --is-test --data '{"settings":{}}'
+flashduty integration update <integration-id> --name "Production alerts (primary)"
+flashduty integration key-rotate <integration-id>      # Issue a new key; the previous key stops working immediately
+flashduty integration disable <integration-id>         # Pause event intake, keep the configuration
+flashduty integration enable <integration-id>          # Re-enable
+flashduty integration delete <integration-id>          # Delete; rejected with ReferenceExist while other objects still reference it
+```
+
+Fields available on create and update:
+
+| Flag | Description |
+|------|-------------|
+| `--plugin-type` | Integration type (required on `create`), taken from `integration type-list` entries with `supports_api_create: true`, for example `standard.alert` or `zabbix.alert` |
+| `--name` | Integration name, 2–49 characters; on create, omitting it or sending an empty value uses the integration type name |
+| `--description` | Free-form description, at most 499 characters |
+| `--team-id` | Owning team ID; omitted or `0` means account-level, and a nonzero value must belong to the current account. On update, passing `0` clears the team assignment |
+| `--integration-key` | Only on `create`: an optional pre-generated key, 35 characters, ending with the account ID modulo 1000 padded to three digits, and it must not already be in use; omit it to generate a key |
+| `--is-test` | Runs the plugin connectivity test. Omitted on create means no test; on update it only runs when `settings` is actually submitted, so a name/description-only update performs no test. Read `test.success` and `test.message` from the response: an HTTP success is not a passing test, and an absent `test` means no test was run |
+| `--data` | Full JSON request body; the type-specific `settings` block can only be passed here, and the accepted keys depend on `plugin_type` |
+
+How `settings` reads back, and the secret rules:
+
+- In the `settings` returned by `list` and `info`, every **saved secret** — passwords, app secrets, tokens, encryption keys, HTTP pull URL and body, header values — is shown as `******`; webhook and custom action endpoints and custom bodies come back as is; unset values stay empty. **`integration_key` is the exception and comes back as is** (it authenticates inbound pushes and is not the account-level `app_key`). A script that reads credentials from `integration info --json` therefore gets the mask; for a new key, rotate it with `key-rotate`, which invalidates the previous key immediately.
+- The `settings` submitted by `update` replaces the type-specific configuration as a whole: **a known sensitive field that is omitted or sent as `******` keeps its stored value**, and an explicit empty `headers: {}` clears headers. But **a stored secret cannot be kept while its destination changes** — changing `endpoint`, `url`, or a database host or port, for example, requires sending the real secret in the same call, otherwise the request is rejected.
+- `editable` only reflects object permission (`no_editable: true` marks a read-only integration); write calls additionally require **Integrations Manage**.
 
 ### Utility commands
 
@@ -865,6 +954,8 @@ inc_abc123   DB connection timeout    Critical   Triggered    Production    2026
 inc_def456   High memory usage        Warning    Processing   Staging       2026-04-10 09:15
 Showing 2 results (page 1, total 2).
 ```
+
+A generated command's list response that carries fields beyond the row array (`items` / `docs` / `list`) — for example `calendar event-list`'s `days` or `oncall license-list`'s `release_limited` — prints an extra line after the row table: `Also in the response: <fields> (use --json to see it).` Those fields never appear in the table; use `--json` or `--output-format toon` to read them.
 </Tab>
 
 <Tab title="JSON (--json / --output-format json)">
@@ -892,7 +983,15 @@ Table view with no column truncation — useful for copy-paste or wide terminals
 </Tab>
 </Tabs>
 
-#### Generated-command output bound
+### Time-window note
+
+Commands that query a time range print the window they actually sent to stderr in the local timezone, for example `note: window 2026-10-08T14:00:00+08:00..2026-10-09T14:00:00+08:00 (1d, ended now)`. The parenthesised part carries the span and where the end sits relative to now (`ended 3m ago` / `ends in 2h`); when the window comes from a default rather than from `--since`/`--until` you typed, the note names that default (an `--progress` filter of open states only, or `--active`).
+
+This covers `incident list`, `alert list`, `alert-event list`, `change list`, `audit search`, `insight`, `oncall`, `monit-query` (when its tool params carry an execution window), and every generated command whose `--start-time`/`--end-time` resolve. A command that leaves one side to `--data` or to the server default prints no note, because the window was never fully resolved by the CLI. A query with a single evaluation timestamp reads `note: instant <time> (…)` instead.
+
+Use it to catch a window you did not intend: a default wider than you expected (`--active` widens it to 30 days), or an epoch read in the wrong timezone, which lands the window in the future and reads `ends in 7h`. The note goes only to stderr, so stdout stays byte-identical for `jq` and toon consumers.
+
+### Generated-command output bound
 
 Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply a 16 KiB bound to **list-shaped** responses in `json`/`toon` mode. The reduction has three tiers, plus a machine-readable marker:
 
@@ -900,18 +999,22 @@ Generated commands (the ones covering the OpenAPI through the code generator, su
 2. **A single row alone overflows the budget**: that row's string values are shortened and end with `...`; a stderr note names the clipped fields. Identifier fields (keys ending in `_id` or `_key`) are never shortened.
 3. **A row cannot be reduced enough to fit**: the command fails and names the largest fields (up to 3, with their byte sizes); lower `--limit` or reduce the output fields and retry.
 
-**A reduced list envelope is rebuilt with the reduction written into the payload.** A list envelope is a response whose row array is named `items`, `docs`, or `list` and whose siblings are all scalars (`total`, `has_next_page`, `search_after_ctx`, …) — `monit datasource-list` and `safari session-list` are examples. Once a reduction happens, the CLI rebuilds that envelope and adds fields to the payload, so a script sees the reduction without parsing stderr:
+**A reduced list envelope is rebuilt with the reduction written into the payload.** A list envelope is a response whose row array is named `items`, `docs`, or `list`, and whose other fields are all scalars (`total`, `has_next_page`, `search_after_ctx`, …). Examples are `monit datasource-list` and `safari session-list`. Once a reduction happens, the CLI rebuilds that envelope and adds fields to the payload, so a script sees the reduction without parsing stderr:
 
-- **Rows withheld**: the payload carries `truncated: true` together with `emitted_rows: N` (N is the number of rows actually emitted). The envelope's `total`, `has_next_page`, and `search_after_ctx` still echo the page as the server returned it, so they **cannot** tell you whether you got everything — a page cut to 7 of 100 rows keeps the original pagination fields. To collect all rows, re-request with a `--limit` no larger than the rows you actually received, then follow the returned cursor.
-- **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or switch to a curated command that supports field projections.
+- **Rows withheld**: the payload carries `truncated: true` together with `emitted_rows: N` (N is the number of rows actually emitted). The envelope's `total`, `has_next_page`, and `search_after_ctx` still describe the page as the server returned it. They **can't** tell you whether you got everything: a page cut to 7 of 100 rows keeps the original pagination fields. To collect all rows, re-request with a `--limit` no larger than the rows you actually received, then follow the returned cursor.
+- **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or keep only the fields you need with the global `--fields`.
+
+**A response whose row array carries non-scalar siblings is not bounded.** When the row array is named `items` / `docs` / `list` but the response also has object or array fields beside it (for example `calendar event-list`'s `days` map), it cannot be squeezed under 16 KiB without losing fields, so it prints whole, exactly like the **detail-shaped single objects** in the last paragraph of this section: no `truncated` / `emitted_rows` marker, and no value shortened.
 
 **Bare top-level arrays** (such as the curated `incident list` and `insight incidents`) have nowhere to carry the marker, so a reduction is announced on stderr only.
 
-**Detail-shaped single objects** (e.g. `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands mostly expose no flag that narrows their output (the occasional `--fields` is a request-body write selector, not an output projection); for complete JSON lower `--limit` and page through with `--page` (e.g. `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
+**Detail-shaped single objects** (for example, `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands can narrow their output fields with the global `--fields` (see "Global flags" and "Field projections for structured output" below; where an occasional command spells `--fields` as a request-body field selector, such as `monit rule-update-fields`, it does not apply to the output). For complete JSON, lower `--limit` and page through with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
 
 ### Field projections for structured output
 
-The following commands support `--fields` with `json` or `toon` output. Supply comma-separated top-level response fields; an unknown field fails immediately, and table output ignores this flag.
+`--fields` is a global flag (see "Global flags"): every command accepts it in `json` or `toon` output, and it takes a comma-separated list of top-level fields to keep, applied to each row of a list or to the keys of a single record. The projection runs on the response: for a list envelope (row array named `items`, `docs`, or `list`, with only scalar paging fields beside it) it narrows that row array and leaves the paging fields intact; a field no row of the response carries is left out and stderr reports it as matching no key, listing the keys the output does carry; output that is neither an object nor a list of objects fails the command and tells you to drop `--fields`. Table output ignores `--fields`, and stderr says so.
+
+The curated commands in the table below fall back to a default compact projection when `--fields` is omitted, and are size-bounded; each of them defines its own `--fields` (same meaning as the global one), so a misspelled field name fails immediately and lists the names that are valid. Every other command — all the generated ones included — has no default projection: on those, `--fields` applies to the raw fields of the API response, and a name that matches no key only produces the stderr note above.
 
 | Command | Structured output when `--fields` is omitted | Limit |
 | --- | --- | --- |
@@ -930,8 +1033,8 @@ flashduty incident list --json --fields incident_id,title,progress
 
 When a list projection (`incident list`, `incident similar`, `alert-event list`, `channel escalate-rule-list`, `insight incidents`) exceeds its 16 KiB limit, the CLI handles it in three tiers, with every note going to stderr and stdout left untouched:
 
-1. **Whole page overflows**: only the leading rows that fit are emitted, with every value left intact (no truncation), and a stderr note reports how many of the rows were emitted while the rest were not; narrow `--fields` or lower `--limit` to fit more rows per page.
-2. **A single row alone overflows the budget**: that row's string values are shortened and end with `...`, and a stderr note names the clipped fields — matching or filtering on a shortened field will miss, so narrow `--fields` or `--limit` for untruncated values. Identifier fields (keys ending in `_id` or `_key`) are never shortened at any tier.
+1. **Whole page overflows**: only the leading rows that fit are emitted, with values intact. A stderr note reports how many rows were emitted. Narrow `--fields` or lower `--limit` to fit more rows per page.
+2. **A single row overflows the budget**: that row's string values are shortened and end with `...`, and a stderr note names the clipped fields. Matching or filtering on a shortened field misses, so narrow `--fields` or `--limit` to get full values. Identifier fields (keys ending in `_id` or `_key`) are never shortened at any tier.
 3. **A row cannot be reduced enough to fit**: the command fails with an error naming the largest fields (up to 3, with their byte sizes); reduce the fields in `--fields` or lower `--limit` and retry.
 
 `incident detail` behaves differently when its projection overflows: the detail is a single object, and a truncated value is indistinguishable from a genuinely short one, so silently shortening it would hand you wrong data. A projection over 8 KiB therefore fails the command outright, and the error names the largest fields (up to 3, with their byte sizes). Reduce the fields in `--fields`, or omit `--fields` entirely to get the full detail, which is not subject to the projection limit.
@@ -940,7 +1043,7 @@ When `--fields` is omitted and the default compact projection is used, the CLI p
 
 ## Agent skills
 
-Flashduty CLI ships with a single agent skill named `flashduty` that teaches AI coding agents — Claude Code, Cursor, Codex, Gemini CLI, Windsurf, and 40+ others — how to operate Flashduty from your terminal.
+Flashduty CLI ships with one agent skill, `flashduty`. It teaches AI coding agents, such as Claude Code, Cursor, Codex, Gemini CLI, Windsurf, and 40+ others, to operate Flashduty from your terminal.
 
 Install it to every detected agent on your machine in one shot:
 

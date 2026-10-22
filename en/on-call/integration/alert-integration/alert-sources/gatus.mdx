@@ -1,5 +1,6 @@
 ---
 title: "Gatus alert integration"
+sidebarTitle: "Gatus"
 description: "Send Gatus endpoint trigger and recovery events to Flashduty On-call through the custom alerting provider."
 keywords: ["alert integration", "Gatus", "health check", "webhook", "custom provider"]
 ---
@@ -11,24 +12,31 @@ Gatus has no fixed webhook format: you write the request body in its configurati
 <div className="hide">
 
 ## In Flashduty On-call
----
 
 Create either a dedicated or shared **Gatus** alert integration and copy its complete Push URL.
 
 </div>
 
 ## Configure Gatus
----
 
 <Steps>
-<Step title="Configure the custom provider">
+<Step title="Configure the custom provider in Gatus">
 
-Add `alerting.custom` to the Gatus configuration file and replace `url` with the complete Flashduty Push URL:
+**Where**: config.yaml › alerting › custom
+
+Gatus reads `config/config.yaml` by default; set the `GATUS_CONFIG_PATH` environment variable to use another location.
+
+| Field | Value |
+| --- | --- |
+| `url` (required) | `{integration_url}` |
+| `method` (required) | `POST` (the Gatus default is `GET`) |
+| `headers` (required) | `Content-Type: application/json` |
+| `body` (required) | The JSON template below, pasted as is |
 
 ```yaml
 alerting:
   custom:
-    url: "https://api.flashcat.cloud/event/push/alert/gatus?integration_key=<your-integration-key>"
+    url: "{integration_url}"
     method: "POST"
     headers:
       Content-Type: "application/json"
@@ -44,14 +52,23 @@ alerting:
 ```
 
 <Warning>
-`method` must be `POST`; the Gatus default is `GET`. Keep the `status` and `name` fields, and do not rewrite the values of `[ALERT_TRIGGERED_OR_RESOLVED]` with `placeholders`. Flashduty accepts only `TRIGGERED` and `RESOLVED`, and rejects a request with no `name` or an unrecognized status because it cannot reliably match later updates and recoveries.
+`method` must be `POST`; the Gatus default is `GET`. Keep the `status` and `name` fields, and do not rewrite the values of `[ALERT_TRIGGERED_OR_RESOLVED]` with `placeholders`: Flashduty only accepts `TRIGGERED` and `RESOLVED`. A request with no `name`, or with an unrecognized status, is rejected because later updates and recoveries could not be matched reliably.
 </Warning>
 
 </Step>
 
 <Step title="Enable the custom alert on endpoints">
 
-Add an alert of `type: custom` to each endpoint you want to send, and turn on `send-on-resolved`; otherwise Gatus does not send recovery notifications:
+**Where**: config.yaml › endpoints › alerts
+
+| Field | Value |
+| --- | --- |
+| `type` (required) | `custom` |
+| `send-on-resolved` (required) | `true`; otherwise Gatus sends no recovery notification |
+| `failure-threshold` (optional) | Consecutive failures before the alert triggers; default `3` |
+| `success-threshold` (optional) | Consecutive successes before the alert recovers; default `2` |
+| `minimum-reminder-interval` (optional) | Minimum interval for repeating `TRIGGERED` while the alert lasts; cannot be lower than `5m`; empty or `0` disables reminders |
+| `description` (optional) | Alert description, sent as `[ALERT_DESCRIPTION]` |
 
 ```yaml
 endpoints:
@@ -69,19 +86,26 @@ endpoints:
         description: "health check failed"
 ```
 
-`failure-threshold` is the number of consecutive failures before the alert triggers, and `success-threshold` is the number of consecutive successes before it resolves. If you set `minimum-reminder-interval`, Gatus resends `TRIGGERED` while the alert is ongoing, and those reminders update the same Flashduty alert.
+`failure-threshold` sets how many consecutive failures trigger the alert, and `success-threshold` sets how many consecutive successes recover it. If `minimum-reminder-interval` is set, Gatus resends `TRIGGERED` while the alert lasts, and these reminders update the same Flashduty alert.
+
+Add this alert under every endpoint you want to send.
 
 </Step>
 
 <Step title="Reload Gatus and verify the lifecycle">
 
-Restart or reload Gatus so the configuration takes effect. Make an endpoint condition fail continuously and confirm Flashduty receives an active alert, then let the endpoint recover and confirm the same alert resolves. Gatus has no test button, so verify with a real failure and recovery.
+Restart or reload Gatus so the configuration takes effect. Make one endpoint's conditions keep failing (for example, change `conditions` to a value that can never be met) and confirm Flashduty receives an active alert; then let the endpoint return to normal and confirm the alert recovers. Gatus has no test button, so only real failures and recoveries can verify the integration.
+
+In Flashduty, the integration then shows its Latest event time.
+
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
 
 </Step>
 </Steps>
 
-## Alert Key
----
+## Alert key
 
 Flashduty computes the Alert Key from the endpoint's `group` and `name`. Gatus identifies an endpoint by `<group>_<name>` and provides no separate ID per alert, so the trigger, reminders, and recovery of one endpoint share one Alert Key. An endpoint without a group uses `name` alone.
 
@@ -90,7 +114,6 @@ Flashduty computes the Alert Key from the endpoint's `group` and `name`. Gatus i
 - Changes to `url`, `description`, or `errors` do not change the Alert Key
 
 ## Status and severity
----
 
 | Gatus `[ALERT_TRIGGERED_OR_RESOLVED]` | Flashduty status or severity |
 | :--- | :--- |
@@ -100,7 +123,6 @@ Flashduty computes the Alert Key from the endpoint's `group` and `name`. Gatus i
 Gatus alerts have no severity field, so a failing endpoint health check is treated as Critical. Empty or other status values are rejected.
 
 ## Troubleshooting
----
 
 - **Gatus logs `status code 400`**: confirm `method` is `POST`, the body is valid JSON, and `name` and `status` are not empty. Gatus escapes only double quotes in `[RESULT_ERRORS]`; a double quote, backslash, or line break in an endpoint name, group, or description breaks the JSON, so avoid those characters
 - **Gatus logs `status code 404` or `401`**: confirm the Push URL is complete and contains `integration_key`

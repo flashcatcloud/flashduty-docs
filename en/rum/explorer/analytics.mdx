@@ -5,18 +5,11 @@ description: "Summarize RUM events in the Flashduty RUM Explorer analytics view 
 keywords: ["RUM", "data explorer", "analytics", "charts", "drill-down"]
 ---
 
-The RUM Explorer gives you two view modes: **List** and **Analytics**. The **Analytics** view aggregates the events of the current event type by the aggregation and group you pick, which is what answers questions like "which page loads slowest" or "which browsers do the errors come from". Switch back to the list when you need individual events.
+The RUM Explorer gives you two view modes: **List** and **Analytics**. The **Analytics** view aggregates events of the current type by the aggregation and group you pick. Use it to answer questions like "which page loads slowest" or "which browsers do the errors come from". Switch back to the list when you need individual events.
 
 ## List and analytics
 
-The top of the Explorer has two tabs: **List** shows events one by one, **Analytics** aggregates them into charts. Both share the same event type, query conditions and time range, so switching tabs never drops your current filters.
-
-The mode is recorded in the `mode` URL parameter: `mode=analytics` opens analytics, and omitting `mode` opens the list, so existing Explorer links keep opening the list. Copy the URL of an analytics view to share the same chart with others.
-
-| Tab | `mode` value | What it shows |
-|-----|--------------|---------------|
-| **List** | omitted | Event trend graph and event table, drilling into individual event details |
-| **Analytics** | `analytics` | Charts aggregated by the aggregation and group |
+The top of the Explorer has two tabs: **List** shows events one by one, and **Analytics** aggregates them into charts. Both share the same event type, query conditions and time range, so switching tabs never drops your filters. The analytics view is kept in the URL, so you can copy the link to share the same chart (see [URL parameters](#url-parameters)).
 
 ## Choosing the aggregation and fields
 
@@ -24,102 +17,107 @@ The **Measure** row at the top of the analytics view decides what is computed: p
 
 ### Aggregations
 
-| Aggregation | `agg` value | Description |
-|-------------|-------------|-------------|
-| **Count** | `count` | Number of events; takes no field |
-| **Unique count** | `count_distinct` | Number of distinct values of a field |
-| **Average** | `avg` | Mean of a numeric field |
-| **Sum** | `sum` | Total of a numeric field |
-| **Min** | `min` | Smallest value of a numeric field |
-| **Max** | `max` | Largest value of a numeric field |
-| **P50 / P75 / P90 / P95 / P99** | `p50` / `p75` / `p90` / `p95` / `p99` | Approximate percentiles of a numeric field, for watching the long tail |
+| Aggregation | Description |
+|-------------|-------------|
+| **Count** | Number of events; takes no field |
+| **Unique count** | Number of distinct values of a field |
+| **Average** | Mean of a numeric field |
+| **Sum** | Total of a numeric field |
+| **Min** | Smallest value of a numeric field |
+| **Max** | Largest value of a numeric field |
+| **P50 / P75 / P90 / P95 / P99** | Approximate percentiles of a numeric field, for watching the long tail |
 
-Every aggregation except **Count** needs a **Measured field**. With Average, Sum, Min, Max or any percentile, the field picker lists numeric fields only; timestamp fields (unit `unix_millisecond`) are excluded, since averaging them is meaningless. With **Unique count**, the field picker lists the scalar facets that can be grouped by. After you switch the event type, a field that does not exist on the new event type is reported as missing and you are asked to pick another one, rather than the question silently becoming a count.
+Every aggregation except **Count** needs a **Measured field**:
 
-The legend, the table columns and the CSV header all use the same naming: the measure of **Count** and of a **Distribution** reads "Events"; every other aggregation reads "Aggregation (field name)", for example "Average (view_loading_time)".
+- Average, Sum, Min, Max and percentiles accept numeric fields only (timestamps excluded).
+- Unique count accepts any field you can group by.
+- If you switch to an event type that lacks the field, pick another one.
+
+In the legend, table and CSV, Count and Distribution measures read "Events"; other aggregations read "Aggregation (field name)", such as "Average (view_loading_time)".
 
 ### Group-by field
 
-The **Group-by field** decides what the measure is split by. Once one is chosen, the chart draws each group value separately and a **top** selector appears next to it, offering `5`, `10`, `20` and `50` groups, `10` by default. The group-by field can be cleared (the placeholder reads "No grouping"), and the result then collapses into a single number. Only scalar facets can be grouped by; an array field holds several values per event and therefore has no meaningful grouping.
+The **Group-by field** splits the measure so each value is shown separately. Use **top** to keep the top `5`, `10` (default), `20` or `50` groups; without a group-by, the result is a single number. Array fields cannot be grouped by, and a **Distribution** does not use a group-by.
 
-A **Distribution** does not use a group-by field, and that selector is not shown.
+<span id="cardinality-limits"></span>
+
+### Cardinality limits on the group-by field
+
+A group-by is also limited by field cardinality, because a high-cardinality field makes for an expensive grouping:
+
+- **A field that is an event's own ID cannot be grouped by**: `session_id`, `view_id`, `resource_id`, `action_id`, `error_id`, `long_task_id` and `vital_id` hold one value per event, so grouping by one puts every event in its own group; they do not appear in the group-by picker. **Unique count** still accepts them, to count sessions or views.
+- **A high-cardinality field takes Count or Sum only**: URLs, users, error messages, stacks, IPs and `trace_id` are flagged as high-cardinality in the field list. Grouping by one of them leaves only **Count** and **Sum** in the **Aggregation** picker (picking such a field while another aggregation is selected switches it to Count), and the grouping is annotated "High-cardinality field: count and sum only, time range up to 7 days".
+- Such a grouping covers a time range of at most **7 days**: with a longer range the chart returns no data and says "Grouping by a high-cardinality field covers at most 7 days. Shorten the time range".
+
+The same rules apply to a [custom dashboard](../analytics/custom-dashboards) panel: the server validates them again on save, with the errors `cannot group by an event ID` and `grouping by a high-cardinality field supports only count and sum`.
 
 ## Chart types
 
 The analytics view offers five chart types:
 
-| Chart type | `viz` value | Description |
-|------------|-------------|-------------|
-| **Timeseries** | `timeseries` | The measure over time buckets; the default chart type |
-| **Top list** | `toplist` | Groups ranked by the measure, largest first |
-| **Pie** | `pie` | Share of each group, subject to the constraints below |
-| **Table** | `table` | Two columns: the group and the measure |
-| **Distribution** | `distribution` | Histogram of events per value range of one numeric field |
+| Chart type | Description |
+|------------|-------------|
+| **Timeseries** | The measure over time (default) |
+| **Top list** | Groups ranked by the measure, largest first |
+| **Pie** | Share of each group. Requires a group-by and **Count** or **Sum** (the only aggregations that add up to a whole) |
+| **Table** | Two columns: the group and the measure |
+| **Distribution** | Histogram of events per value range of one numeric field; see [Distribution](#distribution) |
 
-A **Timeseries** also offers a **Draw style** selector that switches between **Line** (`line`) and **Bars** (`bar`), bars by default. When a group-by field is set, the draw style is bars and the aggregation is **Count** or **Sum**, the bars are stacked by group and the bar height is the total; the other aggregations (averages, percentiles, unique counts) cannot stack, because their per-group values do not add up.
-
-Without a group-by field, **Top list** and **Table** print the measure itself instead of drawing a single bar; a **Timeseries** still plots one line over time.
+A **Timeseries** can be drawn as **Bars** (default) or **Line**. With a group-by and Count or Sum, bars are stacked by group so the bar height is the total; other aggregations do not add up, so they are not stacked.
 
 ## Drilling down
 
-Clicking an element on a chart opens a drill-down menu that takes you from the aggregate back to individual events: a point in time on a timeseries, a row in the top list or table, a slice of a pie, or a range of a distribution.
+Click a point in time, row, slice or range on a chart to drill down from the aggregate to individual events:
 
 | Menu item | What it does |
 |-----------|--------------|
 | **View in list** | Switches to the list tab, showing only the events behind the clicked element |
-| **Split "value"** | Keeps only the clicked group value and opens the group-by picker so you can break it down by another field; a distribution range has no group, so the item reads **Filter to "range"** and keeps only the events in that range |
+| **Split "value"** | Keeps only that value and lets you pick the next group-by field (**Filter to "range"** on a distribution) |
 | **Exclude "value"** | Drops the clicked group value from the result |
 
-A drill-down writes the same filters the facet list on the left writes, so they show up in the search box and can be undone the same way. Drilling down from a timeseries point narrows the list to that time bucket, and drilling down from a distribution range filters the list by that numeric range.
-
-After **View in list**, a **Back to analytics** bar appears above the list with the note "The list is filtered by the drill-down; going back restores the previous query". Clicking it returns to the analytics view and restores the query you drilled from. Switching tabs by hand ends that drill-down, and the bar disappears with it.
+A drill-down adds ordinary filters (a time-point drill-down narrows the time range), which you can see and undo in the search box. After **View in list**, click **Back to analytics** at the top of the list to return to the analysis you drilled from.
 
 <Note>
-The empty group, shown on charts as "(empty)", cannot be drilled into yet, so **Split** and **Exclude** are both unavailable for it.
+The empty group (shown as "(empty)") cannot be split or excluded yet.
 </Note>
 
 ## Zooming a timeseries
 
-Drag across a **Timeseries** to zoom into that window. The zoom applies to this chart only; the Explorer's own time range stays as it is. While zoomed, the **Zoomed** badge in the top-right corner of the chart shows the current window, and the close button on it (**Reset zoom**) restores the full time range. Changing the event type, the query conditions or the Explorer's time range resets the zoom.
+Drag across a **Timeseries** to zoom in. The zoom affects this chart only, not the Explorer's time range. Click the close button on the **Zoomed** badge to reset it; changing the event type, query or time range also resets it.
 
 ## Downloading an image and exporting CSV
 
-Two export buttons sit in the top-right corner of the chart:
+From the top-right corner of the chart:
 
-| Button | Description |
-|--------|-------------|
-| **Download image** | Exports the current chart as a PNG rendered at twice the pixel density. A Table, or a single number without a group-by, is not a chart, so the button is unavailable |
-| **CSV** | Exports the current chart's data as CSV, named like `rum-<event type>-analytics-<timestamp>.csv`. A timeseries exports one row per time, group and measure (long format); the other charts export one row per group |
+- **Download image**: exports a PNG at 2× resolution. Not available for tables or a single ungrouped number.
+- **CSV**: exports the chart data. A timeseries has one row per time, group and measure; other charts have one row per group.
 
-Both buttons are unavailable while the result is empty.
+## Saving to a dashboard
+
+**Save to dashboard** in the same row turns the current question into a [custom dashboard](../analytics/custom-dashboards) panel:
+
+- The chart type can be **Time series / Table / Stat**; **Pie** and **Distribution** cannot be saved yet and the button says "Pie and distribution charts can't be saved to a dashboard yet". An incomplete question (no measured field, for instance) says "Select a field to measure".
+- You can **append to an existing dashboard** (its edit mode opens with this panel appended, and nothing is written before you save), or **create a new dashboard** (a dashboard holding just this panel is created first, then its edit mode opens).
+- The panel keeps the current application, time range and filter, and picks up the dashboard's `env` / `service` / `version` variables; its title is generated from the query.
 
 ## Distribution
 
-A **Distribution** buckets one numeric field by value range and shows the number of events in each range. It ignores the aggregation and the group-by.
+A **Distribution** buckets one numeric field by value range and shows the number of events in each range, without an aggregation or group-by.
 
-- Buckets span from the field's minimum up to `P99`: RUM timings have a long tail (one 46s page load among thousands of 1s ones), and splitting up to the maximum would crush the whole body of values into the first bar.
-- The bucket width is rounded to `1`, `2` or `5` times a power of ten, so bucket edges read as round numbers; the observed range is split into about 40 buckets.
-- Everything above `P99` goes into one open-ended last bucket, shown on the chart and in the CSV as "≥ edge".
-- Ranges are labelled in the field's own unit, for example `1s–1.5s` for a duration field.
-
-## When a Pie applies
-
-A Pie requires both of the following; otherwise the chart area shows "Pie charts need a group-by and only apply to count and sum":
-
-- a **Group-by field** is set;
-- the aggregation is **Count** or **Sum** — only these two add up to a whole, which is what a pie claims. Unique counts, averages and percentiles do not.
+- Round-numbered ranges cover values from the minimum to `P99`. Values above `P99` go into a final "≥ edge" bucket, so a long tail doesn't squeeze most data into the first bar.
+- Ranges use the field's unit, such as `1s–1.5s`.
 
 ## Sampled estimates
 
-When the data volume is large enough that the result is estimated from a sample, the **Sampled** badge appears in the top-right corner of the chart, with the tooltip "Large data volume: results are estimated from a sample".
+With large data volumes, results are estimated from a sample and the chart shows a **Sampled** badge in its top-right corner.
 
 ## URL parameters
 
-The analytics view keeps its state in the URL, so a copied link reproduces the same analysis. Values that are not allowed fall back to the default.
+The analytics view keeps its state in the URL, so a copied link reproduces the same analysis, and you can build links from the table below. Invalid values fall back to the default.
 
 | Parameter | Meaning | Values | Default |
 |-----------|---------|--------|---------|
-| `mode` | View mode | `analytics` | omitted, i.e. the list |
+| `mode` | View mode | `analytics` | omitted, that is, the list |
 | `agg` | Aggregation | `count`, `count_distinct`, `avg`, `sum`, `min`, `max`, `p50`, `p75`, `p90`, `p95`, `p99` | `count` |
 | `aggField` | Measured field | a field name | none |
 | `groupBy` | Group-by field | a field name | none (no grouping) |
