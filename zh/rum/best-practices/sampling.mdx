@@ -2,7 +2,7 @@
 title: "理解 RUM 采样：机制、规则与最佳实践"
 sidebarTitle: "采样策略"
 description: "深入理解 RUM 会话采样的工作原理，掌握采样率选择、动态调整与业务自定义采样的最佳实践。"
-keywords: ["RUM", "采样", "采样率", "sessionSampleRate", "最佳实践", "前端监控"]
+keywords: ["RUM", "采样", "采样率", "sessionSampleRate", "远程配置", "beforeSampling", "最佳实践", "前端监控"]
 ---
 
 采样决定了有多少真实用户数据会被采集上报。采样率设置过高会带来不必要的数据量与费用，设置过低则可能漏掉关键问题。本文介绍 RUM 采样的工作机制，并给出选择和动态管理采样率的最佳实践。
@@ -48,9 +48,9 @@ flashcatRum.init({
 
 每个会话的抽签相互独立，没有全局协调。采样率 20% 表示**期望值**是 20%：流量越大，实际采集比例越接近 20%（大数定律）；流量较小时会有明显波动，100 个会话实际采到 13 个或 28 个都是正常的。
 
-### 4. 采样率在初始化时固化
+### 4. 采样率在会话抽签时确定
 
-`sessionSampleRate` 在 `init()` 调用时确定，初始化后无法在运行时修改，页面生命周期内也不能二次 `init()`。想改变采样率，需要让下一次初始化（Web 端即下一次页面加载）拿到新的值。
+每个新会话抽签时，SDK 使用当时生效的采样率：开启[远程配置](#remote-config)后是控制台下发的值，否则是 `init()` 传入的 `sessionSampleRate`。页面或 App 运行期间不能二次 `init()`；未开启远程配置时，改变采样率需要让下一次初始化（Web 端即下一次页面加载）拿到新的值。
 
 ## 如何选择采样率
 
@@ -67,64 +67,119 @@ flashcatRum.init({
 错误是低频事件。如果您的核心诉求是错误监控而非性能统计，宁可选择更高的采样率——性能指标 20% 的样本足够代表整体，而某个只影响 1% 用户的错误在 20% 采样下可能很久才出现一次。
 </Tip>
 
-## 最佳实践一：用远程配置调整采样率
+<span id="remote-config"></span>
 
-采样率写死在代码里，每次调整都要发版。推荐在控制台的 [远程配置](/zh/rum/quickstart/app-management#远程配置) 页签修改**会话采样率**并发布，无需改代码、发版。
+## 最佳实践一：用远程配置动态调整采样
 
-- **前提**：SDK 初始化时开启 `remoteConfigurationEnabled: true`（默认关闭）。支持 Browser、iOS、Android、HarmonyOS、Flutter、微信小程序与 Electron 应用。
-- **生效时机**：下一个新会话生效，进行中的会话维持原判定（规则 2）。客户端通常在发布后约 4 小时内完成切换。
-- **立即生效**：调用 SDK 的 `stopSession()` 结束当前会话，下一个会话按新采样率判定。
+采样率写死在代码里，每次调整都要发版。开启远程配置后，您可以在控制台 **应用管理 → 远程配置** 页签修改采样参数并发布，客户端无需改代码、发版即可生效。典型用法：
+
+- 新版本发布期临时调高会话采样率，稳定后降回常规值。
+- 线上故障排查时调到 100，尽可能多地捕捉现场。
+- 数据量异常上涨时调低，必要时调到 0 紧急关停采集。
+- 调低采样率的同时开启**错误会话补充采集**，未抽中的会话报错后仍会补报现场，见[最佳实践三](#最佳实践三错误全量采集其余数据按比例保留)。
+
+<span id="remote-config-platforms"></span>
+
+### 开启方式与各端支持
+
+在 SDK 初始化时开启 `remoteConfigurationEnabled: true`（默认关闭）。Android 与 HarmonyOS 为 `.setRemoteConfigurationEnabled(true)`，Electron 在主进程的 `init()` 中开启。初始化时传入的 `sessionSampleRate` 仍要保留：客户端首次拿到配置前、或控制台停用远程配置后，SDK 使用这个值。
+
+各端读取的配置项不同，表中未列出的配置项在该端不生效：
+
+| 平台 | 最低版本 | 读取的配置项 |
+| --- | --- | --- |
+| Web（浏览器） | Web SDK 0.4.0 | 会话采样率、会话回放采样率、Trace 采样率、回放脱敏级别、错误会话补充采集、错误会话补充回放、自定义配置项 |
+| iOS | SDK 0.6.0 | 会话采样率、自定义配置项；错误会话补充采集需 0.7.0 |
+| Android | SDK 0.7.0 | 会话采样率、自定义配置项 |
+| HarmonyOS | SDK 0.6.0 | 会话采样率、自定义配置项；错误会话补充采集需 0.7.0 |
+| Flutter | `flashcat_flutter_plugin` 0.2.0 | 会话采样率、自定义配置项 |
+| 微信小程序 | `@flashcatcloud/miniprogram-rum` 0.2.0 | 会话采样率、自定义配置项 |
+| Electron | `@flashcatcloud/electron-sdk` 0.4.0 | 会话采样率、错误会话补充采集、自定义配置项 |
+
+React Native SDK 不支持远程配置，采样率只能在 `init()` 中设置。
+
+<span id="remote-config-timing"></span>
+
+### 生效时机
+
+- **下一个新会话生效**：SDK 在启动时和每个新会话开始时请求配置，新配置用于下一次抽签，进行中的会话维持原判定（规则 2）。客户端通常在发布后约 4 小时内完成切换。
+- **本地缓存**：配置保存在本地，下次启动（Web 端为下次页面加载）的第一个会话直接按它抽签。Web 端本地还没有配置的页面（如首次访问、隐私窗口）会先等待配置，最多约 1 秒后开始采集，等待期间的未捕获错误不会被采集。
+- **请求失败不改值**：请求失败、超时或响应无法识别时，SDK 沿用当前生效的配置。
+
+以下变化不等会话自然过期，SDK 会立即结束当前会话，下一个会话按新配置抽签：
+
+- 会话采样率调为 0（紧急关停），或从 0 调回非 0（重新开启）。
+- Web 端把回放脱敏级别调得更严格。
+
+其余变化需要等下一个新会话。确需立即生效时，可以调用 SDK 的 `stopSession()` 结束当前会话。
 
 <Warning>
 `stopSession()` 会把一个用户的连续行为切分成两个会话，导致会话数轻微膨胀、会话时长统计断开。只在确需立即生效时调用。
 </Warning>
 
-各端的最低 SDK 版本、发布与回滚见 [应用管理 - 远程配置](/zh/rum/quickstart/app-management#远程配置)。
+### 确认配置已生效
+
+发布后，在 **远程配置** 页签的发布面板查看**采用情况**，它按最近到达的会话统计各配置版本的占比。状态长时间停在「未收到配置」，通常是 SDK 未开启远程配置，或版本低于上表要求。发布、回滚与采用情况的详细说明见 [应用管理 - 远程配置](/zh/rum/quickstart/app-management#远程配置)。
 
 ## 最佳实践二：业务自定义采样
 
-默认的随机抽签对所有用户一视同仁，但业务往往希望差异化：VIP 用户全量采集、灰度用户重点观察、出过错的用户下次必采。这时可以把**抽签逻辑从 SDK 挪到业务代码**：业务自行判定当前会话是否采样，SDK 的 `sessionSampleRate` 只传 `0` 或 `100`，退化为开关。
+默认的随机抽签对所有用户一视同仁，但业务往往希望差异化：VIP 用户全量采集、灰度用户重点观察、正在排查的用户必采。SDK 提供以下接口，让业务代码决定每个会话的采样率：
+
+| 接口 | 作用 |
+| --- | --- |
+| `beforeSampling` | 初始化参数。每个新会话抽签前调用，传入即将生效的采样率和控制台下发的自定义配置项；返回新的采样率即覆盖本次抽签，不返回值表示沿用 |
+| `getRemoteConfig()` | 随时读取控制台下发的自定义配置项 |
+| `setForcedSession()` | 不受采样率限制地采集当前用户：当前会话未被采集时立即切换为采集的新会话，之后的会话一律采集，直到 App 进程结束（Web 端为当前页面关闭） |
+
+把规则参数（名单、开关、分桶盐值）放进远程配置的**自定义配置项**，就能在控制台动态下发：改名单、开排查模式都无需发版，并按[生效时机](#remote-config-timing)在下一个新会话生效。例如在控制台发布如下自定义配置项：
+
+```json
+{
+  "incidentMode": false,
+  "debugUsers": ["user_1024", "user_2048"],
+  "salt": "2026q4"
+}
+```
+
+下面的示例按优先级依次判断：排查模式与重点用户全量采集，其余用户按用户 ID 哈希分桶，桶的大小直接取控制台下发的**会话采样率**。
 
 <Tabs>
 <Tab title="Web">
 ```js
-function decideSampling(user, config) {
-  // 优先级从高到低的短路规则
-  if (config.incidentMode) return true;           // 故障排查模式：全量采集
-  if (user.isInternal || user.isBeta) return true; // 内部/灰度用户：必采
-  if (user.isVip) return true;                     // 重点用户：必采
-  if (localStorage.getItem("rum-had-error")) return true; // 上次出过错：必采
-
-  // 底座：按 userId 确定性哈希分桶
-  return hash(user.id + config.salt) % 100 < config.sampleRate;
-}
-
-const sampled = decideSampling(currentUser, cachedConfig);
-
 flashcatRum.init({
-  // ...其他配置
-  sessionSampleRate: sampled ? 100 : 0,
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 20, // 拿到控制台配置前使用的值
+  remoteConfigurationEnabled: true,
+  beforeSampling: ({ sessionSampleRate, custom }) => {
+    if (custom?.incidentMode) return { sessionSampleRate: 100 }; // 排查模式：全量采集
+    if (currentUser.isInternal || currentUser.isVip) return { sessionSampleRate: 100 }; // 重点用户：必采
+    if (custom?.debugUsers?.includes(currentUser.id)) return { sessionSampleRate: 100 }; // 排查名单：必采
+
+    // 底座：按用户 ID 确定性哈希分桶，桶的大小跟随控制台的会话采样率
+    const inBucket = hash(currentUser.id + (custom?.salt ?? "")) % 100 < sessionSampleRate;
+    return { sessionSampleRate: inBucket ? 100 : 0 };
+  },
 });
 ```
 </Tab>
 
 <Tab title="Android">
 ```kotlin
-fun decideSampling(user: User, config: RumRemoteConfig): Boolean {
-    // 优先级从高到低的短路规则
-    if (config.incidentMode) return true            // 故障排查模式：全量采集
-    if (user.isInternal || user.isBeta) return true // 内部/灰度用户：必采
-    if (user.isVip) return true                     // 重点用户：必采
-    if (prefs.getBoolean("rum_had_error", false)) return true // 上次出过错：必采
-
-    // 底座：按 userId 确定性哈希分桶
-    return hash(user.id + config.salt) % 100 < config.sampleRate
-}
-
-val sampled = decideSampling(currentUser, cachedConfig)
-
 val rumConfig = RumConfiguration.Builder(applicationId)
-    .setSessionSampleRate(if (sampled) 100f else 0f)
+    .setSessionSampleRate(20f)            // 拿到控制台配置前使用的值
+    .setRemoteConfigurationEnabled(true)
+    .setBeforeSampling { context ->
+        val custom = context.custom
+        val user = currentUser
+        when {
+            custom?.get("incidentMode") == true -> 100f            // 排查模式：全量采集
+            user.isInternal || user.isVip -> 100f                  // 重点用户：必采
+            (custom?.get("debugUsers") as? List<*>)?.contains(user.id) == true -> 100f // 排查名单：必采
+            // 底座：按用户 ID 确定性哈希分桶，桶的大小跟随控制台的会话采样率
+            else -> if (hash(user.id + (custom?.get("salt") ?: "")) % 100 < context.sessionSampleRate) 100f else 0f
+        }
+    }
     .build()
 Rum.enable(rumConfig)
 ```
@@ -132,25 +187,34 @@ Rum.enable(rumConfig)
 
 <Tab title="iOS">
 ```swift
-func decideSampling(user: User, config: RumRemoteConfig) -> Bool {
-    // 优先级从高到低的短路规则
-    if config.incidentMode { return true }            // 故障排查模式：全量采集
-    if user.isInternal || user.isBeta { return true } // 内部/灰度用户：必采
-    if user.isVip { return true }                     // 重点用户：必采
-    if UserDefaults.standard.bool(forKey: "rumHadError") { return true } // 上次出过错：必采
+let rumConfig = RUM.Configuration(
+    applicationID: "<RUM_APPLICATION_ID>",
+    sessionSampleRate: 20,                // 拿到控制台配置前使用的值
+    remoteConfigurationEnabled: true,
+    beforeSampling: { context in
+        let custom = context.custom
+        let user = currentUser
+        if custom?["incidentMode"] as? Bool == true { return 100 }   // 排查模式：全量采集
+        if user.isInternal || user.isVip { return 100 }              // 重点用户：必采
+        if (custom?["debugUsers"] as? [String])?.contains(user.id) == true { return 100 } // 排查名单：必采
 
-    // 底座：按 userId 确定性哈希分桶
-    return hash(user.id + config.salt) % 100 < config.sampleRate
-}
-
-let sampled = decideSampling(user: currentUser, config: cachedConfig)
-
-var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
-rumConfig.sessionSampleRate = sampled ? 100 : 0
+        // 底座：按用户 ID 确定性哈希分桶，桶的大小跟随控制台的会话采样率
+        let salt = custom?["salt"] as? String ?? ""
+        return Float(hash(user.id + salt) % 100) < context.sessionSampleRate ? 100 : 0
+    }
+)
 RUM.enable(with: rumConfig)
 ```
 </Tab>
 </Tabs>
+
+Flutter、HarmonyOS 与微信小程序提供同样的 `beforeSampling`、`getRemoteConfig()` 与 `setForcedSession()`，用法见各端高级配置文档。Electron 与 React Native SDK 没有 `beforeSampling`，可以在 `init()` 前自行判定，再把 `sessionSampleRate` 设为 `0` 或 `100`。
+
+客服或研发需要临时排查某个用户时，除了把用户加进 `debugUsers`，也可以在业务代码里直接调用 `setForcedSession()`，例如在用户提交反馈时：
+
+```js
+flashcatRum.setForcedSession();
+```
 
 ### 为什么用哈希分桶代替随机数
 
@@ -161,8 +225,9 @@ RUM.enable(with: rumConfig)
 
 ### 注意事项
 
-- **判定必须在会话内稳定**。如果用 `Math.random()` 每次页面加载现抽，同一会话内不同页面可能得出不同结果，而 SDK 只认会话首次判定——表现为「配了 100 却不上报」，非常难排查。确定性哈希天然规避这个问题。
-- **规则变化时同样需要切换会话**。用户从「不采」桶进入「采」桶时，Web / 小程序在检测到本次判定与上次缓存的判定不同时调用一次 `stopSession()`；移动端下次冷启动生效。
+- **回调必须轻量、确定**。`beforeSampling` 在会话创建过程中同步执行，不能发起网络请求或阻塞；同样的输入应返回同样的结果。用 `Math.random()` 现抽会让同一用户的判定忽上忽下，确定性哈希天然规避这个问题。返回 0–100 以外的值或抛出异常时，SDK 沿用传入的采样率。
+- **规则变化在下一个新会话生效**。用户从「不采」桶进入「采」桶后，进行中的会话不会被重新判定；需要立即生效时调用 `setForcedSession()` 或 `stopSession()`。
+- **自定义配置项对外可见**。它会下发到客户端，任何持有 Client Token 的人都能读到，请勿在其中存放密钥、访问令牌或个人敏感信息。`debugUsers` 这类名单只放不可反推身份的用户 ID。
 - **用 `sessionSampleRate: 0` 而不是跳过 `init()`**。跳过初始化会让业务代码里的 `addAction` / `addError` 等调用失效，到处判空很繁琐；传 0 让 SDK 正常初始化为静默状态，代码路径统一。
 - **平台侧数据代表实际采集量**。自定义采样时，平台无法感知您的真实采样比例，看到的会话量即实际采集量，无法按采样率反推全量流量。如需估算全量，请在业务侧基于自己的采样规则换算。
 
@@ -361,12 +426,16 @@ RUM.enable(with: rumConfig)
 
 ## 各端支持情况
 
-| 平台 | 采样率生效时机 | 让新采样率立即生效 |
-| --- | --- | --- |
-| Web（浏览器） | 每次页面加载 `init()` 时 | 支持，调用 `stopSession()` |
-| 微信小程序 | 每次冷启动 `init()` 时 | 支持，调用 `stopSession()` |
-| iOS / Android | App 冷启动初始化时 | 默认下次冷启动生效 |
-| React Native | App 冷启动初始化时 | 不支持，下次启动生效 |
+| 平台 | 远程配置 | `beforeSampling` / `setForcedSession()` | 新采样率何时生效 |
+| --- | --- | --- | --- |
+| Web（浏览器） | 支持 | 支持 | 下一个新会话；采样率跨过 0 或收紧脱敏级别时立即切换 |
+| 微信小程序 | 支持 | 支持 | 下一个新会话；采样率跨过 0 时立即切换 |
+| iOS / Android | 支持 | 支持 | 下一个新会话；采样率跨过 0 时立即切换 |
+| HarmonyOS / Flutter | 支持 | 支持 | 下一个新会话；采样率跨过 0 时立即切换 |
+| Electron | 支持 | 不支持 | 下一个新会话；采样率跨过 0 时立即切换 |
+| React Native | 不支持 | 不支持 | App 下次冷启动初始化时 |
+
+各端最低版本与读取的配置项见[开启方式与各端支持](#remote-config-platforms)。各端都可以调用 `stopSession()` 结束当前会话，让新采样率立即生效。
 
 ## 常见问题
 
