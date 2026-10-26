@@ -10,10 +10,10 @@ Flashduty groups error events with the same cause into one Issue, which reduces 
 A new error event is assigned to an Issue in this order:
 
 1. If its fingerprint matches an existing Issue, it joins that Issue.
-2. If the fingerprint differs but the error is similar, it joins the most similar Issue.
+2. If the fingerprint differs but the error is similar, it joins the most similar Issue. Similarity is compared only among Issues at the same error location.
 3. If no Issue is similar, Flashduty creates a new Issue.
 
-Android NDK native crashes, Electron process-gone events (`RenderProcessGone`, `ChildProcessGone`), and NDK crashes from Flutter and React Native apps are grouped by fingerprint only, without the similarity step. Their error messages are almost identical, so similarity grouping would merge crashes from different locations into one Issue.
+Android NDK native crashes, iOS crashes, Electron process-gone events (`RenderProcessGone`, `ChildProcessGone`), and NDK crashes from Flutter and React Native apps are grouped by fingerprint only, without the similarity step. Their error messages are almost identical, so similarity grouping would merge crashes from different locations into one Issue.
 
 ## Default fingerprint
 
@@ -25,9 +25,30 @@ When an error event doesn't carry a fingerprint, Flashduty calculates one from t
 | `env` | Environment where the error occurred |
 | `error.type` | Error type classification |
 | `error.message` | Error description text. For Android NDK native crashes, the topmost application-layer native frame in the stack also counts and system library frames do not, so the same crash location always groups into the same Issue. |
+| Error location | Counted only for Web JavaScript errors, Android Java/Kotlin exceptions, and iOS crashes; see "Error location" below |
 
 <Tip>
 When calculating the fingerprint, Flashduty ignores dynamic values in stack frames, such as version numbers, IDs, and dates.
+</Tip>
+
+## Error location
+
+The same error message can be thrown from unrelated places. Grouping by message alone puts every `Cannot read properties of undefined (reading 'id')` in an app into one Issue. Flashduty therefore also counts the error location in the fingerprint.
+
+The location keeps only what survives a rebuild: no line or column numbers, no build hashes, and no minified or obfuscated short names.
+
+| Platform | What the error location is | Example |
+|----------|----------------------------|---------|
+| Web | The topmost frame in the stack that resolves to a script: its script file name plus the function name, or the file name alone when the function name is minified to a short one. Build hashes, directory levels, and query strings are dropped; browser-extension frames and the RUM SDK's own instrumentation frames are skipped | `index.js:CartPage.render` |
+| Android (Java/Kotlin exceptions) | The throw site of the innermost root cause of the exception chain, plus the first frame of app code below it. R8-obfuscated class and method names don't count | `com.example.chat.SessionStore.require` |
+| iOS crashes | The crash site, plus the first frame of app code below it. Frames that carry the process to termination, such as `pthread_kill`, `abort`, and `__cxa_throw`, are skipped; when the stack never reaches app code, the site's caller stands in. A crash site without a symbol falls back to the image name plus its offset | `libobjc.A.dylib:objc_msgSend>QuantumApp:ChatCell.layoutSubviews()` |
+
+That offset is stable within a single build, so the same iOS crash can become a new Issue after every release.
+
+Handled errors and App Hangs on iOS take no error location: their message usually names the cause, and leaving the location out keeps existing Issues receiving them. Neither do Android NDK native crashes; they already group by the topmost application native frame. An error with no stable location, such as an Android exception with only obfuscated frames, keeps grouping by type and message alone, and is compared by similarity only with Issues that also have no error location.
+
+<Tip>
+The error location applies to messages first seen after this upgrade. A Web or Android Issue that existed before it still receives errors by type and message, and similarity grouping still covers it, so the Issue keeps its status, assignee, and history; no new Issue opens because the location entered the fingerprint. iOS crashes get no such carry-over: an old iOS Issue was keyed by the signal alone, so after the upgrade the same signal splits into several Issues by crash location.
 </Tip>
 
 ## Custom fingerprint
