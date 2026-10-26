@@ -11,10 +11,10 @@ Flashduty 将相同原因的错误事件聚合为一个 Issue，减少需要处�
 新错误事件按以下顺序归入 Issue：
 
 1. 与已有 Issue 的指纹相同，归入该 Issue。
-2. 指纹不同但错误相似，归入最相似的 Issue。
+2. 指纹不同但错误相似，归入最相似的 Issue。相似度只在同一出错位置的 Issue 之间比较。
 3. 没有相似的 Issue，创建新 Issue。
 
-Android NDK 原生崩溃、Electron 进程终止事件（`RenderProcessGone`、`ChildProcessGone`）和 Flutter、React Native 应用中的 NDK 崩溃只按指纹聚合，不做相似度归并。这类事件的错误消息几乎相同，按相似度归并会把不同位置的崩溃合为一个 Issue。
+Android NDK 原生崩溃、iOS 崩溃、Electron 进程终止事件（`RenderProcessGone`、`ChildProcessGone`）和 Flutter、React Native 应用中的 NDK 崩溃只按指纹聚合，不做相似度归并。这类事件的错误消息几乎相同，按相似度归并会把不同位置的崩溃合为一个 Issue。
 
 ## 默认指纹
 
@@ -26,9 +26,30 @@ Android NDK 原生崩溃、Electron 进程终止事件（`RenderProcessGone`、`
 | `env` | 错误发生的环境 |
 | `error.type` | 错误的类型分类 |
 | `error.message` | 错误的描述文本。Android NDK 原生崩溃还会计入堆栈中最顶层的应用层原生帧，系统库帧不参与，因此同一崩溃位置始终聚合为同一 Issue。 |
+| 出错位置 | 仅 Web 的 JS 错误、Android 的 Java/Kotlin 异常和 iOS 崩溃计入，见下文「出错位置」 |
 
 <Tip>
 计算指纹时，Flashduty 会忽略堆栈帧中的版本号、ID、日期等动态参数。
+</Tip>
+
+## 出错位置
+
+同一句错误消息可能从互不相关的地方抛出。只按消息聚合，应用里每一处 `Cannot read properties of undefined (reading 'id')` 都会落进同一个 Issue。因此 Flashduty 还把出错位置计入指纹。
+
+位置只保留重新构建后仍然不变的部分：不带行号与列号，不带构建哈希，也不带压缩或混淆后的短名。
+
+| 平台 | 出错位置取什么 | 形如 |
+|------|----------------|------|
+| Web | 堆栈中最靠上、且能定位到脚本的那一帧：脚本文件名加函数名，函数名被压缩成短名时只按脚本名区分。构建哈希、目录层级和查询串被去掉，浏览器扩展与 RUM SDK 自身的埋点帧被跳过 | `index.js:CartPage.render` |
+| Android（Java/Kotlin 异常） | 异常链最内层根因异常的抛出位置，加上其下第一个应用代码帧。R8 混淆后的类名与方法名不参与 | `com.example.chat.SessionStore.require` |
+| iOS 崩溃 | 崩溃现场，加上其下第一个应用代码帧。`pthread_kill`、`abort`、`__cxa_throw` 这类把进程带向终止的帧被跳过；堆栈里没有应用代码时，取崩溃现场的下一帧。崩溃现场没有符号时退化为镜像名加偏移 | `libobjc.A.dylib:objc_msgSend>QuantumApp:ChatCell.layoutSubviews()` |
+
+这个偏移只在单次构建内稳定，因此同一个 iOS 崩溃在每次发版后都可能变成一个新建的 Issue。
+
+iOS 上已处理的错误与 App Hang 不取出错位置：这类消息本身通常说明了原因，不取位置才能让已有 Issue 继续接收它们。Android NDK 原生崩溃也不取，它已按堆栈中最顶层的应用原生帧聚合。取不出稳定位置的错误（例如只有混淆帧的 Android 异常）仍只按类型和消息聚合，也只与同样没有出错位置的 Issue 做相似度归并。
+
+<Tip>
+出错位置对本次升级之后首次出现的消息生效。升级前已存在的 Web 与 Android Issue 仍按类型和消息接收错误，相似度归并也仍然覆盖它们，因此这些 Issue 保留原有的状态、负责人和处理历史，不会因为位置进入指纹而重新开一个 Issue。iOS 崩溃没有这条保留规则：旧的 iOS Issue 只按信号聚合，升级后同一信号会按崩溃位置分成多个 Issue。
 </Tip>
 
 ## 自定义指纹
