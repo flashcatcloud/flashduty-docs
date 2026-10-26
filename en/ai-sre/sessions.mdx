@@ -67,7 +67,7 @@ A new session gets an automatic title after its first turn; you can rename it at
 
 | Indicator | Meaning |
 |---|---|
-| Spinning circle | The agent is running |
+| Spinning circle | The agent is running: either the current turn is executing, or a dispatched subagent is still running |
 | 🔭 + number | Number of background tasks running — see [Task Panel and Background Tasks](#task-panel-and-background-tasks) |
 | Blue dot | New content you have not seen; cleared when you open the session |
 | Relative time | Last activity (for example, `5m`, `3h`) |
@@ -112,7 +112,9 @@ While a turn runs, the Send button becomes a **Stop** button. Stopping interrupt
 
 ### Queueing messages while running
 
-You can keep sending messages while a turn runs; they queue and run in order after the current turn. Queued messages appear above the input, where you can edit, remove or **Clear all** of them. Once the agent has started on a message it can no longer be withdrawn; use Stop to interrupt.
+**While the current turn is executing**, you can keep sending messages; they queue and run in order after the current turn. Queued messages appear above the input, where you can edit, remove or **Clear all** of them. Once the agent has started on a message it can no longer be withdrawn; use Stop to interrupt.
+
+**Once the agent has handed the work to a subagent and its own turn has ended**, the session still counts as running (the list still shows the spinning circle, and the button beside the input is still Stop), but the main agent is idle: a message you send then does **not** queue, it starts a new turn immediately. The same holds after a page refresh, so the session is never mistaken for "executing" and your messages are not held back.
 
 ### Environment initialization
 
@@ -150,13 +152,24 @@ If you send a new message instead of answering, the question is treated as skipp
 
 Some console pages **declare that AI can operate them**: each turn sends the agent the actions available on the page you are viewing, so on these pages the agent can read and fill in the form directly instead of only giving written advice.
 
-Currently this covers the **Alert grouping** and **Flapping detection** pages under a channel's Noise reduction; see [Noise reduction](/en/on-call/channel/noise-reduction). Other pages have no page actions, so the agent cannot operate them. Page actions exist only in console sessions, not in IM, API, or automation sessions.
+The console pages that declare page actions:
+
+| Page | What the agent can do |
+|---|---|
+| The **Alert grouping** and **Flapping detection** pages under a channel's Noise reduction (see [Noise reduction](/en/on-call/channel/noise-reduction)) | Read the form and fill in fields; actions that take effect immediately, such as **Save**, are confirmed one at a time |
+| The **RUM Explorer** (see [Query and analyze with AI SRE](/en/rum/explorer/data-query#query-and-analyze-with-ai-sre)) | Look up field values, rewrite the query and event type, move the time range, set up the analytics chart; writes land straight on the page and are reverted with **Undo change** |
+
+Other pages have no page actions, so the agent can only give written advice. Page actions exist only in console sessions, not in IM, API, or automation sessions.
+
+Actions on the **Alert grouping** and **Flapping detection** pages work like this:
 
 - **Reading** the form (fields, current values, options, whether writable) needs no authorization.
 - **Filling** a field only writes the value into the form; it does not submit. Review it and click **Save** yourself.
 - **Saving**, and other actions that take effect immediately, each pop up their own confirmation card in the conversation (above the input), listing "old value → new value" with **Cancel** and the action's own verb (such as **Save**).
 
-Before touching the page, the agent asks with a question card how to apply the change: fill the form for you to review and save, or save directly. While it works, the page gets a brand-colored highlight and an **AI is working on this page** bar at the top, which changes to **Done** when finished; you can click **Stop** to interrupt. Sending a new message or leaving the session voids any unanswered confirmation card. In a shared session opened read-only, page actions do not run.
+Before touching either of those pages, the agent asks with a question card how to apply the change: fill the form for you to review and save, or save directly. While it works, the page gets a brand-colored highlight and an **AI is working on this page** bar at the top, which changes to **Done** when finished; you can click **Stop** to interrupt. Sending a new message or leaving the session voids any unanswered confirmation card. In a shared session opened read-only, page actions do not run.
+
+Writes on the **RUM Explorer** raise no confirmation card: the agent rewrites the query box, the event type, the time range and the analytics chart, and runs them right away. The AI SRE bar under the query box reports progress and the result (**Filling in the query**, **Querying**, then the number of events found, **Query complete**, or **Query complete, no data**). To get back the page you had before the write, click **Undo change** on that bar. Looking up which values a field holds does not change the page.
 
 ### When authorization is required
 
@@ -216,6 +229,8 @@ Click a file the agent produced to preview it on the right:
 | Code | Syntax highlighting and line numbers |
 | Markdown / HTML | Rendered view, with a **Source** toggle |
 | Images, PDF | Shown directly |
+| Table (`.csv` / `.tsv`) | Shown as a table with a fixed header row. Up to 1000 rows and 200 columns are shown, within 20000 cells in total, so a wide table shows fewer rows |
+| Video & audio (`.mp4` `.webm` `.mov` / `.mp3` `.m4a` `.wav`) | Play in the browser's built-in player; if a file can't be played, you're asked to download it |
 | Skill package (`.skill`) | File tree and contents; download it or **Save Skill** to your account |
 
 Previews support **Copy** and **Download**. All artifacts can also be managed on the **Artifacts** page in the left navigation — see <a href="/en/ai-sre/artifacts">Artifacts</a>.
@@ -316,6 +331,17 @@ The **reply language** is set when the session is created and used for the whole
 ## Integrating sessions through the API
 
 This section is for developers integrating AI SRE sessions through the [Open API](/en/api-reference/ai-sre/sessions/session-read-info).
+
+### Session run state
+
+Both `POST /safari/session/get` and `POST /safari/session/list` return two run-state fields, and they mean different things:
+
+| Field | Meaning |
+|---|---|
+| `is_running` | The session holds a running state: the current turn is executing, **or** a dispatched subagent's round has not ended. Running background commands and monitors do not count |
+| `turn_in_flight` | Whether the current turn is actually executing |
+
+After the agent hands work to a subagent, its own turn ends first: during that window `is_running` stays `true` while `turn_in_flight` is `false`. Read `turn_in_flight` to know whether a message sent now will queue, and `is_running` to know whether the session is still working. Both are computed in the response, so they describe the moment you query.
 
 ### Withdrawing a queued message
 

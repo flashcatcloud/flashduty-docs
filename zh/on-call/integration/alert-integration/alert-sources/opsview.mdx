@@ -16,7 +16,7 @@ Opsview 支持添加自定义通知方法（Custom Notification Method）：Opsv
 ### 使用专属集成
 
 1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
-2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增集成**
 3. 选择 **标准告警事件**，点击 **保存**
 4. 打开生成的集成卡片，复制 **推送地址**，形如 `https://api.flashcat.cloud/event/push/alert/standard?integration_key=<集成密钥>`
 
@@ -31,9 +31,16 @@ Opsview 支持添加自定义通知方法（Custom Notification Method）：Opsv
 
 ## 在 Opsview 中配置
 
-### 步骤 1：创建通知脚本
+<Steps>
+<Step title="在 Orchestrator 上创建通知脚本">
 
-在 Opsview Orchestrator 服务器上创建脚本 `notify_by_flashduty`，并设置为可执行（`chmod +x`）。脚本使用 `curl`；如果通知方法在 Collector 上运行，Collector 上也要安装 `curl`，并能访问 `api.flashcat.cloud`。推送地址通过脚本的第一个参数传入，不写在脚本里。
+**操作路径**：Opsview Orchestrator 服务器 › notify_by_flashduty
+
+| 项 | 填写 |
+| --- | --- |
+| 文件 | 新建 `notify_by_flashduty`，并设置为可执行（`chmod +x`） |
+| 第一个参数（必填） | `{integration_url}`，推送地址通过脚本的第一个参数传入，不写在脚本里 |
+| 依赖 | 脚本使用 `curl`；如果通知方法在 Collector 上运行，Collector 上也要安装 `curl`，并能访问 `api.flashcat.cloud` |
 
 ```sh
 #!/bin/sh
@@ -92,47 +99,75 @@ curl -fsS -m 10 -X POST -H 'Content-Type: application/json' -d "$JSON" "$URL" >/
 | `NAGIOS_SERVICEOUTPUT`、`NAGIOS_HOSTOUTPUT` | 告警描述 |
 | `NAGIOS_HOSTADDRESS`、`NAGIOS_HOSTALIAS`、`OPSVIEW_KEYWORDS` | 标签 `host_address`、`host_alias`、`opsview_keywords`；`NAGIOS_HOSTNAME` 写入标签 `resource` |
 
-### 步骤 2：安装并测试脚本
+</Step>
+<Step title="在 Orchestrator 上导入脚本并应用变更">
 
-在 Orchestrator 上以 `opsview` 用户导入脚本：
+**操作路径**：Opsview Orchestrator 服务器的终端；Opsview › Configuration › Apply Changes
+
+以 `opsview` 用户导入脚本：
 
 ```bash
 sudo -u opsview /opt/opsview/orchestrator/bin/orchestratorimportscripts notifications /path/to/notify_by_flashduty
 ```
 
-Opsview 提供 `test_notifications` 工具，模拟 Nagios Core 通知时设置的环境变量，用它测试脚本（`<推送地址>` 替换为步骤 1 复制的地址）：
+导入后进入 **Configuration** › **Apply Changes** 完成脚本安装。
+
+</Step>
+<Step title="在 Opsview 中添加通知方法">
+
+**操作路径**：Opsview › Configuration › Notification Methods › Add New
+
+| 字段 | 填写 |
+| --- | --- |
+| Name（必填） | `Flashduty` |
+| Enable | 勾选 |
+| Run On（必填） | 在 Orchestrator 或 Collector 上运行 |
+| Command（必填） | `notify_by_flashduty {integration_url}`（脚本默认从 `/opt/opsview/monitoringscripts/notifications` 读取，参数写在脚本名后面） |
+
+保存后再次进入 **Configuration** › **Apply Changes**，让新通知方法生效。
+
+</Step>
+<Step title="把通知方法加入用户的 Notification Profile">
+
+**操作路径**：Opsview › Configuration › Users and Roles › Users › 编辑用户 › Notification Profiles › Add New
+
+Opsview 的通知由用户的 Notification Profile 决定，每个要接收 Flashduty 通知的用户都要选择这个通知方法（也可以从右上角的用户名进入 **My Profile**）：
+
+| 字段 | 填写 |
+| --- | --- |
+| Alert me by | `Flashduty` |
+| During | 生效的时间段 |
+| Host and Services | 选择要通知的主机组和服务检查，并勾选要通知的状态，需要同时包含问题状态和恢复状态，否则 Flashduty 收不到恢复通知 |
+
+点击 **Update**，再点击 **Submit Changes**，最后进入 **Configuration** › **Apply Changes** 使配置生效。
+
+也可以在 Shared Notification Profiles 中创建共享配置，分配给多个用户。
+
+</Step>
+<Step title="用 test_notifications 测试脚本并确认真实告警">
+
+**操作路径**：Opsview Orchestrator 服务器的终端
+
+Opsview 提供 `test_notifications` 工具，模拟 Nagios Core 通知时设置的环境变量，用它测试脚本：
 
 ```bash
 # 主机问题
-sudo -u opsview /opt/opsview/coreutils/utils/test_notifications hostproblem /path/to/notify_by_flashduty '<推送地址>'
+sudo -u opsview /opt/opsview/coreutils/utils/test_notifications hostproblem /path/to/notify_by_flashduty '{integration_url}'
 # 服务问题
-sudo -u opsview /opt/opsview/coreutils/utils/test_notifications serviceproblem /path/to/notify_by_flashduty '<推送地址>'
+sudo -u opsview /opt/opsview/coreutils/utils/test_notifications serviceproblem /path/to/notify_by_flashduty '{integration_url}'
 ```
 
-测试会向 Flashduty 发送真实事件，确认告警出现后在 Flashduty 中手动关闭。没有出现告警时，按下文“排查问题”查看脚本实际收到的环境变量。
+测试会向 Flashduty 发送真实事件，确认告警出现后在 Flashduty 中手动关闭；集成显示 **最新事件时间**，说明脚本和推送地址正确。该测试绕过通知方法和 Notification Profile，不能证明它们已生效，请在 Opsview 中让一个受监控对象真实变为非 OK 状态再恢复，确认问题与恢复通知都到达 Flashduty。没有出现告警时，按下文“排查问题”查看脚本实际收到的环境变量。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
 
 <Note>
 如果通知方法设置为在 Collector 上运行，需要在 Collector 服务器上同样测试脚本。
 </Note>
 
-### 步骤 3：添加通知方法
-
-1. 进入 **Configuration** → **Apply Changes** 完成脚本安装
-2. 进入 **Configuration** → **Notification Methods**，点击 **Add New**
-3. `Name` 填 `Flashduty`，勾选 `Enable`，`Run on` 选择在 Orchestrator 或 Collector 上运行
-4. `Command` 填 `notify_by_flashduty <推送地址>`（脚本默认从 `/opt/opsview/monitoringscripts/notifications` 读取，参数写在脚本名后面）
-5. 保存后再次进入 **Configuration** → **Apply Changes**，让新通知方法生效
-
-### 步骤 4：把通知方法加入通知配置
-
-Opsview 的通知由用户的 Notification Profile 决定，每个要接收 Flashduty 通知的用户都要选择这个通知方法：
-
-1. 进入 **Configuration** → **Users and Roles** → **Users**，编辑用户（或从右上角的用户名进入 **My Profile**），打开 **Notification Profiles** 标签页，点击 **Add New**
-2. **Alert me by** 选择 `Flashduty`，**During** 选择生效的时间段
-3. 在 **Host and Services** 中选择要通知的主机组和服务检查，并勾选要通知的状态，需要同时包含问题状态和恢复状态，否则 Flashduty 收不到恢复通知
-4. 点击 **Update**，再点击 **Submit Changes**，最后进入 **Configuration** → **Apply Changes** 使配置生效
-
-也可以在 Shared Notification Profiles 中创建共享配置，分配给多个用户。
+</Step>
+</Steps>
 
 ## 恢复与去重
 

@@ -22,7 +22,7 @@ Choose this option if all alerts go to one channel. It's the simpler setup.
   <Accordion title="View dedicated integration setup steps">
   
   1. In the Flashduty console, select **Channel** and open a channel
-  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add integration**
   3. Choose **PagerDuty Compatible** integration and click **Save** to generate a card
   4. Open the generated integration card and copy the **Push URL**
   
@@ -89,29 +89,54 @@ Choose one of these two methods:
 
 </div>
 
+### Status and severity
+
+| Event | Flashduty |
+| :--- | :--- |
+| V2 `payload.severity` is `critical` or `error` | Critical |
+| V2 `payload.severity` is `warning` | Warning |
+| V2 `payload.severity` is `info` | Info |
+| V1 `trigger` event | Warning (V1 has no severity field) |
+| V1 or V2 `resolve` event (`event_action` in V2, `event_type` in V1) | Recovery; closes the alert with the matching `dedup_key` (`incident_key` in V1) |
+
+Any other V2 `severity` value is rejected. A non-`trigger` event must carry `dedup_key` (`incident_key` in V1), otherwise the request is rejected.
+
 ### Configuration example
 
 Using [ElastAlert2](https://github.com/jertel/elastalert2) as an example:
 
-<div class="md-block">
+<Steps>
+<Step title="Change the push URL in ElastAlert2">
 
-1. Step 1: Obtain Push URL
+**Where**: ElastAlert2 source › `elastalert/alerters/pagerduty.py`
 
-   Enter integration name on the current page and save. Reopen integration details and copy the push URL, such as:
+Enter an integration name on the current page and save, reopen the integration details and copy the push URL. Modify the corresponding source code of your deployed ElastAlert instance: replace both PagerDuty URLs (V2 and V1, `https://events.pagerduty.com/v2/enqueue` and `https://events.pagerduty.com/generic/2010-04-15/create_event.json`) in that file with:
 
-   ```
-   {api_host}/event/push/alert/pagerduty?integration_key=xxx
-   ```
+```
+{integration_url}
+```
 
-2. Step 2: Modify Push URL
+[View diff](https://github.com/jertel/elastalert2/commit/e815a62a6b1eecef6e1fef13afd99d905b67fc34):
 
-   Modify the corresponding source code of your deployed ElastAlert instance, [view diff](https://github.com/jertel/elastalert2/commit/e815a62a6b1eecef6e1fef13afd99d905b67fc34):
+<img alt="drawing" width="600" src="https://download.flashcat.cloud/pagerduty-replace-endpoint.png" />
 
-   <img alt="drawing" width="600" src="https://download.flashcat.cloud/pagerduty-replace-endpoint.png" />
+</Step>
 
-3. Step 3: Report Alert Events
+<Step title="Configure the alert in an ElastAlert2 rule file">
 
-Follow the [ElastAlert PagerDuty push configuration documentation](https://elastalert2.readthedocs.io/en/latest/ruletypes.html#pagerduty) steps to configure alerts:
+**Where**: ElastAlert2 rule file › `alert`
+
+Follow the [ElastAlert PagerDuty push configuration documentation](https://elastalert2.readthedocs.io/en/latest/alerts.html#pagerduty) to configure alerts. The settings that point to Flashduty:
+
+| Setting | Value |
+| --- | --- |
+| `alert` (Required) | `pagerduty` |
+| `pagerduty_service_key` (Required) | `{integration_key}` |
+| `pagerduty_client_name` (Required) | Name of the monitoring client, for example `elastalert2` |
+| `pagerduty_api_version` (Optional) | `v2`; defaults to `v1` |
+| `pagerduty_v2_payload_*` (Optional) | `class`, `component`, `group`, `severity`, `source` and so on, `v2` only; `severity` defaults to `critical`, other values are `error`, `warning`, `info` |
+
+A complete rule example:
 
 ```
 name: "app error rule"
@@ -137,12 +162,12 @@ alert_text_args:
   - "message"
 filter:
   - query:
-      query_string:
-        query: "created_at:*"
+   query_string:
+     query: "created_at:*"
 
 # ------- Flashduty ----------------
 alert: pagerduty
-pagerduty_service_key: xxx
+pagerduty_service_key: {integration_key}
 pagerduty_client_name: elastalert2
 pagerduty_api_version: v2
 pagerduty_v2_payload_class: ping failure
@@ -153,6 +178,16 @@ pagerduty_v2_payload_source: mysql.host.name
 # ------- Flashduty ----------------
 ```
 
-4. Step 4: Restart ElastAlert and wait for alerts to trigger
+</Step>
 
-</div>
+<Step title="Restart ElastAlert and verify">
+
+**Where**: Terminal on the ElastAlert2 host
+
+Restart ElastAlert and wait for the rule to trigger (`pagerduty_event_type` defaults to `trigger`). ElastAlert has no test button for Flashduty, so verify with a real alert that fires.
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
+
+</Step>
+</Steps>

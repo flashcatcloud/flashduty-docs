@@ -206,6 +206,15 @@ client, err := flashduty.NewClientWithAccessToken(accessToken,
 - `AutomationRuleCreateRequest.TeamID`（`team_id`）是 `*int64`：显式传 0 表示个人作用域，大于 0 表示账户内的某个团队；省略时若存在已认证的 IM 会话则继承该会话的作用域，否则由服务端取常规默认值。`current-chat` 规则的作用域必须与该会话一致。
 - `AutomationRuleUpdateRequest` 已不再包含 `TeamID`（同样没有 `RunIn`）：作用域与执行位置创建后不可变。旧代码若在更新请求里设置 `TeamID`，删掉该行即可，否则无法编译。
 
+作战室创建触发器的字段在创建与更新两侧的语义不同：
+
+- 创建侧是普通值：`AutomationRuleCreateRequest.WarRoomTriggerEnabled`（`bool`）、`WarRoomChannelIDs`（`[]int64`）、`WarRoomSeverities`（`[]string`）。更新侧三者都是指针（`*bool` / `*[]int64` / `*[]string`），nil 表示该字段保持不变，非 nil 才会发送。
+- 服务端按「给了就建」判定：`WarRoomTriggerEnabled` 为 true，或 `WarRoomChannelIDs` 非空时，才会创建该触发器——此时协作空间列表与严重程度列表（`Critical` / `Warning` / `Info`）都必须非空，缺任一个会以参数错误拒绝；只给严重程度不会创建触发器。
+- 更新时传空切片等同于省略：服务端把空列表按未提供处理、保留原值，所以过滤条件只能用非空列表整体替换，无法用空数组清空。
+- 读回时 `AutomationRuleItem.WarRoomTriggerEnabled` 恒有值（没有该触发器时为 false），`WarRoomTriggerID`、`WarRoomChannelIDs`、`WarRoomSeverities` 则为空（`""` / 空切片）。
+
+字段含义与触发时机见[自动化 · 作战室创建触发](/zh/ai-sre/automations#作战室创建触发war-room-created)。
+
 ### 规则分组
 
 `client.RuleFolders` 覆盖 `/monit/folder/*` 的 6 个操作：`ReadList`（`POST /monit/folder/list`）与 `ReadHealth`（`POST /monit/folder/health`）不带请求体——前者返回扁平的 `[]FolderItem`，要用 `ParentID` / `ParentPath` 自行在客户端重建目录树（仪表盘与告警规则共用这棵树），后者返回 `FolderHealthOutput`，其中 `FolderHealthItem.HasIssue` 标记该分组或其可见后代是否有活跃告警或规则运行问题；写入侧 `WriteCreate`（`/monit/folder/create`）与 `WriteUpdate`（`/monit/folder/update`）返回 `FolderItem`，`WriteMove`（`/monit/folder/move`）与 `WriteDelete`（`/monit/folder/delete`）只返回 `*Response`。相关导出类型还有 `FolderCreateRequest`、`FolderUpdateRequest`、`FolderMoveRequest` 与 `FolderDeleteRequest`。
@@ -245,7 +254,7 @@ out, _, err := client.DataSources.ToolsInvoke(ctx, req)
 
 ### Prometheus 标签值
 
-`client.DataSources.ReadPrometheusLabelValues(ctx, dataSourceID, labelName)`（`GET /monit/prometheus/api/v1/label/{label_name}/values`，`monit-prometheus-read-label-values`）通过监控代理列出某个 Prometheus 兼容数据源上单个标签的全部取值：标签名放在 URL 路径上（SDK 会做路径转义），目标数据源由 `X-DSID` 请求头指定——SDK 用 `dataSourceID` 自动设置该头（传 `0` 或 `labelName` 为空都直接报错），ID 从 `/monit/datasource/list` 获取，必须是当前账户下 Prometheus 兼容类型的数据源。这是唯一一个成功响应体不是 Flashduty `{request_id, data}` 信封的方法：响应直接解码为 `PrometheusLabelValuesResponse`（`status` 为 `success` 时 `data` 是标签值字符串数组；为 `error` 时携带 `errorType` 与 `error`）。未到达数据源前的失败（`X-DSID` 缺失或非法、数据源不存在、数据源不是 Prometheus 类型）以 `text/plain` 返回，数据源自身的失败则用它自己的 JSON 错误形态；SDK 对两者一视同仁，把原始响应体原样放进 `*ErrorResponse.Message`。受支持的部署要求 monit-edge v0.35.0 及以上版本。
+`client.DataSources.ReadPrometheusLabelValues(ctx, dataSourceID, labelName)`（`GET /monit/prometheus/api/v1/label/{label_name}/values`，`monit-prometheus-read-label-values`）通过监控代理列出某个 Prometheus 兼容数据源上单个标签的全部取值：标签名放在 URL 路径上（SDK 会做路径转义），目标数据源由 `X-DSID` 请求头指定——SDK 用 `dataSourceID` 自动设置该头（传 `0` 或 `labelName` 为空都直接报错），ID 从 `/monit/datasource/list` 获取，必须是当前账户下 Prometheus 兼容类型的数据源。这是唯一一个成功响应体不是 Flashduty `{request_id, data}` 信封的方法：响应直接解码为 `PrometheusLabelValuesResponse`（`status` 为 `success` 时 `data` 是标签值字符串数组；为 `error` 时携带 `errorType` 与 `error`）。未到达数据源前的失败（`X-DSID` 非法、数据源不存在、数据源不是 Prometheus 类型）以 `text/plain` 返回，数据源自身的失败则用它自己的 JSON 错误形态；SDK 对两者一视同仁，把原始响应体原样放进 `*ErrorResponse.Message`。有两类情况不返回错误：请求不带 `X-DSID`，以及该数据源所在 monit-edge 集群里有实例版本低于 v0.35.0（不支持资源代理）——两者都返回 200 与空的 Prometheus 兼容结果，`/api/v1/labels`、`/api/v1/series`、`/api/v1/label/{label_name}/values` 的 `data` 是空数组，`/api/v1/metadata` 的 `data` 是空对象。也就是说读到空结果时不要当成「这个标签没有取值」，先确认 `X-DSID` 是否带上、edge 是否需要升级。受支持的部署要求 monit-edge v0.35.0 及以上版本。
 
 ### 数据源配置
 

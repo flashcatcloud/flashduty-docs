@@ -16,7 +16,7 @@ Get an integration push URL in either of the two ways below. **Choose the AWS Ev
 ### Use a dedicated integration
 
 1. In the Flashduty console, go to **Channels** and open a channel
-2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add an integration**
+2. Go to **Settings** → **Integrations** → **Dedicated integrations** and click **Add integration**
 3. Select **AWS EventBridge** and click **Save**
 4. Open the generated integration card and copy the **Push URL**, in the form `https://api.flashcat.cloud/event/push/alert/aws/eventbridge?integration_key=<integration key>`
 
@@ -31,12 +31,69 @@ Get an integration push URL in either of the two ways below. **Choose the AWS Ev
 
 ## Configure in AWS
 
-Inspector emits events to the default event bus of each Region where it is enabled, so create the rule in every such Region.
+<Steps>
+<Step title="Create an API destination that points to Flashduty in Amazon EventBridge">
 
-1. Follow "Option 1: API destination" in the [AWS EventBridge integration](/en/on-call/integration/alert-integration/alert-sources/aws-eventbridge) to create the Connection and API destination, using the Flashduty push URL as the endpoint. "Option 2: SNS topic" also works
-2. In the EventBridge console, select **Rules** → **Create rule** and choose **Rule with an event pattern** for **Rule type**
-3. In **Event pattern**, choose **Custom patterns (JSON editor)** and paste the pattern below
-4. For **Target types** choose **EventBridge API destination** and select the API destination created above
+<Tabs>
+<Tab title="API destination (recommended)">
+
+**Where**: Amazon EventBridge › Integration › API destinations › Connections › Create connection
+
+| Field | Value |
+| --- | --- |
+| Connection name (required) | `Flashduty` |
+| Destination type (required, under Authorization) | `Other` |
+| Authorization type (required) | `API Key` |
+| API key name (required) | `Flashduty` |
+| Value (required) | `{integration_key}`, the `integration_key` in the push URL |
+
+Click **Create** to save.
+
+**Where**: Amazon EventBridge › Integration › API destinations › Create API destination
+
+| Field | Value |
+| --- | --- |
+| Name (required) | `Flashduty` |
+| API destination endpoint (required) | `{integration_url}` |
+| HTTP method (required) | `POST` |
+| Connection type (required) | `Use an existing connection`, then select the `Flashduty` connection created above |
+
+Click **Create** to save.
+
+</Tab>
+<Tab title="SNS topic">
+
+**Where**: Amazon SNS › Subscriptions › Create subscription (if the topic does not exist yet, go to Topics › Create topic first and set `Type` to `Standard`)
+
+| Field | Value |
+| --- | --- |
+| Topic ARN (required) | The SNS topic that forwards EventBridge events |
+| Protocol (required) | `HTTPS` |
+| Endpoint (required) | `{integration_url}`, which must be the push URL of **this** integration |
+
+Click **Create subscription** and wait until the subscription status is `Confirmed`. Flashduty only visits subscription confirmation URLs on `sns.<region>.amazonaws.com`, `sns.<region>.amazonaws.com.cn` and `sns.<region>.amazonaws.eu`. For the full SNS topic and subscription steps, see the [AWS CloudWatch integration](/en/on-call/integration/alert-integration/alert-sources/aws-cloudwatch).
+
+</Tab>
+</Tabs>
+
+</Step>
+<Step title="Create a rule for Inspector events in Amazon EventBridge">
+
+**Where**: Amazon EventBridge › Rules › Create rule › Advanced Builder
+
+| Field | Value |
+| --- | --- |
+| Builder (when the console offers a choice) | `Advanced Builder` |
+| Name (required) | A name of your choice, for example `Flashduty-Inspector` |
+| Event bus | `AWS default event bus` |
+| Rule type (required) | `Rule with an event pattern`, then click **Next** |
+| Event source (required) | `AWS events or EventBridge partner events` |
+| Creation method / Method (required) | `Custom pattern (JSON editor)` |
+| Event pattern (required) | Paste the event pattern below, then click **Next** |
+| Target type (required) | `EventBridge API destination`, choose `Use an existing API destination` and the `Flashduty` one created in the previous step (for the SNS method choose `AWS service` › `SNS topic` and that topic) |
+| Execution role (required) | `Create a new role for this specific resource` |
+| Input transformer | Do not configure; send the full event |
+
 
 Event pattern:
 
@@ -64,6 +121,29 @@ Do not add `"status": ["ACTIVE"]` to the pattern. The notification example in th
 </Warning>
 
 Other Inspector events (`Inspector2 Scan`, `Inspector2 Coverage`, `Inspector2 AutoEnable`) are not findings and should not be forwarded to Flashduty; the `detail-type` above already excludes them.
+
+Inspector emits events to the default event bus of each Region where it is enabled, so create the rule in every such Region.
+
+</Step>
+<Step title="Send a test Inspector event and confirm">
+
+**Where**: A terminal that can reach the Flashduty push URL
+
+The rule only forwards events that AWS really emits. To verify right away, POST a test event shaped like the real one to the push URL:
+
+```bash
+curl -X POST '{integration_url}' \
+  -H 'Content-Type: application/json' \
+  -d '{"version":"0","id":"flashduty-test-1","detail-type":"Inspector2 Finding","source":"aws.inspector2","account":"123456789012","region":"us-east-1","resources":[],"detail":{"findingArn":"arn:aws:inspector2:us-east-1:123456789012:finding/flashduty-test","status":"ACTIVE","severity":"HIGH","type":"PACKAGE_VULNERABILITY","title":"Flashduty integration test","awsAccountId":"123456789012","resources":[{"id":"i-0123456789abcdef0","type":"AWS_EC2_INSTANCE"}]}}'
+```
+
+Send it again with `status` set to `CLOSED` to confirm that the alert recovers automatically. A few seconds later, go back to Flashduty. The integration shows a **latest event time**, which means the setup works.
+{/* console:
+The checklist item "Receive the first event" is marked done at the same time.
+*/}
+
+</Step>
+</Steps>
 
 ## Field mapping
 

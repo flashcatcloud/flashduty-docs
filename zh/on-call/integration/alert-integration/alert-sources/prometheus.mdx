@@ -34,8 +34,8 @@ keywords: ["告警集成", "Prometheus", "监控告警", "数据接入"]
   <Accordion title="查看专属集成的配置步骤">
   
   1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
-  2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
-  3. 选择 **Prometheus** 集成，点击 **保存**，生成卡片。
+  2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增集成**
+  3. 选择 **Prometheus Alertmanager** 集成，点击 **保存**，生成卡片。
   4. 打开生成的集成卡片，复制 **推送地址**
     
 </Accordion>
@@ -49,7 +49,7 @@ keywords: ["告警集成", "Prometheus", "监控告警", "数据接入"]
   <Accordion title="查看共享集成的配置步骤">
   
   1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
-  2. 选择 **Prometheus** 集成：
+  2. 选择 **Prometheus Alertmanager** 集成：
         - **集成名称**：为当前集成定义一个名称。
   3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
   4. 点击 **保存**，复制生成的 **推送地址**
@@ -58,96 +58,120 @@ keywords: ["告警集成", "Prometheus", "监控告警", "数据接入"]
 </AccordionGroup>
 </div>
 
-### 在 AlertManager
+## 在 Alertmanager 中配置
 
-#### 步骤 1：配置 Alertmanager
+<Steps>
+<Step title="在 alertmanager.yml 中添加 Flashduty receiver">
 
-<div className="md-block">
+**操作路径**：alertmanager.yml › receivers（配置文件一般位于 Alertmanager 部署根目录）
 
-1. 登录您的 Alertmanager 实例
-2. 找到并打开配置文件，一般为 Alertmanager 部署根目录下的 alertmanager.yml
-3. 在 receivers 配置部分，增加一个 Flashduty  webhook 类型的 receiver，如下
+| 配置项 | 填写 |
+| --- | --- |
+| `name`（必填） | receiver 名称，例如 `flashcat`，下一步的路由引用此名称 |
+| `webhook_configs.url`（必填） | `{integration_url}`，推送地址的 query string 中须携带 `integration_key` |
+| `webhook_configs.send_resolved`（可选） | `true`，告警恢复时同时推送恢复事件（Alertmanager 默认值即为 `true`） |
+| `webhook_configs.http_config.proxy_url`（可选） | 需要通过代理访问 Flashduty 时填写代理地址 |
 
-   ```
-   receivers:
-   - name: 'flashcat'
-     webhook_configs:
-     - url: '<您的集成推送地址>'
-       send_resolved: true
+```yaml alertmanager.yml
+receivers:
+- name: 'flashcat'
+  webhook_configs:
+  - url: '{integration_url}'
+    send_resolved: true
+```
 
-   ```
+需要通过代理访问 Flashduty 时：
 
-   您需要替换 url 对应的参数值为集成的推送地址，注意 query string 参数部分需要携带 integration_key。
+```yaml alertmanager.yml
+receivers:
+- name: 'flashcat'
+  webhook_configs:
+  - url: '{integration_url}'
+    send_resolved: true
+    http_config:
+      proxy_url: 'http://proxyserver:port'
+```
 
-   如果您需要通过代理请求 Flashduty，可以额外设置 http_config 的 proxy_url 参数为代理地址：
-   
-      ```
-      receivers:
-      - name: 'flashcat'
-        webhook_configs:
-        - url: '<您的集成推送地址>'
-          send_resolved: true
-          http_config:
-          proxy_url: 'http://proxyserver:port'
+</Step>
+<Step title="在 alertmanager.yml 中把告警路由到 Flashduty">
 
-      ```
+**操作路径**：alertmanager.yml › route
 
-4. 在 route 配置部分，更改默认 route 指定 receiver 为刚才配置的 webhook，如下：
+所有告警只发往 Flashduty 时，将默认路由的 receiver 改为上一步的 receiver：
 
-   ```route config
-   route:
-     receiver: 'flashcat'
-   ```
+```yaml alertmanager.yml
+route:
+  receiver: 'flashcat'
+```
 
-   如果希望不影响之前的推送渠道，您也可以把 receiver 添加到 route 的子路由中
-    
-    ```route config
-   route:
-     receiver: 'feishu'
-     - routes:
-       receiver: 'flashcat'
-    ```
+需要保留原有推送渠道时，把 Flashduty 加为第一条子路由并设置 `continue: true`。子路由默认在第一条匹配后停止，且有子路由匹配时默认路由的 receiver 不再收到告警，所以原渠道也要作为子路由列出：
 
+```yaml alertmanager.yml
+route:
+  receiver: 'feishu'
+  routes:
+  - receiver: 'flashcat'
+    continue: true
+  - receiver: 'feishu'
+```
 
-5. 保存配置文件
-6. 通过重新加载配置文件（向进程发送 SIGHUP 信号，或 POST 请求/-/reload api），使更改生效
+</Step>
+<Step title="在 Alertmanager 主机上重新加载配置">
 
-</div>
+**操作路径**：Alertmanager 所在主机的终端
 
-#### 步骤 2：配置 Timestamp
+保存配置文件，检查语法后重新加载，以下两种方式任选其一：
 
-默认情况下，系统使用当前时间作为事件触发时间。如果您希望自定义时间，您可以额外设定一个 timestamp 字段来标识每一次告警发生的准确时间。
+```bash
+amtool check-config alertmanager.yml
 
-<div className="md-block">
+# 方式一：调用 reload 接口
+curl -X POST http://localhost:9093/-/reload
 
-1. 登录您的 Prometheus Server 实例
-2. 打开告警规则相关配置文件
-3. 对于每一条告警规则，更改 annotations 部分，添加 timestamp 字段，如下：
+# 方式二：向进程发送 SIGHUP 信号
+kill -HUP $(pidof alertmanager)
+```
 
-   ```
-   annotations:
-     timestamp: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'
-     ...
-   ```
+</Step>
+<Step title="在 Alertmanager 中发送测试告警并确认">
 
-4. 保存配置文件
-5. 通过重新加载配置文件（向进程发送 SIGHUP 信号，或 POST 请求/-/reload api），使更改生效
+**操作路径**：Alertmanager 所在主机的终端
 
-</div>
+```bash
+amtool alert add alertname=FlashdutyTest severity=warning \
+  --annotation=summary="Flashduty integration test" \
+  --alertmanager.url=http://localhost:9093
+```
 
-### 在火山引擎托管 Prometheus（VMP）
+Alertmanager 按 `group_wait`（默认 30 秒）等待后推送。随后回到 Flashduty，集成显示 **最新事件时间**，说明配置成功。
+{/* console:
+接入清单中的「收到第一个事件」同时变为已完成。
+*/}
+
+</Step>
+</Steps>
+
+## 自定义事件时间
+
+默认情况下，系统使用当前时间作为事件触发时间。如果您希望使用告警实际发生的时间，在 Prometheus 告警规则文件中为每条规则的 `annotations` 添加 `timestamp` 字段：
+
+```yaml
+annotations:
+  timestamp: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'
+  ...
+```
+
+保存后重新加载 Prometheus 配置（向进程发送 SIGHUP 信号，或 POST 请求 `/-/reload` 接口）使更改生效。
+
+## 火山引擎托管 Prometheus（VMP）
 
 VMP 的通用 Webhook 按 Alertmanager 格式推送告警，直接使用本集成的推送地址即可。
-
-<div className="md-block">
 
 1. 登录火山引擎托管 Prometheus 控制台，进入 **告警中心** → **告警通知策略**，选择 **通知对象** 页签
 2. 点击 **创建通知对象**，对象类型选择 **联系人**，Webhook 勾选 **通用 Webhook**（不要选飞书、钉钉或企业微信机器人，格式不兼容），地址填写集成推送地址，**Token 保持不勾选**
 3. 将该联系人加入一个联系人组（VMP 只能按联系人组配置通知策略）
 4. 在 **告警通知策略** 中创建或编辑策略，通知对象选择该联系人组
 5. 在告警规则的告警通知配置中选择该通知策略，保存，完成
-
-</div>
 
 <Note>
 火山引擎正在将 VMP 的告警通知功能迁移至云监控告警中心。根据火山引擎公告，2026 年 10 月 12 日后，系统将对未完成迁移的告警配置执行自动迁移，原 VMP 告警通知相关接口将逐步下线。迁移后，VMP 告警可通过已有的 [火山引擎云监控告警事件](/zh/on-call/integration/alert-integration/alert-sources/volcengine-cm-metrics) 集成接入 Flashduty；也可以在告警中心的 **通知回调** 模板中输出 Alertmanager 格式的 Webhook 报文，再推送到本集成。
@@ -187,7 +211,7 @@ Prometheus 到 Flashduty On-call 告警等级映射关系：
   **在 AlertManager**
 
   1. 确认 AlertManager 是否产生了新告警。如果没有，请等待新告警触发后再验证。
-  2. 打开 AlertManager 配置文件，如果您设置了子路由，请确保您的路由设置正确（例如前面的路由设置了 continue，AlertManager 会跳过后续子路由。建议仅设置一个指向 Flashduty On-call 的默认路由）。同时验证，目标回调地址是否和集成推送地址完全匹配。如果不匹配，请修改 **告警规则**后重新验证。
+  2. 打开 AlertManager 配置文件，如果您设置了子路由，请确保您的路由设置正确（子路由默认在第一条匹配后停止，排在 Flashduty 前面且未设置 `continue: true` 的子路由会让告警到不了 Flashduty。建议仅设置一个指向 Flashduty On-call 的默认路由）。同时验证，目标回调地址是否和集成推送地址完全匹配。如果不匹配，请修改配置后重新验证。
   3. 如果匹配，请确认 AlertManager 实例可以访问 api.flashcat.cloud。如果无法访问，请为实例开通外网，或单独放行 Flashduty On-call 的域名。
   4. 如果网络正常，请继续查看 AlertManager 的错误日志。
 
@@ -196,6 +220,3 @@ Prometheus 到 Flashduty On-call 告警等级映射关系：
     
 </Accordion>
 </AccordionGroup>
-
-
-

@@ -18,7 +18,7 @@ keywords: ["告警集成", "Ofelia", "定时任务", "Docker", "Webhook", "cron"
 ### 使用专属集成
 
 1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
-2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增一个集成**
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增集成**
 3. 选择 **Ofelia**，点击 **保存**
 4. 打开生成的集成卡片，复制 **推送地址**
 
@@ -36,13 +36,24 @@ keywords: ["告警集成", "Ofelia", "定时任务", "Docker", "Webhook", "cron"
 Ofelia 通过 Docker API 工作，即使只运行 `job-local` 任务也是如此，所以运行 Ofelia 的容器必须挂载 `/var/run/docker.sock`；缺少它时，Ofelia 启动即退出。使用 `docker run` 时加 `-v /var/run/docker.sock:/var/run/docker.sock:ro`。
 
 <Steps>
-<Step title="定义 Webhook">
+<Step title="在 Ofelia 中定义 Webhook">
 
-在 Ofelia 的配置文件中新增一个 Webhook，只写 `url` 和 `trigger`，不要写 `preset`。Ofelia 会使用内置的 `json-post` 预设，向该地址 POST 一个 JSON 请求。
+<Tabs>
+<Tab title="INI 配置文件">
+
+**操作路径**：`/etc/ofelia/config.ini` › `[webhook "flashduty"]`
+
+`/etc/ofelia/config.ini` 是 Ofelia 的默认配置文件（官方镜像也读取该路径）；如果用 `--config` 指定了其他文件，请改在该文件中配置。
+
+| 键 | 填写 |
+| --- | --- |
+| `url`（必填） | `{integration_url}` |
+| `trigger`（必填） | `always` |
+| `preset` | 不要设置。Ofelia 会使用内置的 `json-post` 预设，向该地址 POST 一个 JSON 请求 |
 
 ```ini
 [webhook "flashduty"]
-url = <Flashduty 推送地址>
+url = {integration_url}
 trigger = always
 ```
 
@@ -52,7 +63,17 @@ trigger = always
 
 如果您在 `[global]` 中设置了 `webhook-allowed-hosts`，需要把 `api.flashcat.cloud` 加入列表。
 
-如果用 Docker 标签定义，标签必须写在带有 `ofelia.service: "true"` 的 Ofelia 服务容器上，其他容器上的 Webhook 标签会被忽略：
+</Tab>
+<Tab title="Docker 标签">
+
+**操作路径**：`docker-compose.yml` › `services.ofelia` › `labels`
+
+标签必须写在带有 `ofelia.service: "true"` 的 Ofelia 服务容器上，其他容器上的 Webhook 标签会被忽略；INI 与标签中存在同名 Webhook 时以 INI 为准。
+
+| 标签 | 填写 |
+| --- | --- |
+| `ofelia.webhook.flashduty.url`（必填） | `{integration_url}` |
+| `ofelia.webhook.flashduty.trigger`（必填） | `always` |
 
 ```yaml
 services:
@@ -64,15 +85,20 @@ services:
     labels:
       ofelia.enabled: "true"
       ofelia.service: "true"
-      ofelia.webhook.flashduty.url: "<Flashduty 推送地址>"
+      ofelia.webhook.flashduty.url: "{integration_url}"
       ofelia.webhook.flashduty.trigger: "always"
 ```
 
+</Tab>
+</Tabs>
+
 </Step>
 
-<Step title="把 Webhook 挂到任务上">
+<Step title="在 Ofelia 中把 Webhook 挂到任务上">
 
-在需要监控的任务上用 `webhooks` 指定刚才定义的名称：
+**操作路径**：`/etc/ofelia/config.ini` › `[job-exec "backup-database"]` › `webhooks`
+
+在需要监控的任务段落中，用 `webhooks` 填写上一步定义的 Webhook 名称（多个名称用逗号分隔）：
 
 ```ini
 [job-exec "backup-database"]
@@ -82,19 +108,27 @@ command = pg_dump -U postgres mydb > /backup/db.sql
 webhooks = flashduty
 ```
 
-Docker 标签写法为 `ofelia.job-exec.backup-database.webhooks: "flashduty"`。想让所有任务都发送，可以在 `[global]` 中设置 `webhook-webhooks = flashduty`（标签为 `ofelia.webhook-webhooks`）。
+- Docker 标签写法：在任务所属容器上设置 `ofelia.job-exec.backup-database.webhooks: "flashduty"`
+- 让所有任务都发送：在 `[global]` 中设置 `webhook-webhooks = flashduty`（标签为 `ofelia.webhook-webhooks`）
 
 </Step>
 
-<Step title="固定主机名">
+<Step title="在 Ofelia 中固定主机名">
 
-Flashduty 用主机名区分不同机器上的同名任务。Ofelia 运行在容器里时，主机名默认是容器 ID，重建容器后会变，已打开的告警就无法被新的成功执行恢复。请在 Compose 中设置 `hostname`（如上例），或在 `docker run` 中加 `--hostname`。
+**操作路径**：`docker-compose.yml` › `services.ofelia` › `hostname`（`docker run` 使用 `--hostname`）
+
+Flashduty 用主机名区分不同机器上的同名任务。Ofelia 运行在容器里时，主机名默认是容器 ID，重建容器后会变，已打开的告警就无法被新的成功执行恢复。请设置一个固定值，例如 `hostname: ofelia-prod-01`。
 
 </Step>
 
 <Step title="验证生命周期">
 
-让一个任务真正失败一次（例如临时把命令改成 `false`），确认 Flashduty 收到 Critical 告警；再把命令改回去，等下一次执行成功，确认原告警恢复。Ofelia 没有测试发送功能，上述真实执行是唯一的验证方式。
+**操作路径**：Ofelia 所在主机上被监控任务的 `command`
+
+Ofelia 没有测试发送功能，只能用真实执行验证：
+
+1. 让一个任务真正失败一次（例如临时把 `command` 改成 `false`），确认 Flashduty 收到 Critical 告警，检查清单中的「收到第一个事件」变绿
+2. 把命令改回去，等下一次执行成功，确认原告警恢复
 
 </Step>
 </Steps>

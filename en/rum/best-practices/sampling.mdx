@@ -2,7 +2,7 @@
 title: "Understanding RUM sampling: mechanism, rules, and best practices"
 sidebarTitle: "Sampling strategy"
 description: "Understand how RUM session sampling works, and learn best practices for choosing, dynamically adjusting, and customizing sampling rates."
-keywords: ["RUM", "sampling", "sample rate", "sessionSampleRate", "best practices", "frontend monitoring"]
+keywords: ["RUM", "sampling", "sample rate", "sessionSampleRate", "remote configuration", "beforeSampling", "best practices", "frontend monitoring"]
 ---
 
 Sampling determines how much real user data gets collected and reported. Set the sampling rate too high and you pay for data you don't need; set it too low and you may miss critical issues. This article explains how RUM sampling works and provides best practices for choosing and dynamically managing sampling rates.
@@ -48,9 +48,9 @@ This means that after you change the sampling rate, **new sessions immediately f
 
 Each session's draw is independent, with no global coordination. A 20% sampling rate is an **expected value**. The more traffic you have, the closer the actual ratio gets to 20% (law of large numbers). With low traffic, it fluctuates: collecting 13 or 28 out of 100 sessions is normal.
 
-### 4. The sampling rate is frozen at initialization
+### 4. The sampling rate is set when a session is drawn
 
-`sessionSampleRate` is fixed when `init()` is called. It cannot be changed at runtime, and `init()` cannot be called a second time within a page's lifecycle. To change the sampling rate, the next initialization (on the web, the next page load) must receive the new value.
+Each new session is drawn at the rate in effect at that moment: the value delivered from the console when [remote configuration](#remote-config) is on, otherwise the `sessionSampleRate` passed to `init()`. `init()` can't be called a second time while the page or app is running. Without remote configuration, changing the sampling rate means the next initialization (on the web, the next page load) must receive the new value.
 
 ## Choosing a sampling rate
 
@@ -67,64 +67,119 @@ Each session's draw is independent, with no global coordination. A 20% sampling 
 Errors are low-frequency events. If your main goal is error monitoring rather than performance statistics, use a higher sampling rate. A 20% sample represents performance metrics well, but an error that affects only 1% of users can take a long time to show up.
 </Tip>
 
-## Best practice 1: adjust the sampling rate with remote configuration
+<span id="remote-config"></span>
 
-A sampling rate hardcoded in your source requires a release for every change. Instead, change the **Session sampling rate** on the [Remote configuration](/en/rum/quickstart/app-management#remote-configuration) tab in the console and publish it. No code change or release is needed.
+## Best practice 1: adjust sampling dynamically with remote configuration
 
-- **Prerequisite**: Set `remoteConfigurationEnabled: true` at SDK initialization (off by default). Browser, iOS, Android, HarmonyOS, Flutter, WeChat Mini Program, and Electron applications are supported.
-- **When it takes effect**: At the next new session. Running sessions keep their decision (rule 2). Clients usually switch within about 4 hours of a publish.
-- **Immediately**: Call the SDK's `stopSession()` to end the current session. The next session is decided under the new rate.
+A sampling rate hardcoded in your source requires a release for every change. With remote configuration on, you change sampling settings on the **Application management → Remote configuration** tab in the console and publish them. Clients pick them up without a code change or release. Typical uses:
+
+- Raise the session sample rate while a new version rolls out, then lower it back once it's stable.
+- Set it to 100 while you investigate a production issue, to capture as much evidence as possible.
+- Lower it when data volume spikes, or set it to 0 to stop collection in an emergency.
+- Lower the rate and turn on **Capture additional sessions on error** together, so sessions that weren't drawn still report the lead-up when they hit an error. See [best practice 3](#best-practice-3-full-error-capture-with-proportional-sampling-for-the-rest).
+
+<span id="remote-config-platforms"></span>
+
+### Enabling it and platform support
+
+Set `remoteConfigurationEnabled: true` at SDK initialization (off by default). On Android and HarmonyOS, call `.setRemoteConfigurationEnabled(true)`; on Electron, enable it in the main-process `init()`. Keep passing `sessionSampleRate` at initialization: the SDK uses it until the client first receives a configuration, and again after you disable remote configuration in the console.
+
+Each platform reads a different set of values. Values not listed for a platform have no effect there:
+
+| Platform | Minimum version | Values read |
+| --- | --- | --- |
+| Web (browser) | Web SDK 0.4.0 | Session sample rate, session replay sample rate, trace sample rate, replay privacy level, capture additional sessions on error, capture additional replays on error, custom configuration keys |
+| iOS | SDK 0.6.0 | Session sample rate, custom configuration keys; capture additional sessions on error needs 0.7.0 |
+| Android | SDK 0.7.0 | Session sample rate, custom configuration keys |
+| HarmonyOS | SDK 0.6.0 | Session sample rate, custom configuration keys; capture additional sessions on error needs 0.7.0 |
+| Flutter | `flashcat_flutter_plugin` 0.2.0 | Session sample rate, custom configuration keys |
+| WeChat Mini Program | `@flashcatcloud/miniprogram-rum` 0.2.0 | Session sample rate, custom configuration keys |
+| Electron | `@flashcatcloud/electron-sdk` 0.4.0 | Session sample rate, capture additional sessions on error, custom configuration keys |
+
+The React Native SDK doesn't support remote configuration; its sampling rate can only be set in `init()`.
+
+<span id="remote-config-timing"></span>
+
+### When changes take effect
+
+- **At the next new session**: the SDK requests the configuration at startup and whenever a new session starts. A new configuration applies to the next draw, and running sessions keep their decision (rule 2). Clients usually switch within about 4 hours of a publish.
+- **Stored locally**: the configuration is saved on the device, so the first session after the next launch (on the web, the next page load) is drawn with it right away. On the web, a page with nothing stored yet (such as a first visit or a private window) waits for the configuration for about a second at most before it starts collecting; uncaught errors raised during the wait aren't collected.
+- **Failures don't change anything**: if the request fails, times out, or returns something unreadable, the SDK keeps the configuration already in effect.
+
+These changes don't wait for the session to expire. The SDK ends the current session right away, and the next session is drawn under the new configuration:
+
+- The session sample rate is set to 0 (emergency stop), or raised from 0 to a non-zero value (resume).
+- On the web, the replay privacy level becomes stricter.
+
+All other changes wait for the next new session. If you need a change to apply right away, call the SDK's `stopSession()` to end the current session.
 
 <Warning>
 `stopSession()` splits one user's continuous activity into two sessions, which slightly inflates the session count and breaks session-duration statistics. Call it only when you need the change right away.
 </Warning>
 
-For minimum SDK versions, publishing, and rollback, see [Application management - Remote configuration](/en/rum/quickstart/app-management#remote-configuration).
+### Confirming the configuration is in effect
+
+After publishing, check **adoption** in the rollout panel on the **Remote configuration** tab. It shows the share of recently arrived sessions on each configuration version. If the status stays at **No configuration received**, the SDK usually has remote configuration disabled or is older than the minimum version above. For publishing, rollback, and adoption details, see [Application management - Remote configuration](/en/rum/quickstart/app-management#remote-configuration).
 
 ## Best practice 2: business-defined custom sampling
 
-The default random draw treats every user equally, but businesses often want differentiation: collect all VIP users, watch canary users closely, always sample users who recently hit errors. To do this, **move the draw from the SDK into your business code**. Your code decides whether the session is sampled and passes only `0` or `100` as `sessionSampleRate`, so it acts as an on/off switch.
+The default random draw treats every user the same, but businesses often want to differentiate: collect everything for VIP users, watch canary users closely, always collect users under investigation. The SDK provides these interfaces so your code decides each session's sampling rate:
+
+| Interface | What it does |
+| --- | --- |
+| `beforeSampling` | Initialization option. Called before each new session is drawn, with the rate about to apply and the custom configuration keys delivered from the console. Return a rate to override this draw, or return nothing to keep it |
+| `getRemoteConfig()` | Reads the custom configuration keys delivered from the console, at any time |
+| `setForcedSession()` | Collects the current user regardless of the sampling rate. If the current session isn't being collected, it switches to a collected session right away, and every later session is collected until the app process ends (on the web, until the current page closes) |
+
+Put the rule parameters (lists, switches, the bucketing salt) in the **custom configuration keys** of remote configuration and you can deliver them dynamically from the console: changing a list or turning on investigation mode needs no release, and takes effect at the next new session as described in [When changes take effect](#remote-config-timing). For example, publish these custom configuration keys in the console:
+
+```json
+{
+  "incidentMode": false,
+  "debugUsers": ["user_1024", "user_2048"],
+  "salt": "2026q4"
+}
+```
+
+The example below checks rules in priority order: investigation mode and key users are collected in full, and everyone else is bucketed by a hash of the user ID, with the bucket size taken straight from the **session sample rate** delivered from the console.
 
 <Tabs>
 <Tab title="Web">
 ```js
-function decideSampling(user, config) {
-  // Short-circuit rules, highest priority first
-  if (config.incidentMode) return true;           // incident investigation mode: collect everything
-  if (user.isInternal || user.isBeta) return true; // internal/canary users: always sample
-  if (user.isVip) return true;                     // key users: always sample
-  if (localStorage.getItem("rum-had-error")) return true; // hit an error last time: always sample
-
-  // Base rule: deterministic hash bucketing by userId
-  return hash(user.id + config.salt) % 100 < config.sampleRate;
-}
-
-const sampled = decideSampling(currentUser, cachedConfig);
-
 flashcatRum.init({
-  // ...other options
-  sessionSampleRate: sampled ? 100 : 0,
+  applicationId: "<APPLICATION_ID>",
+  clientToken: "<CLIENT_TOKEN>",
+  sessionSampleRate: 20, // Used until the console configuration arrives
+  remoteConfigurationEnabled: true,
+  beforeSampling: ({ sessionSampleRate, custom }) => {
+    if (custom?.incidentMode) return { sessionSampleRate: 100 }; // Investigation mode: collect everything
+    if (currentUser.isInternal || currentUser.isVip) return { sessionSampleRate: 100 }; // Key users: always collect
+    if (custom?.debugUsers?.includes(currentUser.id)) return { sessionSampleRate: 100 }; // Investigation list: always collect
+
+    // Base rule: deterministic hash bucketing by user ID; the bucket size follows the console's session sample rate
+    const inBucket = hash(currentUser.id + (custom?.salt ?? "")) % 100 < sessionSampleRate;
+    return { sessionSampleRate: inBucket ? 100 : 0 };
+  },
 });
 ```
 </Tab>
 
 <Tab title="Android">
 ```kotlin
-fun decideSampling(user: User, config: RumRemoteConfig): Boolean {
-    // Short-circuit rules, highest priority first
-    if (config.incidentMode) return true            // incident investigation mode: collect everything
-    if (user.isInternal || user.isBeta) return true // internal/canary users: always sample
-    if (user.isVip) return true                     // key users: always sample
-    if (prefs.getBoolean("rum_had_error", false)) return true // hit an error last time: always sample
-
-    // Base rule: deterministic hash bucketing by userId
-    return hash(user.id + config.salt) % 100 < config.sampleRate
-}
-
-val sampled = decideSampling(currentUser, cachedConfig)
-
 val rumConfig = RumConfiguration.Builder(applicationId)
-    .setSessionSampleRate(if (sampled) 100f else 0f)
+    .setSessionSampleRate(20f)            // Used until the console configuration arrives
+    .setRemoteConfigurationEnabled(true)
+    .setBeforeSampling { context ->
+        val custom = context.custom
+        val user = currentUser
+        when {
+            custom?.get("incidentMode") == true -> 100f            // Investigation mode: collect everything
+            user.isInternal || user.isVip -> 100f                  // Key users: always collect
+            (custom?.get("debugUsers") as? List<*>)?.contains(user.id) == true -> 100f // Investigation list: always collect
+            // Base rule: deterministic hash bucketing by user ID; the bucket size follows the console's session sample rate
+            else -> if (hash(user.id + (custom?.get("salt") ?: "")) % 100 < context.sessionSampleRate) 100f else 0f
+        }
+    }
     .build()
 Rum.enable(rumConfig)
 ```
@@ -132,25 +187,34 @@ Rum.enable(rumConfig)
 
 <Tab title="iOS">
 ```swift
-func decideSampling(user: User, config: RumRemoteConfig) -> Bool {
-    // Short-circuit rules, highest priority first
-    if config.incidentMode { return true }            // incident investigation mode: collect everything
-    if user.isInternal || user.isBeta { return true } // internal/canary users: always sample
-    if user.isVip { return true }                     // key users: always sample
-    if UserDefaults.standard.bool(forKey: "rumHadError") { return true } // hit an error last time: always sample
+let rumConfig = RUM.Configuration(
+    applicationID: "<RUM_APPLICATION_ID>",
+    sessionSampleRate: 20,                // Used until the console configuration arrives
+    remoteConfigurationEnabled: true,
+    beforeSampling: { context in
+        let custom = context.custom
+        let user = currentUser
+        if custom?["incidentMode"] as? Bool == true { return 100 }   // Investigation mode: collect everything
+        if user.isInternal || user.isVip { return 100 }              // Key users: always collect
+        if (custom?["debugUsers"] as? [String])?.contains(user.id) == true { return 100 } // Investigation list: always collect
 
-    // Base rule: deterministic hash bucketing by userId
-    return hash(user.id + config.salt) % 100 < config.sampleRate
-}
-
-let sampled = decideSampling(user: currentUser, config: cachedConfig)
-
-var rumConfig = RUM.Configuration(applicationID: "<RUM_APPLICATION_ID>")
-rumConfig.sessionSampleRate = sampled ? 100 : 0
+        // Base rule: deterministic hash bucketing by user ID; the bucket size follows the console's session sample rate
+        let salt = custom?["salt"] as? String ?? ""
+        return Float(hash(user.id + salt) % 100) < context.sessionSampleRate ? 100 : 0
+    }
+)
 RUM.enable(with: rumConfig)
 ```
 </Tab>
 </Tabs>
+
+Flutter, HarmonyOS, and WeChat Mini Program provide the same `beforeSampling`, `getRemoteConfig()`, and `setForcedSession()`; see each platform's advanced configuration page. The Electron and React Native SDKs have no `beforeSampling`: decide before `init()` yourself, then set `sessionSampleRate` to `0` or `100`.
+
+When support or engineering needs to look into one user right away, you can also call `setForcedSession()` from your code instead of adding the user to `debugUsers`, for example when the user submits feedback:
+
+```js
+flashcatRum.setForcedSession();
+```
 
 ### Why hash bucketing instead of random numbers
 
@@ -161,8 +225,9 @@ The base rule uses `hash(userId) % 100` instead of `Math.random()`, which brings
 
 ### Caveats
 
-- **The decision must be stable within a session.** If you draw with `Math.random()` on every page load, pages in the same session can disagree, and the SDK honors only the session's first decision. The symptom is "configured 100 but nothing gets reported", which is hard to debug. Deterministic hashing avoids this by construction.
-- **Rule changes also require switching sessions.** When a user moves from "not sampled" to "sampled", on web / Mini Program call `stopSession()` once when the decision differs from the cached one. On mobile, the change takes effect at the next cold start.
+- **Keep the callback light and deterministic.** `beforeSampling` runs synchronously while a session is being created, so it must not make network requests or block, and the same input should give the same result. Drawing with `Math.random()` makes the same user's decision flip back and forth; deterministic hashing avoids this by construction. If the callback returns a value outside 0–100 or throws, the SDK keeps the incoming rate.
+- **Rule changes take effect at the next new session.** When a user moves from the "not sampled" bucket to the "sampled" one, the running session isn't re-decided. To apply it right away, call `setForcedSession()` or `stopSession()`.
+- **Custom configuration keys are public.** They're delivered to clients, and anyone holding the client token can read them. Never put secrets, access tokens, or personally sensitive information in them. Lists such as `debugUsers` should hold only user IDs that can't be traced back to a person.
 - **Use `sessionSampleRate: 0` instead of skipping `init()`.** Skipping initialization breaks `addAction` / `addError` calls across your code and forces null checks everywhere. Passing 0 initializes a silent SDK and keeps one code path.
 - **Platform-side data reflects what was actually collected.** With custom sampling, the platform can't know your true sampling ratio. The session volume you see is what was collected, and you can't extrapolate it to total traffic. If you need full-traffic estimates, compute them on your side based on your own sampling rules.
 
@@ -365,12 +430,16 @@ Compare it with the "report only errors" configuration. That one **turns non-err
 
 ## Platform support
 
-| Platform | When the sampling rate takes effect | Applying a new rate immediately |
-| --- | --- | --- |
-| Web (browser) | At `init()` on every page load | Supported, through `stopSession()` |
-| WeChat Mini Program | At `init()` on every cold start | Supported, through `stopSession()` |
-| iOS / Android | At initialization on app cold start | Next cold start by default |
-| React Native | At initialization on app cold start | Not supported; takes effect on next launch |
+| Platform | Remote configuration | `beforeSampling` / `setForcedSession()` | When a new sampling rate takes effect |
+| --- | --- | --- | --- |
+| Web (browser) | Supported | Supported | Next new session; right away when the rate crosses 0 or the privacy level becomes stricter |
+| WeChat Mini Program | Supported | Supported | Next new session; right away when the rate crosses 0 |
+| iOS / Android | Supported | Supported | Next new session; right away when the rate crosses 0 |
+| HarmonyOS / Flutter | Supported | Supported | Next new session; right away when the rate crosses 0 |
+| Electron | Supported | Not supported | Next new session; right away when the rate crosses 0 |
+| React Native | Not supported | Not supported | At initialization on the next app cold start |
+
+For minimum versions and the values each platform reads, see [Enabling it and platform support](#remote-config-platforms). Every platform can call `stopSession()` to end the current session so a new rate applies right away.
 
 ## FAQ
 

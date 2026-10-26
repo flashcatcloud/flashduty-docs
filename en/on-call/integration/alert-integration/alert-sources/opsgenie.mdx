@@ -16,7 +16,7 @@ You can get the push URL in either of two ways.
 ### Dedicated integration
 
 1. In the Flashduty console, select **Channels** and open a channel
-2. Select **Settings** → **Integrations** → **Dedicated Integrations**, then click **Add an Integration**
+2. Select **Settings** → **Integrations** → **Dedicated Integrations**, then click **Add integration**
 3. Select **Opsgenie Compatible** and click **Save**
 4. Open the generated integration card and copy the **Push URL**
 
@@ -34,7 +34,7 @@ You can get the push URL in either of two ways.
 The push URL has this format, with `integration_key` as part of the path:
 
 ```
-{api_host}/event/push/alert/opsgenie/<integration_key>/
+{api_host}/event/push/alert/opsgenie/{integration_key}/
 ```
 
 Opsgenie clients append paths such as `v2/alerts` and `v2/alerts/<alias>/close` to the API URL, which can drop an `integration_key` query parameter or put it in the wrong place, so Flashduty reads `integration_key` from the path. The `Authorization: GenieKey <key>` header is not used for authentication; if the client requires it, enter any non-empty value.
@@ -49,16 +49,34 @@ Supported endpoints:
 
 A successful request returns HTTP 202 and `{"result": "Request will be processed", "took": 0, "requestId": "..."}`, the same as Opsgenie.
 
-## Configure in Prometheus Alertmanager
+## Configure the alerting tool
 
-Add `opsgenie_configs` to a receiver in `alertmanager.yml` and set `api_url` to the push URL:
+The steps below use Prometheus Alertmanager and Grafana as examples; for other tools see [Other tools](#other-tools).
+
+<Steps>
+<Step title="Point the tool's Opsgenie address to Flashduty">
+
+<Tabs>
+<Tab title="Prometheus Alertmanager">
+
+**Where**: alertmanager.yml › receivers
+
+Add `opsgenie_configs` to a receiver:
+
+| Setting | Value |
+| --- | --- |
+| `name` (Required) | Receiver name, for example `flashduty`; the next step's route refers to it |
+| `opsgenie_configs.api_key` (Required) | Any non-empty value; Flashduty does not check it |
+| `opsgenie_configs.api_url` (Required) | `{api_host}/event/push/alert/opsgenie/{integration_key}/`, must end with `/` |
+| `opsgenie_configs.send_resolved` (Required) | `true`; otherwise no Close request is sent on recovery |
+| `opsgenie_configs.priority` (Optional) | Map labels to `P1` to `P5`, see the example below |
 
 ```yaml
 receivers:
   - name: flashduty
     opsgenie_configs:
       - api_key: any-non-empty-value
-        api_url: https://api.flashcat.cloud/event/push/alert/opsgenie/<integration_key>/
+        api_url: {api_host}/event/push/alert/opsgenie/{integration_key}/
         send_resolved: true
         priority: '{{ if eq .CommonLabels.severity "critical" }}P1{{ else }}P3{{ end }}'
 ```
@@ -72,41 +90,58 @@ receivers:
 - Without `priority`, Opsgenie's default `P3` applies, which is Warning
 - The Update Message and Update Description requests sent with `update_alerts: true` are accepted and ignored; the title and description update with the next Create request
 
-## Configure in Grafana
+</Tab>
+<Tab title="Grafana">
 
-<Steps>
-<Step title="Create an OpsGenie contact point">
+**Where**: Grafana › Alerts & IRM › Alerting › Contact points › + Add contact point (Grafana 12: Alerting › Notification configuration › Contact points › + New contact point)
 
-1. Go to **Alerting → Contact points** and click **+ Add contact point**
-2. Set **Integration** to **OpsGenie**
-3. Enter any non-empty value in **API Key**
-4. Set **Alert API URL** to the push URL followed by `v2/alerts`:
+| Field | Value |
+| --- | --- |
+| Integration (Required) | `OpsGenie` |
+| API Key (Required) | Any non-empty value |
+| Alert API URL (Required) | `{api_host}/event/push/alert/opsgenie/{integration_key}/v2/alerts`, the push URL followed by `v2/alerts` |
+| Auto close incidents (Required) | Select it; otherwise Grafana sends no Close request when the alert resolves |
+| Send notification tags as (Optional) | Keep the default **Tags**, or choose **Tags & Extra Properties** |
 
-   ```
-   https://api.flashcat.cloud/event/push/alert/opsgenie/<integration_key>/v2/alerts
-   ```
-
-5. Select **Auto close incidents**; otherwise Grafana sends no Close request when the alert resolves
-6. Keep **Send notification tags as** at the default **Tags**, or choose **Tags & Extra Properties**
+</Tab>
+</Tabs>
 
 </Step>
 
 <Step title="Route alerts to it">
 
+<Tabs>
+<Tab title="Prometheus Alertmanager">
+
+**Where**: alertmanager.yml › route
+
+In `route`, point the alerts you want to push at the receiver from the previous step, for example `receiver: 'flashduty'`, or add it as a sub-route. Save and reload the Alertmanager configuration.
+
+</Tab>
+<Tab title="Grafana">
+
+**Where**: Grafana › Alerts & IRM › Alerting › Notification policies (Grafana 12: under Alerting › Notification configuration)
+
 In **Notification policies**, route the alerts you want to push to this contact point.
+
+</Tab>
+</Tabs>
 
 </Step>
 
 <Step title="Verify the lifecycle">
 
-Let an alert rule go to Firing and confirm Flashduty receives the alert; then let the rule return to Normal and confirm the same alert recovers.
+Let an alert rule go to Firing and confirm Flashduty receives the alert; then let the rule recover and confirm the same alert recovers (Normal in Grafana).
+
+The contact point's **Test** button in Grafana only proves connectivity: it uses a new alias on every press, so each press opens a separate Warning alert in Flashduty that never recovers on its own. Close it by hand, and verify recovery with a real alert.
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
 
 </Step>
 </Steps>
 
 Grafana sends alert labels in `tags` as `key:value`, and Flashduty turns them back into labels of the same name. Grafana sends no `priority` by default, so `P3` (Warning) applies. To set the severity per rule, turn on **Override priority** in the contact point and add the label `og_priority` with a value from `P1` to `P5` to the alert rule.
-
-The contact point's **Test** button uses a new alias on every press, so each press opens a separate Warning alert in Flashduty that never recovers on its own. Close it by hand.
 
 ## Other tools
 

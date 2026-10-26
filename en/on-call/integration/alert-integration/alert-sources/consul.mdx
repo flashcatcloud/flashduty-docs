@@ -23,7 +23,7 @@ Choose this option if all alerts go to one channel. It's the simpler setup.
   <Accordion title="View dedicated integration setup steps">
 
   1. In the Flashduty console, select **Channel** and open a channel
-  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**
+  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add integration**
   3. Select **HashiCorp Consul**, then click **Save**
   4. Open the generated integration card and copy the **Push URL**
 
@@ -68,13 +68,27 @@ The watch sends the current state once as soon as it is loaded, so checks that a
 <Steps>
 <Step title="Choose the agent that runs the watch">
 
+**Where**: The host of a Consul agent
+
 The watch queries the health checks of the whole datacenter, so configure it on **one** agent: a server, or a dedicated client. Configuring the same watch on several agents does not create duplicate alerts (events for the same check merge), but it multiplies the event count of every alert.
 
 </Step>
 
 <Step title="Add the watch definition">
 
-In that agent's configuration directory, create a file named `flashduty-watch.json` with the content below, and replace `path` with the full push URL of your Flashduty integration (including the `integration_key` parameter):
+**Where**: The agent's configuration directory (for example `/etc/consul.d`) › `flashduty-watch.json`
+
+Create a file named `flashduty-watch.json` with the content below:
+
+| Parameter | Value |
+| :--- | :--- |
+| `type` (Required) | `checks` |
+| `handler_type` (Required) | `http` |
+| `http_handler_config.path` (Required) | `{integration_url}` |
+| `http_handler_config.method` (Required) | `POST` |
+| `http_handler_config.timeout` (Optional) | For example `10s` |
+| `filter` / `service` (Optional) | Narrow the watch to some checks, see the notes below |
+| `token` (Required when ACLs are enabled) | The ACL token |
 
 ```json
 {
@@ -83,7 +97,7 @@ In that agent's configuration directory, create a file named `flashduty-watch.js
       "type": "checks",
       "handler_type": "http",
       "http_handler_config": {
-        "path": "https://api.flashcat.cloud/event/push/alert/consul?integration_key=<integration key>",
+        "path": "{integration_url}",
         "method": "POST",
         "timeout": "10s"
       }
@@ -105,6 +119,8 @@ In that agent's configuration directory, create a file named `flashduty-watch.js
 
 <Step title="Reload the configuration">
 
+**Where**: A terminal on the host of the Consul agent
+
 ```bash
 consul reload
 ```
@@ -112,14 +128,16 @@ consul reload
 For a Docker deployment, put the file in the directory mounted at `/consul/config` in the container, then run:
 
 ```bash
-docker exec <container name> consul reload
+docker exec <container-name> consul reload
 ```
 
 Once loaded, the agent immediately sends the current state of all checks to Flashduty. If the agent log shows `http watch handler failed with output`, Flashduty rejected the request; the log line carries the HTTP status and the reason.
 
 </Step>
 
-<Step title="Verify an alert and its recovery">
+<Step title="Register a TTL check to verify an alert and its recovery">
+
+**Where**: A terminal on the host of the Consul agent (agent HTTP API)
 
 Consul has no test notification button. Register a TTL check to verify the setup instead. A TTL check starts as `critical`, so it raises an alert right away:
 
@@ -142,6 +160,11 @@ curl -X PUT http://127.0.0.1:8500/v1/agent/check/deregister/flashduty-test
 
 When ACLs are enabled, add `-H "X-Consul-Token: <ACL token>"` to each command.
 
+After a few seconds, go back to Flashduty. If the integration shows a **Latest event time**, the setup works.
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
+
 </Step>
 </Steps>
 
@@ -163,7 +186,7 @@ A watch only returns the checks of its own datacenter, and the payload does not 
 | :--- | :--- | :--- |
 | `critical` | Triggered | Critical |
 | `warning` | Triggered | Warning |
-| `passing` | Recovered | Keeps the severity from before recovery |
+| `passing` | Recovered | The alert keeps its severity from before recovery (the recovery event itself is recorded as Info and does not change the alert severity) |
 
 When a check moves between `warning` and `critical`, Flashduty keeps one alert per severity: `warning` turning `critical` creates a new Critical alert, and `passing` recovers both.
 

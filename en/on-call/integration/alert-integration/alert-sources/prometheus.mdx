@@ -33,8 +33,8 @@ Choose this option if all alerts go to one channel. It's the simpler setup.
   <Accordion title="View dedicated integration setup steps">
   
   1. In the Flashduty console, select **Channel** and open a channel
-  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add an integration**, and enter the integration page
-  3. Select **Prometheus** integration, click **Save** to generate a card
+  2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add integration**, and enter the integration page
+  3. Select **Prometheus Alertmanager** integration, click **Save** to generate a card
   4. Open the generated integration card and copy the **Push URL**
     
 </Accordion>
@@ -48,7 +48,7 @@ Choose this method when you need to route alert events to different channels bas
   <Accordion title="View shared integration setup steps">
   
   1. In the Flashduty console, go to **Integration Center → Alert Events**
-  2. Select **Prometheus** integration:
+  2. Select **Prometheus Alertmanager** integration:
         - **Integration Name**: Define a name for this integration
   3. Configure the default route and select a channel. You can add more rules under **Routing** after creation
   4. Click **Save** and copy the generated **Push URL**
@@ -57,95 +57,120 @@ Choose this method when you need to route alert events to different channels bas
 </AccordionGroup>
 </div>
 
-### In AlertManager
+## Configure Alertmanager
 
-#### Step 1: Configure Alertmanager
+<Steps>
+<Step title="Add a Flashduty receiver in alertmanager.yml">
 
-<div class="md-block">
+**Where**: alertmanager.yml › receivers (the file is usually in the Alertmanager deployment root directory)
 
-1. Log in to your Alertmanager instance
-2. Locate and open the configuration file, typically alertmanager.yml in the Alertmanager deployment root directory
-3. In the receivers configuration section, add a Flashduty webhook type receiver as follows:
+| Key | Value |
+| --- | --- |
+| `name` (required) | Receiver name, for example `flashcat`. The route in the next step refers to it |
+| `webhook_configs.url` (required) | `{integration_url}`. The query string of the push URL must carry `integration_key` |
+| `webhook_configs.send_resolved` (optional) | `true`, so recoveries are pushed as recovery events (Alertmanager defaults to `true`) |
+| `webhook_configs.http_config.proxy_url` (optional) | Your proxy address, if Alertmanager reaches Flashduty through a proxy |
 
-   ```
-   receivers:
-   - name: 'flashcat'
-     webhook_configs:
-     - url: '<Your Integration Push URL>'
-       send_resolved: true
+```yaml alertmanager.yml
+receivers:
+- name: 'flashcat'
+  webhook_configs:
+  - url: '{integration_url}'
+    send_resolved: true
+```
 
-   ```
+If Alertmanager reaches Flashduty through a proxy:
 
-   Replace the url parameter value with your integration push URL, ensuring the integration_key is included in the query string parameters.
+```yaml alertmanager.yml
+receivers:
+- name: 'flashcat'
+  webhook_configs:
+  - url: '{integration_url}'
+    send_resolved: true
+    http_config:
+      proxy_url: 'http://proxyserver:port'
+```
 
-   If you need to request Flashduty through a proxy, you can additionally set the http_config proxy_url parameter:
-   
-      ```
-      receivers:
-      - name: 'flashcat'
-        webhook_configs:
-        - url: '<Your Integration Push URL>'
-          send_resolved: true
-          http_config:
-          proxy_url: 'http://proxyserver:port'
+</Step>
+<Step title="Route alerts to Flashduty in alertmanager.yml">
 
-      ```
+**Where**: alertmanager.yml › route
 
-4. In the route configuration section, change the default route to specify the newly configured webhook receiver:
+To send all alerts to Flashduty only, set the default route's receiver to the receiver from the previous step:
 
-   ```route config
-   route:
-     receiver: 'flashcat'
-   ```
+```yaml alertmanager.yml
+route:
+  receiver: 'flashcat'
+```
 
-   If you don't want to affect existing push channels, you can add the receiver to a route's subroute:
-    
-    ```route config
-   route:
-     receiver: 'feishu'
-     - routes:
-       receiver: 'flashcat'
-    ```
+To keep your existing channels, add Flashduty as the first child route with `continue: true`. Child routes stop at the first match by default, and when any child route matches, the default route's receiver no longer gets the alert, so list your existing channel as a child route too:
 
-5. Save the configuration file
-6. Reload the configuration (by sending a SIGHUP signal to the process or POST request to /-/reload api)
+```yaml alertmanager.yml
+route:
+  receiver: 'feishu'
+  routes:
+  - receiver: 'flashcat'
+    continue: true
+  - receiver: 'feishu'
+```
 
-</div>
+</Step>
+<Step title="Reload the configuration on the Alertmanager host">
 
-#### Step 2: Configure timestamp
+**Where**: a terminal on the Alertmanager host
 
-By default, the system uses the current time as the event trigger time. If you want to customize the time, you can set an additional timestamp field to identify the exact time of each alert.
+Save the file, check it, and reload it in either of these ways:
 
-<div class="md-block">
+```bash
+amtool check-config alertmanager.yml
 
-1. Log in to your Prometheus Server instance
-2. Open the alert rules configuration file
-3. For each alert rule, modify the annotations section by adding a timestamp field:
+# Option 1: call the reload endpoint
+curl -X POST http://localhost:9093/-/reload
 
-   ```
-   annotations:
-     timestamp: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'
-     ...
-   ```
+# Option 2: send SIGHUP to the process
+kill -HUP $(pidof alertmanager)
+```
 
-4. Save the configuration file
-5. Reload the configuration (by sending a SIGHUP signal to the process or POST request to /-/reload api)
+</Step>
+<Step title="Send a test alert from Alertmanager and confirm">
 
-</div>
+**Where**: a terminal on the Alertmanager host
 
-### In Volcengine Managed Prometheus (VMP)
+```bash
+amtool alert add alertname=FlashdutyTest severity=warning \
+  --annotation=summary="Flashduty integration test" \
+  --alertmanager.url=http://localhost:9093
+```
+
+Alertmanager pushes the alert after `group_wait` (30 seconds by default). Then go back to Flashduty. If the integration shows a **Latest event time**, the setup works.
+{/* console:
+The checklist item "Receive the first event" is then complete as well.
+*/}
+
+</Step>
+</Steps>
+
+## Customize the event time
+
+By default, the system uses the current time as the event trigger time. To use the time the alert actually fired, add a `timestamp` field to the `annotations` of each rule in your Prometheus alert rule files:
+
+```yaml
+annotations:
+  timestamp: '{{ with query "time()" }}{{ . | first | value }}{{ end }}'
+  ...
+```
+
+Save the file and reload the Prometheus configuration (send a SIGHUP signal to the process, or send a POST request to `/-/reload`).
+
+## Volcengine Managed Prometheus (VMP)
 
 VMP's general webhook sends alerts in the Alertmanager format, so it uses this integration's push URL directly.
-
-<div class="md-block">
 
 1. Log in to the Volcengine Managed Prometheus console, go to **Alert Center** → **Alert Notification Policies**, and open the **Notification Objects** tab
 2. Click **Create Notification Object**, set the object type to **Contact**, check **General Webhook** under Webhook (not the Feishu, DingTalk, or WeCom bot options, whose format is incompatible), enter the integration push URL, and **leave Token unchecked**
 3. Add the contact to a contact group (VMP notification policies only accept contact groups)
 4. In **Alert Notification Policies**, create or edit a policy and select that contact group as the notification object
 5. Select that notification policy in the alert rule's notification settings, save, and you're done
-
-</div>
 
 <Note>
 Volcengine is moving VMP alert notification to the Cloud Monitor alert center. According to Volcengine's announcement, after October 12, 2026 alert configurations that have not been migrated are migrated automatically, and the old VMP alert notification APIs are taken offline gradually. After the migration, VMP alerts can reach Flashduty through the existing [Volcengine Cloud Monitor Alert Events](/en/on-call/integration/alert-integration/alert-sources/volcengine-cm-metrics) integration. Alternatively, use a **Notification Callback** template in the alert center that renders an Alertmanager-format webhook body, and push it to this integration.
@@ -174,8 +199,8 @@ Prometheus to Flashduty severity mapping:
 
 ## FAQ
 
-<details>
-  <summary>Why am I not receiving alerts in Flashduty?</summary>
+<AccordionGroup>
+  <Accordion title="Why am I not receiving alerts in Flashduty?">
 
   **In Flashduty**
   
@@ -185,13 +210,11 @@ Prometheus to Flashduty severity mapping:
   **In AlertManager**
 
   1. First, confirm if AlertManager has generated new alerts. If not, wait for new alerts to trigger and verify again.
-  2. Open the AlertManager configuration file. If you've set up subroutes, ensure your routing is correct (for example, if previous routes set continue, AlertManager will skip matching subsequent subroutes. We recommend setting only one default route to Flashduty). Also verify that the callback URL matches the integration push URL exactly. If they don't match, modify the **Alert Rules** and verify again.
+  2. Open the AlertManager configuration file. If you've set up child routes, ensure your routing is correct (child routes stop at the first match by default, so a child route placed before Flashduty without `continue: true` keeps alerts from reaching Flashduty. We recommend setting only one default route to Flashduty). Also verify that the callback URL matches the integration push URL exactly. If they don't match, fix the configuration and verify again.
   3. If they match, confirm that your AlertManager instance can access api.flashcat.cloud domain. If not, you need to enable internet access or specifically allow access to Flashduty's domain.
   4. If network access is fine, continue troubleshooting AlertManager by checking for relevant error logs.
 
   If you still can't find the cause after these steps, contact us.
     
-</details>
-
-
-
+</Accordion>
+</AccordionGroup>

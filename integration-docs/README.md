@@ -16,3 +16,10 @@ cd integration-docs
 npm run build
 npm run check
 ```
+
+## Authoring conventions
+
+The console reads these from the built Markdown; `npm run check` enforces them.
+
+- **Steps.** `<Step title="X">` becomes `### 步骤 N：X` (zh) or `### Step N: X` (en), numbered across the whole page. Hand-written `步骤 N` / `Step N` headings and bold `**步骤 N：X**` labels are rewritten to the same form when they number 1..N in order. Pages that repeat numbers (one flow per deployment type) are left as written. `<Tab>` titles become plain `### <title>`, or `#### <title>` when the tab sits inside a step.
+- **Placeholders in code blocks.** Write `{integration_url}` for the full push URL (including the key) and `{integration_key}` for the key alone; use `{api_host}` when a page must show the URL format. Do not write the push URL out against `api.flashcat.cloud` or use spellings such as `<push URL>`, `<集成密钥>` or `YOUR_INTEGRATION_KEY`.
