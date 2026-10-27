@@ -159,6 +159,7 @@ client, err := flashduty.NewClientWithAccessToken(accessToken,
 | `client.Dashboards` | 仪表盘；面板试跑与执行、面板查询解析（`QueryReadResolve`）、变量解析，以及仪表盘的读写、移动/恢复与修订历史 |
 | `client.Integrations` | 集成 |
 | `client.ImIntegrations` | IM 集成 |
+| `client.DedicatedIntegrations` | 专属集成（协作空间专属，`/channel/integration/*`）：`ReadInfo` / `ReadList` / `WriteCreate` / `WriteUpdate` / `WriteDelete` / `WriteEnable` / `WriteDisable` / `WriteRotateKey` |
 | `client.NotificationTemplates` | 通知模板 |
 | `client.Changes` | 变更 |
 | `client.Diagnostics` | 诊断 |
@@ -181,10 +182,20 @@ client, err := flashduty.NewClientWithAccessToken(accessToken,
 | `client.Sourcemaps` | RUM Sourcemap |
 
 <Note>
-所有标识符、服务字段名与方法名均与生成代码保持一致。具体每个服务有哪些方法、请求与响应类型，请以 `services_gen.go` 与各服务文件，以及 [Open API 参考](/zh/openapi/introduction) 为准。
+所有标识符、服务字段名与方法名均与生成代码保持一致。具体每个服务有哪些方法、请求与响应类型，请以 `services_gen.go` 与各服务文件，以及 [Open API 参考](/zh/openapi/introduction) 为准。会话的写入与事件流方法不在 Open API 参考的覆盖范围内，见下文「AI SRE 会话」。
 </Note>
 
 以下服务有需要额外说明的行为：
+
+### 公共集成与专属集成
+
+公共集成是账户级的（`/integration/*`），在集成中心管理，通过订阅或路由接入协作空间，用 `client.Integrations` 调用。专属集成属于某一个协作空间（`/channel/integration/*`），用 `client.DedicatedIntegrations` 调用，它提供 8 个方法：`ReadInfo`、`ReadList`、`WriteCreate`、`WriteUpdate`、`WriteDelete`、`WriteEnable`、`WriteDisable`、`WriteRotateKey`。
+
+读取专属集成要求您具备**协作空间查看**、**协作空间管理**或**集成中心查看**之一，并且目标空间对您可见；写入要求**协作空间管理**权限，以及目标空间的管理资格。共用的集成类型目录（`/integration/type/list`）同样接受这三项读取权限；限制了接口范围的 App Key 还须允许 `integration.api:read:typeList` 才能查询。
+
+按集成的实际归属选择服务，不要用集成 ID 去猜类型：`ReadInfo`、`WriteUpdate` 等只接受专属集成 ID，传公共集成 ID 会被拒绝。权限不足时不会自动改用另一组接口。两类接口都用管理用的 App Key 鉴权，响应里的 `integration_key` 用于事件上报，不能当作管理凭据使用；列表和详情会返回完整集成 Key，不要记录完整响应。
+
+更新专属集成时省略字段即保留原值。`ChannelIntegrationUpdateRequest.Description` 是 `*string`，最长 499 个字符：nil 保留原描述，指向空字符串则清空描述。`Settings` 为 nil 时保留现有配置，传非 nil 的空 map 会提交 `{}` 作为替换配置，其中被脱敏成 `******` 或省略的敏感字段仍保留已存值。
 
 ### 状态页草稿
 
@@ -432,6 +443,81 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 <Tip>
 `retry` 子包是纯 `net/http` 实现，刻意不导入父级 `flashduty` 包，因此永远不会引入循环依赖。`retry.New()` 与 `&retry.Transport{}`（零值）都开箱即用。
 </Tip>
+
+## AI SRE 会话
+
+程序化驱动一个 AI SRE 会话分三步：写入用户轮次、订阅事件流取回回复、需要留档时导出整段转录。前两步用 `client.Sessions.WriteMessage` 与 `client.Sessions.Subscribe`，第三步用 [流式导出](#流式导出) 里的 `client.Sessions.Export`。
+
+### 会话写入（创建会话 / 发送消息 / 上传附件）
+
+用 `client.Sessions.WriteMessage`（`POST /safari/session/message`）发一个用户轮次。省略 `SessionID` 即新建会话，此时 `AppName`（如 `ai-sre`）与 `EntryKind` 必填，`EntryKind` 取 `web`、`im` 或 `api`。`Query` 是消息正文，最长 32000 个字符。
+
+其余字段都可省略：
+
+- `Parts`：附加的消息片段，每项是 `SessionMessagePart`，`Type` 取 `text` 或 `file`。`text` 用 `Text` 字段；`file` 用 `File`（`SessionFilePart` 的 `Mime`、`Filename`、`ObjectKey`、`Size`），指向已上传到该会话的文件。
+- `Surface`：轮次的来源标记，例如 `cli`。
+- `DeliveryMode`：协商回复的投递方式。取 `reply_only` 时 agent 只用回复工具作答；响应的 `SessionMessageAck.DeliveryMode` 是服务端实际接受的方式，为空表示请求的投递方式未被接受。
+- `EnvironmentKind`：执行环境，取 `cloud` 或 `byoc`；`EnvironmentID` 在该类型下指定具体环境。
+- `TeamID`：把新建会话绑定到某个团队，0 表示账户作用域。
+
+`WriteMessage` 在服务端把该轮次持久入队后立即返回（HTTP 202），响应只有 `SessionID`、`InvocationID`、`RootInvocationID` 与实际授予的 `DeliveryMode`。轮次异步执行，**回复不在这个响应里**，要从会话事件流读取（见下文「会话事件流」）。
+
+附件必须挂在已存在的会话下。要在第一条消息之前上传附件，先用 `WriteCreate`（`POST /safari/session/create`）建一个空会话：`AppName` 必填，`EntryKind` 取 `web`、`im`、`api` 或 `automation`，`TeamID` 创建后不可修改。
+
+`UploadAttachment`（`POST /safari/attachment/upload`）把文件存到某个会话下。`SessionAttachmentUploadRequest` 的 `SessionID`、`File`、`Filename` 都必填，单个文件最大 50 MB。返回的 `SessionAttachment` 用 `FilePart()` 转成 `SessionMessagePart`，直接放进下一条消息的 `Parts`：
+
+```go
+att, _, err := client.Sessions.UploadAttachment(ctx, &flashduty.SessionAttachmentUploadRequest{
+	SessionID: sessionID,
+	File:      f,
+	Filename:  "trace.log",
+})
+if err != nil {
+	return err
+}
+
+_, _, err = client.Sessions.WriteMessage(ctx, &flashduty.SessionMessageRequest{
+	SessionID: sessionID,
+	Query:     "这份日志里有哪些错误？",
+	Parts:     []flashduty.SessionMessagePart{att.FilePart()},
+})
+```
+
+### 会话事件流（Subscribe / SSE）
+
+`client.Sessions.Subscribe`（`POST /safari/session/subscribe`，`Accept: text/event-stream`）打开会话的事件流，返回 `io.ReadCloser`。这条流先重放严格晚于游标的已持久事件，再持续推送实时帧；`Export` 则是对整段转录的一次性 NDJSON 读取，两者用途不同。
+
+用 `NewSessionFrameReader` 与 `Next()` 读帧：
+
+```go
+rc, _, err := client.Sessions.Subscribe(ctx, &flashduty.SessionSubscribeRequest{SessionID: sessionID})
+if err != nil {
+	return err
+}
+defer rc.Close()
+
+fr := flashduty.NewSessionFrameReader(rc)
+for {
+	frame, err := fr.Next()
+	if errors.Is(err, io.EOF) {
+		return nil // 服务端结束了流
+	}
+	var streamErr *flashduty.SessionStreamError
+	if errors.As(err, &streamErr) {
+		return streamErr
+	}
+	if err != nil {
+		return err
+	}
+	handle(frame)
+}
+```
+
+- **游标**：`SessionSubscribeRequest.LastEventAt` 是 Unix 毫秒，0 表示从会话开始重放；`LastEventID` 只在同一毫秒内的事件之间定序。把上一帧的 `CreatedAt` 与 `EventID` 填回这两个字段，就从该帧之后续读，断开后重连不会重复已处理的事件。
+- **生命周期**：流在时间上没有上限，服务端在空闲一段时间后关闭它。SDK 用一个去掉了整体超时的客户端副本来发送，所以流的存活时间由 `ctx` 决定，需要停止时取消 `ctx`。返回的 `io.ReadCloser` 由调用方持有并**必须** `Close`。
+- **结束与错误**：`Next()` 在收到 `[DONE]` 或流被正常关闭时返回 `io.EOF`；流内的错误记录返回 `*SessionStreamError`；其余情况（含 `ctx` 取消）返回传输错误。心跳注释行与无法解析的记录会被跳过。非 2xx 状态仍是常规 JSON 错误信封，`Subscribe` 会读取并关闭它，返回与生成接口一致的类型化错误，`io.ReadCloser` 为 `nil`。
+- **帧字段**：`SessionEventFrame` 带 `EventID`、`CreatedAt`、`Type`、`AgentPath`、`Payload`（原始 JSON）、`InvocationID`、`RootInvocationID`、`DeliveryMode`、`IsError` 与 `ErrorCode`。持久事件有 `EventID` 与 `CreatedAt`，`Type` 是作者（`user`、`assistant` 等）；临时帧（`turn_complete`、`assistant_token` 等）没有 `EventID`，`Type` 是帧类型。
+- **与 `reply_only` 的关系**：用 `DeliveryMode: "reply_only"` 发送的轮次，回复只出现在这条流里，不会出现在 `WriteMessage` 的响应中。
 
 ## 流式导出
 
