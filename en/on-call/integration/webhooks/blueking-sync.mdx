@@ -1,0 +1,160 @@
+---
+title: "BlueKing ITSM synchronization"
+description: "Configure gateway authentication, ticket creation, and state synchronization for linked incidents."
+keywords: ["BlueKing", "ITSM", "Webhook", "ticket synchronization"]
+---
+
+Create BlueKing tickets from Flashduty incidents and synchronize workflow node or completion states back to linked incidents.
+
+## Synchronization scope
+
+| Direction | Create tickets from Flashduty | Apply linked ticket states to Flashduty |
+| --- | --- | --- |
+| Bidirectional | Manual or automatic creation | Supported |
+| Flashduty → BlueKing only | Manual or automatic creation | Does not acknowledge or close incidents |
+| BlueKing → Flashduty only | Link an existing ticket number; creation is disabled | Supported |
+
+Inbound synchronization applies only to linked incidents. It does not import other BlueKing tickets as new incidents. Acknowledging, closing, or editing an incident does not perform a BlueKing approval or update arbitrary fields on an existing ticket.
+
+## Prerequisites
+
+1. Confirm that your Flashduty version includes the BlueKing ITSM integration.
+2. Prepare a published BlueKing service and identify its creation fields, required values, and workflow node meanings.
+3. Obtain the BlueKing application's `app_code` and `app_secret`, and a username authorized to access the target service and tickets.
+4. Request application permissions for the following ESB / API gateway resources. Confirm that the gateway allows the application to access them using the configured username.
+5. Ensure that the Flashduty backend can reach the gateway. For callbacks, BlueKing must also be able to reach the Flashduty callback URL.
+
+| Method | BlueKing operation | Purpose |
+| --- | --- | --- |
+| GET | `get_services` | Load available services |
+| GET | `get_service_detail` | Load creation fields and validation rules |
+| POST | `create_ticket` | Create tickets; unused in inbound-only mode |
+| GET | `get_ticket_info` | Verify the service when linking an existing ticket |
+| GET | `get_ticket_status` | Query actual ticket status and current nodes |
+| POST | `ticket_approval_result` | Check approval results when completion-based closure is configured |
+
+Production connections use ESB / API gateway authentication. Flashduty sends the application credentials and username in the `X-Bkapi-Authorization` header as `bk_app_code`, `bk_app_secret`, and `bk_username`. If your gateway additionally requires an interactive user token, ask the BlueKing administrator to confirm a compatible resource authentication policy. The current form does not provide a user-token setting.
+
+For SaaS, use a public gateway address reachable by the backend. On-premises deployments can use reachable private addresses. Authentication adapters for standalone test environments are for integration testing; passing those tests does not establish compatibility with production gateway authentication.
+
+## Configure the integration in Flashduty
+
+Open the Integration Center, find BlueKing ITSM, and create an integration. Enter its name, description, and management team.
+
+### Connection settings
+
+| Setting | Value |
+| --- | --- |
+| ESB / API gateway URL prefix | The shared URL prefix for ITSM resources, such as `https://bk.example.com/api/c/compapi/v2/itsm`. Use the actual prefix supplied by your administrator |
+| `app_code` | BlueKing application identifier |
+| `app_secret` | Application secret. Leave it empty when editing to retain the saved credential |
+| BlueKing user | The authorized username, rather than the user's password |
+
+Do not append an operation such as `get_services`, query parameters, or embedded URL credentials to the prefix. Flashduty appends each operation name and a trailing `/`. A console login URL or a standalone instance's raw OpenAPI URL may differ from the production gateway prefix.
+
+Click **Test connection and load services**, then select a ticket service. This checks service-list access only. Ticket creation, status queries, and callbacks require separate verification.
+
+### Synchronization settings
+
+Choose a direction and the channels covered by this integration. Each integration uses one BlueKing service and keeps one ticket association per incident. Create separate integrations for different services.
+
+When outbound creation is enabled, choose a trigger mode:
+
+- **Manual**: In the incident's BlueKing ITSM section, open **Create or link a BlueKing ticket**, select the integration, leave the ticket number empty, and create the ticket.
+- **Automatic**: Configure matching conditions. Eligible incidents can create tickets when a creation, acknowledgment, closure, or field-update event is processed. Saving the integration does not scan historical incidents. An existing association prevents duplicate creation.
+
+Outbound-only mode does not require callback or status mappings. Inbound-only mode hides creation triggers; link an existing ticket number to establish the association.
+
+## Creation field mappings
+
+Select a service before adding mappings. Target fields come from its definition, and each target field can appear only once.
+
+| Incident field source | What to enter in the value / label / custom-field input |
+| --- | --- |
+| Title, description, severity, resolution, incident ID | Leave empty; Flashduty reads the selected incident property |
+| Constant | The literal value to write |
+| Label | A label key, such as `service` |
+| Custom field | The custom field's Key, rather than its display name |
+
+If `title` has no explicit mapping, Flashduty uses the incident title. Map other required fields and ensure that their sources contain values when the ticket is created. Missing labels, custom fields, or empty values can cause creation to fail. Inbound-only synchronization does not require creation field mappings.
+
+Values are converted using the BlueKing field type. Integer and number fields require valid numeric values. String values for multiselect, checkbox, or custom-table fields must contain valid JSON, such as `["a","b"]` for a multiselect. Use actual option keys for enumerations. Severity uses the original incident value and is not automatically converted to BlueKing priority.
+
+For example, map a service-name field to **Label / `service`** and an environment field to **Constant / `production`**. Both target fields must exist in the selected service.
+
+Mappings write values at creation only. After republishing service fields or workflows, reload the fields, review the mappings, and verify them using a test incident.
+
+## Synchronize BlueKing states
+
+### Node mappings
+
+Add a mapping using a published workflow node ID and an **Acknowledge incident** or **Close incident** action. The ID is `current_steps[].state_id` from the status response, rather than a ticket ID, ticket number, or node name.
+
+| Configuration | Condition | Incident action |
+| --- | --- | --- |
+| Node ID → acknowledge | Both the ticket and mapped node are `RUNNING` | Acknowledge |
+| Node ID → close | Both the ticket and mapped node are `RUNNING` | Close |
+| Completion action → close | Ticket is `FINISHED` and a fresh approval query confirms approval | Close |
+
+**A node mapping takes effect when the ticket enters the node, not when that node finishes.** Map a node to closure only if entering it means that the incident is already resolved. Do not map pending approval or work-in-progress nodes to closure. Avoid conflicting actions across parallel nodes.
+
+The completion action is optional. Leaving it empty prevents completion alone from closing the incident. Termination (`TERMINATED`), withdrawal (`REVOKED`), or a completed ticket with a negative approval result does not trigger completion-based closure. Running tickets still follow node mappings; ensure that rejection branches cannot enter nodes mapped to closure.
+
+Inbound updates do not reopen closed incidents or move them back to processing. Flashduty does not automatically approve, transfer, or withdraw BlueKing tickets.
+
+### Callbacks
+
+1. In the integration page’s documentation panel, find **Callback URL for this integration**, then select and copy the complete address, including `integration_key`. Use the actual address, rather than an example URL.
+2. To register a completion callback during creation, enter that URL in the callback setting and save. Flashduty sends it as `meta.callback_url` in the create request.
+3. For updates during the workflow, configure HTTP triggers for the relevant BlueKing events. Send a `POST` request to the same URL with `Content-Type: application/json`.
+4. Put the actual ticket number in the top-level `sn` property. Trigger variable syntax varies by BlueKing version; select the ticket-number variable available in your deployment instead of hardcoding a test number.
+
+```json
+{
+  "sn": "REQ20261022000001"
+}
+```
+
+Flashduty identifies the integration using `integration_key` and queries BlueKing for the actual ticket state. Payload status and approval values do not directly acknowledge or close incidents. A callback does not establish an association; link existing tickets first. HTTP 200 alone does not prove that an incident changed state.
+
+To verify the callback chain, use a **test incident and its linked ticket number**:
+
+```sh
+curl --request POST '<complete BlueKing callback URL>' \
+  --header 'Content-Type: application/json' \
+  --data '{"sn":"<linked test ticket number>"}'
+```
+
+A background worker also reconciles linked tickets that have not reached an end state, covering missed callbacks. Reconciliation is periodic rather than real-time. Use **Refresh status** in incident details when checking an outcome.
+
+## Link existing tickets and retry failed creation
+
+Open **Create or link a BlueKing ticket** in incident details. Select the integration, enter an existing ticket number, and link it. The ticket must belong to the integration's service, and the incident must belong to one of its channels.
+
+If creation fails or its result is unknown, first search BlueKing using the incident title and creation time:
+
+1. If the previous attempt may still be running, wait at least 60 seconds before checking again. Flashduty rejects retries made too early.
+2. If a matching ticket exists, link its number instead of creating another ticket.
+3. If no ticket exists, use **Retry after reconciliation** and confirm the warning.
+
+Do not change the integration's service as a retry workaround. Existing associations must retain the same service.
+
+## Verification and troubleshooting
+
+Use test incidents to verify manual creation, linking an existing ticket, entry into an acknowledgment node, approved completion, rejection or withdrawal, reconciliation after callbacks stop, and inbound-only / outbound-only restrictions before connecting business workflows.
+
+| Symptom | Check first |
+| --- | --- |
+| Connection failure, 401, or 403 | Prefix, credentials, application resource permissions, username policy, and network access |
+| Connection passes but the service is unavailable | Whether the service is published and the user has access |
+| Required-field, type, or option errors | Current field keys, actual source values, numeric / JSON format, and enumeration keys |
+| Existing ticket cannot be linked | Ticket number, matching service, and incident channel scope |
+| Callback succeeds but the incident stays unchanged | Existing association, inbound direction, current node ID, and whether the node is running |
+| Completion does not close the incident | Configured completion action and a queryable positive approval result; payload claims are insufficient |
+| Creation result awaits reconciliation | Check for an existing remote ticket, then link it or explicitly retry after confirming absence |
+
+Ordinary comments, arbitrary post-creation field updates, automated BlueKing approvals, and bulk ticket imports as new incidents are currently unsupported. BlueKing's `comment` API is a completion rating, rather than an ordinary comment.
+
+## Public references
+
+BlueKing publishes its [create-ticket contract](https://github.com/TencentBlueKing/bk-itsm/blob/develop/docs/itsm_bkapi/apidocs/en/create_ticket.md) and [ticket-status contract](https://github.com/TencentBlueKing/bk-itsm/blob/develop/docs/itsm_bkapi/apidocs/en/get_ticket_status.md). Authentication policies and resource paths depend on your BlueKing version and administrator configuration. This page describes the capabilities implemented by the current Flashduty integration.
