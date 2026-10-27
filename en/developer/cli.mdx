@@ -569,6 +569,59 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 |------|-------------|
 | `--include-subagents` | After each `subagent_dispatch`, recursively inline that subagent's own full event stream |
 
+### safari send / safari watch — Talk to AI SRE from a terminal
+
+`flashduty safari send` puts one message into an AI SRE session, and `flashduty safari watch` reads the agent's answers back line by line. Together they run a whole investigation from a terminal or a script; the session is the same one the console shows — see [Console chat](/en/ai-sre/sessions).
+
+```bash
+flashduty safari send "why is checkout latency up?"                  # Start a session and send one message
+flashduty safari send --session-id <session_id> --file trace.json "does this match?"
+cat question.md | flashduty safari send --team-id 42 --env-kind byoc
+flashduty safari watch --session-id <session_id> --root-invocation-id <root_invocation_id>
+```
+
+`send` takes its text from exactly one of three sources: the positional argument, `--message-file <path>` (`-` means standard input), or standard input (read when neither of the other two is given and standard input is not a terminal). Passing both the positional argument and `--message-file` is an error. The body is capped at 32000 characters (counted as Unicode characters); over that the command fails and points you to `--file` for longer content, and giving neither text nor an attachment also fails.
+
+| Flag | Description |
+|------|-------------|
+| `--session-id` | Continue this session; omit it to start a new one |
+| `--message-file` | Read the body from a file; `-` means standard input |
+| `--file` | Attach a file to the session; repeatable, up to 50 MB per file, and an oversized file fails before any session is created |
+| `--team-id` | Team that owns a new session; `0` means account scope, and a nonzero value must be a team you belong to |
+| `--env-kind` / `--env-id` | Execution environment: `cloud` or `byoc`; `--env-id` requires `--env-kind` |
+
+On success stdout is one JSON receipt with `session_id`, `invocation_id`, `root_invocation_id`, and `delivery_mode`; feed `root_invocation_id` to `safari watch --root-invocation-id`. The message goes out on the CLI channel with `delivery_mode` set to `reply_only`: the agent answers only through its reply tool, and you read those answers with `safari watch`. If the server does not grant that channel the command fails outright, naming the `session_id` and `invocation_id` — the message is already queued, but its answers will not appear in `safari watch`, and the command does not fall back to another delivery mode.
+
+With `--file` and no `--session-id`, the command creates the session first and then uploads, because an attachment belongs to an existing session.
+
+`safari watch` writes events one per line to stdout: one compact JSON object each, with diagnostics on stderr and nothing else on stdout, so each line can go straight to a consumer that turns every stdout line into a notification.
+
+```json
+{"type":"reply","purpose":"progress","message":"…","invocation_id":"…","event_id":"…","created_at":1700000000000}
+{"type":"settled","root_invocation_id":"…","reason":"…","event_id":"…","created_at":1700000000000}
+{"type":"error","message":"…","created_at":1700000000000}
+```
+
+| Line type | Description |
+|-----------|-------------|
+| `reply` | A message the agent sent through its reply tool; `purpose` is `progress` or `result`, and it defaults to `result` when unlabelled |
+| `settled` | The watched request has settled; `reason` says why, and `standing_tasks` is how many background tasks are still running (omitted when 0) |
+| `error` | A session error; `code` carries the error code, `environment_failed` when the execution environment could not be provisioned |
+
+Only messages the agent explicitly sends through its reply tool are printed. Tool calls, thinking, and ordinary assistant text are its private working content and never appear.
+
+| Flag | Description |
+|------|-------------|
+| `--session-id` | Session to follow (required) |
+| `--root-invocation-id` | Follow only this request; take the value from the `root_invocation_id` in the `safari send` receipt |
+| `--since` | Replay from this Unix-millisecond timestamp, that millisecond included. Omitted without `--root-invocation-id` it means now; omitted with it, the replay starts at the beginning of the session |
+| `--since-event-id` | Requires `--since`: resume strictly after that event, excluding it; take the value from the `event_id` of the last line you saw |
+
+Events are de-duplicated by `event_id`, and after a disconnect the stream resumes from the last event received, so no message is printed twice. Re-arming a watch with `--since` alone delivers the frame at exactly that millisecond again; to continue from your last line, pass its `created_at` as `--since` and its `event_id` as `--since-event-id`.
+
+After 8 retries with no event at all the command gives up, exiting non-zero with the last error. A connection that closes cleanly after staying open for 30 seconds or more also counts as progress, because the server closes a subscription that has been quiet for a long time.
+
+The command exits 0 once the watched request has settled with no background task left and the session reports no running turn; a settled request that still lists background tasks keeps the watch open for the rounds those tasks post later. Unrecoverable errors (a 4xx other than 408 or rate limiting, and a failed execution environment) exit non-zero and also leave one `{"type":"error",…}` line on stdout, which for an environment failure is the failure event itself.
 
 ### monit-query — Unified datasource tool invocation
 
@@ -808,14 +861,14 @@ In `json`/`toon` mode the rows default to the compact fields `incident_id`, `tit
 
 ### Full command coverage
 
-Beyond the curated commands above, the CLI covers **all** Flashduty Open APIs through a spec-driven code generator, organized into top-level command groups by resource. Run `flashduty <group> --help` to browse them. `session export`, `enrichment mapping-data-upload`, `safari skill-upload`, and `monit prometheus-api-v1-label-{label_name}-values` (see "Query Prometheus label values" below) are hand-written. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI covers **all** Flashduty Open APIs through a spec-driven code generator, organized into top-level command groups by resource. Run `flashduty <group> --help` to browse them. `session export`, `safari send`, `safari watch`, `enrichment mapping-data-upload`, `safari skill-upload`, and `monit prometheus-api-v1-label-{label_name}-values` (see "Query Prometheus label values" below) are hand-written. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
 
-- **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more
+- **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more, plus the hand-written `send` and `watch` (see "safari send / safari watch — Talk to AI SRE from a terminal" above)
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
 - **On-call & scheduling**: calendar, schedule
 - **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
 - **Monitoring & RUM**: monit, rum, sourcemap
-- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations; secret masking and update rules in "integration — integrations and secrets" below), webhook (integrations)
+- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations; secret masking and update rules in "integration — integrations and secrets" below), `channel integration-*` (create, read, update, delete and key-rotation for channel-owned integrations, in "channel integration — dedicated integrations" below), webhook (integrations)
 
 These generated leaf commands use a `resource-action` naming form (for example, `flashduty safari a2a-agent-get`, `flashduty safari session-list`); Every public API operation is reachable as `flashduty <group> <verb>`, with the name derived from its API path: request fields become typed flags, and `--data` accepts the full JSON request body (typed flags override fields with the same name). This page does not list them all; explore them level by level with `flashduty <resource> --help`:
 
@@ -890,7 +943,7 @@ Public-sharing and signing semantics:
 
 #### integration — integrations and secrets
 
-The `integration` command family manages account-level public integrations — alert sources, change sources, IM bots and custom webhooks — with 9 subcommands: `list`, `info <integration-id>`, `type-list`, `create`, `update <integration-id>`, `delete <integration-id>`, `enable <integration-id>`, `disable <integration-id>`, and `key-rotate <integration-id>`. Channel-owned integrations (a `ref_id` starting with `c_`) are not included; configure those in the console.
+The `integration` command family manages account-level public integrations — alert sources, change sources, IM bots and custom webhooks — with 9 subcommands: `list`, `info <integration-id>`, `type-list`, `create`, `update <integration-id>`, `delete <integration-id>`, `enable <integration-id>`, `disable <integration-id>`, and `key-rotate <integration-id>`. Channel-owned integrations (a `ref_id` starting with `c_`) are not among these 9; manage them with `flashduty channel integration-*` below.
 
 ```bash
 flashduty integration type-list --category event.alert # List the integration types the account can configure (only types with supports_api_create: true can be created)
@@ -921,6 +974,53 @@ How `settings` reads back, and the secret rules:
 - In the `settings` returned by `list` and `info`, every **saved secret** — passwords, app secrets, tokens, encryption keys, HTTP pull URL and body, header values — is shown as `******`; webhook and custom action endpoints and custom bodies come back as is; unset values stay empty. **`integration_key` is the exception and comes back as is** (it authenticates inbound pushes and is not the account-level `app_key`). A script that reads credentials from `integration info --json` therefore gets the mask; for a new key, rotate it with `key-rotate`, which invalidates the previous key immediately.
 - The `settings` submitted by `update` replaces the type-specific configuration as a whole: **a known sensitive field that is omitted or sent as `******` keeps its stored value**, and an explicit empty `headers: {}` clears headers. But **a stored secret cannot be kept while its destination changes** — changing `endpoint`, `url`, or a database host or port, for example, requires sending the real secret in the same call, otherwise the request is rejected.
 - `editable` only reflects object permission (`no_editable: true` marks a read-only integration); write calls additionally require **Integrations Manage**.
+
+<span id="channel-integration"></span>
+#### channel integration — dedicated integrations
+
+Dedicated alert integrations — the ones owned by a channel rather than by the Integration Center — are managed by 8 commands under the `channel` group. The feature model is in [Integrate data](/en/on-call/channel/integrate-data):
+
+```bash
+flashduty channel integration-list <channel-id> [flags]                                 # List the channel's dedicated integrations
+flashduty channel integration-info <integration-id>                                     # Get one, including settings and integration_key
+flashduty channel integration-create <channel-id> --plugin-type standard.alert [flags]  # Create
+flashduty channel integration-update <integration-id> [flags]                           # Change name, description, settings
+flashduty channel integration-key-rotate <integration-id>                               # Issue a new key; the old one stops working immediately
+flashduty channel integration-enable <integration-id>                                   # Resume accepting alerts
+flashduty channel integration-disable <integration-id>                                  # Pause intake, keep the configuration
+flashduty channel integration-delete <integration-id>                                   # Delete; rejected while other objects still reference it
+```
+
+For `integration-list` and `integration-create` the channel ID is positional (you can also write `--channel-id`), and on create the channel must be enabled. The other 6 commands take the `integration_id` (an integer) from a response as their positional argument; a public integration ID is **not** accepted.
+
+Flags for `integration-list`:
+
+| Flag | Description |
+|------|-------------|
+| `--page` | Page number, starting at 1 |
+| `--limit` | Rows per page, at most 100 (default 100) |
+| `--name` | Filter by integration name, at most 49 characters |
+| `--plugin-type` | Filter by one integration type |
+| `--status` | `enabled` (accepting alerts) or `disabled` (intake paused) |
+| `--search-after-ctx` | Paging cursor |
+
+The response carries `items`, `limit`, `p`, and `total`; each row has `integration_id`, `channel_id`, `name`, `description`, `plugin_type`, `plugin_type_name`, `status`, `settings` (saved secrets shown as `******`), `integration_key` (returned as is; it authenticates inbound pushes and is not the account-level `app_key`), `created_at`, `updated_at`, `last_time`, and `last_source_time`.
+
+Fields for `integration-create`:
+
+| Flag | Description |
+|------|-------------|
+| `--plugin-type` | Required; an alert integration type the account can use, for example `standard.alert`. The type must be an `event.alert` type |
+| `--name` | Integration name, 2–49 characters; omitted or empty uses the integration type name |
+| `--description` | Description, at most 499 characters |
+| `--integration-key` | Optional key you supply: 35 characters, ending with the account suffix, and unique among existing integrations |
+| `--data` | Full JSON request body; the type-specific `settings` block can only be passed here |
+
+The response returns the new `integration_id` and `integration_key`.
+
+`integration-update` changes only `--name`, `--description`, and `settings`: the name is 2–49 characters, an empty description clears it and an omitted one keeps it, and `settings` replaces the type-specific configuration as a whole, where a sensitive field that is omitted or sent back as `******` keeps its stored value. It cannot move an integration to another channel, and it cannot change the integration type — recreate it in the console to change either. `integration-key-rotate` returns a new key and invalidates the previous one immediately, so anything pushing with the old key must be updated in the same change.
+
+Reads (`integration-list`, `integration-info`) need the **Channels Read**, **Channels Manage**, or **Integrations Read** permission, and the target channel must be visible to you. Writes (`integration-create`, `integration-update`, `integration-delete`, `integration-enable`, `integration-disable`, `integration-key-rotate`) need **Channels Manage** and management rights on that channel. `integration type-list` is the shared type catalog for both families, so `integration.api:read:typeList` is part of all three read permissions above and a scoped App Key must be allowed to call it.
 
 ### Utility commands
 

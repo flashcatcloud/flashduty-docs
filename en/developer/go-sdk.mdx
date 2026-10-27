@@ -159,6 +159,7 @@ Endpoints are grouped by service and hang off the client: the call convention is
 | `client.Dashboards` | Dashboards; panel preview and run, panel query resolution (`QueryReadResolve`), variable resolution, plus dashboard read/write, move/restore, and revision history |
 | `client.Integrations` | Integrations |
 | `client.ImIntegrations` | IM integrations |
+| `client.DedicatedIntegrations` | Dedicated integrations (owned by one channel, `/channel/integration/*`): `ReadInfo` / `ReadList` / `WriteCreate` / `WriteUpdate` / `WriteDelete` / `WriteEnable` / `WriteDisable` / `WriteRotateKey` |
 | `client.NotificationTemplates` | Notification templates |
 | `client.Changes` | Changes |
 | `client.Diagnostics` | Diagnostics |
@@ -181,10 +182,20 @@ Endpoints are grouped by service and hang off the client: the call convention is
 | `client.Sourcemaps` | RUM sourcemaps |
 
 <Note>
-All identifiers, service field names, and method names match the generated code. For exactly which methods each service has and their request and response types, rely on `services_gen.go` and the per-service files, plus the [Open API reference](/en/openapi/introduction).
+All identifiers, service field names, and method names match the generated code. For exactly which methods each service has and their request and response types, rely on `services_gen.go` and the per-service files, plus the [Open API reference](/en/openapi/introduction). The session write and event stream methods aren't covered by the Open API reference; they're documented under AI SRE sessions below.
 </Note>
 
 The following services have behavior that needs extra explanation:
+
+### Public and dedicated integrations
+
+Public integrations are account-level (`/integration/*`), managed in the Integration Center, and attach to channels through subscriptions or routing; call them with `client.Integrations`. A dedicated integration belongs to one channel (`/channel/integration/*`); call it with `client.DedicatedIntegrations`, which has eight methods: `ReadInfo`, `ReadList`, `WriteCreate`, `WriteUpdate`, `WriteDelete`, `WriteEnable`, `WriteDisable`, and `WriteRotateKey`.
+
+Reading a dedicated integration requires one of **Channels Read**, **Channels Manage**, or **Integrations Read**, and the target channel must be visible to you. Writing requires **Channels Manage** plus management access to that channel. The shared integration type catalog (`/integration/type/list`) accepts the same three read permissions; a scoped App Key also needs `integration.api:read:typeList` to query it.
+
+Choose the service by who owns the integration, not by the integration ID: `ReadInfo`, `WriteUpdate`, and the rest accept only dedicated integration IDs, and a public integration ID is rejected. Insufficient permissions never switch you to the other group. Both groups authenticate with the management App Key; the `integration_key` in a response is for ingesting events and can't act as a management credential, and list and info responses carry the complete integration key, so don't log the full response.
+
+Omitted fields keep their stored value on an update. `ChannelIntegrationUpdateRequest.Description` is a `*string` of at most 499 characters: nil keeps the stored description, and a pointer to an empty string clears it. A nil `Settings` keeps the stored configuration, while a non-nil empty map submits `{}` as the replacement configuration, in which masked (`******`) or omitted secret fields keep their stored value.
 
 ### Status page drafts
 
@@ -432,6 +443,81 @@ client, err := flashduty.NewClient("YOUR_APP_KEY",
 <Tip>
 The `retry` subpackage is pure `net/http` and deliberately does not import the parent `flashduty` package, so it never introduces a circular dependency. Both `retry.New()` and `&retry.Transport{}` (zero value) work out of the box.
 </Tip>
+
+## AI SRE sessions
+
+Driving an AI SRE session from Go takes three steps: write a user turn, subscribe to the event stream to read the replies, and export the whole transcript when you need a record. The first two use `client.Sessions.WriteMessage` and `client.Sessions.Subscribe`; the third uses `client.Sessions.Export` in [Streaming export](#streaming-export).
+
+### Session writes (create a session, send a message, upload attachments)
+
+Send one user turn with `client.Sessions.WriteMessage` (`POST /safari/session/message`). Omit `SessionID` to start a new session, in which case `AppName` (such as `ai-sre`) and `EntryKind` are required, and `EntryKind` is `web`, `im`, or `api`. `Query` is the message text, at most 32000 characters.
+
+Every other field is optional:
+
+- `Parts`: extra message parts, each a `SessionMessagePart` whose `Type` is `text` or `file`. A `text` part uses `Text`; a `file` part uses `File` (a `SessionFilePart` with `Mime`, `Filename`, `ObjectKey`, and `Size`) pointing at a file already uploaded to that session.
+- `Surface`: tags where the turn originated, for example `cli`.
+- `DeliveryMode`: negotiates how replies are delivered. With `reply_only`, the agent answers only through its reply tool; `SessionMessageAck.DeliveryMode` in the response is the mode the server actually accepted, and it's empty when the requested mode was not granted.
+- `EnvironmentKind`: the execution environment, `cloud` or `byoc`; `EnvironmentID` picks a specific environment of that kind.
+- `TeamID`: binds a new session to a team, 0 for account scope.
+
+`WriteMessage` returns as soon as the server has durably queued the turn (HTTP 202), and the response holds only `SessionID`, `InvocationID`, `RootInvocationID`, and the granted `DeliveryMode`. The turn runs asynchronously, so **replies are not in that response**; read them from the session event stream (see Session event stream below).
+
+An attachment must belong to an existing session. To upload before the first message, create an empty session first with `WriteCreate` (`POST /safari/session/create`): `AppName` is required, `EntryKind` is `web`, `im`, `api`, or `automation`, and `TeamID` is immutable once the session exists.
+
+`UploadAttachment` (`POST /safari/attachment/upload`) stores a file under a session. `SessionID`, `File`, and `Filename` on `SessionAttachmentUploadRequest` are all required, and one file can be at most 50 MB. `FilePart()` on the returned `SessionAttachment` turns it into a `SessionMessagePart` for the next message's `Parts`:
+
+```go
+att, _, err := client.Sessions.UploadAttachment(ctx, &flashduty.SessionAttachmentUploadRequest{
+	SessionID: sessionID,
+	File:      f,
+	Filename:  "trace.log",
+})
+if err != nil {
+	return err
+}
+
+_, _, err = client.Sessions.WriteMessage(ctx, &flashduty.SessionMessageRequest{
+	SessionID: sessionID,
+	Query:     "Which errors are in this log?",
+	Parts:     []flashduty.SessionMessagePart{att.FilePart()},
+})
+```
+
+### Session event stream (Subscribe, SSE)
+
+`client.Sessions.Subscribe` (`POST /safari/session/subscribe`, `Accept: text/event-stream`) opens the session's event stream and returns an `io.ReadCloser`. The stream first replays persisted events strictly newer than your cursor, then keeps tailing live frames; `Export` instead reads the whole transcript once as NDJSON, so the two serve different jobs.
+
+Read frames with `NewSessionFrameReader` and `Next()`:
+
+```go
+rc, _, err := client.Sessions.Subscribe(ctx, &flashduty.SessionSubscribeRequest{SessionID: sessionID})
+if err != nil {
+	return err
+}
+defer rc.Close()
+
+fr := flashduty.NewSessionFrameReader(rc)
+for {
+	frame, err := fr.Next()
+	if errors.Is(err, io.EOF) {
+		return nil // the server finished the stream
+	}
+	var streamErr *flashduty.SessionStreamError
+	if errors.As(err, &streamErr) {
+		return streamErr
+	}
+	if err != nil {
+		return err
+	}
+	handle(frame)
+}
+```
+
+- **Cursor**: `SessionSubscribeRequest.LastEventAt` is Unix milliseconds, and 0 replays from the start of the session; `LastEventID` only breaks ties between events that share the same millisecond. Put the previous frame's `CreatedAt` and `EventID` back into those two fields to resume after it, so a reconnect doesn't repeat events you already handled.
+- **Lifetime**: the stream has no time limit, and the server closes it after an idle period. The SDK sends it with a client copy that drops the overall timeout, so `ctx` bounds the stream — cancel `ctx` to stop it. The returned `io.ReadCloser` belongs to the caller and you **must** `Close` it.
+- **End and errors**: `Next()` returns `io.EOF` on the `[DONE]` sentinel or a clean close, a `*SessionStreamError` for an in-band error record, and the transport error (including context cancellation) otherwise. Heartbeat comments and records it cannot decode are skipped. A non-2xx status is still the regular JSON error envelope: `Subscribe` reads and closes it and returns a typed error with a `nil` `io.ReadCloser`, matching the generated endpoints.
+- **Frame fields**: `SessionEventFrame` carries `EventID`, `CreatedAt`, `Type`, `AgentPath`, `Payload` (raw JSON), `InvocationID`, `RootInvocationID`, `DeliveryMode`, `IsError`, and `ErrorCode`. A persisted event has `EventID` and `CreatedAt`, and its `Type` is the author (`user`, `assistant`, and so on); an ephemeral frame (`turn_complete`, `assistant_token`, and so on) has no `EventID`, and its `Type` is the frame type.
+- **Relation to `reply_only`**: for a turn sent with `DeliveryMode: "reply_only"`, the replies appear only on this stream, never in the `WriteMessage` response.
 
 ## Streaming export
 

@@ -19,7 +19,7 @@ AI SRE's IM integration has four trigger modes:
     When someone opens an IM war room for an incident, AI SRE runs a preliminary diagnosis and posts the findings to the war room if the account has an enabled **War room created** automation rule that the incident's channel and severity match. No one needs to summon it.
   </Card>
   <Card title="Automation Replies in the Group" icon="clock">
-    Ask AI SRE in a group to create an ordinary automation rule and it uses **this group** as the run location: when the rule later fires on a schedule, an API call, or an On-call incident, the run **opens a new session** in the original group and posts its conclusion there. Every run is a fresh session and does not carry over the group's earlier conversation; when the integration has thread replies on, each run also opens a new thread whose root message is the run's first real output (progress or conclusion), with no "started" placeholder posted before there is content. The binding and scope are fixed at creation and cannot move to another group: before each run they are re-checked, and if the group's team scope or session has changed the whole run is **skipped**.
+    Ask AI SRE in a group to create an ordinary automation rule and it uses **this group** as the run location: when the rule later fires on a schedule, an API call, or an On-call incident, the run happens in the original group and posts its conclusion there. Which session the run uses depends on the group: in a **group without thread replies** and in a **direct chat**, the run continues the agent session that chat already has, so the conversation so far stays in context, and a session is created only when that chat has none yet; in a **group with thread replies on**, each run opens a new session and a new thread, carries no earlier group conversation, and its first real output (progress or conclusion) is the thread's root message, with no "started" placeholder posted before there is content; a run in a war room opens its own session too. The binding and scope are fixed at creation and cannot move to another group: before each run they are re-checked, and if the group's team scope or session has changed the whole run is **skipped**.
   </Card>
   <Card title="Proactive replies" icon="comment-dots">
     With **Allow AI to reply proactively** enabled on the integration, AI SRE also reads group messages that **never mention it**, and answers only when it judges a message worth answering; messages that @mention it always get a reply. Off by default, available only on Slack, Lark / Feishu and Microsoft Teams, and any single group can turn it off on its own.
@@ -66,7 +66,7 @@ In a connected IM group with **Allow AI SRE conversations in IM** on, **@mention
     The platform distinguishes between **group @mentions** and **direct messages**. Once mentioned, AI SRE puts a "processing" receipt on that message (see [Processing receipt](#processing-receipt)) and checks whether the message contains a slash command.
   </Step>
   <Step title="Bind to a session">
-    Multiple @mentions within the same IM chat continue the **same agent session**, preserving context. For a new chat, AI SRE starts with the opening message of that IM thread and any associated incident as context. In a Feishu / Lark group with topic replies on, a topic session opened by a **top-level @** also pulls in the group messages from the **last 10 minutes** (up to that @), which is how an error text or screenshot posted just before the @ reaches the context; replies inside a topic read only that topic.
+    Multiple @mentions within the same IM chat continue the **same agent session**, preserving context. For a new session, a reply inside a thread brings in that thread's starter message and a direct chat brings in that chat's earlier messages, plus any associated incident as context. A **top-level @** in a group brings only itself and the message it **quotes (replies to)**, together with that message's attachments: to include an error text or screenshot posted earlier in the group, reply to or quote that message. A reply inside a topic reads only that topic.
   </Step>
   <Step title="Read context and reply">
     AI SRE reads the thread / chat history to build context, investigates autonomously, and posts its findings **in-thread**. Other people @mentioned in the original message are carried over into the reply, making it easy for multiple parties to collaborate in the group.
@@ -79,7 +79,9 @@ The **reply mode** is configurable (off / first / all), controlling whether AI S
 
 ### Attachments and images
 
-AI SRE downloads images, documents and voice messages from the chat and hands them to the agent as files. This covers not only attachments on the message that **@mentions** it but also attachments on **earlier messages in the same thread or chat**: post an error screenshot, then add "@bot what is this?", and the model receives the screenshot.
+AI SRE downloads images, documents and voice messages from the chat and hands them to the agent as files. Attachments come from three sources: the message that **@mentions** it, **earlier messages in the same thread or direct chat**, and the message it **quotes (replies to)**.
+
+A top-level @ in a group does not look back through the group's earlier messages. To carry an error text or screenshot posted earlier, **reply to or quote that message** before the @mention. Inside a topic or a direct chat there is no such limit: post the error screenshot, then add "@bot what is this?", and the model receives that screenshot.
 
 Per turn, the attachment quota is counted by type. The current message's attachments take quota first, and history fills the rest, newest first:
 
@@ -93,6 +95,10 @@ Per turn, the attachment quota is counted by type. The current message's attachm
 - **Rejected:** an attachment over 20 MiB, or a direct link that is not HTTPS.
 - **Time budget for history:** history attachments not downloaded within about 5 seconds are treated as not attached, so a turn never waits on an old screenshot.
 - **All attachments of the current message fail:** AI SRE does not call the agent and replies with a short failure notice asking you to retry or send a smaller file. A failed history attachment does not stop the turn.
+
+In WeCom, Feishu and DingTalk, quoting a message before the @mention brings that message's attachments into context too: WeCom brings the quoted image, the quoted file, and the images inside a mixed text-and-image message, with the voice transcript as the quoted content when you quote a voice message; Feishu brings the images on the quoted message. These quoted attachments are optional context: a failed download or an exhausted per-turn quota never stops the investigation, the attachment is simply not included. A quoted DingTalk image works differently: it rides the current message like an inline image, shares the five-image per-turn quota with the other images, and the quoted text marks it with `[Image]`.
+
+With **Allow AI to reply proactively** on, images on messages that **do not mention it** also reach the decision on whether to answer: up to 5 images, 5 MiB each and 20 MiB in total, in PNG / JPEG / GIF / WebP. So in a group with proactive replies on, posting only an error screenshot without an @mention can still get a reply; when it decides not to answer, that message gets neither a receipt nor a reply.
 
 ### Processing receipt
 
@@ -117,11 +123,11 @@ WeCom has no emoji API, so its "processing" receipt is a placeholder message, su
 Once you hand AI SRE an investigation, every message that appears in the group is one of two kinds:
 
 - **Result**: an answer to your concrete question, or an actionable interim finding.
-- **Progress**: a one-or-two-sentence update while work is still going on: confirmed progress, what it is waiting on, a real blocker. A progress message is **not the answer**: it does not finish the turn, and the result is posted separately as usual.
+- **Progress**: a one-or-two-sentence update while work is still going on: confirmed progress, what it is waiting on, a real blocker. A progress message is **not the answer**: the result is normally posted as a separate message, and a turn can also end after a progress note when the model decides it owes you nothing more — that is not a failure.
 
-When AI SRE hands the work to a background Subagent (or an A2A delegation) and nothing has been sent to the chat yet in that turn, it first posts a short **acknowledgement** saying what it dispatched and that the conclusion will follow when the Subagent reports back, so the group is not left silent until the child finishes. This is a progress message too: it does not end the turn.
+When AI SRE hands the work to a background Subagent (or an A2A delegation) and nothing has been sent to the chat yet in that turn, it first posts a short **acknowledgement** saying what it dispatched and that the conclusion will follow when the Subagent reports back, so the group is not left silent until the child finishes. This is a progress message too.
 
-This reply style applies only to **human-initiated IM requests**: console sessions still answer with streaming text, and war-room auto-diagnosis is an unattended background turn that also keeps native streaming output.
+This reply style applies to **human-initiated IM requests** and to terminal sessions started with `flashduty safari send` (see [CLI](/en/developer/cli)): console sessions still answer with streaming text, and war-room auto-diagnosis is an unattended background turn that also keeps native streaming output.
 
 <Note>
 When a reply is too long, AI SRE trims it or publishes the detailed evidence as an artifact and posts only the conclusion and the artifact link (see [Artifacts](/en/ai-sre/artifacts)). This limit does not apply when you explicitly ask for the full report in the chat.
@@ -168,7 +174,7 @@ When a notification turn has nothing new, AI SRE posts nothing; it speaks only w
 
 ### Progress messages during a long investigation
 
-In long investigations, AI SRE posts a progress update or two in the group saying what it is still checking, what is blocking, and what comes next. A progress message is not the answer and doesn't end the turn; the result follows separately. If nothing has changed, or it is waiting for your input, AI SRE may stay quiet.
+In long investigations, AI SRE posts a progress update or two in the group saying what it is still checking, what is blocking, and what comes next. A progress message is not the answer, and the result is normally posted as a separate message; the turn can also end after a progress note rather than add a conclusion for its own sake. If nothing has changed, or it is waiting for your input, AI SRE may stay quiet.
 
 ## Connections and authorization
 

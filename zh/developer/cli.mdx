@@ -569,6 +569,59 @@ flashduty session export <session_id> --include-subagents > session.ndjson
 |------|------|
 | `--include-subagents` | 在每条 `subagent_dispatch` 之后递归内联该子智能体自身的完整事件流 |
 
+### safari send / safari watch — 从终端与 AI SRE 对话
+
+`flashduty safari send` 把一条消息送进 AI SRE 会话，`flashduty safari watch` 把 Agent 的答复逐行读回来。两者配合可以在终端或脚本里跑完一次排查对话；会话与控制台共用，见[控制台对话](/zh/ai-sre/sessions)。
+
+```bash
+flashduty safari send "checkout 延迟为什么升高？"                  # 新开会话并发一条消息
+flashduty safari send --session-id <session_id> --file trace.json "和这个对得上吗？"
+cat question.md | flashduty safari send --team-id 42 --env-kind byoc
+flashduty safari watch --session-id <session_id> --root-invocation-id <root_invocation_id>
+```
+
+`send` 的正文有三个来源，只能用其中一个：位置参数、`--message-file <path>`（`-` 表示标准输入）、或标准输入（既没有位置参数也没有 `--message-file`、且标准输入不是终端时读取）。位置参数与 `--message-file` 同时给出会直接报错。正文最多 32000 个字符（按 Unicode 字符计），超出时报错并提示较长的内容改用 `--file` 附带；正文与附件都不给同样报错。
+
+| 参数 | 说明 |
+|------|------|
+| `--session-id` | 继续该会话；省略则新开一个 |
+| `--message-file` | 从文件读取正文，`-` 表示标准输入 |
+| `--file` | 附带一个文件作为会话附件，可重复；单个文件上限 50 MB，超限在创建会话之前就报错 |
+| `--team-id` | 新会话的归属团队 ID；`0` 表示账户级，非 0 时必须属于该团队 |
+| `--env-kind` / `--env-id` | 运行环境：`cloud` 或 `byoc`；`--env-id` 必须与 `--env-kind` 一起给出 |
+
+成功时标准输出是一行 JSON 回执，字段为 `session_id`、`invocation_id`、`root_invocation_id` 与 `delivery_mode`；其中 `root_invocation_id` 就是 `safari watch --root-invocation-id` 要传的值。消息走命令行通道，`delivery_mode` 为 `reply_only`：Agent 只通过它的回复工具作答，答复要用 `safari watch` 读取。服务端没有授予这个通道时命令直接失败，错误信息里带上 `session_id` 与 `invocation_id`——此时消息已经入队，但它的答复不会出现在 `safari watch` 的输出里，命令不会退回成别的投递方式。
+
+用 `--file` 而不带 `--session-id` 时，命令先创建会话再上传附件，因为附件挂在已存在的会话下。
+
+`safari watch` 把事件逐行写到标准输出：每行一个紧凑 JSON 对象，诊断信息只写标准错误，其他内容一概不写进标准输出，所以每一行都可以直接交给「把 stdout 每行变成一条通知」的消费方。
+
+```json
+{"type":"reply","purpose":"progress","message":"…","invocation_id":"…","event_id":"…","created_at":1700000000000}
+{"type":"settled","root_invocation_id":"…","reason":"…","event_id":"…","created_at":1700000000000}
+{"type":"error","message":"…","created_at":1700000000000}
+```
+
+| 行类型 | 说明 |
+|--------|------|
+| `reply` | Agent 通过回复工具发出的消息，`purpose` 为 `progress`（进展）或 `result`（结论），未标注时按 `result` |
+| `settled` | 跟随的那次请求已结算，`reason` 给出原因，`standing_tasks` 是仍在运行的后台任务数（为 0 时省略该字段） |
+| `error` | 会话错误，`code` 给出错误码，运行环境准备失败时为 `environment_failed` |
+
+只打印 Agent 通过回复工具明确发出的消息。工具调用、思考过程和普通助手文本属于它的内部工作内容，不会输出。
+
+| 参数 | 说明 |
+|------|------|
+| `--session-id` | 要跟随的会话（必填） |
+| `--root-invocation-id` | 只跟随这一次请求，取值来自 `safari send` 回执的 `root_invocation_id` |
+| `--since` | 从该 Unix 毫秒时间戳开始回放（含该毫秒）。不带 `--root-invocation-id` 时省略即从当前时刻开始；带上它时省略则从会话开头回放 |
+| `--since-event-id` | 必须与 `--since` 同时给出：从该事件之后开始，严格排除该事件本身；取值是上一行输出的 `event_id` |
+
+事件按 `event_id` 去重，连接断开后从最后一条已收到的事件继续回放，同一条消息不会重复打印。只用 `--since` 重新起一个 watch 时，正好落在该毫秒的事件会再出现一次；要接着上次的输出往下跟，把上一行的 `created_at` 传给 `--since`、`event_id` 传给 `--since-event-id`。
+
+重试 8 次仍没有收到任何事件即放弃，以非零退出码结束并带上最后一次的错误。一次连接正常关闭且保持 30 秒以上也算有进展，因为服务端会在长时间没有事件时主动关闭订阅。
+
+跟随的那次请求已结算、没有仍在运行的后台任务，并且会话已无运行中的回合时，命令退出 0；请求还有后台任务时会继续等待它们把后续回合跑完。不可恢复的错误（限流与 408 之外的 4xx、运行环境准备失败）以非零退出码结束，同时在标准输出上留一行 `{"type":"error",…}`，运行环境准备失败时这一行就是该事件本身。
 
 ### monit-query — 监控数据源统一工具调用
 
@@ -803,14 +856,14 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 通过 spec 驱动的代码生成覆盖**全部** Flashduty Open API，按资源组织为顶层命令组，可用 `flashduty <命令组> --help` 查看。其中 `session export`、`enrichment mapping-data-upload`、`safari skill-upload` 和 `monit prometheus-api-v1-label-{label_name}-values`（见下文「查询 Prometheus 标签值」）为手工实现。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 通过 spec 驱动的代码生成覆盖**全部** Flashduty Open API，按资源组织为顶层命令组，可用 `flashduty <命令组> --help` 查看。其中 `session export`、`safari send`、`safari watch`、`enrichment mapping-data-upload`、`safari skill-upload` 和 `monit prometheus-api-v1-label-{label_name}-values`（见下文「查询 Prometheus 标签值」）为手工实现。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
 
-- **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等
+- **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等，另有手工实现的 `send` 与 `watch`（见上文「safari send / safari watch — 从终端与 AI SRE 对话」）
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
 - **监控与 RUM**：monit、rum、sourcemap
-- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换，密钥掩码与更新规则见下文「integration — 集成与密钥」）、webhook（integrations）
+- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换，密钥掩码与更新规则见下文「integration — 集成与密钥」）、`channel integration-*`（协作空间专属集成的增删改查与密钥轮换，见下文「channel integration — 专属集成」）、webhook（integrations）
 
 这些生成命令的叶子名称采用「资源-动作」形式（如 `flashduty safari a2a-agent-get`、`flashduty safari session-list`），每个公开 API 操作都对应一条 `flashduty <分组> <动作>` 命令，命令名由 API 路径推导，请求字段生成带类型的命令行参数，`--data` 可传完整 JSON 请求体（具名参数覆盖其中的同名字段）。完整清单不在本页展开，用 `flashduty <资源> --help` 逐层探索：
 
@@ -879,7 +932,7 @@ flashduty safari artifact-gallery-share-sync <artifact-id>                      
 
 #### integration — 集成与密钥
 
-`integration` 命令族管理账户级的公开集成——告警源、变更源、IM 机器人与自定义 Webhook，共 9 个子命令：`list`、`info <integration-id>`、`type-list`、`create`、`update <integration-id>`、`delete <integration-id>`、`enable <integration-id>`、`disable <integration-id>`、`key-rotate <integration-id>`。渠道专属的集成（`ref_id` 以 `c_` 开头）不在此列，只在控制台配置。
+`integration` 命令族管理账户级的公开集成——告警源、变更源、IM 机器人与自定义 Webhook，共 9 个子命令：`list`、`info <integration-id>`、`type-list`、`create`、`update <integration-id>`、`delete <integration-id>`、`enable <integration-id>`、`disable <integration-id>`、`key-rotate <integration-id>`。渠道专属的集成（`ref_id` 以 `c_` 开头）不在这 9 个命令里，用下文的 `flashduty channel integration-*` 管理。
 
 ```bash
 flashduty integration type-list --category event.alert # 列出账户可配置的集成类型（只有 supports_api_create: true 的类型能用 create 创建）
@@ -910,6 +963,53 @@ flashduty integration delete <integration-id>          # 删除；仍被其他�
 - `list` 与 `info` 返回的 `settings` 中，每个**已保存的密钥类值**——密码、App Secret、Token、加密密钥、HTTP 拉取的 URL 与 Body、Headers 的值——一律显示为 `******`；Webhook 与自定义操作的地址和自定义 Body 按原值返回；未设置的值保持为空。**`integration_key` 是例外，按原值返回**（它用于接入推送，与账户级 `app_key` 不是一回事）。依赖 `integration info --json` 读取凭据的脚本拿到的是掩码；需要新密钥时用 `key-rotate` 轮换，旧密钥会立即失效。
 - `update` 提交的 `settings` 是整体替换：**已知敏感字段被省略或传 `******` 时保留已存密钥**，显式传空 `headers: {}` 会清空 Headers。但**改密钥的发送目标时不能沿用已存密钥**——例如改 `endpoint`、`url`，或改数据库的主机/端口——必须同时传入真实密钥，否则请求被拒。
 - `editable` 只表示对象权限（`no_editable: true` 表示该集成只读）；写操作除此之外还需要**集成管理**权限。
+
+<span id="channel-integration"></span>
+#### channel integration — 专属集成
+
+属于某个协作空间（而不是集成中心）的告警集成由 `channel` 组下的 8 个命令管理，产品侧的功能模型见[集成数据](/zh/on-call/channel/integrate-data)：
+
+```bash
+flashduty channel integration-list <channel-id> [flags]                                 # 列出该空间的专属集成
+flashduty channel integration-info <integration-id>                                     # 查看单个专属集成（含 settings 与 integration_key）
+flashduty channel integration-create <channel-id> --plugin-type standard.alert [flags]  # 新建
+flashduty channel integration-update <integration-id> [flags]                           # 改名称、备注与 settings
+flashduty channel integration-key-rotate <integration-id>                               # 轮换密钥，旧密钥立即失效
+flashduty channel integration-enable <integration-id>                                   # 恢复接收告警
+flashduty channel integration-disable <integration-id>                                  # 暂停接收告警，保留配置
+flashduty channel integration-delete <integration-id>                                   # 删除；仍被其他对象引用时拒绝
+```
+
+`integration-list` 与 `integration-create` 的协作空间 ID 是位置参数（也可写作 `--channel-id`），新建时该协作空间必须已启用；其余 6 个命令的位置参数是响应里的 `integration_id`（整数），**不能**传公共集成的 ID。
+
+`integration-list` 的参数：
+
+| 参数 | 说明 |
+|------|------|
+| `--page` | 页码，从 1 开始 |
+| `--limit` | 每页条数，上限 100（默认 100） |
+| `--name` | 按集成名称过滤，最多 49 字符 |
+| `--plugin-type` | 按一个集成类型过滤 |
+| `--status` | `enabled`（接收告警）或 `disabled`（暂停接收） |
+| `--search-after-ctx` | 翻页游标 |
+
+返回 `items`、`limit`、`p` 与 `total`；每行含 `integration_id`、`channel_id`、`name`、`description`、`plugin_type`、`plugin_type_name`、`status`、`settings`（已保存的密钥显示为 `******`）、`integration_key`（按原值返回，用于接入推送，与账户级 `app_key` 不是一回事）、`created_at`、`updated_at`、`last_time` 与 `last_source_time`。
+
+`integration-create` 的可用字段：
+
+| 参数 | 说明 |
+|------|------|
+| `--plugin-type` | 必填，取账户可用的告警集成类型（如 `standard.alert`），类型须属于 `event.alert` 类 |
+| `--name` | 集成名称，2–49 字符；省略或留空则使用集成类型名 |
+| `--description` | 备注，最多 499 字符 |
+| `--integration-key` | 可选的自定义密钥，35 字符，须以账户后缀结尾且不与现有集成重复 |
+| `--data` | 完整 JSON 请求体；类型专属配置 `settings` 只能通过它传入 |
+
+返回新集成的 `integration_id` 与 `integration_key`。
+
+`integration-update` 只改 `--name`、`--description` 与 `settings`：名称 2–49 字符，备注传空即清空、省略即保留；`settings` 整体替换，其中被省略或回传为 `******` 的敏感字段保留已存值。它不能把集成搬到另一个协作空间，也不能改集成类型——要换归属或类型请在控制台重建。`integration-key-rotate` 返回新密钥，旧密钥立即失效，依赖它的推送要同步更新。
+
+读取（`integration-list`、`integration-info`）需要**协作空间查看**、**协作空间管理**或**集成查看**权限，并且目标协作空间对您可见；写入（`integration-create`、`integration-update`、`integration-delete`、`integration-enable`、`integration-disable`、`integration-key-rotate`）需要**协作空间管理**权限，且您对该协作空间有管理资格。`integration type-list` 的类型目录由两族命令共用，`integration.api:read:typeList` 在**协作空间查看**、**协作空间管理**与**集成查看**三项权限里都有；限制了接口范围的 App Key 须允许它。
 
 ### 工具命令
 
