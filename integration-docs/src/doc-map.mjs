@@ -12,6 +12,7 @@ export const docMap = {
   AliyunARMS: `${alertBase}/aliyun-arms.mdx`,
   AliyunCmEvent: `${alertBase}/aliyun-cm-event.mdx`,
   AliyunCm: `${alertBase}/aliyun-cm-metrics.mdx`,
+  AliyunCmsV2: `${alertBase}/aliyun-cms-v2.mdx`,
   AliyunSLS: `${alertBase}/aliyun-sls.mdx`,
   AWSCW: `${alertBase}/aws-cloudwatch.mdx`,
   AzureMonitor: `${alertBase}/azure-monitor.mdx`,
