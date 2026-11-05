@@ -351,6 +351,7 @@ export const docMap = {
   JiraSync: `${integrationBase}/webhooks/jira-sync.mdx`,
   ServiceNowSync: `${integrationBase}/webhooks/servicenow-sync.mdx`,
   ServiceDeskPlusSync: `${integrationBase}/webhooks/servicedesk-plus-sync.mdx`,
+  BlueKingSync: `${integrationBase}/webhooks/blueking-sync.mdx`,
 
   Templates: 'on-call/configuration/templates.mdx',
   Link: `${integrationBase}/other-integration/link.mdx`
