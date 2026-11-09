@@ -196,6 +196,125 @@ flashcatRum.init({
 });
 ```
 
+<span id="resource-response-context"></span>
+### 将接口响应作为资源上下文上报
+
+您可以在 `beforeSend` 中读取 XHR 的 JSON 响应，将响应内容放入当前资源事件的 `event.context.res`。例如，接口返回 `ResourceNotFound` 时，您可以在 RUM 中同时查看 HTTP 状态和业务错误码。
+
+回调的第二个参数 `context` 包含原始浏览器对象，供您读取；只有写入 `event.context` 的自定义字段才会随事件上报。`res` 是本例自定义的字段名，SDK 不会自动采集响应体。
+
+<Note>
+`beforeSend` 是同步回调，不等待 Promise。此示例不采集 Fetch 响应体；将判断改为 `fetch`，或在回调中使用 `await context.response.clone().json()`，都不能实现同样的采集。Fetch 响应头可同步读取，参见上方响应头示例。XHR 的 Blob 响应同样需要异步读取，因此不在此示例范围内。
+</Note>
+
+<Steps>
+<Step title="按接口范围采集响应">
+
+将下面的回调合并到已有的 `flashcatRum.init()` 配置中。将 `/api/orders/status` 替换为您允许采集的接口路径。示例保留原有上下文，只为符合条件的 XHR 事件添加 `res`。
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackResources: true,
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr") {
+      return true;
+    }
+
+    if (new URL(event.resource.url).pathname !== "/api/orders/status") {
+      return true;
+    }
+
+    const xhr = context.xhr;
+    if (!xhr) return true;
+
+    try {
+      let res;
+      if (xhr.responseType === "json") {
+        res = xhr.response;
+      } else if (xhr.responseType === "" || xhr.responseType === "text") {
+        res = JSON.parse(xhr.responseText);
+      } else {
+        return true;
+      }
+
+      const nextContext = { ...event.context, res };
+      // 本例的业务保护阈值，不是 SDK 的 context 大小上限。
+      const maxContextBytes = 16 * 1024;
+      if (new Blob([JSON.stringify(nextContext)]).size <= maxContextBytes) {
+        event.context = nextContext;
+      } else {
+        event.context = {
+          ...event.context,
+          res_omitted: "context_exceeds_16_kib",
+        };
+      }
+    } catch {
+      // 无法解析响应时，仍保留原资源事件。
+    }
+
+    return true;
+  },
+});
+```
+
+只采集排障所需的接口和字段。生产环境建议从 `res` 中挑选错误码、错误信息和请求 ID，避免上报密码、访问令牌、会话凭据和个人信息。
+
+</Step>
+<Step title="触发一次 XHR 请求">
+
+回调仅对实际使用 XHR 的请求生效。下面的请求使用 `responseType = "json"`；已有应用中的 XHR 请求也可直接触发回调。
+
+```javascript
+const xhr = new XMLHttpRequest();
+xhr.open("GET", "/api/orders/status");
+xhr.responseType = "json";
+xhr.send();
+```
+
+本例支持 XHR 的 JSON 响应，以及可解析为 JSON 的文本响应。Blob、ArrayBuffer 响应，以及无法解析为 JSON 的文本响应，不会附加 `res`。原资源事件仍正常采集。
+
+</Step>
+<Step title="在查看器中读取 context.res">
+
+进入 **RUM → 查看器**，选择对应应用、请求发生的时间范围和 **Resources**。打开接口记录，在 **属性 → Other → context** 中读取 `res`。您也可以使用属性区域的 **JSON** 开关查看结构化数据。
+
+接口返回包含 `request_id` 和 `error` 的 JSON 时，上报事件中的自定义字段如下：
+
+```json
+{
+  "context": {
+    "res": {
+      "request_id": "example-request-id",
+      "error": {
+        "code": "ResourceNotFound",
+        "message": "The requested resource does not exist."
+      }
+    }
+  }
+}
+```
+
+业务错误码位于 `context.res.error.code`，请求 ID 位于 `context.res.request_id`。`res` 保留您选取的响应结构；如果接口返回 `{ "data": ... }`，业务数据位于 `context.res.data`。
+
+<Frame caption="context.res 结构示意：在资源详情中使用示例数据，并格式化展示。">
+  <img src="/images/rum/resource-response-context.png" alt="资源详情的属性区域显示 context.res 中的业务错误码和请求 ID" />
+</Frame>
+
+</Step>
+</Steps>
+
+**大小限制与超限行为**
+
+| 范围 | 限制 | 超限行为 |
+| --- | --- | --- |
+| `beforeSend` 写回的整个 `event.context` | 默认序列化字符预算为 `220 × 1024 = 225,280`；按 JavaScript 字符串长度计算，包含字段名和 JSON 结构 | SDK 停止复制超出预算的字段或数组元素，并在浏览器控制台警告。超大字段可能整个缺失，不能依赖 SDK 保留完整 `res` |
+| 包含上下文和所有标准字段的整个事件 | SDK 的发送检查阈值为 `256 KiB`（`262,144`），按当前编码器估算的尺寸判断 | 达到或超过阈值时，SDK 丢弃整个事件并在浏览器控制台警告 |
+| 示例业务保护阈值（整个候选 context） | JSON 的 UTF-8 大小不超过 `16 KiB`（`16,384` 字节） | 保留原有上下文，省略本次 `res`，添加 `res_omitted` 标记；原资源事件继续上报 |
+
+`res` 与已有的自定义字段共享 context 预算，没有独立额度。字符预算不是 UTF-8 字节上限：中文和 emoji 的字节数可能大于字符串长度。整事件的检查还受编码方式影响，不应将 `256 KiB` 当作响应体可用空间，也不要依赖压缩扩大采集范围。示例中的 `16 KiB` 是可按业务调整的保护阈值，不是平台上限。
+
 ### 修改 RUM 事件内容
 
 例如，从视图 URL 中屏蔽电子邮件地址：

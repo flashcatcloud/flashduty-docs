@@ -196,6 +196,125 @@ flashcatRum.init({
 });
 ```
 
+<span id="resource-response-context"></span>
+### Attach an API response to resource context
+
+Read an XHR JSON response in `beforeSend` and attach it to the current resource event as `event.context.res`. For example, when an API returns `ResourceNotFound`, you can inspect both the HTTP status and the business error code in RUM.
+
+The callback's second argument, `context`, exposes the original browser objects for reading. Only custom fields written to `event.context` are sent with the event. `res` is a custom field name in this example; the SDK does not automatically collect response bodies.
+
+<Note>
+`beforeSend` is synchronous and does not wait for Promises. This example does not collect Fetch response bodies. Changing the condition to `fetch` or using `await context.response.clone().json()` does not provide equivalent collection. Fetch response headers can be read synchronously, as shown above. XHR Blob responses also require asynchronous reading and are outside this example's scope.
+</Note>
+
+<Steps>
+<Step title="Limit collection to selected APIs">
+
+Merge this callback into your existing `flashcatRum.init()` configuration. Replace `/api/orders/status` with an API path you allow for collection. The example preserves existing context and adds `res` only to matching XHR events.
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackResources: true,
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr") {
+      return true;
+    }
+
+    if (new URL(event.resource.url).pathname !== "/api/orders/status") {
+      return true;
+    }
+
+    const xhr = context.xhr;
+    if (!xhr) return true;
+
+    try {
+      let res;
+      if (xhr.responseType === "json") {
+        res = xhr.response;
+      } else if (xhr.responseType === "" || xhr.responseType === "text") {
+        res = JSON.parse(xhr.responseText);
+      } else {
+        return true;
+      }
+
+      const nextContext = { ...event.context, res };
+      // This example's application policy, not the SDK context limit.
+      const maxContextBytes = 16 * 1024;
+      if (new Blob([JSON.stringify(nextContext)]).size <= maxContextBytes) {
+        event.context = nextContext;
+      } else {
+        event.context = {
+          ...event.context,
+          res_omitted: "context_exceeds_16_kib",
+        };
+      }
+    } catch {
+      // Keep the original resource event if the response cannot be parsed.
+    }
+
+    return true;
+  },
+});
+```
+
+Collect only the APIs and fields needed for troubleshooting. In production, select error codes, error messages, and request IDs from `res`. Exclude passwords, access tokens, session credentials, and personal information.
+
+</Step>
+<Step title="Trigger an XHR request">
+
+The callback applies only to requests that use XHR. This request uses `responseType = "json"`; existing XHR requests in your application also trigger the callback.
+
+```javascript
+const xhr = new XMLHttpRequest();
+xhr.open("GET", "/api/orders/status");
+xhr.responseType = "json";
+xhr.send();
+```
+
+The example supports XHR JSON responses and text responses that contain valid JSON. Blob, ArrayBuffer, and text responses that are not valid JSON do not receive `res`. The original resource events are still collected.
+
+</Step>
+<Step title="Read context.res in the Explorer">
+
+Go to **RUM → Explorer**, select the application and request time range, and choose **Resources**. Open the API record and read `res` under **Attributes → Other → context**. You can also use the **JSON** switch in the attributes area to view structured data.
+
+For an API response containing `request_id` and `error`, the reported event includes:
+
+```json
+{
+  "context": {
+    "res": {
+      "request_id": "example-request-id",
+      "error": {
+        "code": "ResourceNotFound",
+        "message": "The requested resource does not exist."
+      }
+    }
+  }
+}
+```
+
+Read the business error code at `context.res.error.code` and the request ID at `context.res.request_id`. `res` keeps the response structure you select. If the API returns `{ "data": ... }`, the business data is at `context.res.data`.
+
+<Frame caption="Illustration of context.res in resource details, using example data and formatted for readability.">
+  <img src="/images/rum/resource-response-context.png" alt="Resource attributes showing a business error code and request ID in context.res" />
+</Frame>
+
+</Step>
+</Steps>
+
+**Size limits and oversized data**
+
+| Scope | Limit | Behavior when exceeded |
+| --- | --- | --- |
+| The entire `event.context` written back by `beforeSend` | The default serialized character budget is `220 × 1024 = 225,280`, measured by JavaScript string length, including field names and JSON structure | The SDK stops copying fields or array items that exceed the budget and logs a browser console warning. An oversized field can be missing entirely; do not rely on the SDK to preserve a complete `res` |
+| The entire event, including context and all standard fields | The SDK's send-check threshold is `256 KiB` (`262,144`), measured using the current encoder's estimated size | The SDK drops the entire event and logs a browser console warning when the estimate reaches or exceeds the threshold |
+| Example application policy: the entire candidate context | At most `16 KiB` (`16,384` bytes) of UTF-8 JSON | Keep existing context, omit this response's `res`, and add `res_omitted`; the original resource event is still sent |
+
+`res` shares the context budget with existing custom fields; it has no separate allowance. The character budget is not a UTF-8 byte limit: CJK text and emoji can use more bytes than their string length. The whole-event check also depends on encoding. Do not treat `256 KiB` as available response-body space or rely on compression to expand collection. The example's `16 KiB` budget is an adjustable application policy, not a platform limit.
+
 ### Modify RUM event content
 
 For example, mask email addresses from view URLs:
