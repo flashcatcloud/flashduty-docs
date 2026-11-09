@@ -128,14 +128,41 @@ The second argument, `context`, exposes the browser objects that triggered the e
 | View | `Location` object |
 | Action | Triggering `Event` and handling stack |
 | Resource (XHR) | `XMLHttpRequest`, `PerformanceResourceTiming`, and handling stack |
-| Resource (Fetch) | `Request`, `Response`, `PerformanceResourceTiming`, and handling stack |
+| Resource (Fetch) | Request input and init (`requestInput`, `requestInit`), `Response`, `PerformanceResourceTiming`, and handling stack |
 | Resource (Other) | `PerformanceResourceTiming` |
 | Error | `Error` object |
 | Long Task | `PerformanceLongTaskTiming` |
 
-### Enrich RUM events
+### Context size limits
 
-Add context attributes to events, such as adding response header data to resource events:
+| Scope | Limit and behavior when exceeded |
+| --- | --- |
+| The entire `event.context` written back by `beforeSend` | The default serialized budget is **225,280 characters** (`220 × 1024`), measured by JavaScript string length, including field names and JSON structure. The SDK stops copying further fields or array items and logs a console warning when the budget is exceeded; an oversized field can be missing entirely |
+| The entire event | The send-check threshold is **256 KiB** (`262,144`), measured using the estimated encoded size. The SDK drops the entire event and logs a console warning when the estimate reaches or exceeds the threshold |
+
+<Tip>
+Custom fields (including `res` and `req`) share the context budget. Character counts differ from UTF-8 byte counts. Do not treat `256 KiB` as response-body space or rely on compression to expand collection.
+</Tip>
+
+Whether a request or response body can be written to `event.context` depends on the request type and body shape. Both only work in the synchronous `beforeSend`:
+
+| Content | Can attach to `event.context` synchronously | Notes |
+| --- | --- | --- |
+| XHR response body (JSON or JSON text) | Yes | `xhr.response` is readable when the request completes; see the [response body section](#resource-response-xhr) |
+| Fetch request body (string body in `fetch(url, { body })`) | Yes | Kept on `context.requestInit.body`; see the [request body section](#resource-request-fetch) |
+| Fetch response body | No | The response stream only reads asynchronously, and `beforeSend` does not wait |
+| XHR request body | Not directly | An XHR object cannot return the body it sent; intercept `send` in application code first, as shown in the request body section |
+| Fetch and XHR response headers, status, and URL | Yes | Fetch reads from `context.response` when it exists; XHR reads through `context.xhr`; Fetch: see the [Fetch tab](#resource-headers-fetch); XHR: see the [XHR tab](#resource-headers-xhr) |
+
+<span id="resource-response-headers"></span>
+### Add response headers to resource events
+
+Both Fetch and XHR response headers can be read synchronously in `beforeSend` and written to `event.context`. Use the tab for your request type.
+
+<Tabs>
+<Tab title="Fetch" id="resource-headers-fetch">
+
+Read all headers from `context.response.headers`, or a single header with `headers.get(name)`:
 
 ```javascript
 flashcatRum.init({
@@ -157,23 +184,55 @@ flashcatRum.init({
 });
 ```
 
+After reporting, open the resource event in the Explorer to see `context.responseHeaders` in its details:
+
+<Frame caption="Resource details in the Explorer">
+  <img src="/images/rum/resource-headers-context.png" alt="Resource details in the Explorer, with a context field containing responseHeaders data" />
+</Frame>
+
+</Tab>
+<Tab title="XHR" id="resource-headers-xhr">
+
+Read a single header with `context.xhr.getResponseHeader(name)`, or all headers with `getAllResponseHeaders()`:
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr" || !context.xhr) {
+      return true;
+    }
+    event.context = {
+      ...event.context,
+      responseHeaders: {
+        "x-request-id": context.xhr.getResponseHeader("x-request-id"),
+      },
+    };
+    return true;
+  }
+});
+```
+
+After reporting, open the resource event in the Explorer to see `context.responseHeaders` in its details:
+
+<Frame caption="Resource details in the Explorer">
+  <img src="/images/rum/resource-headers-xhr.png" alt="XHR resource details in the Explorer, with a context field containing responseHeaders data" />
+</Frame>
+
+</Tab>
+</Tabs>
+
+
 <span id="resource-response-context"></span>
-### Attach a response body to resource context (XHR only)
+### Attach an API response body to resource context
 
-Read an XHR response in `beforeSend` and write the fields you need to `event.context.res`. `res` is a custom field; the SDK does not automatically collect response bodies.
+Read a response in `beforeSend` and write the fields you need to `event.context.res`. `res` is a custom field; the SDK does not automatically collect response bodies. XHR and Fetch differ; use the tab for your request type.
 
-| Data | Support |
-| --- | --- |
-| XHR JSON or JSON text response body | Read synchronously and attach to `event.context`, as shown below |
-| Fetch response headers, status, and URL | Read synchronously when `context.response` exists; other synchronously available business fields are also supported |
-| Fetch response body or XHR Blob response | Requires asynchronous reading; outside this example's scope |
+<Tabs>
+<Tab title="XHR" id="resource-response-xhr">
 
-`beforeSend` does not wait for Promises. Calling `await response.json()` or `await response.text()` in the callback does not make the SDK wait for body parsing.
-
-<Steps>
-<Step title="Attach response context">
-
-Filter requests by API path.
+When the request completes, an XHR JSON or JSON text response reads synchronously from `xhr.response`. Filter requests by API path:
 
 ```javascript
 flashcatRum.init({
@@ -194,6 +253,8 @@ flashcatRum.init({
       const res = xhr.responseType === "json"
         ? xhr.response
         : JSON.parse(xhr.responseText);
+      // Collect only necessary APIs and fields, such as business error codes and request IDs.
+      // Exclude passwords, access tokens, session credentials, and personal information.
       event.context = { ...event.context, res };
     } catch {
       // Keep the resource event if the response cannot be parsed synchronously.
@@ -203,27 +264,121 @@ flashcatRum.init({
 });
 ```
 
-Collect only necessary APIs and fields, such as business error codes and request IDs. Exclude passwords, access tokens, session credentials, and personal information.
+<Tip>
+XHR Blob responses require asynchronous reading and are outside this example's scope.
+</Tip>
 
-</Step>
-<Step title="View reported data">
+After an XHR report, `context.res` appears in the resource details in the Explorer:
 
-<Frame caption="The context field in the JSON view of resource details. Sensitive values are redacted.">
+<Frame caption="Resource details in the Explorer">
   <img src="/images/rum/resource-response-context.png" alt="Resource details in JSON view, with a red box around the context field containing response data in res" />
 </Frame>
 
-</Step>
-</Steps>
+</Tab>
+<Tab title="Fetch" id="resource-response-fetch">
 
-**Size limits**
+<Warning>
+A Fetch response body only reads asynchronously through `response.text()` or `response.json()`, while `beforeSend` is synchronous and does not wait for Promises. Writing the body back after an asynchronous read does not enter the reported event either, so a Fetch response body cannot be attached as resource context.
+</Warning>
 
-| Scope | Limit and behavior when exceeded |
-| --- | --- |
-| The entire `event.context` written back by `beforeSend` | The default serialized budget is **225,280 characters** (`220 × 1024`), measured by JavaScript string length, including field names and JSON structure. The SDK stops copying further fields or array items and logs a console warning when the budget is exceeded; an oversized field can be missing entirely |
-| The entire event | The send-check threshold is **256 KiB** (`262,144`), measured using the estimated encoded size. The SDK drops the entire event and logs a console warning when the estimate reaches or exceeds the threshold |
+<Tip>
+If you only need a few fields, such as a business error code or request ID, have the server return them in response headers and read `context.response.headers` synchronously in `beforeSend`, as in [Add response headers to resource events](#resource-headers-fetch). Do not place a full response body in headers: header values are strings with limited size, and cross-origin headers must be exposed through `Access-Control-Expose-Headers` before the browser can read them.
+</Tip>
 
-`res` shares the context budget with other custom fields. Character counts differ from UTF-8 byte counts. Do not treat `256 KiB` as response-body space or rely on compression to expand collection.
+</Tab>
+</Tabs>
 
+
+
+<span id="resource-request-body-context"></span>
+### Attach an API request body to resource context
+
+A request body is what the frontend sends, unrelated to the response. How it can be read depends on the request type; use the tab for your case. The SDK does not automatically collect request bodies.
+
+<Tabs>
+<Tab title="Fetch" id="resource-request-fetch">
+
+Only when a request is sent as `fetch(url, { body })` with a string body is the body kept on `context.requestInit.body`, the second `beforeSend` argument, where it can be parsed synchronously and written to `event.context` (for example as `req`). The SDK passes the original call arguments through for users to extract from.
+
+```javascript
+beforeSend(event, context) {
+  if (event.type !== "resource" || event.resource.type !== "fetch") {
+    return true;
+  }
+  if (new URL(event.resource.url).pathname !== "/api/orders") {
+    return true;
+  }
+  const body = context.requestInit?.body;
+  if (typeof body !== "string") {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(body);
+    // Collect only the fields you need. Never attach the whole body, passwords, or tokens.
+    event.context = { ...event.context, req: { orderId: parsed.orderId } };
+  } catch {
+    // Not a JSON string: keep the resource event without attaching it.
+  }
+  return true;
+}
+```
+
+Convert `URLSearchParams` first with `Object.fromEntries(body.entries())`. Bodies sent as `fetch(new Request(...))`, a `Blob`, a file, or a stream cannot be read synchronously.
+
+After reporting, open the resource event in the Explorer to see `context.req` in its details:
+
+<Frame caption="Resource details in the Explorer">
+  <img src="/images/rum/resource-context-explorer.png" alt="Resource details in the Explorer, with a context field containing req data extracted from a Fetch request body" />
+</Frame>
+
+</Tab>
+<Tab title="XHR" id="resource-request-xhr">
+
+An XHR object cannot return the body it sent, so `beforeSend` cannot read it directly. Intercept `XMLHttpRequest.prototype.send` in application code to stash the body first, then read it back by XHR object in `beforeSend`:
+
+```javascript
+// Install before requests are sent (ideally before SDK init)
+const xhrBodies = new WeakMap();
+const originalSend = XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send = function (body) {
+  if (typeof body === "string") {
+    xhrBodies.set(this, body);
+  }
+  return originalSend.call(this, body);
+};
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackResources: true,
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr" || !context.xhr) {
+      return true;
+    }
+    const raw = xhrBodies.get(context.xhr);
+    if (typeof raw !== "string") {
+      return true;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      // Collect only the fields you need. Never attach the whole body, passwords, or tokens.
+      event.context = { ...event.context, req: { orderId: parsed.orderId } };
+    } catch {
+      // Not a JSON string: keep the resource event without attaching it.
+    }
+    return true;
+  },
+});
+```
+
+After reporting, open the resource event in the Explorer to see `context.req` in its details:
+
+<Frame caption="Resource details in the Explorer">
+  <img src="/images/rum/resource-request-body-xhr.png" alt="XHR resource details in the Explorer, with a context field containing req data extracted from an XHR request body" />
+</Frame>
+
+</Tab>
+</Tabs>
 
 ### Modify RUM event content
 

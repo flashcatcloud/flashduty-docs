@@ -8,7 +8,7 @@ keywords: ["RUM", "Web SDK", "用户监控", "前端监控"]
 
 ## 覆盖默认 RUM 视图名称
 
-RUM 在页面访问或 SPA URL 变化时自动创建视图，并将含数字的路径段归一化为 `?`。例如，`/dashboard/1234` 和 `/dashboard/9a` 的默认视图名称都是 `/dashboard/?`。需要手动划分路由视图时，启用手动视图跟踪；仅修改名称可使用 `setViewName()`。
+RUM 在页面访问或 SPA 地址变化时自动创建视图，并把含数字的路径段归一化为 `?`。例如 `/dashboard/1234` 和 `/dashboard/9a` 的默认视图名都是 `/dashboard/?`。需要按路由划分视图时，启用手动视图跟踪；只改名称时用 `setViewName()`。
 
 ### 配置手动跟踪视图
 
@@ -103,7 +103,7 @@ flashcatRum.setViewName("Checkout");
 
 ## 控制首屏 Web Vitals 采集
 
-`trackWebVitals` 默认为 `true`，采集初始加载视图的 FCP、LCP、FID 和加载时间。对于预渲染、后台标签页或宿主提前加载的页面，这些指标可能偏大，可将此选项设为 `false`。资源、长任务、用户行为、错误和后续视图事件不受影响。
+`trackWebVitals` 默认为 `true`，采集首个视图的 FCP、LCP、FID 和加载时间。预渲染、后台标签页或宿主提前加载的页面，这些值可能偏大，不需要时设为 `false`。资源、长任务、用户行为、错误和后续视图不受影响。
 
 ```javascript rum-init.js
 import { flashcatRum } from "@flashcatcloud/browser-rum";
@@ -128,14 +128,42 @@ flashcatRum.init({
 | View | `Location` 对象 |
 | Action | 触发事件的 `Event` 和处理堆栈 |
 | Resource (XHR) | `XMLHttpRequest`、`PerformanceResourceTiming` 和处理堆栈 |
-| Resource (Fetch) | `Request`、`Response`、`PerformanceResourceTiming` 和处理堆栈 |
+| Resource (Fetch) | 请求输入与配置（`requestInput`、`requestInit`）、`Response`、`PerformanceResourceTiming` 和处理堆栈 |
 | Resource (Other) | `PerformanceResourceTiming` |
 | Error | `Error` 对象 |
 | Long Task | `PerformanceLongTaskTiming` |
 
-### 丰富 RUM 事件
+### 上下文大小限制
 
-为事件添加上下文属性，例如为资源事件添加响应头数据：
+| 范围 | 限制与超限行为 |
+| --- | --- |
+| `beforeSend` 写回的整个 `event.context` | 默认序列化预算为 **225,280 个字符**（`220 × 1024`），按 JavaScript 字符串长度计算，包含字段名和 JSON 结构。超限时 SDK 停止复制后续字段或数组元素，并在控制台警告；超大字段可能整个缺失 |
+| 整个事件 | 发送检查阈值为 **256 KiB**（`262,144`），按编码后的估算尺寸判断。达到或超过阈值时，SDK 丢弃整个事件并在控制台警告 |
+
+<Tip>
+自定义字段（包括 `res`、`req`）共享 context 预算。字符数不等于 UTF-8 字节数；不要将 `256 KiB` 当作响应体额度，也不要依赖压缩扩大采集范围。
+</Tip>
+
+请求体和响应体能否写进 `event.context`，取决于请求类型和 body 形态。两者都只能在同步的 `beforeSend` 中完成：
+
+| 内容 | 是否可同步附加到 `event.context` | 说明 |
+| --- | --- | --- |
+| XHR 响应体（JSON 或 JSON 文本） | 可以 | 请求完成时 `xhr.response` 已可同步读取，见[响应体章节](#resource-response-xhr) |
+| Fetch 请求体（`fetch(url, { body })` 的字符串 body） | 可以 | 保留在 `context.requestInit.body`，见[请求体章节](#resource-request-fetch) |
+| Fetch 响应体 | 不可以 | 只能异步读取响应流，`beforeSend` 不等待 |
+| XHR 请求体 | SDK 无法直接取得 | XHR 对象无法取回已发送的请求体；需业务侧先拦截 `send` 暂存，见[请求体章节](#resource-request-xhr) |
+| Fetch 与 XHR 的响应头、状态码和 URL | 可以 | Fetch 在 `context.response` 存在时同步读取；XHR 通过 `context.xhr` 读取，Fetch 见[Fetch 页签](#resource-headers-fetch)，XHR 见[XHR 页签](#resource-headers-xhr) |
+
+
+<span id="resource-response-headers"></span>
+### 为资源事件添加响应头
+
+Fetch 与 XHR 都可在 `beforeSend` 中同步读取响应头，把需要的字段写入 `event.context`。请按请求类型查看对应页签。
+
+<Tabs>
+<Tab title="Fetch" id="resource-headers-fetch">
+
+通过 `context.response.headers` 读取全部响应头，或用 `headers.get(name)` 读取单个响应头：
 
 ```javascript
 flashcatRum.init({
@@ -157,23 +185,54 @@ flashcatRum.init({
 });
 ```
 
+上报后，在查看器中打开该资源事件，详情中可看到 `context.responseHeaders`：
+
+<Frame caption="查看器的资源详情">
+  <img src="/images/rum/resource-headers-context.png" alt="查看器资源详情页，属性区 context 字段显示上报的 responseHeaders 响应头数据" />
+</Frame>
+
+</Tab>
+<Tab title="XHR" id="resource-headers-xhr">
+
+通过 `context.xhr.getResponseHeader(name)` 读取单个响应头，或用 `getAllResponseHeaders()` 读取全部：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr" || !context.xhr) {
+      return true;
+    }
+    event.context = {
+      ...event.context,
+      responseHeaders: {
+        "x-request-id": context.xhr.getResponseHeader("x-request-id"),
+      },
+    };
+    return true;
+  }
+});
+```
+
+上报后，在查看器中打开该资源事件，详情中可看到 `context.responseHeaders`：
+
+<Frame caption="查看器的资源详情">
+  <img src="/images/rum/resource-headers-xhr.png" alt="查看器中 xhr 资源详情页，属性区 context 字段显示上报的 responseHeaders 响应头数据" />
+</Frame>
+
+</Tab>
+</Tabs>
+
 <span id="resource-response-context"></span>
-### 将接口响应体作为资源上下文上报（仅 XHR）
+### 将接口响应体作为资源上下文上报
 
-在 `beforeSend` 中读取 XHR 响应，将需要的字段写入 `event.context.res`。`res` 是自定义字段，SDK 不会自动采集响应体。
+在 `beforeSend` 中读取响应，将需要的字段写入 `event.context.res`。`res` 是自定义字段，SDK 不会自动采集响应体。XHR 与 Fetch 的情况不同，请按请求类型查看对应页签。
 
-| 数据 | 支持范围 |
-| --- | --- |
-| XHR 的 JSON 或 JSON 文本响应体 | 可同步读取并附加到 `event.context`，示例见下文 |
-| Fetch 的响应头、状态码和 URL | 可在 `context.response` 存在时同步读取；也可添加其他同步可用的业务字段 |
-| Fetch 响应体、XHR Blob 响应 | 需要异步读取，不适用于此示例 |
+<Tabs>
+<Tab title="XHR" id="resource-response-xhr">
 
-`beforeSend` 不等待 Promise。在回调中调用 `await response.json()` 或 `await response.text()`，不会让 SDK 等待响应体解析完成。
-
-<Steps>
-<Step title="添加响应上下文">
-
-按接口路径筛选请求。
+请求完成时，XHR 的 JSON 或 JSON 文本响应可通过 `xhr.response` 同步读取。按接口路径筛选请求：
 
 ```javascript
 flashcatRum.init({
@@ -194,6 +253,8 @@ flashcatRum.init({
       const res = xhr.responseType === "json"
         ? xhr.response
         : JSON.parse(xhr.responseText);
+      // 只采集必要的接口和字段，例如业务错误码和请求 ID。
+      // 不要上报密码、访问令牌、会话凭据或个人信息。
       event.context = { ...event.context, res };
     } catch {
       // 无法同步解析响应时，仍保留原资源事件。
@@ -203,27 +264,122 @@ flashcatRum.init({
 });
 ```
 
-只采集必要的接口和字段，例如业务错误码和请求 ID。不要上报密码、访问令牌、会话凭据或个人信息。
+<Tip>
+XHR 的 Blob 响应需要异步读取，不在此示例范围内。
+</Tip>
 
-</Step>
-<Step title="查看上报结果">
+XHR 上报后，在查看器的资源详情中可看到 `context.res`：
 
-<Frame caption="资源详情的 JSON 视图中显示 context，截图已脱敏。">
+<Frame caption="查看器的资源详情">
   <img src="/images/rum/resource-response-context.png" alt="资源详情的 JSON 视图中，红框标出包含 res 响应数据的 context 字段" />
 </Frame>
 
-</Step>
-</Steps>
+</Tab>
+<Tab title="Fetch" id="resource-response-fetch">
 
-**大小限制**
+<Warning>
+Fetch 响应体只能通过 `response.text()` 或 `response.json()` 异步读取，而 `beforeSend` 是同步回调、不等待 Promise，读完后写回也不会进入实际上报的事件，因此 Fetch 响应体无法作为资源上下文上报。
+</Warning>
 
-| 范围 | 限制与超限行为 |
-| --- | --- |
-| `beforeSend` 写回的整个 `event.context` | 默认序列化预算为 **225,280 个字符**（`220 × 1024`），按 JavaScript 字符串长度计算，包含字段名和 JSON 结构。超限时 SDK 停止复制后续字段或数组元素，并在控制台警告；超大字段可能整个缺失 |
-| 整个事件 | 发送检查阈值为 **256 KiB**（`262,144`），按编码后的估算尺寸判断。达到或超过阈值时，SDK 丢弃整个事件并在控制台警告 |
+<Tip>
+如只需上报少量字段（例如业务错误码、请求 ID），可由服务端将字段放入响应头，前端在 `beforeSend` 中同步读取 `context.response.headers` 并写入 `event.context`，写法见[为资源事件添加响应头](#resource-headers-fetch)。不要把完整响应体放入响应头：响应头只能承载字符串、体积有限，跨域时还需服务端通过 `Access-Control-Expose-Headers` 暴露后前端才能读到。
+</Tip>
 
-`res` 与其他自定义字段共享 context 预算。字符数不等于 UTF-8 字节数；不要将 `256 KiB` 当作响应体额度，也不要依赖压缩扩大采集范围。
 
+
+</Tab>
+</Tabs>
+
+
+<span id="resource-request-body-context"></span>
+### 将接口请求体作为资源上下文上报
+
+请求体是前端发出的内容，与响应体无关。能否取得取决于请求类型，请按请求类型查看对应页签。SDK 不会自动采集请求体。
+
+<Tabs>
+<Tab title="Fetch" id="resource-request-fetch">
+
+仅当请求以 `fetch(url, { body })` 发出、且 body 是字符串时，请求体保留在 `beforeSend` 第二个参数的 `context.requestInit.body` 中，可同步解析后把需要的字段写入 `event.context`（例如 `req`）。这是 SDK 透传原始调用参数供用户自行提取。
+
+```javascript
+beforeSend(event, context) {
+  if (event.type !== "resource" || event.resource.type !== "fetch") {
+    return true;
+  }
+  if (new URL(event.resource.url).pathname !== "/api/orders") {
+    return true;
+  }
+  const body = context.requestInit?.body;
+  if (typeof body !== "string") {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(body);
+    // 只挑需要的字段，不要整包上报，更不要上报密码、令牌等敏感信息。
+    event.context = { ...event.context, req: { orderId: parsed.orderId } };
+  } catch {
+    // 不是 JSON 字符串时不附加，仍保留原资源事件。
+  }
+  return true;
+}
+```
+
+`URLSearchParams` 可先用 `Object.fromEntries(body.entries())` 转换；`fetch(new Request(...))`、`Blob`、文件或流，都无法同步取得请求体。
+
+上报后，在查看器中打开该资源事件，详情中可看到 `context.req`：
+
+<Frame caption="查看器的资源详情">
+  <img src="/images/rum/resource-context-explorer.png" alt="查看器资源详情页，属性区 context 字段显示从 Fetch 请求体提取的 req 数据" />
+</Frame>
+
+</Tab>
+<Tab title="XHR" id="resource-request-xhr">
+
+XHR 对象无法取回已发送的请求体，`beforeSend` 中拿不到。需要在业务代码中先拦截 `XMLHttpRequest.prototype.send` 暂存请求体，再在 `beforeSend` 中按 XHR 对象取回并写入 `event.context`：
+
+```javascript
+// 在发请求之前安装拦截（建议在 SDK 初始化之前）
+const xhrBodies = new WeakMap();
+const originalSend = XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send = function (body) {
+  if (typeof body === "string") {
+    xhrBodies.set(this, body);
+  }
+  return originalSend.call(this, body);
+};
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackResources: true,
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr" || !context.xhr) {
+      return true;
+    }
+    const raw = xhrBodies.get(context.xhr);
+    if (typeof raw !== "string") {
+      return true;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      // 只挑需要的字段，不要整包上报，更不要上报密码、令牌等敏感信息。
+      event.context = { ...event.context, req: { orderId: parsed.orderId } };
+    } catch {
+      // 不是 JSON 字符串时不附加，仍保留原资源事件。
+    }
+    return true;
+  },
+});
+```
+
+上报后，在查看器中打开该资源事件，详情中可看到 `context.req`：
+
+<Frame caption="查看器的资源详情">
+  <img src="/images/rum/resource-request-body-xhr.png" alt="查看器中 xhr 资源详情页，属性区 context 字段显示从 XHR 请求体提取的 req 数据" />
+</Frame>
+
+</Tab>
+</Tabs>
 
 ### 修改 RUM 事件内容
 
@@ -345,7 +501,7 @@ flashcatRum.init({
 ```
 
 <Warning>
-未被普通采样抽中的会话默认不采集页面视图及其相关遥测数据；开启下方异常补采后，可在报错时补报。
+未被普通采样抽中的会话默认不上报；开启下方异常补采后，可在报错时补报。
 </Warning>
 
 ### 异常会话补采
@@ -431,7 +587,7 @@ acceptCookieBannerButton.addEventListener("click", function () {
 
 ## 视图上下文
 
-您可以通过以下 API 为当前视图及其子事件添加或修改上下文：
+以下 API 为当前视图及其子事件添加或修改上下文：
 
 <Tabs>
 <Tab title="启动视图时指定">
@@ -466,7 +622,7 @@ flashcatRum.setViewContext({
 
 ## 错误上下文
 
-在捕获错误时，您可以通过 `dd_context` 属性为错误对象附加本地上下文：
+捕获错误时，可通过 `dd_context` 属性为错误对象附加上下文：
 
 ```javascript
 const error = new Error("Something went wrong");
@@ -476,7 +632,7 @@ throw error;
 
 ## 全局上下文
 
-全局上下文会附加到所有 RUM 事件上：
+全局上下文会附加到所有事件：
 
 ```javascript
 // 添加属性
@@ -548,11 +704,11 @@ flashcatRum.init({
 
 ## 集成 RUM 与分布式追踪
 
-配置 `allowedTracingUrls`，为匹配的 API 请求注入追踪头，以关联浏览器请求和后端 Trace。
+配置 `allowedTracingUrls` 后，SDK 会为匹配的请求注入追踪头，把浏览器请求与后端 Trace 关联起来。
 
 ### 使用方法
 
-使用 `allowedTracingUrls` 参数配置当前应用的 API 服务域名：
+把当前应用的 API 域名填入 `allowedTracingUrls`：
 
 ```javascript
 import { flashcatRum } from "@flashcatcloud/browser-rum";
@@ -596,7 +752,7 @@ SDK 在匹配的请求上添加 `traceparent` 和 `tracestate` 请求头，字�
 </Frame>
 
 <Warning>
-如您的 HTTP 请求涉及到跨域问题，需要确保请求可通过跨域检测。请确保对应的 server [有跨域相关配置](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Access-Control-Allow-Headers)，支持[预检请求](https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request)访问。
+跨域请求需确保服务端[允许跨域](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Access-Control-Allow-Headers)，并能处理[预检请求](https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request)。
 </Warning>
 
 <span id="注意事项"></span>
