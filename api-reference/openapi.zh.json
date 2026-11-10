@@ -750,10 +750,9 @@
       },
       "AddIncidentResponderRequest": {
         "type": "object",
-        "description": "向已有故障添加处理人员的参数。",
+        "description": "向已有故障添加处理人员的参数。`person_ids` 与 `team_ids` 至少要提供一个。",
         "required": [
-          "incident_id",
-          "person_ids"
+          "incident_id"
         ],
         "properties": {
           "incident_id": {
@@ -767,7 +766,17 @@
               "type": "integer",
               "format": "int64"
             },
-            "description": "要添加为处理人的成员 ID。已经是处理人或账户中不存在的 ID 会被跳过。"
+            "maxItems": 100,
+            "description": "要添加为处理人的成员 ID（最多 100 个）。已经是处理人或账户中不存在的 ID 会被跳过。"
+          },
+          "team_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "maxItems": 20,
+            "description": "按团队添加处理人时的团队 ID 列表（最多 20 个）。每个团队展开为状态为启用的成员后与 `person_ids` 合并，处理人员总数上限为 100。"
           },
           "notify": {
             "type": "object",
@@ -2935,7 +2944,7 @@
       },
       "AssignedTo": {
         "type": "object",
-        "description": "分派对象。请求中设置 `person_ids`、`escalate_rule_id` 或 `emails`；都未设置时服务端会重新匹配协作空间的分派策略。响应中该对象始终存在；从未分派过的故障 `type`、`id` 为空，`assigned_at` 为 `0`。",
+        "description": "分派对象。请求中设置 `person_ids`、`team_ids`、`escalate_rule_id` 或 `emails`；都未设置时服务端会重新匹配协作空间的分派策略。响应中该对象始终存在；从未分派过的故障 `type`、`id` 为空，`assigned_at` 为 `0`。",
         "properties": {
           "person_ids": {
             "type": "array",
@@ -2946,6 +2955,16 @@
             "minItems": 1,
             "maxItems": 100,
             "description": "直接指派的成员 ID 列表。"
+          },
+          "team_ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "description": "按团队指派的团队 ID 列表（1–20 个）。分派执行时每个团队展开为状态为启用的成员并并入 `person_ids`，之后团队成员变动不会重新展开；若所选团队在账户中没有任何成员则返回 `InvalidParameter`，展开后处理人员总数上限为 100。仅请求可用：已落存的分派只保留展开后的成员，响应中不返回该字段。"
           },
           "escalate_rule_id": {
             "type": "string",
@@ -4430,6 +4449,10 @@
             "type": "boolean",
             "description": "是否为非工作日。"
           },
+          "day_end": {
+            "type": "string",
+            "description": "该工作日提前收盘的当地时刻（`HH:MM`），例如 `12:00`。仅共享交易所日历的事件带该字段，整日不提前收盘时省略。"
+          },
           "created_at": {
             "type": "integer",
             "format": "int64",
@@ -4446,7 +4469,7 @@
         "description": "日历事件列表请求。day > 0 时必须同时指定 month；month 与 day 为 0 表示不过滤。",
         "properties": {
           "cal_id": {
-            "description": "日历 ID，可通过 `POST /calendar/list` 获取。",
+            "description": "日历 ID，可通过 `POST /calendar/list` 获取；该接口以 `kind` = `exchange.holiday` 返回的交易所日历 ID 同样可用，因此规则可直接读取交易所日历。",
             "type": "string"
           },
           "day": {
@@ -4521,6 +4544,10 @@
               "weekly"
             ],
             "type": "string"
+          },
+          "day_end": {
+            "type": "string",
+            "description": "该日提前收盘的当地时刻（`HH:MM`），仅在“工作日提前收盘”时返回；整日或休市日省略。"
           }
         },
         "required": [
@@ -4636,7 +4663,7 @@
             "items": {
               "type": "string"
             },
-            "description": "需要继承事件的公共节假日日历 ID 列表（例如 zh-cn.china.official）。"
+            "description": "需要继承事件的公共日历 ID 列表，例如 `zh-cn.china.official` 这样的 `region.official.holiday` 日历，以及最多一个 `exchange.holiday` 交易所日历。关联交易所日历后，本日历的 `timezone` 会跟随交易所时区并覆盖请求中的取值；关联两个交易所日历则返回 `InvalidParameter`。"
           }
         }
       },
@@ -4722,9 +4749,10 @@
           },
           "kind": {
             "type": "string",
-            "description": "日历类型。`region.official.holiday` 为地区法定假日公共日历（数据来自中心假日服务），`religion.holiday` 为宗教假日公共日历（预留值，当前无数据），`personal` 为账户自建的个人/团队日历。",
+            "description": "日历类型。`region.official.holiday` 为地区法定假日公共日历（数据来自中心假日服务），`exchange.holiday` 为共享的交易所休市日历，其时区即交易所时区，规则可直接读取其日期，`religion.holiday` 为宗教假日公共日历（预留值，当前无数据），`personal` 为账户自建的个人/团队日历。",
             "enum": [
               "region.official.holiday",
+              "exchange.holiday",
               "religion.holiday",
               "personal"
             ]
@@ -4779,9 +4807,10 @@
         "description": "日历列表请求。kind 用于按类型过滤；no_locale 在查询公共节假日日历时关闭 locale 过滤。",
         "properties": {
           "kind": {
-            "description": "日历类型过滤条件，为空时默认 personal。`region.official.holiday` 查询地区法定假日公共日历（按调用方 locale 过滤）；`personal` 查询账户自建日历。",
+            "description": "日历类型过滤条件，为空时默认 personal。`region.official.holiday` 查询地区法定假日公共日历（按调用方 locale 过滤）；`exchange.holiday` 查询共享的交易所休市日历，规则可直接读取其 `cal_id`；`personal` 查询账户自建日历。",
             "enum": [
               "region.official.holiday",
+              "exchange.holiday",
               "personal"
             ],
             "type": "string"
@@ -4872,7 +4901,7 @@
             "items": {
               "type": "string"
             },
-            "description": "要继承事件的公共节假日日历 ID（见 `kind` 为 `region.official.holiday` 的 `POST /calendar/list`）。传入时整体替换原列表，空数组即全部移除，不传则保持不变。"
+            "description": "要继承事件的公共日历 ID（见 `kind` 为 `region.official.holiday` 或 `exchange.holiday` 的 `POST /calendar/list`）；其中最多一个可以是 `exchange.holiday` 交易所日历，关联后 `timezone` 跟随交易所时区。传入时整体替换原列表，空数组即全部移除，不传则保持不变。"
           }
         }
       },
@@ -5902,7 +5931,7 @@
           },
           "assigned_to": {
             "type": "object",
-            "description": "分派对象。省略或为空时由协作空间的分派策略决定（独立故障不会有处理人员）；账户配置了创建表单时必填。`person_ids`、`escalate_rule_id` 和 `emails` 可同时设置，处理人员取并集。分派在创建之后执行，分派失败不会撤销故障。",
+            "description": "分派对象。省略或为空时由协作空间的分派策略决定（独立故障不会有处理人员）；账户配置了创建表单时必填。`person_ids`、`team_ids`、`escalate_rule_id` 和 `emails` 可同时设置，处理人员取并集。分派在创建之后执行，分派失败不会撤销故障。",
             "properties": {
               "person_ids": {
                 "type": "array",
@@ -5913,6 +5942,16 @@
                 "minItems": 1,
                 "maxItems": 100,
                 "description": "直接指派的成员 ID 列表（1–100 个），可与 `escalate_rule_id` 同时使用。"
+              },
+              "team_ids": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "minItems": 1,
+                "maxItems": 20,
+                "description": "按团队指派的团队 ID 列表（1–20 个）。每个团队展开为状态为启用的成员后并入 `person_ids`；处理人员总数上限为 100，若所选团队在账户中没有任何成员则返回 `InvalidParameter`。"
               },
               "escalate_rule_id": {
                 "type": "string",
@@ -5964,7 +6003,7 @@
                   "template_id": {
                     "type": "string",
                     "pattern": "^[0-9a-fA-F]{24}$",
-                    "description": "通知模板 ID(MongoDB ObjectID)。"
+                    "description": "通知模板 ID（MongoDB ObjectID）。必须是账户中存在的模板，否则返回 `InvalidParameter`。"
                   }
                 }
               }
@@ -18683,6 +18722,22 @@
       "RemoteConfigValues": {
         "description": "配置可设置的 SDK 参数。每个字段都是可选的：规则与默认值都未设置的字段不会出现在 SDK 响应中，SDK 将沿用初始化值。",
         "properties": {
+          "crashBeaconEnabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "原生 SDK 是否上报崩溃信标：前台崩溃导致进程退出前发出的数百字节数据，使用户此后不再打开 App 也能统计到这次崩溃。SDK 默认开启；设为 `false` 后采集端也会丢弃已收到的信标。与之下的按会话生效的开关不同，该值在 SDK 收到时立即生效。"
+          },
+          "crashBeaconTimeoutMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 500,
+            "maximum": 2000,
+            "description": "崩溃线程等待崩溃信标发送的时长，单位毫秒（500–2000）；不传时 SDK 取 1000。"
+          },
           "defaultPrivacyLevel": {
             "description": "Session Replay 默认的页面脱敏方式：\n\n- `mask`：替换页面文本并隐藏输入值。\n- `mask-user-input`：保留页面文本，只隐藏用户输入的内容。\n- `allow`：按原样录制页面；已上传的内容无法事后脱敏。",
             "enum": [
@@ -38665,7 +38720,7 @@
           "On-call/日历管理"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **300 次/分钟**；**20 次/秒** |\n| 权限要求 | **服务日历管理**（`on-call`） |\n\n## 使用说明\n\n- 每个账户最多 5 个日历：账户已有 5 个日历后，任何成员的创建请求都返回 `InvalidParameter`。\n- `cal_name` 在账户内必须唯一，`timezone` 必须是合法的 IANA 时区，非零 `team_id` 必须是账户中的团队，否则返回 `InvalidParameter`。\n- 每次调用都会记录到账户审计日志。",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **300 次/分钟**；**20 次/秒** |\n| 权限要求 | **服务日历管理**（`on-call`） |\n\n## 使用说明\n\n- 每个账户最多 20 个日历：账户已有 20 个日历后，任何成员的创建请求都返回 `InvalidParameter`。\n- `cal_name` 在账户内必须唯一，`timezone` 必须是合法的 IANA 时区，非零 `team_id` 必须是账户中的团队，否则返回 `InvalidParameter`。\n- 每次调用都会记录到账户审计日志。",
           "href": "/zh/api-reference/on-call/calendars/calendar-create",
           "metadata": {
             "sidebarTitle": "创建服务日历"
@@ -39199,7 +39254,7 @@
           "On-call/日历管理"
         ],
         "x-mint": {
-          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | 无 —— 持有有效的 `app_key` 即可调用 |\n\n## 使用说明\n\n- 不传 `kind` 时返回个人日历。`region.official.holiday` 返回公共节假日日历，默认按调用方语言区域过滤，`no_locale` 为 `true` 时不过滤；其 `cal_id` 可填入 `extra_cal_ids`。\n- 列表不分页，`total` 等于返回的条目数。",
+          "content": "## 限制说明\n\n| 项目 | 说明 |\n| ---- | ---- |\n| 速率限制 | 每个账户 **1,000 次/分钟**；**50 次/秒** |\n| 权限要求 | 无 —— 持有有效的 `app_key` 即可调用 |\n\n## 使用说明\n\n- 不传 `kind` 时返回个人日历。`region.official.holiday` 返回公共节假日日历，默认按调用方语言区域过滤，`no_locale` 为 `true` 时不过滤；其 `cal_id` 可填入 `extra_cal_ids`。`exchange.holiday` 返回共享的交易所休市日历，规则可直接读取其 `cal_id`。\n- 列表不分页，`total` 等于返回的条目数。",
           "href": "/zh/api-reference/on-call/calendars/calendar-list",
           "metadata": {
             "sidebarTitle": "查询服务日历列表"
