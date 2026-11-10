@@ -165,7 +165,7 @@ FlashcatRum.enable(
 | `setEventMapper(mapper)` | function | `null` | 在事件写入磁盘前修改或丢弃 view、action、error、resource 事件 |
 
 <Note>
-`setTrackErrors(false)` 只关闭**自动**错误采集。崩溃不受影响：启用 Crash 模块后，未捕获异常仍按 `JsCrashPolicy` 持久化、计数，并作为 `is_crash` error 回放到崩溃发生的那个会话；手动调用的 `addError` 属于应用的显式意图，同样照常上报。如需连这两类一起过滤，请使用 `setEventMapper()`。
+`setTrackErrors(false)` 只关闭**自动**错误采集。崩溃不受影响：启用 Crash 模块后，未捕获异常仍按 `JsCrashPolicy` 计入崩溃并以 `is_crash` error 上报到崩溃发生的那个会话（`REPORT_AND_CONTINUE` 当场上报，退出类策略在下次启动时回放）；手动调用的 `addError` 属于应用的显式意图，同样照常上报。如需连这两类一起过滤，请使用 `setEventMapper()`。
 </Note>
 
 ### 事件过滤和脱敏
@@ -362,7 +362,7 @@ FlashcatCrash.enable(
 | `setCrashLoopCooldownMs(cooldownMs)` | number | `300000` | 已触发保护后，重置持久化记录所需的无崩溃时长，单位为毫秒；小于 `1` 的值按 `1` 处理 |
 
 <Warning>
-默认策略 `REPORT_THEN_EXIT` 会在未捕获 ArkTS 异常后退出进程。如需让应用继续运行，请显式设置 `JsCrashPolicy.OBSERVE_ONLY`，并确认保留受损进程符合您的业务预期。
+默认策略 `REPORT_THEN_EXIT` 会在未捕获 ArkTS 异常后退出进程。如需让应用继续运行，请显式设置 `JsCrashPolicy.REPORT_AND_CONTINUE`（崩溃仍计入崩溃率）或 `JsCrashPolicy.OBSERVE_ONLY`（不计入崩溃），并确认保留受损进程符合您的业务预期。
 </Warning>
 
 ### `REPORT_THEN_EXIT`
@@ -374,6 +374,14 @@ FlashcatCrash.enable(
 SDK 会同步持久化崩溃记录，检查持久化的崩溃循环保护，然后调用 `appRecovery.saveAppState()` 和 `restartApp()`。旧进程退出并启动新进程，下一次启动回放的记录会带有 `crash.recovered: true`。
 
 如果无法启用恢复、无法持久化循环记录、保护被触发、无法把记录标记为可恢复，或重启请求失败，SDK 会降级为退出。
+
+### `REPORT_AND_CONTINUE`
+
+需要 SDK 0.7.2 及以上。SDK 会把异常作为崩溃（`error.is_crash: true`）实时上报到当前会话，计入该 view 的崩溃数，然后让进程继续运行。该策略不会退出或重启进程，也不写入待处理崩溃记录，下次启动不会回放。
+
+该策略不受 `setTrackErrors(false)` 影响。同一次异常随后产生的 `hiAppEvent.APP_CRASH` 不会重复上报。
+
+当应用有意保持进程存活（例如同时接入了其他崩溃上报工具的 JS 崩溃保护），又需要这类崩溃计入崩溃率时，使用该策略。与 `OBSERVE_ONLY` 一样，未捕获异常可能已经使应用处于损坏或不一致的业务状态。
 
 ### `OBSERVE_ONLY`
 
@@ -410,7 +418,7 @@ export default class EntryAbility extends UIAbility {
 
 | 故障类型 | 采集和策略行为 |
 |----------|----------------|
-| 主线程上未捕获的 ArkTS 同步或异步异常 | 实时采集；应用所选 `JsCrashPolicy`，包括同步持久化和可选重启 |
+| 主线程上未捕获的 ArkTS 同步或异步异常 | 实时采集；应用所选 `JsCrashPolicy`：同步持久化后退出或重启，或在进程继续运行时上报 |
 | 未处理的 Promise rejection | 作为普通非崩溃 RUM error 上报，`error.source_type: promise`；进程不会退出，也不应用崩溃策略 |
 | TaskPool 或 Worker 抛出异常 | 不会到达 error observer，不会导致宿主进程退出，不属于崩溃策略覆盖范围 |
 | Native C/C++ 信号崩溃 | JS 崩溃策略无法阻止或重启；仅在后续启动时通过 `hiAppEvent.APP_CRASH` 采集 |
