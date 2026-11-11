@@ -13,7 +13,7 @@ A new error event is assigned to an Issue in this order:
 2. If the fingerprint differs but the error is similar, it joins the most similar Issue. Similarity is compared only among Issues at the same error location.
 3. If no Issue is similar, Flashduty creates a new Issue.
 
-Android NDK native crashes, iOS crashes, Electron process-gone events (`RenderProcessGone`, `ChildProcessGone`), and NDK crashes from Flutter and React Native apps are grouped by fingerprint only, without the similarity step. Their error messages are almost identical, so similarity grouping would merge crashes from different locations into one Issue.
+Android NDK native crashes, iOS crashes, Electron process-gone events (`RenderProcessGone`, `ChildProcessGone`), NDK crashes from Flutter and React Native apps, and a located iOS App Hang, HarmonyOS freeze or jank, or Android ANR are grouped by fingerprint only, without the similarity step. Their error messages are almost identical, so similarity grouping would merge crashes from different locations into one Issue.
 
 ## Default fingerprint
 
@@ -25,7 +25,7 @@ When an error event doesn't carry a fingerprint, Flashduty calculates one from t
 | `env` | Environment where the error occurred |
 | `error.type` | Error type classification |
 | `error.message` | Error description text. For Android NDK native crashes, the topmost application-layer native frame in the stack also counts and system library frames do not, so the same crash location always groups into the same Issue. |
-| Error location | Counted only for Web JavaScript errors, Android Java/Kotlin exceptions, and iOS crashes; see "Error location" below |
+| Error location | Counted only for Web JavaScript errors, Android Java/Kotlin exceptions, Android ANRs, iOS crashes and App Hangs, and HarmonyOS freezes and janks; see "Error location" below |
 
 <Tip>
 When calculating the fingerprint, Flashduty ignores dynamic values in stack frames, such as version numbers, IDs, and dates.
@@ -41,14 +41,17 @@ The location keeps only what survives a rebuild: no line or column numbers, no b
 |----------|----------------------------|---------|
 | Web | The topmost frame in the stack that resolves to a script: its script file name plus the function name, or the file name alone when the function name is minified to a short one. Build hashes, directory levels, and query strings are dropped; browser-extension frames and the RUM SDK's own instrumentation frames are skipped | `index.js:CartPage.render` |
 | Android (Java/Kotlin exceptions) | The throw site of the innermost root cause of the exception chain, plus the first frame of app code below it. R8-obfuscated class and method names don't count | `com.example.chat.SessionStore.require` |
-| iOS crashes | The crash site, plus the first frame of app code below it. Frames that carry the process to termination, such as `pthread_kill`, `abort`, and `__cxa_throw`, are skipped; when the stack never reaches app code, the site's caller stands in. A crash site without a symbol falls back to the image name plus its offset | `libobjc.A.dylib:objc_msgSend>QuantumApp:ChatCell.layoutSubviews()` |
+| iOS crashes and App Hangs | The first five frames past the crash machinery, for fatal and non-fatal App Hangs alike. Frames that carry the process to termination, such as `pthread_kill`, `abort`, and `__cxa_throw`, are skipped, and so is the app's entry point — the `main` dyld calls — unless the crash is in it: it sits below every main-thread crash and tells none of them apart. Each frame counts by module plus symbol, without the instruction address (ASLR moves it on every launch) or the offset into the symbol (every rebuild moves it); a frame of app code without a symbol falls back to the image name plus its offset, and a system library frame without a symbol to the library alone. A shorter stack contributes the frames it has | `libobjc.A.dylib:objc_msgSend>QuantumApp:ChatCell.layoutSubviews()` |
+| Android ANR | The blocked thread's stack: system library frames under `/apex/`, `/system/`, `/system_ext/`, `/vendor/`, `/odm/`, `/product/` and ART's compiled output (`.odex`, `.vdex`, `.oat`, `.art`) are skipped, and the frame among the rest that locates app code is taken; a frame with a symbol wins over one without | `base.apk:identity_proof` |
 
-That offset is stable within a single build, so the same iOS crash can become a new Issue after every release.
+A frame of app code without a symbol differs by its offset into the image, which is stable within a single build only, so the same iOS crash can become a new Issue after every release.
 
-Handled errors and App Hangs on iOS take no error location: their message usually names the cause, and leaving the location out keeps existing Issues receiving them. Neither do Android NDK native crashes; they already group by the topmost application native frame. An error with no stable location, such as an Android exception with only obfuscated frames, keeps grouping by type and message alone, and is compared by similarity only with Issues that also have no error location.
+Handled errors on iOS take no error location: their message usually names the cause, and leaving the location out keeps existing Issues receiving them. Neither do Android NDK native crashes; they already group by the topmost application native frame. An error with no stable location, such as an Android exception with only obfuscated frames, keeps grouping by type and message alone, and is compared by similarity only with Issues that also have no error location.
+
+An Android ANR's message is always `Application Not Responding`, and a HarmonyOS freeze or jank's message is a constant too, so only the error location tells them apart: a located ANR, freeze or jank gets its own Issue by location and skips the similarity step.
 
 <Tip>
-The error location applies to messages first seen after this upgrade. A Web or Android Issue that existed before it still receives errors by type and message, and similarity grouping still covers it, so the Issue keeps its status, assignee, and history; no new Issue opens because the location entered the fingerprint. iOS crashes get no such carry-over: an old iOS Issue was keyed by the signal alone, so after the upgrade the same signal splits into several Issues by crash location.
+The error location applies to messages first seen after this upgrade. A Web Issue or an Android Java/Kotlin exception Issue that existed before it still receives errors by type and message, and similarity grouping still covers it, so the Issue keeps its status, assignee, and history; no new Issue opens because the location entered the fingerprint. iOS crashes and Android ANRs get no such carry-over: an old iOS Issue was keyed by the signal alone and an old Android ANR Issue by its constant message, so after the upgrade the same signal or the same kind of ANR splits into several Issues by error location.
 </Tip>
 
 ## Custom fingerprint
