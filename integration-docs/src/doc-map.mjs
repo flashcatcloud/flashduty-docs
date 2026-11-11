@@ -345,6 +345,7 @@ export const docMap = {
   Wecom: `${integrationBase}/instant-messaging/wecom.mdx`,
   Slack: `${integrationBase}/instant-messaging/slack.mdx`,
   MicrosoftTeams: `${integrationBase}/instant-messaging/microsoft-teams.mdx`,
+  ZoomApp: `${integrationBase}/instant-messaging/zoom-app.mdx`,
 
   AlertWebhook: `${integrationBase}/webhooks/alert-webhook.mdx`,
   IncidentWebhook: `${integrationBase}/webhooks/incident-webhook.mdx`,
