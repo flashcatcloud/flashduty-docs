@@ -175,6 +175,28 @@ The blog's Vale rules ([flashduty-website#253](https://github.com/flashcatcloud/
 
 - Prefer Mintlify components where they fit: `<Steps>`, `<Tabs>`, `<Note>`, `<Tip>`, `<Warning>`, `<Frame>`, `<CodeGroup>`, `<Accordion>`. See `.agents/skills/polish-document/components.md`.
 
+### Images
+
+Host every doc image on OSS and reference the CDN URL. Don't commit image files to this repo, and don't use local paths such as `/images/...` or relative paths.
+
+- Bucket: `flashduty-docs` (region `oss-cn-beijing`), directory `images/png/`, served as `https://docs-cdn.flashcat.cloud/images/png/<name>.png`.
+- Recommended: the VS Code / Cursor extension **Aliyun OSS Upload Image** (`vvkee.aliyun-oss-upload-image`). Configure it once in the editor's **user** settings:
+
+```json
+{
+  "aliyun.accessKeyId": "<YOUR_ACCESS_KEY_ID>",
+  "aliyun.accessKeySecret": "<YOUR_ACCESS_KEY_SECRET>",
+  "aliyun.bucket": "flashduty-docs",
+  "aliyun.region": "oss-cn-beijing",
+  "aliyun.remotePath": "images/png",
+  "aliyun.domain": "https://docs-cdn.flashcat.cloud"
+}
+```
+
+  In a Markdown editor, `Shift+P` uploads the clipboard image and `Shift+O` uploads a chosen file; the extension names the file by content MD5, inserts the CDN URL, and re-uploading the same image reuses the same URL. For `.mdx` files, upload from any `.md` file and paste the URL in. Use your own RAM credentials — ask a maintainer if you don't have them. **Never commit AccessKeys, paste them into docs or PRs, or put them in repo files.**
+- Manual alternative: upload the file to the same bucket and directory with the OSS console or `ossutil` using your own credentials, then reference `https://docs-cdn.flashcat.cloud/images/png/<file name>`.
+- zh and en use the same image URL. Describe what the image shows in `alt`; don't use file names or timestamps.
+
 ### Dos
 
 - **State the rule and its outcome in 1–3 lines**, then add a relative link to the details (`/zh/...`, never an absolute docs URL).
@@ -240,6 +262,7 @@ Best-practice cards → list:
 - [ ] Headings and anchors diffed before/after: no section lost, and every `#anchor` link still resolves.
 - [ ] Renamed or removed pages have redirects in `docs.json`, and new pages are in the nav for both languages.
 - [ ] zh and en are updated together, with matching sections and numbers.
+- [ ] Images use OSS-hosted CDN URLs (see [Images](#images)); no local image files are committed.
 - [ ] Changed prose passes the [language style](#language-style) rules: 您/you, no AI-voice words, spaces between Chinese and Latin text, and no clause over 40 characters.
 - [ ] Changed pages pass [Reader first](#reader-first-what-goes-on-a-page): no internals the reader can't act on, no internal hosts or names in samples, no roadmap, and every limit, default, and error message the reader needs is still there.
 - [ ] Facts and numbers are checked against product code or the owner. Unverified items are listed in the PR description.
