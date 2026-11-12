@@ -591,6 +591,8 @@ flashduty safari watch --session-id <session_id> --root-invocation-id <root_invo
 
 成功时标准输出是一行 JSON 回执，字段为 `session_id`、`invocation_id`、`root_invocation_id` 与 `delivery_mode`；其中 `root_invocation_id` 就是 `safari watch --root-invocation-id` 要传的值。消息走命令行通道，`delivery_mode` 为 `reply_only`：Agent 只通过它的回复工具作答，答复要用 `safari watch` 读取。服务端没有授予这个通道时命令直接失败，错误信息里带上 `session_id` 与 `invocation_id`——此时消息已经入队，但它的答复不会出现在 `safari watch` 的输出里，命令不会退回成别的投递方式。
 
+带 `--session-id` 发消息时，命令先读一次会话状态：如果该会话还有回合在跑，这条消息会被那个回合在下一个步骤并入并由它作答，不再等这一轮结束；会话空闲时它照常走自己的一轮。
+
 用 `--file` 而不带 `--session-id` 时，命令先创建会话再上传附件。
 
 `safari watch` 把事件逐行写到标准输出：每行一个紧凑 JSON 对象，诊断信息只写标准错误，其他内容一概不写进标准输出。
@@ -603,16 +605,16 @@ flashduty safari watch --session-id <session_id> --root-invocation-id <root_invo
 
 | 行类型 | 说明 |
 |--------|------|
-| `reply` | Agent 通过回复工具发出的消息，`purpose` 为 `progress`（进展）或 `result`（结论），未标注时按 `result` |
-| `settled` | 跟随的那次请求已结算，`reason` 给出原因，`standing_tasks` 是仍在运行的后台任务数（为 0 时省略该字段） |
+| `reply` | Agent 的答复，`purpose` 为 `progress`（进展）或 `result`（结论），未标注时按 `result`。既包括它通过回复工具发出的消息，也包括不使用回复工具作答的那一轮的最终回答（其 `event_id` 是该轮 `settled` 帧的） |
+| `settled` | 一个回合已结算，`reason` 给出原因（`steered` 表示这条消息被运行中的回合并入，该回合稍后才作答），`standing_tasks` 是仍在运行的后台任务数（为 0 时省略该字段） |
 | `error` | 会话错误，`code` 给出错误码，运行环境准备失败时为 `environment_failed` |
 
-只打印 Agent 通过回复工具明确发出的消息。工具调用、思考过程和普通助手文本属于它的内部工作内容，不会输出。
+打印 Agent 的答复本身，包括它通过回复工具发出的消息，以及不使用回复工具作答的那一轮的最终回答。工具调用、思考过程和其他助手文本属于它的内部工作内容，不会输出。跟随的是整条会话：同一会话里别人的消息、以及把这条消息并入运行中回合的那一轮，它们的答复同样会打印出来。
 
 | 参数 | 说明 |
 |------|------|
 | `--session-id` | 要跟随的会话（必填） |
-| `--root-invocation-id` | 只跟随这一次请求，取值来自 `safari send` 回执的 `root_invocation_id` |
+| `--root-invocation-id` | 从这一次请求的第一帧开始输出，并在它结算后结束整次跟随，取值来自 `safari send` 回执的 `root_invocation_id`；跟随的仍然是整条会话，它只决定从哪里开始、以哪一次请求的结算为结束条件 |
 | `--since` | 从该 Unix 毫秒时间戳开始回放（含该毫秒）。不带 `--root-invocation-id` 时省略即从当前时刻开始；带上它时省略则从会话开头回放 |
 | `--since-event-id` | 必须与 `--since` 同时给出：从该事件之后开始，严格排除该事件本身；取值是上一行输出的 `event_id` |
 
@@ -620,7 +622,7 @@ flashduty safari watch --session-id <session_id> --root-invocation-id <root_invo
 
 重试 8 次仍没有收到任何事件即放弃，以非零退出码结束并带上最后一次的错误。
 
-跟随的那次请求已结算、没有仍在运行的后台任务，并且会话已无运行中的回合时，命令退出 0；请求还有后台任务时会继续等待它们把后续回合跑完。不可恢复的错误（限流与 408 之外的 4xx、运行环境准备失败）以非零退出码结束，同时在标准输出上留一行 `{"type":"error",…}`，运行环境准备失败时这一行就是该事件本身。
+跟随的那次请求已结算（自己开了一轮，或被运行中的回合并入），之后有一个不是 `steered` 的回合结算、没有仍在运行的后台任务，并且会话已无运行中的回合时，命令退出 0；请求还有后台任务时会继续等待它们把后续回合跑完。不可恢复的错误（限流与 408 之外的 4xx、运行环境准备失败）以非零退出码结束，同时在标准输出上留一行 `{"type":"error",…}`，运行环境准备失败时这一行就是该事件本身。
 
 ### monit-query — 监控数据源统一工具调用
 
