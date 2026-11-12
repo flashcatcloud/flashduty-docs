@@ -143,9 +143,20 @@ React Native SDK 不支持远程配置，采样率只能在 `init()` 中设置�
 
 下面的示例按优先级依次判断：排查模式与重点用户全量采集，其余用户按用户 ID 哈希分桶，桶的大小直接取控制台下发的**会话采样率**。
 
+SDK 只负责调用 `beforeSampling`，不提供按用户分桶的开关，也不提供哈希函数：示例中的 `bucketOf` 需要您自行实现。三端示例给出的 `bucketOf` 计算结果一致，同一个用户 ID 在 Web、Android 与 iOS 上落在同一个桶，可以直接复制使用。
+
 <Tabs>
 <Tab title="Web">
 ```js
+// 把用户 ID 稳定映射到 0–99。SDK 不提供哈希函数，需要业务自行实现
+function bucketOf(key) {
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 100;
+}
+
 flashcatRum.init({
   applicationId: "<APPLICATION_ID>",
   clientToken: "<CLIENT_TOKEN>",
@@ -157,7 +168,7 @@ flashcatRum.init({
     if (custom?.debugUsers?.includes(currentUser.id)) return { sessionSampleRate: 100 }; // 排查名单：必采
 
     // 底座：按用户 ID 确定性哈希分桶，桶的大小跟随控制台的会话采样率
-    const inBucket = hash(currentUser.id + (custom?.salt ?? "")) % 100 < sessionSampleRate;
+    const inBucket = bucketOf(currentUser.id + (custom?.salt ?? "")) < sessionSampleRate;
     return { sessionSampleRate: inBucket ? 100 : 0 };
   },
 });
@@ -166,6 +177,11 @@ flashcatRum.init({
 
 <Tab title="Android">
 ```kotlin
+import kotlin.math.abs
+
+// 把用户 ID 稳定映射到 0–99，结果与 Web、iOS 示例一致
+fun bucketOf(key: String): Int = (abs(key.hashCode().toLong()) % 100).toInt()
+
 val rumConfig = RumConfiguration.Builder(applicationId)
     .setSessionSampleRate(20f)            // 拿到控制台配置前使用的值
     .setRemoteConfigurationEnabled(true)
@@ -177,7 +193,10 @@ val rumConfig = RumConfiguration.Builder(applicationId)
             user.isInternal || user.isVip -> 100f                  // 重点用户：必采
             (custom?.get("debugUsers") as? List<*>)?.contains(user.id) == true -> 100f // 排查名单：必采
             // 底座：按用户 ID 确定性哈希分桶，桶的大小跟随控制台的会话采样率
-            else -> if (hash(user.id + (custom?.get("salt") ?: "")) % 100 < context.sessionSampleRate) 100f else 0f
+            else -> {
+                val salt = custom?.get("salt") as? String ?: ""
+                if (bucketOf(user.id + salt) < context.sessionSampleRate) 100f else 0f
+            }
         }
     }
     .build()
@@ -187,6 +206,16 @@ Rum.enable(rumConfig)
 
 <Tab title="iOS">
 ```swift
+// 把用户 ID 稳定映射到 0–99，结果与 Web、Android 示例一致
+// 不要用 String.hashValue：它每次启动 App 都会变化
+func bucketOf(_ key: String) -> Int {
+    var hash: Int32 = 0
+    for unit in key.utf16 {
+        hash = hash &* 31 &+ Int32(unit)
+    }
+    return Int(abs(Int64(hash)) % 100)
+}
+
 let rumConfig = RUM.Configuration(
     applicationID: "<RUM_APPLICATION_ID>",
     sessionSampleRate: 20,                // 拿到控制台配置前使用的值
@@ -200,7 +229,7 @@ let rumConfig = RUM.Configuration(
 
         // 底座：按用户 ID 确定性哈希分桶，桶的大小跟随控制台的会话采样率
         let salt = custom?["salt"] as? String ?? ""
-        return Float(hash(user.id + salt) % 100) < context.sessionSampleRate ? 100 : 0
+        return Float(bucketOf(user.id + salt)) < context.sessionSampleRate ? 100 : 0
     }
 )
 RUM.enable(with: rumConfig)
@@ -218,10 +247,17 @@ flashcatRum.setForcedSession();
 
 ### 为什么用哈希分桶代替随机数
 
-底座规则用 `hash(userId) % 100` 而不是 `Math.random()`，带来两个默认抽签没有的性质：
+SDK 默认的抽签对每个会话独立随机。上面的底座规则改为在 `beforeSampling` 里按用户 ID 计算桶号，这是业务侧的写法，带来两个默认抽签没有的性质：
 
 - **用户级稳定**：同一个用户的判定结果永远一致，您可以回答「用户 A 有没有数据」——中签用户的所有会话都在，未中签用户则明确没有。
 - **放量单调**：采样率从 20% 调到 100% 时，原本中签的用户全部继续中签，新增的是纯增量，前后数据连续可对比。换一个 `salt` 即可整体重新洗牌。
+
+<Warning>
+自行实现哈希时，结果必须跨进程稳定，并且始终落在 0–99：
+
+- **iOS**：不要用 `String.hashValue` 或 `Hasher`。它们每次启动 App 都会变化，同一个用户的判定会随之变化。
+- **Android**：`String.hashCode()` 可能为负数，直接 `% 100` 会得到负的桶号。负数永远小于采样率，这部分用户会被全量采集。
+</Warning>
 
 ### 注意事项
 

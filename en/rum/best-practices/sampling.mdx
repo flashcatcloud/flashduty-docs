@@ -143,9 +143,20 @@ Put the rule parameters (lists, switches, the bucketing salt) in the **custom co
 
 The example below checks rules in priority order: investigation mode and key users are collected in full, and everyone else is bucketed by a hash of the user ID, with the bucket size taken straight from the **session sample rate** delivered from the console.
 
+The SDK only calls `beforeSampling`. It has no per-user bucketing option and no hash function, so you implement `bucketOf` yourself. The `bucketOf` in the three samples below returns the same result on every platform: a given user ID lands in the same bucket on Web, Android, and iOS. You can copy it as is.
+
 <Tabs>
 <Tab title="Web">
 ```js
+// Map a user ID to a stable 0–99 bucket. The SDK has no hash function; implement it yourself
+function bucketOf(key) {
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) % 100;
+}
+
 flashcatRum.init({
   applicationId: "<APPLICATION_ID>",
   clientToken: "<CLIENT_TOKEN>",
@@ -157,7 +168,7 @@ flashcatRum.init({
     if (custom?.debugUsers?.includes(currentUser.id)) return { sessionSampleRate: 100 }; // Investigation list: always collect
 
     // Base rule: deterministic hash bucketing by user ID; the bucket size follows the console's session sample rate
-    const inBucket = hash(currentUser.id + (custom?.salt ?? "")) % 100 < sessionSampleRate;
+    const inBucket = bucketOf(currentUser.id + (custom?.salt ?? "")) < sessionSampleRate;
     return { sessionSampleRate: inBucket ? 100 : 0 };
   },
 });
@@ -166,6 +177,11 @@ flashcatRum.init({
 
 <Tab title="Android">
 ```kotlin
+import kotlin.math.abs
+
+// Map a user ID to a stable 0–99 bucket; same result as the Web and iOS samples
+fun bucketOf(key: String): Int = (abs(key.hashCode().toLong()) % 100).toInt()
+
 val rumConfig = RumConfiguration.Builder(applicationId)
     .setSessionSampleRate(20f)            // Used until the console configuration arrives
     .setRemoteConfigurationEnabled(true)
@@ -177,7 +193,10 @@ val rumConfig = RumConfiguration.Builder(applicationId)
             user.isInternal || user.isVip -> 100f                  // Key users: always collect
             (custom?.get("debugUsers") as? List<*>)?.contains(user.id) == true -> 100f // Investigation list: always collect
             // Base rule: deterministic hash bucketing by user ID; the bucket size follows the console's session sample rate
-            else -> if (hash(user.id + (custom?.get("salt") ?: "")) % 100 < context.sessionSampleRate) 100f else 0f
+            else -> {
+                val salt = custom?.get("salt") as? String ?: ""
+                if (bucketOf(user.id + salt) < context.sessionSampleRate) 100f else 0f
+            }
         }
     }
     .build()
@@ -187,6 +206,16 @@ Rum.enable(rumConfig)
 
 <Tab title="iOS">
 ```swift
+// Map a user ID to a stable 0–99 bucket; same result as the Web and Android samples
+// Don't use String.hashValue: it changes every time the app launches
+func bucketOf(_ key: String) -> Int {
+    var hash: Int32 = 0
+    for unit in key.utf16 {
+        hash = hash &* 31 &+ Int32(unit)
+    }
+    return Int(abs(Int64(hash)) % 100)
+}
+
 let rumConfig = RUM.Configuration(
     applicationID: "<RUM_APPLICATION_ID>",
     sessionSampleRate: 20,                // Used until the console configuration arrives
@@ -200,7 +229,7 @@ let rumConfig = RUM.Configuration(
 
         // Base rule: deterministic hash bucketing by user ID; the bucket size follows the console's session sample rate
         let salt = custom?["salt"] as? String ?? ""
-        return Float(hash(user.id + salt) % 100) < context.sessionSampleRate ? 100 : 0
+        return Float(bucketOf(user.id + salt)) < context.sessionSampleRate ? 100 : 0
     }
 )
 RUM.enable(with: rumConfig)
@@ -218,10 +247,17 @@ flashcatRum.setForcedSession();
 
 ### Why hash bucketing instead of random numbers
 
-The base rule uses `hash(userId) % 100` instead of `Math.random()`, which brings two properties the default draw lacks:
+By default, the SDK draws each session independently at random. The base rule above instead computes a bucket from the user ID inside `beforeSampling`. This is application-side code, and it brings two properties the default draw lacks:
 
 - **User-level stability**: the same user always gets the same decision, so you can answer "does user A have data?". A sampled user has all sessions, and an unsampled user has none.
 - **Monotonic rollout**: when the rate goes from 20% to 100%, every sampled user stays sampled and new users are only added. The data stays continuous and comparable. Changing the `salt` reshuffles all buckets.
+
+<Warning>
+If you write your own hash, its result must be stable across launches and always fall in 0–99:
+
+- **iOS**: don't use `String.hashValue` or `Hasher`. They change every time the app launches, so the same user's decision changes too.
+- **Android**: `String.hashCode()` can be negative, and a plain `% 100` then gives a negative bucket. A negative bucket is always below the sample rate, so those users are always collected.
+</Warning>
 
 ### Caveats
 
