@@ -96,7 +96,7 @@ flashcatRum.init({
 | 微信小程序 | `@flashcatcloud/miniprogram-rum` 0.2.0 | 会话采样率、自定义配置项 |
 | Electron | `@flashcatcloud/electron-sdk` 0.4.0 | 会话采样率、错误会话补充采集、自定义配置项 |
 
-React Native SDK 不支持远程配置，采样率只能在 `init()` 中设置。
+React Native SDK 不支持远程配置，采样率只能在初始化配置的 `sessionSamplingRate` 中设置。
 
 <span id="remote-config-timing"></span>
 
@@ -129,7 +129,7 @@ React Native SDK 不支持远程配置，采样率只能在 `init()` 中设置�
 | --- | --- |
 | `beforeSampling` | 初始化参数。每个新会话抽签前调用，传入即将生效的采样率和控制台下发的自定义配置项；返回新的采样率即覆盖本次抽签，不返回值表示沿用 |
 | `getRemoteConfig()` | 随时读取控制台下发的自定义配置项 |
-| `setForcedSession()` | 不受采样率限制地采集当前用户：当前会话未被采集时立即切换为采集的新会话，之后的会话一律采集，直到 App 进程结束（Web 端为当前页面关闭） |
+| `setForcedSession()` | 不受采样率限制地采集当前用户：当前会话未被采集时立即结束，随后的新会话按采集处理（Android 立即开始新会话，Web 与 iOS 在用户下一次操作时开始）；之后的会话一律采集，直到 App 进程结束（Web 端为当前页面关闭）。已在采集的会话继续运行。微信小程序的行为不同，见下文 |
 
 把规则参数（名单、开关、分桶盐值）放进远程配置的**自定义配置项**，就能在控制台动态下发：改名单、开排查模式都无需发版，并按[生效时机](#remote-config-timing)在下一个新会话生效。例如在控制台发布如下自定义配置项：
 
@@ -237,7 +237,13 @@ RUM.enable(with: rumConfig)
 </Tab>
 </Tabs>
 
-Flutter、HarmonyOS 与微信小程序提供同样的 `beforeSampling`、`getRemoteConfig()` 与 `setForcedSession()`，用法见各端高级配置文档。Electron 与 React Native SDK 没有 `beforeSampling`，可以在 `init()` 前自行判定，再把 `sessionSampleRate` 设为 `0` 或 `100`。
+Flutter、HarmonyOS 与微信小程序同样提供 `beforeSampling`、`getRemoteConfig()` 与 `setForcedSession()`，用法见各端高级配置文档。各端差异如下：
+
+- **回调返回值**：HarmonyOS、Flutter 与微信小程序的 `beforeSampling` 直接返回采样率数字，与 Android、iOS 相同；只有 Web 端返回 `{ sessionSampleRate }` 对象。
+- **Flutter**：`getRemoteConfig()` 是异步方法，返回 `Future`。
+- **微信小程序**：`setForcedSession()` 只把下一个新会话标为必采，不影响当前会话，之后的会话也照常抽签。需要立即开始采集时，调用 `setForcedSession()` 后紧接着调用 `stopSession()`。
+
+Electron 与 React Native SDK 没有 `beforeSampling` 和 `setForcedSession()`。您可以在初始化前自行判定，再把采样率设为 `0` 或 `100`：Electron 为主进程 `init()` 中的 `sessionSampleRate`，React Native 为初始化配置中的 `sessionSamplingRate`。
 
 客服或研发需要临时排查某个用户时，除了把用户加进 `debugUsers`，也可以在业务代码里直接调用 `setForcedSession()`，例如在用户提交反馈时：
 
@@ -261,7 +267,7 @@ SDK 默认的抽签对每个会话独立随机。上面的底座规则改为在 
 
 ### 注意事项
 
-- **回调必须轻量、确定**。`beforeSampling` 在会话创建过程中同步执行，不能发起网络请求或阻塞；同样的输入应返回同样的结果。用 `Math.random()` 现抽会让同一用户的判定忽上忽下，确定性哈希天然规避这个问题。返回 0–100 以外的值或抛出异常时，SDK 沿用传入的采样率。
+- **回调必须轻量、确定**。`beforeSampling` 在会话创建过程中同步执行，不能发起网络请求或阻塞；同样的输入应返回同样的结果，并且不能有副作用：同一个会话可能触发多次调用，新配置到达时 SDK 也会调用它来判断是否结束当前会话，因此不要在回调里计数、打点或上报。用 `Math.random()` 现抽会让同一用户的判定忽上忽下，确定性哈希天然规避这个问题。返回 0–100 以外的值或抛出异常时，SDK 沿用传入的采样率。
 - **规则变化在下一个新会话生效**。用户从「不采」桶进入「采」桶后，进行中的会话不会被重新判定；需要立即生效时调用 `setForcedSession()` 或 `stopSession()`。
 - **自定义配置项对外可见**。它会下发到客户端，任何持有 Client Token 的人都能读到，请勿在其中存放密钥、访问令牌或个人敏感信息。`debugUsers` 这类名单只放不可反推身份的用户 ID。
 - **用 `sessionSampleRate: 0` 而不是跳过 `init()`**。跳过初始化会让业务代码里的 `addAction` / `addError` 等调用失效，到处判空很繁琐；传 0 让 SDK 正常初始化为静默状态，代码路径统一。
@@ -372,7 +378,7 @@ SDK 默认的抽签对每个会话独立随机。上面的底座规则改为在 
     </Note>
   </Tab>
   <Tab title="按用户分桶">
-    分桶 key 必须来自 `init()` 之前就可得的来源：登录用户 ID，或业务自维护的匿名 ID（自己生成并存入 localStorage）。SDK 虽会把跨会话匿名 ID 回填到 `event.usr.id`（`trackAnonymousUser` 默认开启），但它要等初始化才生成，赶不上初始化时的重放判定——所以 `init()` 和 `beforeSend` 统一使用业务侧的 key，一份配置到底：
+    分桶 key 必须来自 `init()` 之前就可得的来源：登录用户 ID，或业务自维护的匿名 ID（自己生成并存入 localStorage）。未设置用户信息时，SDK 虽会把跨会话匿名 ID 回填到 `event.usr.id`（`trackAnonymousUser` 默认开启），但它要等初始化才生成，赶不上初始化时的重放判定——所以 `init()` 和 `beforeSend` 统一使用业务侧的 key，一份配置到底：
 
     ```js
     // 保留完整数据的用户占比
@@ -468,7 +474,7 @@ SDK 默认的抽签对每个会话独立随机。上面的底座规则改为在 
 | 微信小程序 | 支持 | 支持 | 下一个新会话；采样率跨过 0 时立即切换 |
 | iOS / Android | 支持 | 支持 | 下一个新会话；采样率跨过 0 时立即切换 |
 | HarmonyOS / Flutter | 支持 | 支持 | 下一个新会话；采样率跨过 0 时立即切换 |
-| Electron | 支持 | 不支持 | 下一个新会话；采样率跨过 0 时立即切换 |
+| Electron | 支持 | 不支持 | 下一个新会话；采样率跨过 0 时立即切换（调为 0 立即切换需 0.5.3） |
 | React Native | 不支持 | 不支持 | App 下次冷启动初始化时 |
 
 各端最低版本与读取的配置项见[开启方式与各端支持](#remote-config-platforms)。各端都可以调用 `stopSession()` 结束当前会话，让新采样率立即生效。

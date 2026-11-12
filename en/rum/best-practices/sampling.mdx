@@ -96,7 +96,7 @@ Each platform reads a different set of values. Values not listed for a platform 
 | WeChat Mini Program | `@flashcatcloud/miniprogram-rum` 0.2.0 | Session sample rate, custom configuration keys |
 | Electron | `@flashcatcloud/electron-sdk` 0.4.0 | Session sample rate, capture additional sessions on error, custom configuration keys |
 
-The React Native SDK doesn't support remote configuration; its sampling rate can only be set in `init()`.
+The React Native SDK doesn't support remote configuration; its sampling rate can only be set with `sessionSamplingRate` in the initialization configuration.
 
 <span id="remote-config-timing"></span>
 
@@ -129,7 +129,7 @@ The default random draw treats every user the same, but businesses often want to
 | --- | --- |
 | `beforeSampling` | Initialization option. Called before each new session is drawn, with the rate about to apply and the custom configuration keys delivered from the console. Return a rate to override this draw, or return nothing to keep it |
 | `getRemoteConfig()` | Reads the custom configuration keys delivered from the console, at any time |
-| `setForcedSession()` | Collects the current user regardless of the sampling rate. If the current session isn't being collected, it switches to a collected session right away, and every later session is collected until the app process ends (on the web, until the current page closes) |
+| `setForcedSession()` | Collects the current user regardless of the sampling rate. If the current session isn't being collected, it ends right away and the next session is collected (Android starts it immediately; Web and iOS start it at the user's next interaction). Every later session is collected until the app process ends (on the web, until the current page closes). A session that is already collected keeps running. WeChat Mini Program behaves differently; see below |
 
 Put the rule parameters (lists, switches, the bucketing salt) in the **custom configuration keys** of remote configuration and you can deliver them dynamically from the console: changing a list or turning on investigation mode needs no release, and takes effect at the next new session as described in [When changes take effect](#remote-config-timing). For example, publish these custom configuration keys in the console:
 
@@ -237,7 +237,13 @@ RUM.enable(with: rumConfig)
 </Tab>
 </Tabs>
 
-Flutter, HarmonyOS, and WeChat Mini Program provide the same `beforeSampling`, `getRemoteConfig()`, and `setForcedSession()`; see each platform's advanced configuration page. The Electron and React Native SDKs have no `beforeSampling`: decide before `init()` yourself, then set `sessionSampleRate` to `0` or `100`.
+Flutter, HarmonyOS, and WeChat Mini Program also provide `beforeSampling`, `getRemoteConfig()`, and `setForcedSession()`; see each platform's advanced configuration page. The differences:
+
+- **Callback return value**: on HarmonyOS, Flutter, and WeChat Mini Program, `beforeSampling` returns the rate as a number, the same as Android and iOS. Only Web returns a `{ sessionSampleRate }` object.
+- **Flutter**: `getRemoteConfig()` is asynchronous and returns a `Future`.
+- **WeChat Mini Program**: `setForcedSession()` marks only the next new session as always collected. It doesn't affect the current session, and sessions after that are drawn as usual. To start collecting right away, call `setForcedSession()` and then `stopSession()`.
+
+The Electron and React Native SDKs have no `beforeSampling` or `setForcedSession()`. Decide before initialization yourself, then set the rate to `0` or `100`: `sessionSampleRate` in the Electron main-process `init()`, or `sessionSamplingRate` in the React Native initialization configuration.
 
 When support or engineering needs to look into one user right away, you can also call `setForcedSession()` from your code instead of adding the user to `debugUsers`, for example when the user submits feedback:
 
@@ -261,7 +267,7 @@ If you write your own hash, its result must be stable across launches and always
 
 ### Caveats
 
-- **Keep the callback light and deterministic.** `beforeSampling` runs synchronously while a session is being created, so it must not make network requests or block, and the same input should give the same result. Drawing with `Math.random()` makes the same user's decision flip back and forth; deterministic hashing avoids this by construction. If the callback returns a value outside 0–100 or throws, the SDK keeps the incoming rate.
+- **Keep the callback light and deterministic.** `beforeSampling` runs synchronously while a session is being created, so it must not make network requests or block, and the same input should give the same result. It must also have no side effects: one session can trigger several calls, and the SDK also calls it when a new configuration arrives to decide whether to end the current session, so don't count, log, or report from it. Drawing with `Math.random()` makes the same user's decision flip back and forth; deterministic hashing avoids this by construction. If the callback returns a value outside 0–100 or throws, the SDK keeps the incoming rate.
 - **Rule changes take effect at the next new session.** When a user moves from the "not sampled" bucket to the "sampled" one, the running session isn't re-decided. To apply it right away, call `setForcedSession()` or `stopSession()`.
 - **Custom configuration keys are public.** They're delivered to clients, and anyone holding the client token can read them. Never put secrets, access tokens, or personally sensitive information in them. Lists such as `debugUsers` should hold only user IDs that can't be traced back to a person.
 - **Use `sessionSampleRate: 0` instead of skipping `init()`.** Skipping initialization breaks `addAction` / `addError` calls across your code and forces null checks everywhere. Passing 0 initializes a silent SDK and keeps one code path.
@@ -373,7 +379,7 @@ One more thing if you use Session Replay: it needs an alignment step. Natively, 
     </Note>
   </Tab>
   <Tab title="User bucketing">
-    The bucket key must come from a source available before `init()`: a signed-in user ID, or an anonymous ID you maintain yourself (generate one and store it in localStorage). The SDK backfills a cross-session anonymous ID into `event.usr.id` (`trackAnonymousUser` is on by default). That ID appears only during initialization, too late for the replay decision. So both `init()` and `beforeSend` use a key your own code holds, in one self-contained configuration:
+    The bucket key must come from a source available before `init()`: a signed-in user ID, or an anonymous ID you maintain yourself (generate one and store it in localStorage). When no user is set, the SDK backfills a cross-session anonymous ID into `event.usr.id` (`trackAnonymousUser` is on by default). That ID appears only during initialization, too late for the replay decision. So both `init()` and `beforeSend` use a key your own code holds, in one self-contained configuration:
 
     ```js
     // Share of users that keep full data
@@ -472,7 +478,7 @@ Compare it with the "report only errors" configuration. That one **turns non-err
 | WeChat Mini Program | Supported | Supported | Next new session; right away when the rate crosses 0 |
 | iOS / Android | Supported | Supported | Next new session; right away when the rate crosses 0 |
 | HarmonyOS / Flutter | Supported | Supported | Next new session; right away when the rate crosses 0 |
-| Electron | Supported | Not supported | Next new session; right away when the rate crosses 0 |
+| Electron | Supported | Not supported | Next new session; right away when the rate crosses 0 (switching to 0 right away needs 0.5.3) |
 | React Native | Not supported | Not supported | At initialization on the next app cold start |
 
 For minimum versions and the values each platform reads, see [Enabling it and platform support](#remote-config-platforms). Every platform can call `stopSession()` to end the current session so a new rate applies right away.
