@@ -1,0 +1,210 @@
+---
+title: "Zoom"
+description: "Import a generated Zoom app manifest in one click to connect a self-built Zoom app across Zoom Global or Mainland China, receive interactive incident cards, spin up private war rooms, and investigate with AI SRE."
+keywords: ["Zoom", "Zoom Team Chat", "zoom_app", "zoom.com.cn", "instant messaging", "alert notification", "war room", "AI SRE"]
+---
+
+<Tip>**Plan requirement**: Every plan can create IM applications for AI SRE conversations. Using an application for On-call notifications requires an active On-call Professional subscription. [Learn more](https://flashcat.cloud/flashduty/price/)</Tip>
+
+## Overview and architecture comparison
+
+Flashduty offers two distinct Zoom integrations: the **Zoom Team Chat app** (channel identifier `zoom_app`, covered on this page) and the legacy **Zoom Incoming Webhook bot** (channel identifier `zoom`, documented under [Notification](/en/on-call/configuration/notifications)). Existing Incoming Webhook bots continue to work unchanged, so you can run both side by side or migrate at your own pace.
+
+The Zoom Team Chat integration uses a **self-built General App + one-click `flashduty-zoom-manifest.json` import + automated lifecycle management** architecture. It supports both **Zoom Global (`zoom.us`)** and **Zoom Mainland China (`zoom.com.cn`)**, and internal General Apps take effect immediately inside your Zoom organization with no public Marketplace review.
+
+| Capability | Zoom Team Chat app (`zoom_app`) | Zoom Incoming Webhook (`zoom`) |
+| :--- | :--- | :--- |
+| **Setup and lifecycle** | Import `flashduty-zoom-manifest.json` in one click to create an internal app; Flashduty auto-manages scope upgrades and drift after initial OAuth | Per-channel Incoming Webhook endpoint and Verify Token tied to the creator's personal Zoom account |
+| **Regional endpoints** | Native support for Zoom Global (`zoom.us`), Zoom Mainland China (`zoom.com.cn`), and custom gateways | Tied to individual channel webhook URLs |
+| **Alert message format** | Interactive Zoom App Cards supporting Acknowledge, Resolve, Snooze, custom actions, and in-place status updates | One-way outbound text notifications without interactive buttons |
+| **Personal 1:1 DM alerts** | Supported; responders can select Zoom in personal notification preferences | Not supported |
+| **On-call handover reminders** | Supported for both group channels and personal 1:1 DMs | Group channels only |
+| **Member matching** | Automatic matching by corporate email address, with no mapping table required | Requires collecting `zoom_jid` values and maintaining a manual mapping table |
+| **Automated war rooms** | Creates dedicated private Zoom channels and invites responders automatically | Not supported |
+| **Conversational AI SRE** | Supports `@Flashduty` mentions, 1:1 bot DMs, `/fd` slash commands, thread isolation, and proactive replies | Not supported |
+
+<Note>
+If you only need one-way text messages pushed to a channel, you can still configure the legacy Zoom Incoming Webhook bot under [Notification](/en/on-call/configuration/notifications). Choose the **Zoom Team Chat app** on this page whenever you need interactive incident cards, 1:1 personal DM alerts, automated private war rooms, or conversational AI SRE.
+</Note>
+
+<span id="install-app"></span>
+
+## Three-step setup: one-click manifest import and auto-management
+
+When you add a Zoom integration, Flashduty pre-generates a dedicated `integration_key` and builds a ready-to-import Zoom App Manifest JSON file, so you never have to configure callback URLs, slash commands, or event subscriptions by hand.
+
+<Steps>
+<Step title="Create the app">
+In the Flashduty Console, go to **Integration Center → Instant Messaging → Zoom**, and click **Add**:
+
+1. Click **Download Manifest** (or **Copy JSON**). The manifest JSON works across all Zoom regions; switch the toggle to **Mainland China (`zoom.com.cn`)** if your organization uses Mainland China Zoom (or click **Custom Host** for dedicated endpoints).
+2. Click **Open Zoom Console**, navigate to **Develop → Build App → General App**, choose **Manifest file**, and upload `flashduty-zoom-manifest.json`.
+</Step>
+
+<Step title="Enter credentials and save to authorize">
+Copy the fields in order from your Zoom app console into **Step 2** in Flashduty (for internal self-built apps, copy the matching **Development** tab credentials throughout — there is no need to switch to Production or submit for public listing):
+
+- **Client ID** and **Client Secret**: Found on **Basic Information** (Development tab).
+- **App ID**: Found in your browser URL bar (`/develop/applications/{id}` — pasting the full URL also works).
+- **Secret Token**: Found under **Features → Access**.
+- **Bot JID**: Found under **Features → Surface → Team Chat** (formatted like `v1...@xmpp.zoom.us`, matching the Development tab).
+
+Configure optional features such as **Enable War Room** or **Allow AI to reply proactively**, then click **Save** at the bottom of the page:
+
+1. Flashduty encrypts and saves your credentials first so the webhook endpoint is immediately ready for Zoom URL validation.
+2. Your browser redirects to the Zoom OAuth consent screen. Sign in with an admin or app-owner account and click **Allow** to activate the integration.
+</Step>
+</Steps>
+
+### Automated lifecycle management and drift repair
+
+After initial OAuth completes, the **Zoom App & Auto-Management** panel on the integration detail page checks your app's state via the Zoom App Manifest API:
+
+- **Drift detection and one-click self-healing**: If someone removes the `/fd` slash command, edits a webhook URL, or drops a required scope in the Zoom console, the detail page lists the drifted items with a **Sync & Repair Configuration** button. Clicking it merges the expected Flashduty callbacks, commands, and scopes back into your Zoom app while preserving your custom app name, description, and icon.
+- **Zero-console feature upgrades**: Enabling features that require extra scopes or event subscriptions (such as proactive replies) updates your Zoom app manifest directly from Flashduty without reopening the Zoom developer console.
+
+### Member matching
+
+The Zoom Team Chat integration has no manual **Linked Users** tab and needs no `zoom_jid` mapping table. Flashduty matches members automatically by corporate **email** (case-insensitive):
+
+- When dispatching a 1:1 personal DM alert or inviting responders into a war room, Flashduty looks up the corresponding Zoom user in your organization using the member's Flashduty email address.
+- When a responder clicks an action button on a Zoom incident card or messages AI SRE, Flashduty reads the operator's Zoom email and matches it against members in the current Flashduty account. Make sure each responder's Zoom email matches their Flashduty email; if no member matches, the bot replies in Zoom explaining the mismatch.
+
+<span id="aisre-permissions"></span>
+<span id="war-room-scope"></span>
+<span id="ambient-scopes"></span>
+
+## Required and optional permissions
+
+Following least-privilege principles, Flashduty splits Zoom OAuth permissions into **required scopes** included in the default manifest and **optional scopes** injected on demand when you enable proactive replies.
+
+### Required scopes
+
+The default `flashduty-zoom-manifest.json` includes the 10 scopes below, covering incident cards, private war rooms, AI SRE conversations, and automated manifest management:
+
+| Official scope name | Purpose |
+| :--- | :--- |
+| `imchat:bot` | Enable Team Chat bot messaging and receive `@` mentions and dedicated `/fd_<suffix>` slash commands |
+| `team_chat:write:user_message:admin` | Send incident App Cards, shift reminders, war room summaries, and AI SRE replies to channels and 1:1 DMs |
+| `team_chat:update:user_message:admin` | Refresh incident App Cards in place after state changes and stream AI SRE progress updates |
+| `team_chat:read:list_user_channels:admin` | List Zoom channels accessible to the app for escalation rule and schedule selectors |
+| `team_chat:write:user_channel:admin` | Create dedicated private Zoom channels for incident war rooms |
+| `team_chat:write:members:admin` | Invite incident responders into war room channels in batches by email |
+| `team_chat:read:files:admin` | Download error screenshots and log attachments shared in chat (up to 25 MB per file, restricted to verified Zoom hosts) for AI SRE analysis |
+| `user:read:user:admin` | Read Zoom user profile and email fields to match Flashduty members automatically |
+| `marketplace:read:app:admin` | Read your self-built app's manifest to detect callback, command, or scope drift |
+| `marketplace:write:app:admin` | Repair manifest configuration drift automatically and provision new scopes and event subscriptions in one click |
+
+### Optional scopes for proactive replies
+
+The two message-reading scopes below are treated as sensitive permissions and **excluded from active baseline permissions** until you choose to enable **Allow AI to reply proactively**:
+
+| Official scope name | Purpose |
+| :--- | :--- |
+| `team_chat:read:user_message:admin` | Receive unmentioned channel message events (`chat_message.sent`, `chat_message.replied`, and `team_chat.channel_message_posted`) for context buffering and proactive triage |
+| `team_chat:read:list_messages:admin` | Read channel and thread message history to enrich AI SRE investigations and post-mortem reports |
+
+<Note>
+**Zero-friction on-demand authorization**:
+
+- **Left off on creation (default)**: OAuth requests only baseline required permissions and excludes channel message-read access.
+- **Turned on during creation**: Whether you toggle **Allow AI to reply proactively** before or after downloading the manifest, clicking **Save** requests the permission in the same single OAuth step and automatically syncs `chat_message.sent` and `chat_message.replied` into your Zoom app—no manifest re-upload needed.
+- **Turned on later when editing**: Toggling **Allow AI to reply proactively** on and clicking **Save** automatically updates your Zoom app's event subscriptions and redirects to Zoom to confirm permission once.
+</Note>
+
+## Notifications and automated war rooms
+
+### Channel incident App Cards
+
+Navigate to **Channel → Escalation Rules**, choose **Zoom App** under group chat notification methods, and select your integration instance. The channel dropdown automatically lists **all public channels** in your Zoom workspace plus **private channels joined by the authorizing admin or by you** (no need to manually add a bot member to the channel beforehand).
+
+When an incident triggers, Flashduty posts an interactive App Card to the configured channels:
+
+- **In-card actions**: Responders can click **Acknowledge**, **Resolve**, **Snooze**, **Create War Room**, or configured **Custom Actions** directly on the card, and Flashduty updates the card status in place.
+- **Custom templates**: Customize the `Zoom` app card layout in [Templates](/en/on-call/configuration/templates) using Go `text/template` syntax (up to 15,000 bytes per rendered card).
+
+### Personal DM alerts and on-call reminders
+
+- **Personal 1:1 incident alerts**: Each responder can enable the Zoom app under **Personal Settings → Notification Preferences** to receive 1:1 interactive incident cards via Zoom direct message.
+- **On-call handover reminders**: Under [Schedule](/en/on-call/configuration/schedule) notification settings, select **Zoom App** to post shift handover summaries to a Zoom channel or send 1:1 shift reminders to incoming on-call responders.
+
+### Automated private war rooms and AI root-cause analysis
+
+Under **Advanced Features** on the Zoom integration page, **Enable War Room** and **Automatically start AI incident analysis** are turned on by default:
+
+- **Private channel isolation**: Starting a war room from an incident detail page, an alert card button, or an escalation policy creates a **Private Zoom Channel** by default, invites incident responders in batches by email, and posts the incident summary card.
+- **Automated root-cause diagnosis**: When **Automatically start AI incident analysis** is on and an active war-room-created automation rule matches the incident, AI SRE immediately investigates the incident context, timeline, and recent changes and posts its initial root-cause findings into the war room. See [War room](/en/on-call/advanced/war-room) for details.
+
+## Conversational AI SRE
+
+With **Allow AI SRE conversations in IM** enabled (on by default), responders can investigate incidents with AI SRE directly inside Zoom Team Chat. For platform-wide session concepts, see [IM platform](/en/ai-sre/im).
+
+### Entry points and streaming cards
+
+- **Channel `@Flashduty` mentions**: Mention `@Flashduty` with your question in any connected Zoom channel. To include an earlier error message or screenshot from the channel, reply to that message when mentioning `@Flashduty`.
+- **1:1 direct messages**: Open a direct chat with your self-built Flashduty app in Zoom Team Chat for private troubleshooting sessions.
+- **Streaming card updates and artifacts**: Because Zoom Team Chat bot APIs do not support message reaction receipts, AI SRE immediately posts an analyzing placeholder App Card and updates it in place at throttled intervals until the final answer arrives. When an answer contains wide tables (more than 4 columns) or a long report, the card includes a button linking to the full published artifact.
+
+### `/fd_<suffix>` slash commands
+
+Importing the manifest registers a globally unique slash command for your app (formatted like `/fd_1a2b3c`). Use it in Zoom channels or 1:1 bot DMs to manage your AI SRE session:
+
+| Command | Description |
+| :--- | :--- |
+| `/fd_<suffix> <prompt>` | Start a new investigation or send a follow-up question in the active session |
+| `/fd_<suffix> new [prompt]` | Reset the current session context and start a fresh conversation, optionally with an initial prompt |
+| `/fd_<suffix> env [name]` | List available environments, bind the session to a specific runner or sandbox, or run `/fd_<suffix> env clear` to reset |
+| `/fd_<suffix> scope [info]` | Inspect the bound team and collaboration scope, switch to another team, or run `/fd_<suffix> scope clear` to reset |
+| `/fd_<suffix> help` | Display available subcommands and usage examples |
+
+In channels where proactive replies are enabled on the integration, you can also send `/ambient on`, `/ambient off`, `/ambient inherit`, or `/ambient status` to control proactive replies for that specific channel.
+
+### Thread reply isolation vs. channel replies
+
+- **AI SRE uses thread replies in regular group chats** (on by default): When enabled, AI SRE sets Zoom's `reply_main_message_id` so replies stay inside the message thread, binding each thread to its own isolated session (`group_thread`). Turning this switch off posts replies to the main channel stream using a shared channel session (`group_chat`). War room channels always reply directly in the channel.
+- **Allow AI to reply proactively** (off by default): Once you provision and authorize the [optional scopes for proactive replies](#ambient-scopes) and turn this switch on, Flashduty maintains a rolling 24-hour buffer of the latest 30 messages per channel and replies to unmentioned messages only when the triage judge determines AI assistance is warranted.
+
+## Self-hosted deployment notes
+
+Self-hosted Flashduty deployments use the exact same **one-click manifest import and auto-management** workflow as SaaS:
+
+1. Ensure your Flashduty console domain (for example, `https://console.example.com`) and event gateway domain (for example, `https://api.example.com`) are reachable by Zoom over HTTPS for webhook delivery and signature validation.
+2. Add a Zoom integration in the console and download `flashduty-zoom-manifest.json` — Flashduty automatically populates your private deployment's webhook URL (`https://api.example.com/event/push/zoom_app/data?integration_key=<key>`) and OAuth redirect URL (`https://console.example.com/settings/source/im/add/zoom_app`) with no server config edits required.
+
+If you want to configure optional deployment-wide fallback credentials (used only when an integration omits per-datasource credentials), you can set the fields below under `deploy` in `fc-datasource` and `fc-event` YAML files (`etc/*.yaml`) or via `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET`, `ZOOM_SECRET_TOKEN`, `ZOOM_BOT_JID`, and `ZOOM_REDIRECT_URI`:
+
+```yaml
+deploy:
+  zoomClientID: "<YOUR_ZOOM_CLIENT_ID>"
+  zoomClientSecret: "<YOUR_ZOOM_CLIENT_SECRET>"
+  zoomSecretToken: "<YOUR_ZOOM_SECRET_TOKEN>"
+  zoomBotJID: "<YOUR_ZOOM_BOT_JID>"
+  zoomRedirectURI: "https://console.example.com/settings/source/im/add/zoom_app"
+```
+
+## FAQ
+
+<AccordionGroup>
+<Accordion title="How do I choose between Zoom Global (zoom.us) and Zoom Mainland China (zoom.com.cn)?">
+Select the region that matches where your organization signs in to Zoom. If your Zoom tenant runs on `zoom.com.cn`, choose **Zoom Mainland China (`zoom.com.cn`)** in Step 1 so Flashduty sets the API endpoint to `https://api.zoom.com.cn`, sets OAuth to `https://zoom.com.cn`, and links you to `marketplace.zoom.com.cn` to import the manifest.
+</Accordion>
+
+<Accordion title="Why is my target Zoom channel missing from the escalation rule or schedule dropdown?">
+- Confirm that the Zoom integration has completed OAuth authorization and is enabled
+- All public channels appear automatically; for a private channel, make sure either **you** (with matching Zoom and Flashduty email) or **the authorizing Zoom admin** is a member of that private channel
+- Return to the escalation rule or schedule form in Flashduty and click the refresh icon next to the channel selector (server-side channel lists are cached for 5 minutes and refresh immediately when requested)
+</Accordion>
+
+<Accordion title="Why does clicking an action button on a Zoom incident card say no member matched?">
+The Zoom Team Chat integration identifies responders by email address. Verify that the email address on your Zoom account matches your email in Flashduty **Member Management** (case-insensitive). Once they match, card actions work immediately with no manual account linking.
+</Accordion>
+
+<Accordion title="Why does enabling 'Allow AI to reply proactively' prompt for Zoom authorization again?">
+The baseline manifest omits sensitive channel message-reading scopes (`team_chat:read:user_message:admin` and `team_chat:read:list_messages:admin`). When you enable the toggle and click **Save**, Flashduty automatically writes those scopes and message event subscriptions to your internal Zoom app and redirects to Zoom to confirm incremental authorization—with no manual manifest edits.
+</Accordion>
+
+<Accordion title="What should I keep in mind when enabling War Room?">
+- Only one IM integration in an account can have War Room enabled at a time; turn War Room off in the other IM integration first. See [War room](/en/on-call/advanced/war-room)
+- If configuration drift or missing scopes are detected, click **Sync & Repair Configuration** on the integration detail page and re-authorize if prompted
+</Accordion>
+</AccordionGroup>
