@@ -1,0 +1,129 @@
+---
+title: "n8n alert integration"
+sidebarTitle: "n8n"
+description: "Import an error workflow template to send automatic n8n execution failures to Flashduty."
+---
+
+Import the error workflow template to send automatic n8n workflow failures to Flashduty. Multiple business workflows can share one error workflow.
+
+Each failed execution is a one-shot alert. This integration does not recover alerts automatically. Close the incident manually in Flashduty after handling the failure. You need permission to configure n8n workflows and credentials.
+
+<div className="hide">
+
+## In Flashduty On-call
+
+You can get the integration push URL in either of the following ways.
+
+### Use a dedicated integration
+
+1. In the Flashduty console, select **Channel** and open a channel
+2. Select **Configuration** → **Integrations** → **Private integration**, then click **Add integration**
+3. Select **n8n**, then click **Save**
+4. Open the generated integration card and copy the **Push URL**
+
+### Use a shared integration
+
+1. In the Flashduty console, go to **Integration Center → Alert Events**
+2. Select **n8n** and enter an integration name
+3. Configure the default route and select a channel. You can add more rules under **Routing** after creation
+4. Click **Save** and copy the generated **Push URL**
+
+</div>
+
+## Configure n8n
+
+<Steps>
+<Step title="Download and import the template">
+
+Download the [Flashduty error workflow template](https://flashduty-public.oss-cn-beijing.aliyuncs.com/flashduty-error-workflow.json). In the n8n workflow editor menu, select **Import from File** and import the file.
+
+The template includes Error Trigger, settings, event conversion, HTTP Request, and response validation nodes. No community nodes are required.
+
+![Imported n8n error workflow](https://docs-cdn.flashcat.cloud/images/png/n8n-error-workflow-20261118.png)
+
+</Step>
+<Step title="Set the instance and severity">
+
+Open **Flashduty settings** and configure:
+
+| Field         | Configuration                                                                                                                                              |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `instance_id` | A unique identifier for this n8n instance, such as `automation-production`. Use different identifiers when multiple instances send to the same integration |
+| `severity`    | Defaults to `Warning`. You can also use `Critical` or `Info`. Values are case-sensitive                                                                    |
+
+The instance identifier must not exceed 64 characters. Replace `YOUR_INSTANCE_ID` with your actual value.
+
+![Configure the n8n instance ID and severity](https://docs-cdn.flashcat.cloud/images/png/n8n-error-settings-20261118.png)
+
+</Step>
+<Step title="Configure the push URL and credentials">
+
+Open **Send to Flashduty**. Set **URL** to your push URL, removing its `integration_key` parameter and keeping any other parameters.
+
+Keep **Authentication → Generic Credential Type → Query Auth** and create a credential:
+
+| Credential field | Configuration                                                   |
+| ---------------- | --------------------------------------------------------------- |
+| **Name**         | `integration_key`                                               |
+| **Value**        | The value of the `integration_key` parameter from your push URL |
+
+Name the credential `Flashduty integration key`, save it, and select it. The integration key stays in n8n credentials instead of the workflow template.
+
+</Step>
+<Step title="Connect business workflows">
+
+Save the error workflow. Publish it in versions that provide a **Publish** action.
+
+Open a business workflow to monitor. Under **Settings → Error workflow**, select **Flashduty - n8n failure alerts**. Save and publish the business workflow.
+
+Repeat for each workflow you want to monitor. Enable saving failed executions so that failure events include an execution ID.
+
+</Step>
+</Steps>
+
+## Verify the integration
+
+1. Create a test business workflow with a Webhook or Schedule Trigger followed by a Stop And Error node.
+2. Set its **Error workflow** to the imported error workflow, then save and publish it.
+3. Send a webhook request or wait for the schedule to trigger a failure.
+4. Confirm that the error workflow succeeds and **Check response** returns `request_id` and `alert_key`.
+5. In the target Flashduty channel, confirm the alert and check its workflow ID, execution ID, and error summary.
+
+<Note>
+  Manual business workflow runs do not trigger Error Trigger. Use an automatic
+  trigger for verification. Afterwards, deactivate or delete the test workflow
+  and close the test incident manually.
+</Note>
+
+## Alert mapping
+
+| Content                    | Mapping                                                                                                                          |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Title                      | `n8n workflow failed:` followed by the workflow name                                                                             |
+| Severity                   | The configured `severity`, defaulting to `Warning`                                                                               |
+| Execution failure identity | A combination of the instance identifier, business workflow ID, and failed execution ID                                          |
+| Trigger failure identity   | Without a business execution ID, a combination of the instance identifier, business workflow ID, and error workflow execution ID |
+| Description                | Workflow, execution ID, failed node, error summary, and execution link with query parameters and fragments removed               |
+| Labels                     | `integration`, `instance_id`, `workflow_id`, `failure_type`, and `execution_id`                                                  |
+
+Different failed executions use different alert keys. HTTP Request retries reuse the same event and alert key. A new failure from retrying a business workflow creates another alert. Flashduty can still group these alerts into one incident according to the channel's alert grouping rules.
+
+For trigger failures without a business execution ID, the `execution_id` label identifies the error workflow execution. The template stops with an error if workflow or execution identity is missing.
+
+The template excludes full execution inputs, outputs, error stacks, and error contexts. Error summaries can still contain business information; adjust **Prepare alert** as needed. The template accepts only `Critical`, `Warning`, and `Info` and never sends an `Ok` recovery event.
+
+## FAQ
+
+### Why is there no alert after a business workflow fails
+
+Confirm that the business workflow is published, has an **Error workflow**, and failed during an automatic execution. In n8n execution history, check whether the error workflow ran and inspect **Send to Flashduty** and **Check response**.
+
+### How do I troubleshoot a failed push
+
+Check the push URL, Query Auth credential, and network connectivity. The template uses a 10-second request timeout and up to three attempts for failed requests. An `error` in the Flashduty response fails **Check response**. Fix the configuration before running the error workflow again. Re-executing a trigger failure without a business execution ID creates a new alert key.
+
+### Can this detect n8n downtime or a workflow that never starts
+
+This template depends on n8n running the error workflow. Use external health checks or heartbeat monitoring for instance availability and missed scheduled runs.
+
+Related documentation: [n8n Error Trigger](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.errortrigger/) and [Standard alert events](/en/on-call/integration/alert-integration/alert-sources/standard-alert).

@@ -190,6 +190,7 @@ export const docMap = {
   Logrocket: `${alertBase}/logrocket.mdx`,
   RedgateSqlMonitor: `${alertBase}/redgate-sql-monitor.mdx`,
   Gitlab: `${alertBase}/gitlab.mdx`,
+  N8n: `${alertBase}/n8n.mdx`,
   Hookdeck: `${alertBase}/hookdeck.mdx`,
   Bugsnag: `${alertBase}/bugsnag.mdx`,
   Raygun: `${alertBase}/raygun.mdx`,
