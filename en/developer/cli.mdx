@@ -551,7 +551,7 @@ Common flags for `session list`:
 | `--since` | Keep only sessions updated within the window (client-side filter), for example, `30d`, `24h`, `2026-05-01` | - |
 | `--limit` | Max sessions to fetch | `200` |
 | `--page` | Start page (1-based) | `1` |
-| `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope; subject to the 16 KiB output bound — see "Output formats"), `toon` (compact) | `jsonl` |
+| `--output-format` | Output format: `jsonl` (default, one session object per line, pipe straight to `jq`), `json` (full envelope, not clipped), `toon` (compact) | `jsonl` |
 
 <Note>
 The server endpoint `/safari/session/list` caps each page at 100 rows; when `--limit` exceeds that, the CLI paginates automatically — no manual paging required. The API has no time-window filter, so `--since` is applied client-side against each session's `updated_at` after fetching.
@@ -632,6 +632,8 @@ The command exits 0 once the watched request has settled (in a turn of its own, 
 flashduty monit datasource-list --type prometheus --json | jq '.[] | {id, name, type_ident, address}'
 flashduty monit-query <datasource-id> --tool 'prometheus.query' \
   --params '{"expr":"sum(rate(http_requests_total[5m]))","execution":{"kind":"instant","to_ms":1789000000000}}'
+flashduty monit-query <datasource-id> --tool 'prometheus.query' \
+  --since 2h --params '{"expr":"up","execution":{"kind":"range","max_data_points":240}}'
 flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 ```
 
@@ -640,10 +642,15 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `<datasource-id>` | Datasource ID (positional, required, from `monit datasource-list`, min 1) |
 | `--tool` | Tool name (required), prefixed by the datasource type, for example, `prometheus.query`, `mysql.overview`, `redis_node.slowlog`; 1–128 chars |
 | `--params` | Tool parameters JSON (may be omitted, meaning `{}`; pass `-` to read a larger payload from standard input; an explicit `null` is invalid) |
+| `--since` / `--until` | The query window, written into `params.execution.from_ms` / `to_ms` so you never compute epoch milliseconds by hand: a relative duration such as `30m`, `2h`, `7d`, an RFC3339 timestamp, a date, a datetime, or unix seconds/milliseconds. `--since` alone ends the window now; `--until` alone evaluates at that instant. The command fails when `--params` already carries the same field, or when the window ends before it starts | omitted |
 
 Query tools require every online Edge in the cluster to be v0.68.0 or later, and diagnostic tools require v0.71.0 or later. If the versions don't match, the command fails with one of these error codes: `edge_upgrade_required` (Edge too old), `mixed_edge_versions` (mixed Edge versions in the cluster), `edge_version_unknown` (an Edge version in the cluster can't be identified), `no_active_edge` (no online Edge available). Upgrade Edge first; do not rotate Edge and retry.
 
-Query tools return a complete `explore_result.v1` structured result. `format` is always `explore_result.v1`. `result.kind` is `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
+By default a query result prints as a bounded plain-text **digest** (around 8 KB; diagnostic tool results are not digested): time series ordered by maximum with per-series min/max and their timestamps, average, first/last and a 12-bucket shape (each bucket with its start time); instant samples sorted by value; rows for tables; entry counts, constant fields, value counts for short low-cardinality fields and each entry's varying fields for logs (message first). The first line states the resolved window, every cut states its counts and timestamps, and an empty result says so in one line.
+
+Use `--output-format json` or `toon` for the complete result — every point, row, or entry. Those formats keep stdout to the result alone and note the window on stderr instead. The digest's last line gives the jq path to that kind's data in the JSON form (for example, `.data.result.entries[] | .timestamp_ns, .fields["<name>"]`), so you can project it directly without reading the whole result first.
+
+The complete result of a query tool is a `explore_result.v1` structure. `format` is always `explore_result.v1`. `result.kind` is `samples` (instant samples with complete label sets), `frames` (typed table/time-series frames), or `logs` (raw logs with `applied_limit` and `has_more`). For the diagnostic tool response shape, see `monit datasource-tools-invoke` below.
 
 ### monit datasource-tools-invoke — Datasource diagnostics
 
@@ -852,9 +859,9 @@ Common flags for `insight incidents`:
 | `--since` / `--until` | Time window (same human-friendly formats as `incident list`) | `7d` / `now` |
 | `--limit` | Max results (capped at 100) | `20` |
 | `--page` | Page number | `1` |
-| `--fields` | Field projection for `json`/`toon` output (comma-separated, for example, `incident_id,title,severity`); ignored in table mode; at least one field required | default compact projection |
+| `--fields` | Field projection for `json`/`toon` output (comma-separated, for example, `incident_id,title,severity`); ignored in table mode; at least one field required | no projection: full records |
 
-In `json`/`toon` mode the rows default to the compact fields `incident_id`, `title`, `severity`, `channel_name`, `seconds_to_ack`, `seconds_to_close`, `notifications` (a stderr note announces the default projection and that `--fields` can change it); output is bounded at 16 KiB — overflowing rows are dropped or shortened, with all notes on stderr (see "Field projections for structured output" under "Output formats" below).
+In `json`/`toon` mode every record is printed in full, not clipped. To see only some fields, project with `--fields` (for example, `--fields incident_id,title,severity`); see "Field projections for structured output" under "Output formats" below.
 
 `insight top-alerts`: `--label` is required (`check` or `resource`), `--since`/`--until` as above, `--limit` defaults to `10` (top-K), returning the alert count and event count per label value.
 
@@ -1065,7 +1072,7 @@ A generated command's list response that carries fields beyond the row array (`i
 </Tab>
 
 <Tab title="JSON (--json / --output-format json)">
-Machine-parseable. Except for the commands with default compact fields listed below, it returns the command's full response data; table-column truncation does not apply to JSON. Ideal for scripts and CI/CD pipelines. Note that generated commands' **list-shaped** responses are bounded at 16 KiB in `json` mode too (see "Generated-command output bound" below).
+Machine-parseable and unclipped: it returns the command's full response data, and table-column truncation never applies to JSON. Ideal for scripts and CI/CD pipelines.
 
 ```bash
 flashduty incident list --json | jq '.[].title'
@@ -1073,7 +1080,7 @@ flashduty incident list --json | jq '.[].title'
 </Tab>
 
 <Tab title="TOON (--output-format toon)">
-TOON (Token-Oriented Object Notation) drops the per-row field names that JSON repeats for homogeneous arrays, cutting token usage substantially on list output and making it well suited to AI agents. Commands with default compact fields listed below emit their field projections and are size-bounded; generated commands' list-shaped output is bounded at 16 KiB as well (see "Generated-command output bound" below).
+TOON (Token-Oriented Object Notation) drops the per-row field names that JSON repeats for homogeneous arrays, cutting token usage substantially on list output and making it well suited to AI agents. Its content matches `json` and is likewise unclipped; save more tokens with `--fields`.
 
 ```bash
 flashduty incident list --output-format toon
@@ -1097,51 +1104,32 @@ This covers `incident list`, `alert list`, `alert-event list`, `change list`, `a
 
 Use it to catch a window you did not intend: a default wider than you expected (`--active` widens it to 30 days), or an epoch read in the wrong timezone, which lands the window in the future and reads `ends in 7h`. The note goes only to stderr, so stdout stays byte-identical for `jq` and toon consumers.
 
-### Generated-command output bound
+### Structured output is never clipped
 
-Generated commands (the ones covering the OpenAPI through the code generator, such as `safari session-list`, `monit datasource-list`, `safari a2a-agent-list`) apply a 16 KiB bound to **list-shaped** responses in `json`/`toon` mode. The reduction has three tiers, plus a machine-readable marker:
+`json` and `toon` output is not bounded: every row of the returned page and every field is written in full, long values are not shortened, and a list envelope gains no `truncated` or `emitted_rows` marker. The API returns one page and you get that page; `total` and `has_next_page` describe it truthfully.
 
-1. **The whole page overflows**: only the leading rows that fit are emitted, with every value intact, and a stderr note reports how many of the N/M rows were emitted.
-2. **A single row alone overflows the budget**: that row's string values are shortened and end with `...`; a stderr note names the clipped fields. Identifier fields (keys ending in `_id` or `_key`) are never shortened.
-3. **A row cannot be reduced enough to fit**: the command fails and names the largest fields (up to 3, with their byte sizes); lower `--limit` or reduce the output fields and retry.
-
-**A reduced list envelope is rebuilt with the reduction written into the payload.** A list envelope is a response whose row array is named `items`, `docs`, or `list`, and whose other fields are all scalars (`total`, `has_next_page`, `search_after_ctx`, …). Examples are `monit datasource-list` and `safari session-list`. Once a reduction happens, the CLI rebuilds that envelope and adds fields to the payload, so a script sees the reduction without parsing stderr:
-
-- **Rows withheld**: the payload carries `truncated: true` together with `emitted_rows: N` (N is the number of rows actually emitted). The envelope's `total`, `has_next_page`, and `search_after_ctx` still describe the page as the server returned it. They **can't** tell you whether you got everything: a page cut to 7 of 100 rows keeps the original pagination fields. To collect all rows, re-request with a `--limit` no larger than the rows you actually received, then follow the returned cursor.
-- **Only long values clipped** (no rows withheld): the payload carries `truncated: true` alone, and stderr names the clipped fields. Re-requesting cannot restore them: narrow the filter, lower the rows per page, or keep only the fields you need with the global `--fields`.
-
-**A response whose row array carries non-scalar siblings is not bounded.** When the row array is named `items` / `docs` / `list` but the response also has object or array fields beside it (for example `calendar event-list`'s `days` map), it cannot be squeezed under 16 KiB without losing fields, so it prints whole, exactly like the **detail-shaped single objects** in the last paragraph of this section: no `truncated` / `emitted_rows` marker, and no value shortened.
-
-**Bare top-level arrays** (such as the curated `incident list` and `insight incidents`) have nowhere to carry the marker, so a reduction is announced on stderr only.
-
-**Detail-shaped single objects** (for example, `safari session-get`) are never bounded or shortened — a shortened id or status would pass for a real value, so these responses print untouched. Generated commands can narrow their output fields with the global `--fields` (see "Global flags" and "Field projections for structured output" below; where an occasional command spells `--fields` as a request-body field selector, such as `monit rule-update-fields`, it does not apply to the output). For complete JSON, lower `--limit` and page through with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`), or narrow the filter.
+You control the size: keep only the fields you need with the global `--fields`, lower the rows per page with `--limit`, and fetch the rest with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`). On a few commands `--fields` is a request-body field selector instead (such as `monit rule-update-fields`) and does not apply to the output.
 
 ### Field projections for structured output
 
 `--fields` is a global flag (see "Global flags"): every command accepts it in `json` or `toon` output, and it takes a comma-separated list of top-level fields to keep, applied to each row of a list or to the keys of a single record. The projection runs on the response: for a list envelope (row array named `items`, `docs`, or `list`, with only scalar paging fields beside it) it narrows that row array and leaves the paging fields intact; a field no row of the response carries is left out and stderr reports it as matching no key, listing the keys the output does carry; output that is neither an object nor a list of objects fails the command and tells you to drop `--fields`. Table output ignores `--fields`, and stderr says so.
 
-The curated commands in the table below fall back to a default compact projection when `--fields` is omitted, and are size-bounded; each of them defines its own `--fields` (same meaning as the global one), so a misspelled field name fails immediately and lists the names that are valid. Every other command — all the generated ones included — has no default projection: on those, `--fields` applies to the raw fields of the API response, and a name that matches no key only produces the stderr note above.
+Without `--fields`, every command — the curated ones in the table below included — prints the records the API returned in full; there is no default compact projection. Each curated command defines its own `--fields` names (same meaning as the global flag), so a misspelled name fails immediately and lists the names that are valid. Every other command — all the generated ones included — applies `--fields` to the raw fields of the API response, where a name that matches no key produces the stderr note above.
 
-| Command | Structured output when `--fields` is omitted | Limit |
-| --- | --- | --- |
-| `flashduty incident list` | `incident_id`, `num`, `title`, `incident_severity`, `progress`, `start_time`, `channel_id`, `detail_url` | 16 KiB |
-| `flashduty incident similar <id>` | `incident_id`, `num`, `title`, `incident_severity`, `progress`, `start_time`, `close_time`, `ack_time`, `alert_cnt`, `root_cause`, `score`, `detail_url` | 16 KiB |
-| `flashduty incident detail <id>` | Returns full detail when `--fields` is omitted; otherwise returns only the selected fields | 8 KiB for projections only |
-| `flashduty alert-event list` | `event_id`, `alert_id`, `event_severity`, `event_status`, `event_time`, `title` | 16 KiB |
-| `flashduty channel escalate-rule-list <channel-id>` | `rule_id`, `rule_name`, `status`, `priority`, `filters` | 16 KiB |
-| `flashduty insight incidents` | `incident_id`, `title`, `severity`, `channel_name`, `seconds_to_ack`, `seconds_to_close`, `notifications` | 16 KiB |
+| Command | Named fields `--fields` accepts |
+| --- | --- |
+| `flashduty incident list` | `incident_id`, `num`, `title`, `incident_severity`, `progress`, `start_time`, `channel_id`, `detail_url` |
+| `flashduty incident similar <id>` | `incident_id`, `num`, `title`, `incident_severity`, `progress`, `start_time`, `close_time`, `ack_time`, `alert_cnt`, `root_cause`, `score`, `detail_url` |
+| `flashduty incident detail <id>` | Full detail when `--fields` is omitted; only the selected fields when it is given |
+| `flashduty alert-event list` | `event_id`, `alert_id`, `event_severity`, `event_status`, `event_time`, `title` |
+| `flashduty channel escalate-rule-list <channel-id>` | `rule_id`, `rule_name`, `status`, `priority`, `filters` |
+| `flashduty insight incidents` | `incident_id`, `title`, `severity`, `channel_name`, `seconds_to_ack`, `seconds_to_close`, `notifications` |
 
 For example, export only an incident ID, title, and progress:
 
 ```bash
 flashduty incident list --json --fields incident_id,title,progress
 ```
-
-When a list projection (`incident list`, `incident similar`, `alert-event list`, `channel escalate-rule-list`, `insight incidents`) exceeds its 16 KiB limit, the three-tier reduction is the same as in "Generated-command output bound" above, with every note going to stderr and stdout left untouched. The difference is that you narrow the output with `--fields` or `--limit` to fit more rows per page or to get full values. Matching or filtering on a shortened field misses; identifier fields (keys ending in `_id` or `_key`) are never shortened at any tier.
-
-`incident detail` behaves differently when its projection overflows: the detail is a single object, and a truncated value is indistinguishable from a genuinely short one, so silently shortening it would hand you wrong data. A projection over 8 KiB therefore fails the command outright, and the error names the largest fields (up to 3, with their byte sizes). Reduce the fields in `--fields`, or omit `--fields` entirely to get the full detail, which is not subject to the projection limit.
-
-When `--fields` is omitted and the default compact projection is used, the CLI prints a one-line note to stderr stating which fields the projection uses and that `--fields` can select others. The note goes only to stderr and never touches stdout, so piping into `jq` or similar tools is unaffected.
 
 ## Agent skills
 
