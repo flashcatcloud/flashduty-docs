@@ -26,6 +26,9 @@ consolidated) and fails on:
                        present in responses
   description-too-long the operation description is the one-line subtitle;
                        longer prose belongs in x-mint.content
+  bad-ref              every $ref must point inside the same file
+                       (`#/components/...`) at an entry that exists; Mintlify
+                       rejects the whole spec on one bare or dangling $ref
 
 Usage:
   python3 scripts/lint_openapi.py            # lint all spec files, exit 1 on violations
@@ -239,9 +242,26 @@ def lint_operations(spec, file, rep):
                                   where + " response", rep, response=True)
 
 
+def lint_refs(spec, node, file, rep, where="$"):
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            target = spec
+            for part in ref[2:].split("/") if ref.startswith("#/") else [None]:
+                target = target.get(part) if isinstance(target, dict) and part else None
+            if target is None:
+                rep.add(file, "bad-ref", where, f"$ref {ref!r} does not resolve in this file")
+        for k, v in node.items():
+            lint_refs(spec, v, file, rep, f"{where}.{k}")
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            lint_refs(spec, v, file, rep, f"{where}[{i}]")
+
+
 def lint_file(path, rep):
     spec = json.load(open(path))
     file = path.name
+    lint_refs(spec, spec, file, rep)
     for name, schema in spec.get("components", {}).get("schemas", {}).items():
         walk_properties(schema, f"schema:{name}", file, rep, set())
     lint_operations(spec, file, rep)
