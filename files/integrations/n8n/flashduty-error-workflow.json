@@ -1,0 +1,155 @@
+{
+  "name": "Flashduty - n8n failure alerts",
+  "nodes": [
+    {
+      "id": "n8n-error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": {}
+    },
+    {
+      "id": "flashduty-settings",
+      "name": "Flashduty settings",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [240, 0],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "instance-id",
+              "name": "instance_id",
+              "value": "YOUR_INSTANCE_ID",
+              "type": "string"
+            },
+            {
+              "id": "severity",
+              "name": "severity",
+              "value": "Warning",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      }
+    },
+    {
+      "id": "prepare-alert",
+      "name": "Prepare alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 0],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const text = (value) => typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';\nconst instanceId = text($json.instance_id);\nconst workflowId = text($json.workflow?.id);\nif (!instanceId || instanceId === 'YOUR_INSTANCE_ID') throw new Error('Configure a unique instance identity in Flashduty settings');\nif (instanceId.length > 64) throw new Error('Instance identity length must not exceed 64 characters');\nif (!workflowId) throw new Error('Missing failed workflow identity');\nconst severity = $json.severity;\nif (!['Critical', 'Warning', 'Info'].includes(severity)) throw new Error('Invalid severity: use Critical, Warning, or Info');\nconst isTriggerFailure = !!$json.trigger && !$json.execution;\nconst executionId = isTriggerFailure ? text($execution.id) : text($json.execution?.id);\nif (!executionId) throw new Error('Missing execution identity; enable saving failed executions');\nconst failureType = isTriggerFailure ? 'trigger' : 'execution';\nconst alertKey = JSON.stringify(['n8n', instanceId, workflowId, failureType, executionId]);\nif (alertKey.length > 255) throw new Error('Alert identity is too long');\nconst error = isTriggerFailure ? $json.trigger.error : $json.execution.error;\nconst workflowName = text($json.workflow?.name) || workflowId;\nconst nodeName = text($json.execution?.lastNodeExecuted);\n// Keep the execution link, but exclude query strings, fragments, and URL credentials.\nconst sourceUrl = text($json.execution?.url).match(/^https?:\\/\\/[^\\s?#]+/)?.[0] || '';\nconst safeUrl = /^https?:\\/\\/[^/]*@/.test(sourceUrl) ? '' : sourceUrl;\nconst lines = [\n  `Workflow: ${workflowName.slice(0, 256)} (${workflowId})`,\n  `Failure: ${failureType}; execution: ${executionId}`,\n  nodeName ? `Node: ${nodeName.slice(0, 128)}` : '',\n  safeUrl ? `Execution: ${safeUrl.slice(0, 512)}` : '',\n  text(error?.message).slice(0, 1000),\n].filter(Boolean);\nreturn { json: {\n  title: `n8n workflow failed: ${workflowName}`.slice(0, 512),\n  event_status: severity,\n  alert_key: alertKey,\n  description: lines.join('\\n').slice(0, 2048),\n  labels: { integration: 'n8n', instance_id: instanceId, workflow_id: workflowId,\n    failure_type: failureType, execution_id: executionId },\n} };"
+      }
+    },
+    {
+      "id": "send-to-flashduty",
+      "name": "Send to Flashduty",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.flashcat.cloud/event/push/alert/standard",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {
+          "timeout": 10000,
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000
+    },
+    {
+      "id": "check-response",
+      "name": "Check response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 0],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "if ($json.error) throw new Error('Flashduty rejected the alert; inspect its response and request_id');\nif (typeof $json.request_id !== 'string' || !$json.request_id || typeof $json.data?.alert_key !== 'string' || !$json.data.alert_key) {\n  throw new Error('Flashduty did not return an alert confirmation; check the push URL and response');\n}\nreturn { json: { request_id: $json.request_id, alert_key: $json.data.alert_key } };"
+      }
+    },
+    {
+      "id": "setup-note",
+      "name": "Setup",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [160, -360],
+      "parameters": {
+        "width": 800,
+        "height": 260,
+        "content": "## Send n8n failures to Flashduty\n1. Set a unique instance_id and severity in Flashduty settings.\n2. In Send to Flashduty, set the push URL without its integration_key query parameter. Keep other URL parameters.\n3. Select a Query Auth credential: Name = integration_key, Value = your Flashduty integration key.\n4. Save/publish this workflow and select it as the Error workflow of each monitored workflow.\n\nAutomatic failures only. Each failed execution creates an independent alert; no automatic recovery. Never share an export containing your credentials or integration URL.\nDocs: https://docs.flashduty.com/en/on-call/integration/alert-integration/alert-sources/n8n"
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Flashduty settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flashduty settings": {
+      "main": [
+        [
+          {
+            "node": "Prepare alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare alert": {
+      "main": [
+        [
+          {
+            "node": "Send to Flashduty",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Flashduty": {
+      "main": [
+        [
+          {
+            "node": "Check response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "none"
+  },
+  "active": false,
+  "pinData": {},
+  "tags": []
+}

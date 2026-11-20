@@ -13,7 +13,7 @@ flashduty-docs/
 ├── zh/ en/              # Docs (mirrored paths)
 ├── docs.json            # Navigation, tabs, theme, redirects
 ├── api-reference/       # OpenAPI 3.1 specs (per module, per language) → API Reference tab
-├── integration-docs/    # Build-only bundle of integration pages embedded in the product (not published)
+├── integration-docs/    # Integration pages embedded in the product; released to the CDN and npm (see integration-docs/README.md)
 ├── scripts/             # api_path_redirects.py, lint_openapi.py, upload.sh, review.sh
 ├── glossary.md          # zh → en terminology (the only copy; skills link to it)
 ├── .agents/skills/      # Agent skills (.claude/skills is a symlink to it)
