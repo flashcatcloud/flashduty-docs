@@ -12,6 +12,7 @@ export const docMap = {
   AliyunARMS: `${alertBase}/aliyun-arms.mdx`,
   AliyunCmEvent: `${alertBase}/aliyun-cm-event.mdx`,
   AliyunCm: `${alertBase}/aliyun-cm-metrics.mdx`,
+  AliyunCmsV2: `${alertBase}/aliyun-cms-v2.mdx`,
   AliyunSLS: `${alertBase}/aliyun-sls.mdx`,
   AWSCW: `${alertBase}/aws-cloudwatch.mdx`,
   AzureMonitor: `${alertBase}/azure-monitor.mdx`,
@@ -189,6 +190,7 @@ export const docMap = {
   Logrocket: `${alertBase}/logrocket.mdx`,
   RedgateSqlMonitor: `${alertBase}/redgate-sql-monitor.mdx`,
   Gitlab: `${alertBase}/gitlab.mdx`,
+  N8n: `${alertBase}/n8n.mdx`,
   Hookdeck: `${alertBase}/hookdeck.mdx`,
   Bugsnag: `${alertBase}/bugsnag.mdx`,
   Raygun: `${alertBase}/raygun.mdx`,
@@ -344,6 +346,7 @@ export const docMap = {
   Wecom: `${integrationBase}/instant-messaging/wecom.mdx`,
   Slack: `${integrationBase}/instant-messaging/slack.mdx`,
   MicrosoftTeams: `${integrationBase}/instant-messaging/microsoft-teams.mdx`,
+  ZoomApp: `${integrationBase}/instant-messaging/zoom-app.mdx`,
 
   AlertWebhook: `${integrationBase}/webhooks/alert-webhook.mdx`,
   IncidentWebhook: `${integrationBase}/webhooks/incident-webhook.mdx`,

@@ -76,6 +76,7 @@ description: "Concise explanation of page purpose"
 - Use active voice, present tense
 - Use sentence case for English titles (capitalize only first word)
 - Leverage Mintlify components: `<Steps>`, `<Tabs>`, `<Note>`, `<Tip>`, `<Warning>`, `<Frame>`, `<CodeGroup>`
+- Host images on OSS and reference the CDN URL; don't commit image files. See **Images** in [AGENTS.md](AGENTS.md)
 
 The complete writing, page-design and pre-merge rules are in [AGENTS.md](AGENTS.md).
 

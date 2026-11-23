@@ -551,7 +551,7 @@ flashduty session export <session_id>     # 以 NDJSON 流式导出单个会话�
 | `--since` | 仅保留在该时间窗口内有更新的会话（客户端过滤），如 `30d`、`24h`、`2026-05-01` | - |
 | `--limit` | 最多拉取的会话数 | `200` |
 | `--page` | 起始页码（1 开始） | `1` |
-| `--output-format` | 输出格式：`jsonl`（默认，每行一个会话对象，可直接管道给 `jq`）、`json`（完整信封；受 16 KiB 输出上限约束，见「输出格式」）、`toon`（紧凑编码） | `jsonl` |
+| `--output-format` | 输出格式：`jsonl`（默认，每行一个会话对象，可直接管道给 `jq`）、`json`（完整信封，不裁剪）、`toon`（紧凑编码） | `jsonl` |
 
 <Note>
 服务端 `/safari/session/list` 单页上限为 100 条，超出 `--limit` 时 CLI 会自动向服务端翻页拉取，无需手动分页。API 本身没有时间窗口过滤，`--since` 是在拉取后于客户端按会话的 `updated_at` 进行过滤的。
@@ -591,6 +591,8 @@ flashduty safari watch --session-id <session_id> --root-invocation-id <root_invo
 
 成功时标准输出是一行 JSON 回执，字段为 `session_id`、`invocation_id`、`root_invocation_id` 与 `delivery_mode`；其中 `root_invocation_id` 就是 `safari watch --root-invocation-id` 要传的值。消息走命令行通道，`delivery_mode` 为 `reply_only`：Agent 只通过它的回复工具作答，答复要用 `safari watch` 读取。服务端没有授予这个通道时命令直接失败，错误信息里带上 `session_id` 与 `invocation_id`——此时消息已经入队，但它的答复不会出现在 `safari watch` 的输出里，命令不会退回成别的投递方式。
 
+带 `--session-id` 发消息时，命令先读一次会话状态：如果该会话还有回合在跑，这条消息会被那个回合在下一个步骤并入并由它作答，不再等这一轮结束；会话空闲时它照常走自己的一轮。
+
 用 `--file` 而不带 `--session-id` 时，命令先创建会话再上传附件。
 
 `safari watch` 把事件逐行写到标准输出：每行一个紧凑 JSON 对象，诊断信息只写标准错误，其他内容一概不写进标准输出。
@@ -603,16 +605,16 @@ flashduty safari watch --session-id <session_id> --root-invocation-id <root_invo
 
 | 行类型 | 说明 |
 |--------|------|
-| `reply` | Agent 通过回复工具发出的消息，`purpose` 为 `progress`（进展）或 `result`（结论），未标注时按 `result` |
-| `settled` | 跟随的那次请求已结算，`reason` 给出原因，`standing_tasks` 是仍在运行的后台任务数（为 0 时省略该字段） |
+| `reply` | Agent 的答复，`purpose` 为 `progress`（进展）或 `result`（结论），未标注时按 `result`。既包括它通过回复工具发出的消息，也包括不使用回复工具作答的那一轮的最终回答（其 `event_id` 是该轮 `settled` 帧的） |
+| `settled` | 一个回合已结算，`reason` 给出原因（`steered` 表示这条消息被运行中的回合并入，该回合稍后才作答），`standing_tasks` 是仍在运行的后台任务数（为 0 时省略该字段） |
 | `error` | 会话错误，`code` 给出错误码，运行环境准备失败时为 `environment_failed` |
 
-只打印 Agent 通过回复工具明确发出的消息。工具调用、思考过程和普通助手文本属于它的内部工作内容，不会输出。
+打印 Agent 的答复本身，包括它通过回复工具发出的消息，以及不使用回复工具作答的那一轮的最终回答。工具调用、思考过程和其他助手文本属于它的内部工作内容，不会输出。跟随的是整条会话：同一会话里别人的消息、以及把这条消息并入运行中回合的那一轮，它们的答复同样会打印出来。
 
 | 参数 | 说明 |
 |------|------|
 | `--session-id` | 要跟随的会话（必填） |
-| `--root-invocation-id` | 只跟随这一次请求，取值来自 `safari send` 回执的 `root_invocation_id` |
+| `--root-invocation-id` | 从这一次请求的第一帧开始输出，并在它结算后结束整次跟随，取值来自 `safari send` 回执的 `root_invocation_id`；跟随的仍然是整条会话，它只决定从哪里开始、以哪一次请求的结算为结束条件 |
 | `--since` | 从该 Unix 毫秒时间戳开始回放（含该毫秒）。不带 `--root-invocation-id` 时省略即从当前时刻开始；带上它时省略则从会话开头回放 |
 | `--since-event-id` | 必须与 `--since` 同时给出：从该事件之后开始，严格排除该事件本身；取值是上一行输出的 `event_id` |
 
@@ -620,7 +622,7 @@ flashduty safari watch --session-id <session_id> --root-invocation-id <root_invo
 
 重试 8 次仍没有收到任何事件即放弃，以非零退出码结束并带上最后一次的错误。
 
-跟随的那次请求已结算、没有仍在运行的后台任务，并且会话已无运行中的回合时，命令退出 0；请求还有后台任务时会继续等待它们把后续回合跑完。不可恢复的错误（限流与 408 之外的 4xx、运行环境准备失败）以非零退出码结束，同时在标准输出上留一行 `{"type":"error",…}`，运行环境准备失败时这一行就是该事件本身。
+跟随的那次请求已结算（自己开了一轮，或被运行中的回合并入），之后有一个不是 `steered` 的回合结算、没有仍在运行的后台任务，并且会话已无运行中的回合时，命令退出 0；请求还有后台任务时会继续等待它们把后续回合跑完。不可恢复的错误（限流与 408 之外的 4xx、运行环境准备失败）以非零退出码结束，同时在标准输出上留一行 `{"type":"error",…}`，运行环境准备失败时这一行就是该事件本身。
 
 ### monit-query — 监控数据源统一工具调用
 
@@ -630,6 +632,8 @@ flashduty safari watch --session-id <session_id> --root-invocation-id <root_invo
 flashduty monit datasource-list --type prometheus --json | jq '.[] | {id, name, type_ident, address}'
 flashduty monit-query <datasource-id> --tool 'prometheus.query' \
   --params '{"expr":"sum(rate(http_requests_total[5m]))","execution":{"kind":"instant","to_ms":1789000000000}}'
+flashduty monit-query <datasource-id> --tool 'prometheus.query' \
+  --since 2h --params '{"expr":"up","execution":{"kind":"range","max_data_points":240}}'
 flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 ```
 
@@ -638,10 +642,15 @@ flashduty monit-query <datasource-id> --tool 'redis_node.slowlog' --params '{}'
 | `<datasource-id>` | 数据源 ID（位置参数，必填，来自 `monit datasource-list`，最小 1） |
 | `--tool` | 工具名（必填），以数据源类型为前缀，如 `prometheus.query`、`mysql.overview`、`redis_node.slowlog`；1–128 字符 |
 | `--params` | 工具参数 JSON（可省略，省略即 `{}`；参数较长时传 `-` 从标准输入读取；显式 `null` 不合法） |
+| `--since` / `--until` | 查询窗口，写入 `params.execution.from_ms` / `to_ms`，不必自己算毫秒：`30m`、`2h`、`7d` 这类相对时长、RFC3339 时间、日期、日期时间，或 Unix 秒/毫秒。只给 `--since` 时窗口截止到现在，只给 `--until` 时按那一刻做即时求值。`--params` 里已经带了同名字段，或窗口首尾颠倒时报错 | 省略 |
 
 查询工具要求集群内所有在线 Edge 版本不低于 v0.68.0，诊断工具要求不低于 v0.71.0。版本不满足时命令直接失败并返回错误码：`edge_upgrade_required`（Edge 版本过低）、`mixed_edge_versions`（集群内 Edge 版本混合）、`edge_version_unknown`（集群内存在版本无法识别的 Edge）、`no_active_edge`（没有可用的在线 Edge）。请先升级 Edge，不要轮换 Edge 重试。
 
-查询工具返回完整的 `explore_result.v1` 结构化结果：`format` 固定为 `explore_result.v1`，`result.kind` 为 `samples`（带完整标签集的即时样本）、`frames`（类型化表格/时序帧）或 `logs`（原始日志，含 `applied_limit` 与 `has_more`）三者之一。诊断工具的返回结构见下文 `monit datasource-tools-invoke`。
+默认输出是一份**有界摘要**（约 8 KB，诊断工具的输出不做摘要）：时序按最大值排序，给出每条序列的最小/最大值及各自时间、平均值、首末值，以及 12 段的大致形态（每段带起始时间）；即时样本按值排序；表格输出行；日志给出条数、恒定字段、短低基数字段的取值分布与每条日志的变化字段（消息在前）。首行写明实际发出的时间窗口，每一处裁剪都写明条数与时间，空结果只用一行说明。
+
+要看完整结果（每一个点、行或日志）时加 `--output-format json` 或 `toon`：这两种格式的 stdout 只有结果本身，窗口信息改在 stderr 的 `note:` 行。摘要最后一行给出该类数据在 JSON 里的 jq 路径，例如 `.data.result.entries[] | .timestamp_ns, .fields["<name>"]`，可直接按它投影，不必先看完整结果。
+
+查询工具的返回结构是 `explore_result.v1`：`format` 固定为 `explore_result.v1`，`result.kind` 为 `samples`（带完整标签集的即时样本）、`frames`（类型化表格/时序帧）或 `logs`（原始日志，含 `applied_limit` 与 `has_more`）三者之一。诊断工具的返回结构见下文 `monit datasource-tools-invoke`。
 
 ### monit datasource-tools-invoke — 数据源诊断工具
 
@@ -845,9 +854,9 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 | `--since` / `--until` | 时间窗口（与 `incident list` 相同的人性化格式） | `7d` / `now` |
 | `--limit` | 最大结果数（上限 100） | `20` |
 | `--page` | 页码 | `1` |
-| `--fields` | `json`/`toon` 输出时的字段投影（逗号分隔，如 `incident_id,title,severity`）；表格模式忽略；至少指定一个字段 | 默认紧凑投影 |
+| `--fields` | `json`/`toon` 输出时的字段投影（逗号分隔，如 `incident_id,title,severity`）；表格模式忽略；至少指定一个字段 | 不投影，输出完整记录 |
 
-`json`/`toon` 模式默认按紧凑字段投影：`incident_id`、`title`、`severity`、`channel_name`、`seconds_to_ack`、`seconds_to_close`、`notifications`（默认投影时 stderr 会提示可用 `--fields` 更换），输出受 16 KiB 上限约束，超出时行会被丢弃或单行截短，提示只写 stderr（详见下文「输出格式」的「结构化输出的字段投影」）。
+`json`/`toon` 模式输出接口返回的完整记录，不裁剪。只想看其中几个字段时用 `--fields` 投影（如 `--fields incident_id,title,severity`），详见下文「输出格式」的「结构化输出的字段投影」。
 
 `insight top-alerts`：`--label` 必填（`check` 或 `resource`），`--since`/`--until` 同前，`--limit` 默认 `10`（Top-K），返回每个标签值的告警数与事件数。
 
@@ -1052,7 +1061,7 @@ Showing 2 results (page 1, total 2).
 </Tab>
 
 <Tab title="JSON（--json / --output-format json）">
-机器可解析。除下方列出的默认紧凑字段命令外，返回命令的完整响应数据；表格列截断不适用于 JSON。适合脚本、CI/CD 流水线消费。注意生成命令的**列表形态**响应在 `json` 模式下同样受 16 KiB 上限约束（见下方「生成命令的输出上限」）。
+机器可解析，返回命令的完整响应数据，不做裁剪，表格列截断也不适用于 JSON。适合脚本、CI/CD 流水线消费。
 
 ```bash
 flashduty incident list --json | jq '.[].title'
@@ -1060,7 +1069,7 @@ flashduty incident list --json | jq '.[].title'
 </Tab>
 
 <Tab title="TOON（--output-format toon）">
-TOON（Token-Oriented Object Notation）对同构数组省去了 JSON 中每行重复的字段名，列表输出可显著减少 token 消耗，更适合喂给 AI / 智能体消费。下方列出的默认紧凑字段命令会按其字段投影输出，并受大小限制；生成命令的列表形态输出同样受 16 KiB 上限约束（见下方「生成命令的输出上限」）。
+TOON（Token-Oriented Object Notation）对同构数组省去了 JSON 中每行重复的字段名，列表输出可显著减少 token 消耗，更适合喂给 AI / 智能体消费。内容与 `json` 相同，同样不裁剪；要更省 token 就用 `--fields` 只保留需要的字段。
 
 ```bash
 flashduty incident list --output-format toon
@@ -1084,51 +1093,32 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 
 它用来核对窗口是否就是您要的那个：默认值可能比您预期的宽（例如 `--active` 会把默认窗口放宽到 30 天），把时间戳按错误时区解读会让窗口落到未来，此时提示形如 `ends in 7h`。提示只写 stderr，stdout 保持原样，`jq` 与 toon 消费方不受影响。
 
-### 生成命令的输出上限
+### 结构化输出不裁剪
 
-由 OpenAPI 代码生成提供覆盖的生成命令（如 `safari session-list`、`monit datasource-list`、`safari a2a-agent-list` 等），其 `json` / `toon` 输出对**列表形态**的响应按 16 KiB 上限处理。缩减分三级，另外会有一个机读标记：
+`json` 与 `toon` 输出不做裁剪：返回页的每一行、每个字段都完整写出，长值不改短，列表信封也不会多出 `truncated`、`emitted_rows` 这类标记。接口返回一页就是一页，`total` 与 `has_next_page` 说的就是真实情况。
 
-1. **整页超限**：只输出能完整放下的前几行，每个值保持原样，stderr 提示实际输出了 N/M 行、其余行未输出。
-2. **单行本身超限**：该行的字符串值以 `...` 截短，stderr 点名被截字段；标识符字段（以 `_id` / `_key` 结尾）不会被截短。
-3. **行无法缩减到上限以内**：命令报错并点名字节数最大的字段（最多 3 个），请调低 `--limit` 或减少输出字段后重试。
-
-**列表信封会被重建并写入缩减标记**。列表信封指行数组名为 `items` / `docs` / `list`、同级只有 `total`、`has_next_page`、`search_after_ctx` 等标量字段的响应（如 `monit datasource-list`、`safari session-list`）；一旦发生缩减，CLI 会重建该信封并在 payload 中补写字段，脚本无需解析 stderr 也能发现缩减：
-
-- **整行被丢弃**：写入 `truncated: true` 与 `emitted_rows: N`（N 为实际输出的行数）。此时信封中的 `total`、`has_next_page`、`search_after_ctx` 仍是服务端原始分页的原样回显，**不能**用来判断是否已取全——被截成「100 行中前 7 行」的一页照样带着原来的分页字段。要取全请按实际收到的行数收窄 `--limit` 重新请求，再沿返回的游标继续翻页。
-- **只有长值被截短**（没有丢行）：只写 `truncated: true`，stderr 会点名被截字段。重新请求无法找回这些值，请收窄筛选条件、减少每页行数，或用全局 `--fields` 只保留需要的字段。
-
-**行数组还带非标量同级字段的响应不做缩减**。行数组为 `items` / `docs` / `list`、但同级还有对象或数组字段的响应（如 `calendar event-list` 的 `days` 地图），无法在不丢字段的前提下压进 16 KiB，因此整包原样输出、处理方式同本节末段的**明细形态的单个对象**：既不写 `truncated` / `emitted_rows`，也不截短任何值。
-
-**顶层数组形态**的响应（如精选命令 `incident list`、`insight incidents`）没有信封可承载标记，缩减仍只写 stderr。
-
-**明细形态的单个对象**（如 `safari session-get` 的详情）不做截断、原样输出——截短后的值无法与真实短值区分，因此这类响应不受上限约束。生成命令可以用全局 `--fields` 收窄输出的字段（见「全局参数」与下文「结构化输出的字段投影」；个别命令的 `--fields` 是请求体的字段选择器，如 `monit rule-update-fields`，不作用于输出）；需要完整 JSON 时请通过 `--limit` 调小每页数量、配合 `--page` 分页逐页拉取（如 `flashduty safari session-list --limit 20 --page 2`），或按需收窄筛选条件。
+输出体积由您自己控制：用全局 `--fields` 只保留需要的字段，用 `--limit` 减少每页行数，再用 `--page` 取后面的页（如 `flashduty safari session-list --limit 20 --page 2`）。个别命令的 `--fields` 是请求体的字段选择器（如 `monit rule-update-fields`），不作用于输出。
 
 ### 结构化输出的字段投影
 
-`--fields` 是全局参数（见「全局参数」）：任意命令在 `json` 或 `toon` 输出时都能用它，逗号分隔要保留的顶层字段，作用于列表的每一行或单个记录。投影在返回结果上执行：列表信封（行数组为 `items`、`docs` 或 `list`，同级只有标量分页字段）只收窄其中的行数组，分页字段原样保留；某个字段在整个响应里都不存在时不会被写入输出，stderr 会提示该字段未匹配到任何键、并列出实际存在的键；输出既不是对象也不是对象列表时，命令报错并要求去掉 `--fields`。表格输出忽略 `--fields`，此时 stderr 会提示它未生效。
+`--fields` 是全局参数（见「全局参数」）：任意命令在 `json` 或 `toon` 输出时都能用它，逗号分隔要保留的顶层字段，作用于列表的每一行或单个记录。投影在返回结果上执行：列表信封（行数组为 `items`、`docs` 或 `list`，同级只有标量分页字段）只收窄其中的行数组，分页字段原样保留；某个字段在整个响应里都不存在时不会被写入输出，精选命令会直接报错并列出具名可用的字段，其它命令会在 stderr 提示该字段未匹配到任何键、并列出实际存在的键；输出既不是对象也不是对象列表时，命令报错并要求去掉 `--fields`。表格输出忽略 `--fields`，此时 stderr 会提示它未生效。
 
-下表列出的精选命令在省略 `--fields` 时按默认紧凑投影输出，并受大小上限约束；它们各自定义了自己的 `--fields`（含义与全局一致），字段名写错会直接报错并列出具名可用的字段。其它命令——包括全部生成命令——不带默认投影，`--fields` 直接作用在接口返回的原始字段上，字段名未命中只会得到上面那条 stderr 提示。
+省略 `--fields` 时，所有命令——包括下表这些精选命令——都输出接口返回的完整记录，不再有默认紧凑投影。精选命令各自定义了自己的 `--fields`（含义与全局一致），字段名写错会直接报错并列出具名可用的字段；其它命令——包括全部生成命令——的 `--fields` 作用在接口返回的原始字段上，一个字段都没命中时 stderr 会提示并列出实际存在的键。
 
-| 命令 | 未指定 `--fields` 时的结构化输出 | 上限 |
-| --- | --- | --- |
-| `flashduty incident list` | `incident_id`、`num`、`title`、`incident_severity`、`progress`、`start_time`、`channel_id`、`detail_url` | 16 KiB |
-| `flashduty incident similar <id>` | `incident_id`、`num`、`title`、`incident_severity`、`progress`、`start_time`、`close_time`、`ack_time`、`alert_cnt`、`root_cause`、`score`、`detail_url` | 16 KiB |
-| `flashduty incident detail <id>` | 不指定 `--fields` 时返回完整详情；指定后只返回所选字段 | 仅投影输出为 8 KiB |
-| `flashduty alert-event list` | `event_id`、`alert_id`、`event_severity`、`event_status`、`event_time`、`title` | 16 KiB |
-| `flashduty channel escalate-rule-list <channel-id>` | `rule_id`、`rule_name`、`status`、`priority`、`filters` | 16 KiB |
-| `flashduty insight incidents` | `incident_id`、`title`、`severity`、`channel_name`、`seconds_to_ack`、`seconds_to_close`、`notifications` | 16 KiB |
+| 命令 | 可用 `--fields` 选择的具名字段 |
+| --- | --- |
+| `flashduty incident list` | `incident_id`、`num`、`title`、`incident_severity`、`progress`、`start_time`、`channel_id`、`detail_url` |
+| `flashduty incident similar <id>` | `incident_id`、`num`、`title`、`incident_severity`、`progress`、`start_time`、`close_time`、`ack_time`、`alert_cnt`、`root_cause`、`score`、`detail_url` |
+| `flashduty incident detail <id>` | 不指定 `--fields` 时返回完整详情；指定后只返回所选字段 |
+| `flashduty alert-event list` | `event_id`、`alert_id`、`event_severity`、`event_status`、`event_time`、`title` |
+| `flashduty channel escalate-rule-list <channel-id>` | `rule_id`、`rule_name`、`status`、`priority`、`filters` |
+| `flashduty insight incidents` | `incident_id`、`title`、`severity`、`channel_name`、`seconds_to_ack`、`seconds_to_close`、`notifications` |
 
 例如，只导出故障编号、标题和处理进度：
 
 ```bash
 flashduty incident list --json --fields incident_id,title,progress
 ```
-
-列表投影（`incident list`、`incident similar`、`alert-event list`、`channel escalate-rule-list`、`insight incidents`）超过 16 KiB 上限时，缩减的三级行为与上文「生成命令的输出上限」相同，提示只写 stderr、不改写 stdout；区别是请用 `--fields` 或 `--limit` 收窄输出，让每页容纳更多行或取回完整值。被截短的字段上匹配或过滤会漏数据；标识符字段（以 `_id` 或 `_key` 结尾）在任何一级都不会被截短。
-
-`incident detail` 的投影超限行为不同：详情是单个对象，截断后的值与本身就很短的真实值无法区分，静默截短会返回错误数据，因此投影超过 8 KiB 时命令直接失败，错误信息会点名最大的字段（最多 3 个，含各自字节数）。此时请减少 `--fields` 中的字段，或直接省略 `--fields` 获取不受投影上限约束的完整详情。
-
-未指定 `--fields` 而使用默认紧凑投影时，CLI 会在 stderr 打印一行提示，说明当前投影使用的字段、以及可通过 `--fields` 选择其他字段。该提示只写 stderr、不改写 stdout，管道给 `jq` 等工具时输出保持不变。
 
 ## Agent Skills
 

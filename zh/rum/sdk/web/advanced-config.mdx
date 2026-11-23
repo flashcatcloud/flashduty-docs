@@ -1,35 +1,14 @@
 ---
 title: "Web SDK 高级配置"
-description: "深入了解 Web RUM SDK 的高级配置功能，包括视图管理、数据控制、用户会话和分布式追踪"
+description: "配置 Web RUM SDK 的视图、上下文、采样、用户同意和分布式追踪。"
 keywords: ["RUM", "Web SDK", "用户监控", "前端监控"]
 ---
 
-<Info>
-本文档介绍 Web RUM SDK 的高级配置选项，帮助您根据业务需求定制数据收集行为。
-</Info>
-
-RUM 提供多种高级配置选项：
-
-<CardGroup cols={2}>
-<Card title="保护敏感数据" icon="shield">
-  屏蔽个人身份信息等敏感数据
-</Card>
-<Card title="关联用户会话" icon="user">
-  将用户会话与内部用户标识关联
-</Card>
-<Card title="减少数据量" icon="chart-line-down">
-  通过采样降低 RUM 数据收集量
-</Card>
-<Card title="增强上下文" icon="tags">
-  为数据添加丰富的上下文信息
-</Card>
-</CardGroup>
+完成 [SDK 接入](/zh/rum/sdk/web/sdk-integration)后，按需配置视图、上下文、采样和分布式追踪。下方初始化示例可合并到您已有的 `flashcatRum.init()` 配置中。
 
 ## 覆盖默认 RUM 视图名称
 
-RUM 会在用户访问新页面或 SPA 中 URL 更改时自动生成视图事件。视图名称默认从当前页面 URL 计算，并自动移除变量 ID（包含数字的路径段）。例如，`/dashboard/1234` 和 `/dashboard/9a` 会被归一化为 `/dashboard/?`。
-
-您可以通过设置 `trackViewsManually` 选项手动跟踪视图事件，并为视图指定自定义名称。
+RUM 在页面访问或 SPA 地址变化时自动创建视图，并把含数字的路径段归一化为 `?`。例如 `/dashboard/1234` 和 `/dashboard/9a` 的默认视图名都是 `/dashboard/?`。需要按路由划分视图时，启用手动视图跟踪；只改名称时用 `setViewName()`。
 
 ### 配置手动跟踪视图
 
@@ -64,21 +43,12 @@ flashcatRum.startView({
 </Step>
 </Steps>
 
-<ParamField body="name" type="string">
-视图名称，默认为页面 URL 路径
-</ParamField>
-
-<ParamField body="service" type="string">
-服务名称，默认为创建 RUM 应用时指定的服务
-</ParamField>
-
-<ParamField body="version" type="string">
-应用版本，默认为创建 RUM 应用时指定的版本
-</ParamField>
-
-<ParamField body="context" type="object">
-视图的附加上下文，应用于视图及其子事件
-</ParamField>
+| `startView` 参数 | 说明 |
+| --- | --- |
+| `name` | 视图名称，默认为页面 URL 路径 |
+| `service` | 服务名称，默认沿用应用的服务配置 |
+| `version` | 应用版本，默认沿用应用的版本配置 |
+| `context` | 附加到该视图及其子事件的上下文 |
 
 ### React Router 集成
 
@@ -133,9 +103,7 @@ flashcatRum.setViewName("Checkout");
 
 ## 控制首屏 Web Vitals 采集
 
-Web SDK 默认在初始加载视图中采集 Web Vitals 和首屏性能指标，包括 FCP、LCP、FID 和加载时间。这些指标会以页面导航开始时间为基准计算，适用于真实用户直接打开页面的场景。
-
-如果页面会在用户可见前提前加载，例如被浏览器预渲染、在后台标签页打开，或由宿主容器提前初始化，首屏指标可能会从不相关的导航开始时间计算，导致 FCP、LCP 或加载时间异常偏大。您可以在初始化时将 `trackWebVitals` 设置为 `false`，只关闭初始加载视图的 Web Vitals 和首屏性能指标采集。
+`trackWebVitals` 默认为 `true`，采集首个视图的 FCP、LCP、FID 和加载时间。预渲染、后台标签页或宿主提前加载的页面，这些值可能偏大，不需要时设为 `false`。资源、长任务、用户行为、错误和后续视图不受影响。
 
 ```javascript rum-init.js
 import { flashcatRum } from "@flashcatcloud/browser-rum";
@@ -147,54 +115,271 @@ flashcatRum.init({
 });
 ```
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `trackWebVitals` | boolean | `true` | 是否采集初始加载视图的 Web Vitals 和首屏性能指标。设置为 `false` 后，SDK 不再为初始加载视图采集 FCP、LCP、FID 和加载时间 |
-
-<Note>
-`trackWebVitals` 只影响初始加载视图的 Web Vitals 和首屏性能指标。资源、长任务、用户行为、错误和后续视图事件仍按其他配置项继续采集。
-</Note>
-
 ## 丰富和控制 RUM 数据
 
-通过 `beforeSend` 回调函数，您可以在事件发送到 Flashduty 之前对其进行拦截和修改：
-
-- **丰富事件**：添加额外的上下文属性
-- **修改事件**：更改事件内容或屏蔽敏感信息
-- **丢弃事件**：选择性地丢弃特定 RUM 事件
+使用 `beforeSend(event, context)` 在上报前添加上下文、修改允许的字段，或返回 `false` 丢弃事件。回调是同步的，不等待 Promise。
 
 ### 上下文类型
 
-不同的事件类型对应不同的上下文：
+第二个参数 `context` 提供触发事件的浏览器对象：
 
 | 事件类型 | 上下文 |
 |----------|--------|
 | View | `Location` 对象 |
 | Action | 触发事件的 `Event` 和处理堆栈 |
 | Resource (XHR) | `XMLHttpRequest`、`PerformanceResourceTiming` 和处理堆栈 |
-| Resource (Fetch) | `Request`、`Response`、`PerformanceResourceTiming` 和处理堆栈 |
+| Resource (Fetch) | 请求输入与配置（`requestInput`、`requestInit`）、`Response`、`PerformanceResourceTiming` 和处理堆栈 |
 | Resource (Other) | `PerformanceResourceTiming` |
 | Error | `Error` 对象 |
 | Long Task | `PerformanceLongTaskTiming` |
 
-### 丰富 RUM 事件
+### 上下文大小限制
 
-为事件添加上下文属性，例如为资源事件添加响应头数据：
+| 范围 | 限制与超限行为 |
+| --- | --- |
+| `beforeSend` 写回的整个 `event.context` | 默认序列化预算为 **225,280 个字符**（`220 × 1024`），按 JavaScript 字符串长度计算，包含字段名和 JSON 结构。超限时 SDK 停止复制后续字段或数组元素，并在控制台警告；超大字段可能整个缺失 |
+| 整个事件 | 发送检查阈值为 **256 KiB**（`262,144`），按编码后的估算尺寸判断。达到或超过阈值时，SDK 丢弃整个事件并在控制台警告 |
+
+<Tip>
+自定义字段（包括 `res`、`req`）共享 context 预算。字符数不等于 UTF-8 字节数；不要将 `256 KiB` 当作响应体额度，也不要依赖压缩扩大采集范围。
+</Tip>
+
+请求体和响应体能否写进 `event.context`，取决于请求类型和 body 形态。两者都只能在同步的 `beforeSend` 中完成：
+
+| 内容 | 是否可同步附加到 `event.context` | 说明 |
+| --- | --- | --- |
+| XHR 响应体（JSON 或 JSON 文本） | 可以 | 请求完成时 `xhr.response` 已可同步读取，见[响应体章节](#resource-response-xhr) |
+| Fetch 请求体（`fetch(url, { body })` 的字符串 body） | 可以 | 保留在 `context.requestInit.body`，见[请求体章节](#resource-request-fetch) |
+| Fetch 响应体 | 不可以 | 只能异步读取响应流，`beforeSend` 不等待 |
+| XHR 请求体 | SDK 无法直接取得 | XHR 对象无法取回已发送的请求体；需业务侧先拦截 `send` 暂存，见[请求体章节](#resource-request-xhr) |
+| Fetch 与 XHR 的响应头、状态码和 URL | 可以 | Fetch 在 `context.response` 存在时同步读取；XHR 通过 `context.xhr` 读取，Fetch 见[Fetch 页签](#resource-headers-fetch)，XHR 见[XHR 页签](#resource-headers-xhr) |
+
+
+<span id="resource-response-headers"></span>
+### 为资源事件添加响应头
+
+Fetch 与 XHR 都可在 `beforeSend` 中同步读取响应头，把需要的字段写入 `event.context`。请按请求类型查看对应页签。
+
+<Tabs>
+<Tab title="Fetch" id="resource-headers-fetch">
+
+通过 `context.response.headers` 读取全部响应头，或用 `headers.get(name)` 读取单个响应头：
 
 ```javascript
 flashcatRum.init({
   applicationId: "<YOUR_APPLICATION_ID>",
   clientToken: "<YOUR_CLIENT_TOKEN>",
   beforeSend: (event, context) => {
-    if (event.type === "resource" && event.resource.type === "fetch") {
-      event.context.responseHeaders = Object.fromEntries(
-        context.response.headers
-      );
+    if (
+      event.type === "resource" &&
+      event.resource.type === "fetch" &&
+      context.response
+    ) {
+      event.context = {
+        ...event.context,
+        responseHeaders: Object.fromEntries(context.response.headers),
+      };
     }
     return true;
   }
 });
 ```
+
+上报后，在查看器中打开该资源事件，详情中可看到 `context.responseHeaders`：
+
+<Frame caption="查看器的资源详情">
+  <img src="https://docs-cdn.flashcat.cloud/images/png/5b345e793affd3bc7eb90e1ec511d099.png" alt="查看器资源详情页，属性区 context 字段显示上报的 responseHeaders 响应头数据" />
+</Frame>
+
+</Tab>
+<Tab title="XHR" id="resource-headers-xhr">
+
+通过 `context.xhr.getResponseHeader(name)` 读取单个响应头，或用 `getAllResponseHeaders()` 读取全部：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr" || !context.xhr) {
+      return true;
+    }
+    event.context = {
+      ...event.context,
+      responseHeaders: {
+        "x-request-id": context.xhr.getResponseHeader("x-request-id"),
+      },
+    };
+    return true;
+  }
+});
+```
+
+上报后，在查看器中打开该资源事件，详情中可看到 `context.responseHeaders`：
+
+<Frame caption="查看器的资源详情">
+  <img src="https://docs-cdn.flashcat.cloud/images/png/3779f6fe41d0ddb294e3aadfa3499f2f.png" alt="查看器中 xhr 资源详情页，属性区 context 字段显示上报的 responseHeaders 响应头数据" />
+</Frame>
+
+</Tab>
+</Tabs>
+
+<span id="resource-response-context"></span>
+### 将接口响应体作为资源上下文上报
+
+在 `beforeSend` 中读取响应，将需要的字段写入 `event.context.res`。`res` 是自定义字段，SDK 不会自动采集响应体。XHR 与 Fetch 的情况不同，请按请求类型查看对应页签。
+
+<Tabs>
+<Tab title="XHR" id="resource-response-xhr">
+
+请求完成时，XHR 的 JSON 或 JSON 文本响应可通过 `xhr.response` 同步读取。按接口路径筛选请求：
+
+```javascript
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackResources: true,
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr") {
+      return true;
+    }
+    if (new URL(event.resource.url).pathname !== "/api/orders/status") {
+      return true;
+    }
+    const xhr = context.xhr;
+    if (!xhr) return true;
+
+    try {
+      const res = xhr.responseType === "json"
+        ? xhr.response
+        : JSON.parse(xhr.responseText);
+      // 只采集必要的接口和字段，例如业务错误码和请求 ID。
+      // 不要上报密码、访问令牌、会话凭据或个人信息。
+      event.context = { ...event.context, res };
+    } catch {
+      // 无法同步解析响应时，仍保留原资源事件。
+    }
+    return true;
+  },
+});
+```
+
+<Tip>
+XHR 的 Blob 响应需要异步读取，不在此示例范围内。
+</Tip>
+
+XHR 上报后，在查看器的资源详情中可看到 `context.res`：
+
+<Frame caption="查看器的资源详情">
+  <img src="https://docs-cdn.flashcat.cloud/images/png/6d51039869f7388e8c75c3a60d37c9f5.png" alt="资源详情的 JSON 视图中，红框标出包含 res 响应数据的 context 字段" />
+</Frame>
+
+</Tab>
+<Tab title="Fetch" id="resource-response-fetch">
+
+<Warning>
+Fetch 响应体只能通过 `response.text()` 或 `response.json()` 异步读取，而 `beforeSend` 是同步回调、不等待 Promise，读完后写回也不会进入实际上报的事件，因此 Fetch 响应体无法作为资源上下文上报。
+</Warning>
+
+<Tip>
+如只需上报少量字段（例如业务错误码、请求 ID），可由服务端将字段放入响应头，前端在 `beforeSend` 中同步读取 `context.response.headers` 并写入 `event.context`，写法见[为资源事件添加响应头](#resource-headers-fetch)。不要把完整响应体放入响应头：响应头只能承载字符串、体积有限，跨域时还需服务端通过 `Access-Control-Expose-Headers` 暴露后前端才能读到。
+</Tip>
+
+
+
+</Tab>
+</Tabs>
+
+
+<span id="resource-request-body-context"></span>
+### 将接口请求体作为资源上下文上报
+
+请求体是前端发出的内容，与响应体无关。能否取得取决于请求类型，请按请求类型查看对应页签。SDK 不会自动采集请求体。
+
+<Tabs>
+<Tab title="Fetch" id="resource-request-fetch">
+
+仅当请求以 `fetch(url, { body })` 发出、且 body 是字符串时，请求体保留在 `beforeSend` 第二个参数的 `context.requestInit.body` 中，可同步解析后把需要的字段写入 `event.context`（例如 `req`）。这是 SDK 透传原始调用参数供用户自行提取。
+
+```javascript
+beforeSend(event, context) {
+  if (event.type !== "resource" || event.resource.type !== "fetch") {
+    return true;
+  }
+  if (new URL(event.resource.url).pathname !== "/api/orders") {
+    return true;
+  }
+  const body = context.requestInit?.body;
+  if (typeof body !== "string") {
+    return true;
+  }
+  try {
+    const parsed = JSON.parse(body);
+    // 只挑需要的字段，不要整包上报，更不要上报密码、令牌等敏感信息。
+    event.context = { ...event.context, req: { orderId: parsed.orderId } };
+  } catch {
+    // 不是 JSON 字符串时不附加，仍保留原资源事件。
+  }
+  return true;
+}
+```
+
+`URLSearchParams` 可先用 `Object.fromEntries(body.entries())` 转换；`fetch(new Request(...))`、`Blob`、文件或流，都无法同步取得请求体。
+
+上报后，在查看器中打开该资源事件，详情中可看到 `context.req`：
+
+<Frame caption="查看器的资源详情">
+  <img src="https://docs-cdn.flashcat.cloud/images/png/492aa7e32b9ff990ec355d69ce724353.png" alt="查看器资源详情页，属性区 context 字段显示从 Fetch 请求体提取的 req 数据" />
+</Frame>
+
+</Tab>
+<Tab title="XHR" id="resource-request-xhr">
+
+XHR 对象无法取回已发送的请求体，`beforeSend` 中拿不到。需要在业务代码中先拦截 `XMLHttpRequest.prototype.send` 暂存请求体，再在 `beforeSend` 中按 XHR 对象取回并写入 `event.context`：
+
+```javascript
+// 在发请求之前安装拦截（建议在 SDK 初始化之前）
+const xhrBodies = new WeakMap();
+const originalSend = XMLHttpRequest.prototype.send;
+XMLHttpRequest.prototype.send = function (body) {
+  if (typeof body === "string") {
+    xhrBodies.set(this, body);
+  }
+  return originalSend.call(this, body);
+};
+
+flashcatRum.init({
+  applicationId: "<YOUR_APPLICATION_ID>",
+  clientToken: "<YOUR_CLIENT_TOKEN>",
+  trackResources: true,
+  beforeSend(event, context) {
+    if (event.type !== "resource" || event.resource.type !== "xhr" || !context.xhr) {
+      return true;
+    }
+    const raw = xhrBodies.get(context.xhr);
+    if (typeof raw !== "string") {
+      return true;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      // 只挑需要的字段，不要整包上报，更不要上报密码、令牌等敏感信息。
+      event.context = { ...event.context, req: { orderId: parsed.orderId } };
+    } catch {
+      // 不是 JSON 字符串时不附加，仍保留原资源事件。
+    }
+    return true;
+  },
+});
+```
+
+上报后，在查看器中打开该资源事件，详情中可看到 `context.req`：
+
+<Frame caption="查看器的资源详情">
+  <img src="https://docs-cdn.flashcat.cloud/images/png/93359ffa365a04807b9717e0c08fdb00.png" alt="查看器中 xhr 资源详情页，属性区 context 字段显示从 XHR 请求体提取的 req 数据" />
+</Frame>
+
+</Tab>
+</Tabs>
 
 ### 修改 RUM 事件内容
 
@@ -248,27 +433,17 @@ flashcatRum.init({
 
 ## 用户会话
 
-通过为 RUM 会话添加用户信息，您可以：
-
-- 跟踪特定用户的浏览路径
-- 了解哪些用户受错误影响最大
-- 监控关键用户的性能
+设置用户标识后，您可以在 RUM 中关联同一用户的会话和错误。
 
 ### 用户属性
 
-以下为可选的用户属性，建议至少提供一个：
+以下属性均可选，建议至少设置一项：
 
-<ParamField body="usr.id" type="string">
-唯一用户标识符
-</ParamField>
-
-<ParamField body="usr.name" type="string">
-用户友好名称，默认在 RUM UI 中显示
-</ParamField>
-
-<ParamField body="usr.email" type="string">
-用户电子邮件，若无名称则显示邮件
-</ParamField>
+| 事件字段 | 说明 |
+| --- | --- |
+| `usr.id` | 唯一用户标识符 |
+| `usr.name` | 用户名称，优先用于界面显示 |
+| `usr.email` | 用户邮箱，未设置名称时用于显示 |
 
 ### 用户会话 API
 
@@ -315,7 +490,7 @@ flashcatRum.clearUser();
 
 ## 采样
 
-默认情况下，RUM 会收集所有会话的数据。您可以通过 `sessionSampleRate` 参数设置采样率来减少收集的会话数量：
+使用 `sessionSampleRate` 设置会话采样百分比，默认 `100`。例如，以下配置采集 90% 的会话：
 
 ```javascript
 flashcatRum.init({
@@ -326,12 +501,12 @@ flashcatRum.init({
 ```
 
 <Warning>
-未被普通采样抽中的会话默认不采集页面视图及其相关遥测数据；开启下方异常补采后，可在报错时补报。
+未被普通采样抽中的会话默认不上报；开启下方异常补采后，可在报错时补报。
 </Warning>
 
 ### 异常会话补采
 
-Web SDK **0.3.0 及以上**支持在普通采样之外，补采发生错误的会话及其回放。两个参数均为布尔值，默认 `false`，只作用于对应采样率**未抽中**的会话，不改变已抽中会话的采集行为。
+需要 Web SDK **0.3.0 及以上**。以下两个选项默认均为 `false`，只补采对应采样率未抽中的会话或回放。已抽中的会话保持正常采集。
 
 | 参数 | 作用范围 | 首次报错后的行为 |
 |------|----------|----------------|
@@ -351,10 +526,10 @@ flashcatRum.init({
 });
 ```
 
-- **先缓存，报错后再上报**：未抽中的会话从开始就采集到内存中，仅保留有限的历史；首次出现符合条件的错误时才补报。最多回溯一分钟，不保证完整保留一分钟，也无法恢复 SDK 初始化前或录制开始前的数据。
-- **不报错就不落库、不计费**：由 `sessionOnError` 保留的会话如果始终没有报错，事件和回放都不会上传，不产生会话费用。仅开启 `sessionReplayOnError` 时，无错误的候选回放不上传、不产生回放费用，但普通采样已抽中的 RUM 会话仍正常上报和计费。
-- **补采只计自身一次**：普通采样与异常补采不会重复计算同一会话；异常补采会话在统计中按实际会话计数，不按 `1 / sessionSampleRate` 放大推算全量，也不因多次报错重复计数。
-- **触发条件是 RUM 错误事件**：例如自动捕获的 JavaScript 错误或 `addError()` 上报的错误。被 `beforeSend` 丢弃或被限流的错误，以及 SDK 自身错误，不触发补采。失败请求或 HTTP 5xx 的资源事件本身不触发补采。
+- 未抽中的候选数据先缓存在内存中，首次符合条件的错误触发补报。最多回溯一分钟，不保证完整保留，也无法恢复 SDK 初始化或录制开始前的数据。
+- 只有 RUM 错误事件触发补采，例如 JavaScript 错误或 `addError()`。被 `beforeSend` 丢弃、被限流或 SDK 自身的错误不触发；失败请求和 HTTP 5xx 资源事件也不触发。
+- `sessionOnError` 候选会话始终未报错时，事件和回放不上传、不计费。仅开启 `sessionReplayOnError` 时，无错误的候选回放不上传、不计费；普通采样已抽中的 RUM 会话仍正常上报和计费。
+- 同一会话只计一次，不因重复报错重复计数。异常补采会话按实际数量统计，不按 `1 / sessionSampleRate` 放大。
 
 <Note>
 `sessionSampleRate: 100` 时，`sessionOnError` 没有额外作用；`sessionReplaySampleRate: 100` 时，`sessionReplayOnError` 没有额外作用。`sessionSampleRate: 0` 且未开启 `sessionOnError` 时，仅开启 `sessionReplayOnError` 也不会采集任何会话。若只想保留异常会话及回放，可将两个采样率都设为 `0`，同时开启两个补采开关。
@@ -362,17 +537,19 @@ flashcatRum.init({
 
 #### 已知限制
 
-- **单页应用的回放不跨视图补齐**：回放只能回溯到报错所在视图的起点，且最多一分钟；RUM 事件可以跨视图回溯最多一分钟。
-- **报错后立即离开可能丢失部分历史**：首次报错后几秒内关闭或跳转页面，较大的补报数据（约超过 64 KiB）可能因浏览器页面退出时的发送上限而丢失，启用压缩也不能保证完整送达。SDK 优先发送视图和错误，可能丢失较早的其他事件及最后一次视图更新。
-- **缓存回放仍有性能开销**：复杂且频繁变化的 DOM 可能使缓冲区溢出并反复生成完整快照，增加主线程负担，缩短可回溯的回放。此类页面建议只开启 `sessionOnError`。
-- **手动录制前没有回放历史**：若通过 `startSessionReplayRecording()` 控制录制时机，请显式设置 `startSessionReplayRecordingManually: true`。尤其在开启远程配置后，即使初始化的回放采样率为 `0`，录制器也可能自动启动；不要依赖采样率为 `0` 来等待用户同意。手动开始录制前的操作无法补采。
-- **撤回同意不撤销已触发的补报**：会话已报错后再撤回跟踪同意，仍会上传此前在同意期间收集、等待补报的数据。
+| 场景 | 行为或建议 |
+| --- | --- |
+| 单页应用 | 回放仅回溯到当前视图起点，最多一分钟；RUM 事件可跨视图回溯最多一分钟 |
+| 报错后立即关闭或跳转页面 | 较大的补报数据（约超过 64 KiB）可能因浏览器退出时的发送上限丢失，压缩不能保证送达。SDK 优先发送视图和错误，可能丢失较早的其他事件及最后一次视图更新 |
+| 复杂且频繁更新的页面 | 缓存回放会增加主线程开销，并可能缩短回溯范围。此类页面建议仅开启 `sessionOnError` |
+| 手动开始回放录制 | 显式设置 `startSessionReplayRecordingManually: true`。即使初始化回放采样率为 `0`，远程配置也可能使录制自动开始；不要用采样率代替用户同意。手动开始前的操作不能补采 |
+| 报错后撤回跟踪同意 | 已触发补报、在同意期间采集的候选数据仍会上传 |
 
 两个开关也可以通过[远程配置](/zh/rum/quickstart/app-management#远程配置)调整。
 
 ## 远程配置
 
-Web SDK 0.4.0 及以上，初始化时设置 `remoteConfigurationEnabled: true`（默认 `false`）后，SDK 会读取应用在控制台 **远程配置** 页签发布的会话采样率、会话回放采样率、Trace 采样率、回放脱敏级别、错误会话补充采集、错误会话补充回放和自定义配置项，覆盖 `init()` 中的对应值。发布后的配置对下一个新会话生效。各项含义与发布流程见[应用管理](/zh/rum/quickstart/app-management#远程配置)。
+需要 Web SDK **0.4.0 及以上**。设置 `remoteConfigurationEnabled: true`（默认 `false`），可使用控制台发布的采样、回放、隐私和自定义配置覆盖初始化值。新配置对下一个新会话生效，支持项与发布步骤见[应用管理](/zh/rum/quickstart/app-management#远程配置)。
 
 ```javascript
 flashcatRum.init({
@@ -383,7 +560,7 @@ flashcatRum.init({
 
 ## 用户跟踪同意
 
-为遵守 GDPR、CCPA 等隐私法规，RUM 允许在初始化时设置用户跟踪同意状态：
+需要先获得用户同意时，将 `trackingConsent` 初始化为 `"not-granted"`，同意后调用 `setTrackingConsent("granted")`：
 
 | 状态 | 行为 |
 |------|------|
@@ -410,7 +587,7 @@ acceptCookieBannerButton.addEventListener("click", function () {
 
 ## 视图上下文
 
-您可以通过以下 API 为当前视图及其子事件添加或修改上下文：
+以下 API 为当前视图及其子事件添加或修改上下文：
 
 <Tabs>
 <Tab title="启动视图时指定">
@@ -445,7 +622,7 @@ flashcatRum.setViewContext({
 
 ## 错误上下文
 
-在捕获错误时，您可以通过 `dd_context` 属性为错误对象附加本地上下文：
+捕获错误时，可通过 `dd_context` 属性为错误对象附加上下文：
 
 ```javascript
 const error = new Error("Something went wrong");
@@ -455,7 +632,7 @@ throw error;
 
 ## 全局上下文
 
-全局上下文会附加到所有 RUM 事件上：
+全局上下文会附加到所有事件：
 
 ```javascript
 // 添加属性
@@ -481,12 +658,7 @@ const context = flashcatRum.getGlobalContext();
 
 ### 上下文生命周期
 
-默认情况下，全局上下文和用户上下文存储在当前页面内存中：
-
-- 页面完全刷新后不会保留
-- 不同标签页或窗口间不共享
-
-启用 `storeContextsAcrossPages` 选项可以将上下文存储到 `localStorage`：
+全局上下文和用户信息默认不跨页面刷新保留，也不在标签页间共享。设置 `storeContextsAcrossPages: true` 可将其保存到 `localStorage`：
 
 ```javascript
 flashcatRum.init({
@@ -504,7 +676,7 @@ flashcatRum.init({
 
 ## 微前端支持
 
-RUM 支持微前端架构，通过堆栈跟踪机制识别事件来源。在 `beforeSend` 中根据堆栈信息覆盖 `service` 和 `version` 属性：
+在 `beforeSend` 中按事件的调用堆栈设置 `service` 和 `version`，区分微前端应用：
 
 ```javascript
 const SERVICE_REGEX = /some-pathname\/(?<service>\w+)\/(?<version>\w+)\//;
@@ -532,14 +704,12 @@ flashcatRum.init({
 
 ## 集成 RUM 与分布式追踪
 
-集成 RUM 与分布式追踪，可让您将 Web 应用程序的请求与其对应的后端跟踪关联起来，实现完整的前后端链路追踪。
+配置 `allowedTracingUrls` 后，SDK 会为匹配的请求注入追踪头，把浏览器请求与后端 Trace 关联起来。
 
 ### 使用方法
 
-使用 `allowedTracingUrls` 参数配置当前应用的 API 服务域名：
+把当前应用的 API 域名填入 `allowedTracingUrls`：
 
-<Tabs>
-<Tab title="NPM">
 ```javascript
 import { flashcatRum } from "@flashcatcloud/browser-rum";
 
@@ -558,57 +728,8 @@ flashcatRum.init({
   traceSampleRate: 20
 });
 ```
-</Tab>
 
-<Tab title="CDN 同步">
-```html
-<script
-  src="https://static.flashcat.cloud/browser-sdk/v0.4.0/flashcat-rum.js"
-  type="text/javascript">
-</script>
-<script>
-  window.FC_RUM && window.FC_RUM.init({
-    applicationId: "<YOUR_APPLICATION_ID>",
-    clientToken: "<YOUR_CLIENT_TOKEN>",
-    service: "<SERVICE_NAME>",
-    env: "<ENV_NAME>",
-    version: "1.0.0",
-    sessionSampleRate: 100,
-    allowedTracingUrls: [
-      "https://api.example.com",
-      /https:\/\/.*\.my-api-domain\.com/
-    ]
-  });
-</script>
-```
-</Tab>
-
-<Tab title="CDN 异步">
-```html
-<script>
-  (function(h,o,u,n,d) {
-    h=h[d]=h[d]||{q:[],onReady:function(c){h.q.push(c)}}
-    d=o.createElement(u);d.async=1;d.src=n
-    n=o.getElementsByTagName(u)[0];n.parentNode.insertBefore(d,n)
-  })(window,document,'script','https://static.flashcat.cloud/browser-sdk/v0.4.0/flashcat-rum.js','FC_RUM')
-  window.FC_RUM.onReady(function() {
-    window.FC_RUM.init({
-      applicationId: "<YOUR_APPLICATION_ID>",
-      clientToken: "<YOUR_CLIENT_TOKEN>",
-      service: "<SERVICE_NAME>",
-      env: "<ENV_NAME>",
-      version: "1.0.0",
-      sessionSampleRate: 100,
-      allowedTracingUrls: [
-        "https://api.example.com",
-        /https:\/\/.*\.my-api-domain\.com/
-      ]
-    })
-  })
-</script>
-```
-</Tab>
-</Tabs>
+CDN 接入使用相同的初始化参数，加载方式见 [SDK 接入指南](/zh/rum/sdk/web/sdk-integration)。
 
 `allowedTracingUrls` 匹配完整 URL，接受以下类型：
 
@@ -624,23 +745,17 @@ SDK 在匹配的请求上添加 `traceparent` 和 `tracestate` 请求头，字�
 
 ### 如何验证
 
-添加配置后，查看从应用中发送的请求，如能正确携带对应的 header 则说明配置无误。
+在浏览器 Network 面板检查匹配请求是否携带 `traceparent` 和 `tracestate` 追踪头。
 
 <Frame>
 <img src="https://docs-cdn.flashcat.cloud/images/png/534953.png" alt="分布式追踪验证" />
 </Frame>
 
 <Warning>
-如您的 HTTP 请求涉及到跨域问题，需要确保请求可通过跨域检测。请确保对应的 server [有跨域相关配置](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Access-Control-Allow-Headers)，支持[预检请求](https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request)访问。
+跨域请求需确保服务端[允许跨域](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Access-Control-Allow-Headers)，并能处理[预检请求](https://developer.mozilla.org/en-US/docs/Glossary/Preflight_request)。
 </Warning>
 
-## 注意事项
-
-<Warning>
-- 确保正确配置 `applicationId` 和 `clientToken`，以避免数据上传失败
-- 根据应用需求调整采样率和隐私设置，平衡数据量与合规性
-- 对于微前端或复杂前端框架，建议在框架路由级别实现 `startView` 逻辑
-</Warning>
+<span id="注意事项"></span>
 
 ## 相关文档
 
@@ -656,6 +771,4 @@ SDK 在匹配的请求上添加 `traceparent` 和 `tracestate` 请求头，字�
 </Card>
 </CardGroup>
 
-<Tip>
-有关 RUM SDK 的更多详细信息，请访问 [Flashduty SDK GitHub 仓库](https://github.com/flashcatcloud/browser-sdk)。
-</Tip>
+SDK 源码与版本见 [Flashduty SDK GitHub 仓库](https://github.com/flashcatcloud/browser-sdk)。

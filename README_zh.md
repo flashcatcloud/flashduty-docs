@@ -76,6 +76,7 @@ description: "简洁说明页面目的"
 - 使用主动语态、现在时
 - 英文标题使用 sentence case（仅首字母大写）
 - 善用 Mintlify 组件：`<Steps>`、`<Tabs>`、`<Note>`、`<Tip>`、`<Warning>`、`<Frame>`、`<CodeGroup>`
+- 图片统一上传到 OSS 并引用 CDN 地址，不要把图片文件提交进仓库。详见 [AGENTS.md](AGENTS.md) 的 **Images** 一节
 
 完整的写作、页面设计与合并前检查规范见 [AGENTS.md](AGENTS.md)。
 

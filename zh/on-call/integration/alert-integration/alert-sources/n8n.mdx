@@ -1,0 +1,128 @@
+---
+title: "n8n 告警集成"
+sidebarTitle: "n8n"
+description: "导入错误工作流模板，将 n8n 自动执行失败推送到 Flashduty。"
+---
+
+导入错误工作流模板，将 n8n 工作流的自动执行失败推送到 Flashduty。多个业务工作流可共用同一个错误工作流。
+
+此集成将执行失败作为一次性告警发送，不自动恢复。处理完成后，您需要在 Flashduty 中手动关闭故障。需要配置 n8n 工作流和凭据的权限。
+
+<div className="hide">
+
+## 在 Flashduty On-call
+
+您可通过以下两种方式获取集成推送地址，任选其一即可。
+
+### 使用专属集成
+
+1. 进入 Flashduty 控制台，选择 **协作空间**，打开一个协作空间
+2. 选择 **配置** → **集成数据** → **专属集成**，点击 **新增集成**
+3. 选择 **n8n**，点击 **保存**
+4. 打开生成的集成卡片，复制 **推送地址**
+
+### 使用共享集成
+
+1. 进入 Flashduty 控制台，选择 **集成中心 → 告警事件**
+2. 选择 **n8n**，填写集成名称
+3. 配置默认路由并选择协作空间；创建后可在 **路由** 中增加更多规则
+4. 点击 **保存**，复制生成的 **推送地址**
+
+</div>
+
+## 在 n8n 中配置
+
+<Steps>
+<Step title="下载并导入模板">
+
+下载 [Flashduty 错误工作流模板](https://flashduty-public.oss-cn-beijing.aliyuncs.com/flashduty-error-workflow.json)。在 n8n 工作流编辑器的菜单中选择 **Import from File**，导入文件。
+
+模板包含 Error Trigger、配置、事件转换、HTTP Request 和响应检查节点，无需安装社区节点。
+
+![导入后的 n8n 错误工作流](https://docs-cdn.flashcat.cloud/images/png/n8n-error-workflow-20261118.png)
+
+</Step>
+<Step title="设置实例和严重程度">
+
+打开 **Flashduty settings** 节点，设置：
+
+| 字段          | 配置                                                                                              |
+| ------------- | ------------------------------------------------------------------------------------------------- |
+| `instance_id` | 为这套 n8n 实例填写唯一标识，例如 `automation-production`。同一集成接收多个实例时，各实例不可重名 |
+| `severity`    | 默认 `Warning`，也可填写 `Critical` 或 `Info`，区分大小写                                         |
+
+实例标识不超过 64 个字符。请将模板中的 `YOUR_INSTANCE_ID` 替换为实际值。
+
+![设置 n8n 实例标识和严重程度](https://docs-cdn.flashcat.cloud/images/png/n8n-error-settings-20261118.png)
+
+</Step>
+<Step title="配置推送地址和凭据">
+
+打开 **Send to Flashduty** 节点，将 **URL** 设置为您的推送地址，移除其中的 `integration_key` 参数，保留其他参数。
+
+保留 **Authentication → Generic Credential Type → Query Auth**，创建凭据：
+
+| 凭据字段  | 配置                                  |
+| --------- | ------------------------------------- |
+| **Name**  | `integration_key`                     |
+| **Value** | 推送地址中 `integration_key` 参数的值 |
+
+将凭据命名为 `Flashduty integration key`，保存并选中它。集成密钥保存在 n8n 凭据中，无需写入模板。
+
+</Step>
+<Step title="关联业务工作流">
+
+保存错误工作流，并在提供 **Publish** 的版本中发布它。
+
+打开需要监控的业务工作流，进入 **Settings → Error workflow**，选择 **Flashduty - n8n failure alerts**，保存并发布业务工作流。
+
+对每个需要监控的业务工作流执行此操作。启用失败执行记录的保存，确保失败事件包含执行 ID。
+
+</Step>
+</Steps>
+
+## 验证接入
+
+1. 创建测试业务工作流，使用 Webhook 或 Schedule Trigger 自动启动，再连接 Stop And Error 节点。
+2. 将测试工作流的 **Error workflow** 设置为刚导入的错误工作流，保存并发布。
+3. 通过 Webhook 请求或等待计划触发一次失败。
+4. 确认错误工作流执行成功，**Check response** 节点返回 `request_id` 和 `alert_key`。
+5. 在 Flashduty 的目标协作空间确认产生告警，核对工作流 ID、执行 ID 和错误摘要。
+
+<Note>
+  手动执行业务工作流不会触发 Error
+  Trigger。请使用自动触发方式验证。验证结束后，停用或删除测试工作流，并手动关闭测试故障。
+</Note>
+
+## 告警映射
+
+| 内容                          | 映射规则                                                                      |
+| ----------------------------- | ----------------------------------------------------------------------------- |
+| 标题                          | `n8n workflow failed:` 加工作流名称                                           |
+| 严重程度                      | 使用 `severity` 配置，默认 `Warning`                                          |
+| 普通执行失败标识（Alert Key） | 实例标识、业务工作流 ID 和失败执行 ID 的组合                                  |
+| 触发器失败标识                | 无业务执行 ID 时，使用实例标识、业务工作流 ID 和错误工作流执行 ID 的组合      |
+| 详情                          | 工作流、执行 ID、失败节点、错误摘要，以及去除查询参数和片段后的执行链接       |
+| 标签                          | `integration`、`instance_id`、`workflow_id`、`failure_type` 和 `execution_id` |
+
+不同失败执行使用不同的告警标识。HTTP Request 重试发送同一事件时，告警标识保持不变。重试业务工作流产生的新失败执行是另一条告警。Flashduty 仍可按协作空间的告警聚合规则，将这些告警合入同一个故障。
+
+触发器失败没有业务执行 ID 时，`execution_id` 标签记录的是错误工作流的执行 ID。缺少工作流或执行标识时，模板报错并停止发送。
+
+模板不发送完整执行输入、输出、错误堆栈或错误上下文。错误摘要仍可能包含业务信息，请按需调整 **Prepare alert** 节点。模板只接受 `Critical`、`Warning` 和 `Info`，不会发送 `Ok` 恢复事件。
+
+## 常见问题
+
+### 业务工作流失败了，为什么没有告警
+
+确认业务工作流已发布、已配置 **Error workflow**，并且本次失败由自动执行产生。进入 n8n 的执行记录，检查错误工作流是否运行，以及 **Send to Flashduty** 和 **Check response** 的结果。
+
+### 推送节点失败后如何排查
+
+确认推送 URL、Query Auth 凭据和网络连接。模板设置 10 秒请求超时，失败请求最多尝试 3 次。Flashduty 响应中的 `error` 会使 **Check response** 报错；修正配置后，可重新执行错误工作流。没有业务执行 ID 的触发器失败重新执行时，会产生新的告警标识。
+
+### n8n 停机或任务没有按时启动，能否告警
+
+此模板依赖 n8n 执行错误工作流。实例不可用或计划任务未启动时，请使用外部健康检查或心跳检测。
+
+相关文档：[n8n Error Trigger](https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.errortrigger/) 和[标准告警事件](/zh/on-call/integration/alert-integration/alert-sources/standard-alert)。
