@@ -29,6 +29,8 @@ consolidated) and fails on:
   bad-ref              every $ref must point inside the same file
                        (`#/components/...`) at an entry that exists; Mintlify
                        rejects the whole spec on one bare or dangling $ref
+  undeclared-tag       operation tags must be declared in the spec's tags list;
+                       a typo creates an unexpected automatic navigation group
 
 Usage:
   python3 scripts/lint_openapi.py            # lint all spec files, exit 1 on violations
@@ -213,6 +215,7 @@ def check_example(spec, schema, ex, file, where, rep, path="$", response=False, 
 
 
 def lint_operations(spec, file, rep):
+    declared_tags = {tag["name"] for tag in spec.get("tags", [])}
     for path, pi in spec.get("paths", {}).items():
         if not isinstance(pi, dict):
             continue
@@ -220,6 +223,9 @@ def lint_operations(spec, file, rep):
             if not isinstance(op, dict):
                 continue
             where = f"{method.upper()} {path}"
+            for tag in op.get("tags", []):
+                if tag not in declared_tags:
+                    rep.add(file, "undeclared-tag", where, f"tag {tag!r} is not declared in tags")
             body = op.get("requestBody", {}).get("content", {}).get("application/json", {})
             if body and "example" not in body and "examples" not in body:
                 rep.add(file, "missing-example", where, "request body has no example")
