@@ -76,11 +76,12 @@ HarmonyOS SDK 在其他平台需要额外关闭的几项上天然没有开销，
 
 | 能力 | 其他平台 | HarmonyOS SDK |
 |------|----------|---------------|
-| Vitals 采集 | Android / iOS 默认每 500 毫秒采集 | 不采集 |
 | 长任务追踪 | Android / iOS 默认开启 | 不产生 `long_task` 事件 |
 | SDK 内部遥测 | Android / iOS 默认 20% 采样 | 无内部遥测上报 |
 | 用户交互追踪 | Android / iOS 默认开启，需显式关闭 | `setTrackUserInteractions` 默认即为 `false` |
 | 上报压缩 | Web 需显式开启 | body 超过 512 字符时自动压缩，不可配 |
+
+页面性能指标与 Android、iOS 一样默认每 500 毫秒采样一次，可用 [`setVitalsUpdateFrequency()`](#rum-config) 调低频率或关闭。
 
 如果事件量本身偏大，可以用 [事件过滤](#事件过滤和脱敏) 的 `setEventMapper` 丢弃指定的噪音事件（返回 `null` 即丢弃），侵入性小于改业务打点代码。
 
@@ -99,6 +100,10 @@ HarmonyOS SDK 在其他平台需要额外关闭的几项上天然没有开销，
 <Info>
 如果初始化时使用 `TrackingConsent.PENDING`，SDK 会将事件写入单独的本地缓冲区，但在同意状态更改为 `GRANTED` 之前不会发送；变更为 `GRANTED` 后缓冲数据自动迁移并上传，变更为 `NOT_GRANTED` 则清空缓冲。
 </Info>
+
+<Tip>
+需要先征得用户同意的应用，建议在 `AbilityStage.onCreate` 中以 `TrackingConsent.PENDING` 初始化 SDK，用户同意后调用 `Flashcat.setTrackingConsent(TrackingConsent.GRANTED)`。这样首次启动的[应用启动耗时](/zh/rum/sdk/harmony/data-collection#app-launch)也能记录；用户拒绝时调用 `setTrackingConsent(TrackingConsent.NOT_GRANTED)`，缓冲的数据会被清空。等用户同意后才初始化 SDK 时，那次启动不上报启动耗时。
+</Tip>
 
 ### 应用是同意状态的唯一权威
 
@@ -134,6 +139,7 @@ Flashcat.setTrackingConsent(TrackingConsent.GRANTED);
 Trace header 也受同意状态控制。只有状态为 `GRANTED` 时，SDK 才会向请求注入可关联的 `traceparent` 和 `tracestate`。
 </Warning>
 
+<span id="rum-config"></span>
 ## RUM 配置
 
 RUM 配置通过 `RumConfigurationBuilder` 创建，并传给 `FlashcatRum.enable()`。
@@ -159,10 +165,11 @@ FlashcatRum.enable(
 | `new RumConfigurationBuilder(applicationId)` | string | 必填 | RUM 应用 ID，写入 `application.id` |
 | `setSessionSampleRate(rate)` | number | `100` | 会话采样率，取值范围按百分比理解；`100` 表示全部采集，`0` 表示不采集事件 |
 | `setTrackUserInteractions(enabled)` | boolean | `false` | 控制 `FlashcatRum.trackTap()` 是否记录 tap action |
-| `setTrackNavigation(enabled)` | boolean | `false` | 控制 `FlashcatRum.startViewTracking()` 是否注册 ArkUI `routerPageUpdate` 监听 |
+| `setTrackNavigation(enabled)` | boolean | `false` | 控制 SDK 是否注册 ArkUI `routerPageUpdate` 监听，把 `router` 页面记录为视图 |
 | `setTrackNetworkRequests(enabled)` | boolean | `false` | 控制 Trace 发布的网络生命周期是否转换为 RUM resource |
 | `setTrackErrors(enabled)` | boolean | `true` | 控制是否**自动**采集未捕获错误和未处理的 Promise rejection |
 | `setEventMapper(mapper)` | function | `null` | 在事件写入磁盘前修改或丢弃 view、action、error、resource 事件 |
+| `setVitalsUpdateFrequency(frequency)` | `VitalsUpdateFrequency` | `VitalsUpdateFrequency.AVERAGE` | [页面性能指标](/zh/rum/sdk/harmony/data-collection#view-vitals)的内存和 CPU 采样周期：`FREQUENT` 100 毫秒 / `AVERAGE` 500 毫秒 / `RARE` 1 秒。`NEVER` 关闭内存、CPU 和帧的全部采集，不影响应用启动耗时。需要 SDK 0.8.0 及以上 |
 
 <Note>
 `setTrackErrors(false)` 只关闭**自动**错误采集。崩溃不受影响：启用 Crash 模块后，未捕获异常仍按 `JsCrashPolicy` 计入崩溃并以 `is_crash` error 上报到崩溃发生的那个会话（`REPORT_AND_CONTINUE` 当场上报，退出类策略在下次启动时回放）；手动调用的 `addError` 属于应用的显式意图，同样照常上报。如需连这两类一起过滤，请使用 `setEventMapper()`。
@@ -358,6 +365,7 @@ FlashcatTrace.enable(
 当前 `setFirstPartyHosts()` 只由 `FlashcatHttp` 包装器使用。`rcp` 拦截器本身就是每个 session 的显式接入点，因此添加拦截器的 session 会对其请求注入 Trace header。请求已带有 `traceparent` 时，SDK 不会覆盖已有 Trace 上下文；已有 `tracestate` 会保留其他 vendor，并把更新后的 `dd=` 成员放在最前。
 </Note>
 
+<span id="crash-config"></span>
 ## 崩溃采集配置
 
 Crash 模块提供两条采集路径：
@@ -393,6 +401,7 @@ FlashcatCrash.enable(
 | `setCrashLoopThreshold(threshold)` | number | `3` | 滚动窗口内第 N 次崩溃禁止再次重启，最多允许 N-1 次恢复重启；小于 `1` 的值按 `1` 处理 |
 | `setCrashLoopWindowMs(windowMs)` | number | `60000` | 统计可恢复崩溃的滚动窗口，单位为毫秒；小于 `1` 的值按 `1` 处理 |
 | `setCrashLoopCooldownMs(cooldownMs)` | number | `300000` | 已触发保护后，重置持久化记录所需的无崩溃时长，单位为毫秒；小于 `1` 的值按 `1` 处理 |
+| `setTrackMainThreadJank(enabled)` | boolean | `true` | 把系统上报的[主线程卡顿](/zh/rum/sdk/harmony/data-collection#main-thread-jank)作为非崩溃 error 上报。API 15 及以上的设备上，SDK 会设置进程级的卡顿采样配置（只采调用栈，每个进程最多 3 次），可能覆盖应用自己的设置。需要 SDK 0.8.0 及以上 |
 
 <Warning>
 默认策略 `REPORT_THEN_EXIT` 会在未捕获 ArkTS 异常后退出进程。如需让应用继续运行，请显式设置 `JsCrashPolicy.REPORT_AND_CONTINUE`（崩溃仍计入崩溃率）或 `JsCrashPolicy.OBSERVE_ONLY`（不计入崩溃），并确认保留受损进程符合您的业务预期。
@@ -455,7 +464,8 @@ export default class EntryAbility extends UIAbility {
 | 未处理的 Promise rejection | 作为普通非崩溃 RUM error 上报，`error.source_type: promise`；进程不会退出，也不应用崩溃策略 |
 | TaskPool 或 Worker 抛出异常 | 不会到达 error observer，不会导致宿主进程退出，不属于崩溃策略覆盖范围 |
 | Native C/C++ 信号崩溃 | JS 崩溃策略无法阻止或重启；仅在后续启动时通过 `hiAppEvent.APP_CRASH` 采集 |
-| `APP_FREEZE` | 仅通过 `hiAppEvent.APP_FREEZE` 在后续启动时采集 |
+| `APP_FREEZE` | 仅通过 `hiAppEvent.APP_FREEZE` 在后续启动时采集；应用在后台时系统不产生该事件 |
+| 主线程卡顿 | 进程存活时通过 `hiAppEvent.MAIN_THREAD_JANK` 实时采集，作为非崩溃 error 上报 |
 
 <Warning>
 请在 `Flashcat.initialize()` 后尽早启用 RUM 和 Crash。JS 崩溃策略的传递不依赖启用顺序：Crash 会把策略推送给 RUM，RUM 启动时也会主动读取策略，因此先启用任一模块都能激活策略。仍建议先调用 `FlashcatRum.enable()`，再调用 `FlashcatCrash.enable()`，以便立即回放上一次启动留下的待处理崩溃记录。Crash 事件需要通过 RUM 管道发布。

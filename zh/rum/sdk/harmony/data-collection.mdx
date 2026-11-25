@@ -4,7 +4,7 @@ description: "了解 HarmonyOS RUM SDK 自动和手动采集的事件类型、�
 keywords: ["RUM", "HarmonyOS SDK", "数据收集", "事件字段", "Crash"]
 ---
 
-HarmonyOS SDK 将 RUM 数据组装为 NDJSON 批次并上报到 Flashduty。当前版本采集 view、action、resource 和 error 四类 RUM 事件；崩溃和卡死会作为带 `is_crash` 标记的 error 事件进入同一条管道。
+HarmonyOS SDK 将 RUM 数据组装为 NDJSON 批次并上报到 Flashduty。SDK 采集 view、action、resource、error 和 vital（应用启动耗时）五类 RUM 事件；崩溃和卡死会作为带 `is_crash` 标记的 error 事件进入同一条管道。
 
 ## 默认上下文
 
@@ -17,7 +17,7 @@ SDK 初始化后，会为每条事件附加通用上下文。
 | `version` | HarmonyOS bundle 信息 | 应用版本号 |
 | `application.id` | `RumConfigurationBuilder(applicationId)` | RUM 应用 ID |
 | `session.id` | SDK 生成 | 用户会话 ID |
-| `os.name` / `os.version` | `@kit.BasicServicesKit.deviceInfo` | 操作系统名称和版本 |
+| `os.name` / `os.version` / `os.version_major` | `@kit.BasicServicesKit.deviceInfo` | 操作系统名称、完整版本（如 `OpenHarmony-6.1.1.125`）和主版本号（如 `6`） |
 | `device.brand` / `device.model` / `device.type` | `deviceInfo` | 设备品牌、型号和类型 |
 | `connectivity.status` | SDK 网络上下文 | `connected` / `not_connected` / `maybe`（`maybe` 对应 schema 的 unknown，权限缺失或接口不可用时使用） |
 | `connectivity.interfaces` | SDK 网络上下文 | 当前网络接口，取值 `wifi` / `cellular` / `ethernet` / `other`，未知时为空数组 |
@@ -57,6 +57,8 @@ monitor.startView('product-detail', 'ProductDetail', {
 monitor.stopView('product-detail');
 ```
 
+会话还没有 view 时发生的 action、resource 或 error 会记入名为 `ApplicationLaunch` 的 view，例如在用户同意隐私弹窗后才启用 RUM、首个页面已经显示的情况。应用的第一个 view 开始后会替换它。两个 view 之间，或系统报告为后台启动时，不会开启该 view，这些事件会被丢弃。需要 SDK 0.8.1 及以上。
+
 View 事件包含：
 
 | 字段 | 说明 |
@@ -69,8 +71,66 @@ View 事件包含：
 | `view.action.count` | 当前 view 下 action 数量 |
 | `view.error.count` | 当前 view 下 error 数量 |
 | `view.resource.count` | 当前 view 下 resource 数量 |
-| `view.crash.count` | 当前 view 下 `is_crash` error 数量，用于计算 crash-free rate |
+| `view.loading_time` | 页面加载耗时，单位为纳秒，需要 SDK 0.8.0 及以上。`router` 页面自动测量从页面显示到下一帧的时间，超过 90 秒不记录；也可以调用 `addViewLoadingTime(overwrite)` 把当前时刻记为加载完成，`overwrite` 为 `false` 时保留已有值 |
+| `view.crash.count` | 当前 view 下的崩溃数量，用于计算 crash-free rate。卡死（`error.category: ANR`）不计入，只计入 `view.error.count` |
 | `_dd.document_version` | 同一 view 的更新版本号 |
+
+<span id="view-vitals"></span>
+## 页面性能指标
+
+需要 SDK 0.8.0 及以上；CPU 使用率字段需要 0.8.1 及以上。
+
+应用在前台、view 打开期间，SDK 按 `setVitalsUpdateFrequency()` 设置的周期（默认 500 毫秒）采样内存和 CPU，并统计该窗口绘制的帧，结果写入 view 事件。没有样本的字段不会上报，不会以 `0` 代替。字段名和单位与 Android SDK 一致，CPU 使用率字段与 iOS SDK 一致。
+
+| 字段 | 说明 |
+|------|------|
+| `view.memory_average` / `view.memory_max` | 进程实际占用内存（RSS）的平均值和最大值，单位为字节 |
+| `view.cpu_ticks_count` / `view.cpu_ticks_per_second` | 进程用户态 CPU 时钟数及每秒时钟数，与 Android SDK 含义一致。短于约 2 秒的 view 可能没有这两个字段 |
+| `view.cpu_usage_average` / `view.cpu_usage_max` | 进程 CPU 使用率（用户态和内核态，全部线程），按进程可用的全部核计算的百分比 |
+| `view.main_thread_cpu_usage_average` / `view.main_thread_cpu_usage_max` | 主线程 CPU 使用率，按单核计算的百分比 |
+| `view.refresh_rate_average` / `view.refresh_rate_min` | 平均和最低帧率，高刷新率屏幕按 60 归一化，最大为 60 |
+| `view.is_slow_rendered` | 平均帧率低于 55 时为 `true` |
+| `view.slow_frame.count` | 慢帧数：耗时超过一个刷新周期（API 12–21 为 60 Hz 刷新周期的 1.5 倍）、且不超过 700 毫秒的帧 |
+| `view.frozen_frame.count` | 冻结帧数：超过 700 毫秒的帧 |
+| `view.slow_frames_rate` | 慢帧耗时占比，单位为毫秒/秒。view 时长不超过 1 秒时为 `0` |
+| `view.freeze_rate` | 5 秒及以上的帧的累计耗时，单位为秒/小时。view 时长不超过 1 秒时为 `0` |
+
+CPU 使用率只统计前台时间，view 中途进入后台的时段不计入。view 累计 0.9 秒前台时间后才上报 CPU 使用率；峰值按至少 0.25 秒的区间计算（主线程约 1 秒），且不低于平均值。
+
+SDK 0.8.2 起，SDK 在每个窗口创建时自动统计它绘制的帧；在应用窗口出现后才初始化 SDK 时，SDK 在初始化时找到当前窗口开始统计（需要 API 14 及以上）。SDK 0.8.0、0.8.1 需要在首个页面调用 `FlashcatRum.startViewTracking()`。API 22 及以上的设备统计窗口的每次重绘；API 12–21 的设备只统计列表等可滚动组件滚动期间的帧。应用用 `displaySync` 或 `postFrameCallback` 驱动自绘动画时，系统会上报没有实际重绘的帧，帧率会偏高。
+
+`setVitalsUpdateFrequency(VitalsUpdateFrequency.NEVER)` 会关闭内存、CPU 和帧的全部采集，配置方法见[高级配置](/zh/rum/sdk/harmony/advanced-config#rum-config)。
+
+<span id="app-launch"></span>
+## 应用启动
+
+需要 SDK 0.8.0 及以上。SDK 为每次冷启动和热启动上报一条 `vital.type: "app_launch"` 的 vital 事件。
+
+| 字段 | 说明 |
+|------|------|
+| `vital.name` | `time_to_initial_display`（首帧耗时）或 `time_to_full_display`（完全显示耗时） |
+| `vital.app_launch_metric` | `ttid` 或 `ttfd`，与 `vital.name` 对应 |
+| `vital.startup_type` | `cold_start`（冷启动）或 `hot_start`（热启动） |
+| `vital.duration` | 耗时，单位为纳秒 |
+
+| 启动类型 | 计时范围 |
+|----------|----------|
+| 冷启动 | 从进程启动到第一帧绘制 |
+| 热启动 | 从应用回到前台到下一帧绘制 |
+
+首帧耗时超过 60 秒的启动不上报。启动计时要求在 `AbilityStage.onCreate` 中初始化 SDK 并启用 RUM；SDK 0.8.0、0.8.1 还需要在首个页面的 `aboutToAppear` 中调用 `FlashcatRum.startViewTracking(this.getUIContext())`。在用户同意隐私政策后才初始化 SDK 时，那次启动不上报，可改为先以 `TrackingConsent.PENDING` 初始化，见[用户跟踪同意](/zh/rum/sdk/harmony/advanced-config#用户跟踪同意)。SDK 没有观察到第一帧的启动不会上报，例如应用在第一帧之前回到后台。`VitalsUpdateFrequency.NEVER` 不影响启动计时。
+
+应用加载完首屏内容（包括数据）后，调用 `reportAppFullyDisplayed()` 上报完全显示耗时：
+
+```ts
+import { GlobalRumMonitor } from '@flashcatcloud/rum';
+
+GlobalRumMonitor.get().reportAppFullyDisplayed();
+```
+
+完全显示耗时从应用启动开始计算，超过 90 秒不上报，每个会话只上报一次。在第一帧之前调用时，SDK 在第一帧绘制后上报，值等于首帧耗时。
+
+温启动（系统在保留的进程中重新创建页面）不上报启动耗时。
 
 ## Action 事件
 
@@ -139,7 +199,12 @@ Resource 事件包含：
 | `resource.status_code` | HTTP 状态码 |
 | `resource.size` | 响应体大小，单位为字节 |
 | `resource.duration` | 请求耗时，单位为纳秒 |
+| `resource.provider` | 请求一方域名（Trace 配置的 `setFirstPartyHosts()`）时写入 `{ type: "first party", domain: <host> }`。这类请求失败时，`error.resource` 中同样写入该字段 |
+| `resource.dns` / `resource.connect` / `resource.ssl` / `resource.first_byte` / `resource.download` | 请求各阶段的 `{ start, duration }`，单位为纳秒，`start` 从请求开始计算。复用连接的请求没有 `dns` 和 `connect`，http 请求没有 `ssl` |
+| `resource.redirect` | 发生重定向的请求只上报该阶段，不上报其他阶段 |
 | `_dd.trace_id` / `_dd.span_id` | 当请求注入了 `traceparent` 时写入，用于关联后端 Trace |
+
+请求阶段需要 SDK 0.8.0 及以上，只在网络库提供计时时上报：通过 `FlashcatHttp` 发起的请求，以及 rcp session 设置了 `requestConfiguration.tracing.collectTimeInfo` 时经过拦截器的请求。通过 axios、`startTracedResource()` 或手动 API 上报的请求，以及跨越后台时段、没有耗时的请求，不带请求阶段。
 
 自动网络采集的资源类型映射：
 
@@ -193,10 +258,15 @@ Error 事件包含：
 | `error.stack` | 错误栈，存在时上报。只包含栈帧：errorManager 回调文本里的 `Error name:` / `Error message:` / `Stacktrace:` 标签行和 sourcemap 提示行会被剥离，它们属于回调格式而非栈内容 |
 | `error.handling` | `handled` 或 `unhandled` |
 | `error.is_crash` | 崩溃和卡死事件为 `true` |
-| `error.category` | Crash 模块写入 `Exception` 或 `App Hang` |
+| `error.type` | 错误类型。未捕获异常为异常名（如 `TypeError`）；Native 崩溃为信号（如 `SIGSEGV`）；卡死为故障名（如 `THREAD_BLOCK_6S`）；主线程卡顿为 `MAIN_THREAD_JANK`。`addError()` 上报的错误和网络错误不带类型，可在属性中传 `error.type` 指定 |
+| `error.category` | 崩溃为 `Exception`，卡死为 `ANR`，主线程卡顿为 `Jank` |
+| `view.in_foreground` | 崩溃和卡死时应用是否在前台。状态未知时（如启动早期系统尚未通知，或旧版本 SDK 记录的崩溃）不上报。需要 SDK 0.8.1 及以上 |
+| `session.sampled` | 崩溃和卡死所在会话是否由采样率抽中：抽中或强制采集为 `true`，仅因报错被[异常补采](/zh/rum/sdk/harmony/advanced-config#远程配置)保留为 `false`。旧版本 SDK 记录的崩溃不上报。需要 SDK 0.8.1 及以上 |
 | `error.source_type` | Crash 模块写入 `harmony`；未处理的 Promise rejection 写入 `promise` |
 | `crash.recovered` | 通过 `REPORT_AND_RECOVER` 软着陆并在后续启动回放的崩溃中存在且为 `true` |
-| `crash.crashed_at_ms` | 仅在崩溃无法归因回原会话、只能记入当前会话时写入，保留真实故障发生时间（毫秒） |
+| `crash.crashed_at_ms` | 崩溃记入单独会话时写入，值为真实故障发生时间（毫秒） |
+| `crash.fault_address` | Native 崩溃由内核故障触发时的出错地址（空指针为 `0x0`），写在 error 的 `context` 中。进程主动发出的信号（如 `abort()`）没有该字段 |
+| `freeze.reason` | 卡死时系统给出的原始描述，写在 error 的 `context` 中 |
 | `error.binary_images` | Native 崩溃关联的动态库符号信息 |
 | `error.threads` | Native 崩溃和卡死时的全部线程，每个线程包含名称、状态和调用栈。故障线程（Native 崩溃的出错线程、卡死的主线程）标记 `crashed: true` 并排在第一位；线程总量有大小上限，超出时保留故障线程。ArkTS 崩溃没有线程快照，不上报该字段 |
 | `crash.memory.rss_kb`、`crash.memory.sys_free_kb`、`crash.memory.sys_avail_kb`、`crash.memory.sys_total_kb` | 故障发生时的进程实际占用内存，以及设备的空闲、可用、总内存，单位 KB。来自系统故障事件，Native 崩溃和卡死在 API 22 及以上的设备上报，写在 error 的 `context` 中。ArkTS 崩溃由 SDK 在进程内采集，不带该字段 |
@@ -214,20 +284,34 @@ Crash 模块通过实时和事后两条路径采集故障：
 
 未处理的 Promise rejection 会单独采集为 `error.source_type: promise` 的普通非崩溃 RUM error。它不会使进程退出，也不会进入崩溃策略路径。
 
+卡死（`error.category: ANR`）的 `is_crash` 为 `true`，计入 view 的 error 数，但不计入 crash 数：崩溃率不含卡死，卡死单独计入 ANR 率。需要 SDK 0.8.1 及以上。HarmonyOS 会冻结后台进程，系统不会为后台的应用产生卡死事件，因此后台没有卡死上报。
+
+<span id="main-thread-jank"></span>
+### 主线程卡顿
+
+主线程单个任务耗时过长、但进程没有被终止时，Crash 模块把系统上报的主线程卡顿记为当前会话中的一条 error：`error.category: Jank`、`error.type: MAIN_THREAD_JANK`、`is_crash: false`，附带系统采样的调用栈，卡顿时长写在 `context.jank.duration_ms`（毫秒）。卡顿计入 view 的 error 数，不计入 crash 数。
+
+需要 SDK 0.8.0 及以上，默认开启，可用 `setTrackMainThreadJank(false)` 关闭，见[高级配置](/zh/rum/sdk/harmony/advanced-config#crash-config)。API 15 及以上的设备每个进程最多上报 3 次卡顿。
+
 ### 崩溃归因
 
-崩溃和卡死会归因到**故障真正发生的那个会话和视图**，而不是回放它的那次启动。两类故障的归因依据不同：
+崩溃和卡死会归因到**故障真正发生的那个会话和视图**，而不是回放它的那次启动：
 
 - SDK 能在进程内观察到的故障（主线程上未捕获的 ArkTS 异常）在退出前会把当时的 RUM 会话和视图一并写入待处理记录，下次启动按该记录回放
-- SDK 无法在进程内观察到的故障（Native 信号崩溃、卡死）会直接杀死进程，来不及记录任何数据。SDK 会把每次写出的 view 事件快照到本地，下次启动时读取（读取后立即删除）并据此还原崩溃所属的会话和视图
+- SDK 无法在进程内观察到的故障（Native 信号崩溃、卡死）会直接杀死进程。SDK 在会话开始、结束和 view 更新时把当前会话和 view 记录到本地，下次启动时据此还原故障所属的会话和视图
 
-回放这类故障时，SDK 会在原会话中写入一条带真实故障时间的 `is_crash` error，并把该视图的 `crash` 和 `error` 计数各加 1。两项都写入成功才算完成，否则下次启动重试，避免原会话显示为无崩溃。
+回放时，SDK 在原会话中写入一条带真实故障时间的 `is_crash` error，并更新该视图的 crash 和 error 计数（卡死只更新 error 计数）。会话还没有 view 时（例如启动过程中，或会话刚续期），故障记入该会话的 `ApplicationLaunch` view；系统报告应用当时在后台时，记入 `Background` view。
 
-以下情况会回退为记入**当前会话**并使用当前时间，真实故障时间保留在 `crash.crashed_at_ms` 属性中：
+未被采集的会话（未被采样率抽中，且未被异常补采保留）中发生的崩溃不会上报，与该会话的其他事件一致。
 
-- 视图已开始超过 4 小时（会话最长 4 小时，此时原会话已关闭）
-- 故障发生距今已超过 23 小时（超过 24 小时的事件会被丢弃，因此崩溃必须在一天内上报才会归入原会话）
-- 崩溃发生在第一个会话建立之前，或本地没有可用的 view 快照
+以下少见情况无法归因到原会话，崩溃会记入一个单独的会话，真实故障时间保留在 `crash.crashed_at_ms` 中。该会话使用上报这次崩溃的那次启动的应用版本和用户信息：
+
+- 本地没有该会话的记录，例如崩溃发生在 RUM 启用或第一个会话建立之前，或记录属于另一个进程
+- 故障发生时会话已经结束（调用了 `stopSession()`，或会话已过期，包括 view 超过 15 分钟没有更新）
+- 视图已开始超过 4 小时（会话最长 4 小时）
+- 故障发生距今已超过 23 小时（超过 24 小时的事件会被服务端丢弃）
+
+极少数情况下，崩溃 error 写入成功而视图计数更新失败，此时该会话的崩溃数会比实际少 1。
 
 崩溃事件会通过 RUM error 管道上报：
 
@@ -260,6 +344,6 @@ SDK 以 NDJSON 形式批量上报事件。
 
 - Session Replay
 - Web Vitals 或浏览器页面性能指标
-- HarmonyOS 页面渲染性能指标
+- 长任务（long task）
 - 自动 frustration 事件
 
