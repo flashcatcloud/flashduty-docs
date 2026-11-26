@@ -12,8 +12,6 @@ Configure alert Webhook. When specific operations occur on alerts (such as trigg
 
 ## Event types
 
-Flashduty currently supports the following event types and may add more later.
-
 <div className="md-block">
 
 | Event Type | Description |
@@ -72,13 +70,11 @@ The Person and Image fields are the same as in [Incident Webhook](/en/on-call/in
 | alert_key | string | Yes | Alert association key |
 | alert_severity | string | Yes | Severity, enum: Critical, Warning, Info |
 | alert_status | string | Yes | Alert status, enum: Critical, Warning, Info, Ok |
-| progress | string | Yes | Progress, enum: Triggered, Closed |
 | created_at | int64 | Yes | Created time |
 | updated_at | int64 | Yes | Updated time |
 | start_time | int64 | Yes | First trigger time (time of first event received by platform), Unix seconds timestamp |
 | last_time | int64 | Yes | Latest event time (time of latest event received by platform), Unix seconds timestamp |
 | end_time | int64 | No | Alert recovery time (time platform last received end-type event), Unix seconds timestamp, default 0 |
-| close_time | int64 | No | Close time, different from end_time, this is progress close, doesn't mean alert truly recovered. Unix seconds timestamp, default 0 |
 | ever_muted | bool | Yes | Whether the alert has ever been silenced by a silence rule |
 | images | [][Image](/en/on-call/integration/webhooks/incident-webhook#Image) | Yes | Alert image list; null when there are no images |
 | labels | map[string]string | No | Label KV, both Key and Value are strings |
@@ -95,6 +91,7 @@ Legacy fields: `data_source_id`, `data_source_name`, `data_source_type`, and `da
 | :---------: | :----: | :--: | :------- |
 | incident_id | string | Yes | Incident ID |
 | title | string | No | Incident title, may be omitted |
+| progress | string | No | Incident progress, enum: Triggered, Processing, Closed |
 
 </div>
 
@@ -116,7 +113,6 @@ curl -X POST 'https://example.com/alert/webhook?a=a' \
         "alert_status":"Warning",
         "channel_id":1163577812973,
         "channel_name":"Order System",
-        "close_time":0,
         "created_at":1683766015,
         "data_source_id":1571358104973,
         "data_source_name":"Aliyun SLS",
@@ -129,7 +125,8 @@ curl -X POST 'https://example.com/alert/webhook?a=a' \
         "images":null,
         "incident":{
             "incident_id":"645db17c9759374196929314",
-            "title":"Order service CPU usage high"
+            "title":"Order service CPU usage high",
+            "progress":"Triggered"
         },
         "integration_id":1571358104973,
         "integration_name":"Aliyun SLS",
@@ -149,7 +146,6 @@ curl -X POST 'https://example.com/alert/webhook?a=a' \
             "severity":"6"
         },
         "last_time":1683809153,
-        "progress":"Triggered",
         "responder_email":"",
         "responder_name":"",
         "start_time":1683766013,
@@ -174,13 +170,13 @@ Go to **Integration Center** → **Webhook** → Add or edit an **Alert Webhook*
 
 ### Basic settings
 
-Enter the integration name and description for easy management.
+Enter the webhook **Name** and description for easy management.
 
 ### Webhook settings
 
 | Config Item | Description |
 | :--- | :--- |
-| **Managing Team** | Select the team that manages this integration; only team members can edit the integration configuration |
+| **Team** | Optional. When set, only members of that team, the integration creator, and account administrators can edit this integration; when not set, any member with the integration management permission can edit it |
 | **Endpoint** | HTTP/HTTPS address to receive callbacks, must start with `http://` or `https://` |
 | **TLS Verification** | Enabled by default. When disabled, TLS certificate verification of the target server is skipped; suitable for test environments or self-signed certificates |
 | **Headers** | Custom request headers in Key-Value format; multiple headers supported. Saved values are treated as secrets and read back as `******` in the editor: leaving one untouched keeps the saved value, entering a new one overwrites it. If you change **Endpoint**, every Header still showing `******` must be re-entered, otherwise saving fails with **The endpoint changed. Enter this value again.**, so a saved secret is never sent to a new address |
@@ -192,7 +188,7 @@ Disabling TLS certificate verification may expose you to man-in-the-middle attac
 </Warning>
 
 <Note>
-Only **Incident Webhook** and **Webhook custom actions** support **custom request body** and **value mapping**. An **Alert Webhook** always pushes the [Payload structure](#request-payload) described above and cannot reorganize it. See the **Custom Request Body** and **Value Mapping** sections of [Incident Webhook](/en/on-call/integration/webhooks/incident-webhook#custom-request-body).
+Only **Incident Webhook** and **Webhook custom actions** support **Custom Payload** and **value mapping**. An **Alert Webhook** always pushes the [Payload structure](#request-payload) described above and cannot reorganize it. See the **Custom Payload** and **Value Mapping** sections of [Incident Webhook](/en/on-call/integration/webhooks/incident-webhook#custom-request-body).
 </Note>
 
 ## Invocation history
@@ -250,7 +246,13 @@ Click **View Details** on a record to see the complete request and response info
    - Flashduty pushes events for the same alert in chronological order, but retries can deliver them out of order
    - Services can filter based on event_time; after receiving a later event, they can drop earlier ones. Each push carries the latest complete information, so occasional event loss is tolerable
 
-4. **Trusted IP whitelist for push source?**
+4. **Does Flashduty pause pushes after repeated failures to the same endpoint?**
+
+   - Yes. After 50 failures to the same endpoint within 1 minute, Flashduty pauses pushes to that address for 5 minutes
+   - Events during the pause are skipped entirely: no retry, no replay, and no record in the invocation history
+   - The pause is per endpoint, so integrations that share an endpoint pause together; to resume immediately, switch to another endpoint (edit the integration, or create a new integration with a new address)
+
+5. **Trusted IP whitelist for push source?**
    {/* console:
    - {ip_whitelist}
    - We may update this list, so check it regularly

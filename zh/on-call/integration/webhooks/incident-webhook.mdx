@@ -10,8 +10,6 @@ keywords: ["故障Webhook", "HTTP回调", "事件通知", "系统集成", "自�
 
 ## 事件类型
 
-目前支持以下事件类型，未来可能会增加。
-
 <div className="md-block">
 
 |   事件类型   | 释义             |
@@ -40,6 +38,7 @@ keywords: ["故障Webhook", "HTTP回调", "事件通知", "系统集成", "自�
 | i_wi_assignees | 更新行动项或跟进项负责人（暂仅支持通过 API 订阅） |
 | i_wi_completed | 完成行动项或跟进项（暂仅支持通过 API 订阅） |
 | i_wi_converted | 将行动项转换为跟进项（暂仅支持通过 API 订阅） |
+| i_wi_auto_converted | 关闭故障时，把未完成的行动项批量转换为跟进项（暂仅支持通过 API 订阅） |
 
 </div>
 
@@ -62,7 +61,7 @@ POST, Content-Type:"application/json"
 | event_time |         int64         |  是  | 事件发生 `毫秒时间戳` |
 | event_type |        string         |  是  | 事件类型，枚举值见[事件类型](#EventTypes) |
 |  event_id  |        string         |  是  | 事件 ID，`同一个事件可能因为超时等原因重试多次，接收方需要能够去重` |
-| event_detail | object | 否 | 事件明细，结构随 event_type 变化，见[事件明细](#EventDetail)；未列出的事件类型固定为空对象 `{}` |
+| event_detail | object | 否 | 事件明细，结构随 event_type 变化，见[事件明细](#EventDetail)；未在本页列出的事件类型，其 event_detail 可能为空对象，也可能是其他结构 |
 |   person   |   [Person](#Person)   |  否  | 操作人，仅人为动作时存在 |
 |  incident  | [Incident](#Incident) |  是  | 故障详情 |
 
@@ -88,7 +87,7 @@ acknowledged_at | int64| 否 | 认领时间
 **AssignedTo**:
 字段|类型|必含|释义
 :-:|:-:|:-:|:---
-person_ids | []int64 | 否 | 直接分派的人员 ID 列表，直接分派到指定人员时存在
+person_ids | []int64 | 否 | 直接分派的人员 ID 列表，直接分派到指定人员或团队时存在；按团队分派时已展开为团队成员
 escalate_rule_id | string | 否 | 分派策略 ID，按分派策略分派时存在
 escalate_rule_name | string | 否 | 分派策略名称
 layer_idx | int | 是 | 当前分派层级，从 0 开始
@@ -260,6 +259,9 @@ alt | string | 是 | 图片说明，可能为空字符串
 | comment | string | 否 | 合并说明 |
 | source_incidents | [][IncidentShort](#IncidentShort) | 否 | 被合并的故障列表 |
 | target_incident | [IncidentShort](#IncidentShort) | 否 | 合并后的目标故障 |
+| title | string | 否 | 合并后的故障标题，仅在合并时修改了目标故障标题才返回 |
+| remove_source_incidents | bool | 否 | 是否在合并后删除源故障；仅在值为 true 时返回 |
+| source_responders | []int64 | 否 | 被合并故障的处理人 ID 列表 |
 
 **i_comm**：
 
@@ -334,6 +336,15 @@ alt | string | 是 | 图片说明，可能为空字符串
 | to_type | string | 是 | 转换后的类型，枚举值：action（行动项）、follow_up（跟进项） |
 | status | string | 否 | 转换后的状态 |
 | post_mortem_id | string | 否 | 关联复盘报告 ID |
+
+**i_wi_auto_converted**：
+
+| 字段 | 类型 | 必含 | 释义 |
+| :-------- | :------: | :--: | :--- |
+| count | int | 是 | 本次批量转换的行动项数量 |
+| work_item_ids | []string | 是 | 被转换的行动项 ID 列表 |
+| titles | []string | 是 | 被转换的行动项标题列表 |
+| post_mortem_id | string | 是 | 关联复盘报告 ID，无关联时为空字符串 |
 
 ### 请求响应
 
@@ -428,13 +439,13 @@ curl -X POST 'https://example.com/incident/webhook?a=a' \
 
 ### 基础设置
 
-填写集成名称和描述，便于后续管理。
+填写 **Webhook 名称** 和描述，便于后续管理。
 
 ### Webhook 设置
 
 | 配置项 | 说明 |
 | :--- | :--- |
-| **管理团队** | 选择管理该集成的团队，只有团队成员可以编辑此集成配置 |
+| **管理团队** | 可选。设置后，只有该团队成员、集成创建者以及账户管理员可以编辑此集成；不设置时，具有集成中心管理权限的成员都可以编辑 |
 | **Endpoint** | 接收回调的 HTTP/HTTPS 地址，必须以 `http://` 或 `https://` 开头 |
 | **TLS 验证** | 默认启用。关闭后将跳过目标服务器的 TLS 证书验证，适用于测试环境或自签名证书场景 |
 | **Headers** | 自定义请求头，以 Key-Value 形式添加，支持添加多个。已保存的取值按密钥处理，编辑时以 `******` 回显，原样保存即沿用已保存的值，填入新值则覆盖；如果改了 **Endpoint**，仍为 `******` 的 Header 必须重新填写，否则保存时会提示 **Endpoint 已修改，请重新填写这个值**，以免已保存的密钥被发往新地址 |
@@ -445,9 +456,11 @@ curl -X POST 'https://example.com/incident/webhook?a=a' \
 关闭 TLS 证书验证可能存在中间人攻击风险，建议仅在测试环境或使用自签名证书时关闭。
 </Warning>
 
-### 自定义请求体
+<span id="自定义请求体"></span>
 
-默认情况下，系统会按照上述 [Payload 结构](#请求-payload)推送完整的 JSON 数据。如果您的接收方对数据格式有特殊要求，可以通过**自定义请求体**来重新组织推送内容。
+### 自定义 Payload
+
+默认情况下，系统会按照上述 [Payload 结构](#请求-payload)推送完整的 JSON 数据。如果您的接收方对数据格式有特殊要求，可以通过**自定义 Payload** 重新组织推送内容。
 
 使用 `{{字段路径}}` 语法引用默认 Payload 中的任意字段，系统会在推送时将变量替换为实际值。
 
@@ -485,7 +498,7 @@ curl -X POST 'https://example.com/incident/webhook?a=a' \
 
 ### 值映射
 
-在自定义请求体中，您可能需要将 Flashduty 的字段值转换为接收方系统所期望的格式。通过 **值映射** 可以在变量解析时自动完成值的转换。
+在自定义 Payload 中，您可能需要将 Flashduty 的字段值转换为接收方系统所期望的格式。通过 **值映射** 可以在变量解析时自动完成值的转换。
 
 值映射按**字段路径**分组配置，每个路径下是一个 `源值 → 目标值` 的映射表。
 
@@ -508,7 +521,7 @@ curl -X POST 'https://example.com/incident/webhook?a=a' \
 }
 ```
 
-配合如下自定义请求体使用：
+配合如下自定义 Payload 使用：
 
 ```json
 {
@@ -575,7 +588,13 @@ curl -X POST 'https://example.com/incident/webhook?a=a' \
    - 理论上同一个故障的事件是按照时间顺序进行推送，但是重试等情况可能会导致乱序
    - 服务可以根据 event_time 进行过滤，如果已经收到了更晚的事件，可以直接过滤掉更早的事件，每一次推送都会携带最新的、完整的信息，偶尔丢失事件是可以容忍的
 
-4. **推送来源可信 IP 白名单？**
+4. **同一个 Endpoint 频繁失败后是否会暂停推送？**
+
+   - 会。同一个 Endpoint 在 1 分钟内失败 50 次后，系统暂停向该地址推送 5 分钟
+   - 暂停期间的事件会被直接跳过：不重试，不会补发，也不会出现在调用历史里
+   - 暂停按 Endpoint 计算，多个集成共用同一个 Endpoint 时会一起暂停；需要立即恢复时，改用另一个 Endpoint（可直接编辑集成，或新建集成并使用新地址）
+
+5. **推送来源可信 IP 白名单？**
    {/* console:
    - {ip_whitelist}
    - 未来可能会更新，请定期查验

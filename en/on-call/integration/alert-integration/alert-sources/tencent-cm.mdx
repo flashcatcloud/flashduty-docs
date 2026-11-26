@@ -85,6 +85,33 @@ The "first event received" item in the setup checklist turns green as well.
 </Step>
 </Steps>
 
+## Payload
+
+Tencent Cloud Observability Platform posts a JSON object built from the notification template. Flashduty reads these fields:
+
+| Field | Meaning | Use in Flashduty |
+| :--- | :--- | :--- |
+| `alarmLevel` | Alert level | Alert severity |
+| `alarmStatus` | Alert status | Treated as recovery when it is `0` |
+| `alarmType` | Alert type (`metric`, `event`, `prometheus`, and others) | Severity fallback and recovery check |
+| `recoverTime` | Recovery time | Treated as recovery for `event` alerts when it is not `0` |
+| `alarmObjInfo` | Alert object | Object details become `obj_` labels, and its dimensions take part in the Alert Key |
+| `alarmPolicyInfo.policyId`, `policyName`, `policyType`, `policyTypeCName` | Alert policy details | Alert key (`policyId`), title (`policyName`), and labels with the same names |
+| `alarmPolicyInfo.conditions` | Alert conditions | Title, Alert Key, and label `conditions` |
+| `alarmPolicyInfo.tag`, `policyTags` | Resource tags and policy tags | Each key-value pair becomes a label with the same name |
+| `alarmObjInfo.dimensions` | Object dimensions | Alert Key and labels starting with `obj_dimensions_` |
+| `alarmObjInfo.tags` | Object tags | Each key-value pair becomes a label with the same name |
+| `additionalMsg` | Additional information | Parsed as a `{key, value}` array and written as labels with the same names |
+| `alarmObjInfo.summary`, `content` | Alert summary and content | Title and description of a `prometheus` alert |
+
+`alarmStatus`, `alarmType`, `alarmObjInfo`, and `alarmPolicyInfo` are required; a payload missing any of them returns a parameter error. For types other than `prometheus`, the description appends the `objName` dimension and the current value after the title.
+
+## Alert key
+
+Flashduty builds the Alert Key from three parts: the alert policy ID `policyId`, the metric name `metricName` of each condition (`eventName` for event alerts) together with the product name `productName`, and the object dimensions `dimensions`.
+
+For one policy, one object, and one alert condition, the trigger and recovery land on the same alert; a different policy or condition produces its own alert, and objects with dimensions (for example different instances) each get one too. Changing the alert level, the object name, or tags does not change the Alert Key.
+
 ## Status and severity
 <div class="md-block">
   
@@ -106,3 +133,29 @@ When `alarmLevel` is missing or unrecognized, Flashduty uses the default severit
 Recovery is evaluated independently: an `event` alert is resolved (OK) when `recoverTime` is not `0`; all other alert types are resolved (OK) when `alarmStatus` is `0`.
 
 </div>
+
+## Labels
+
+| Label | Source |
+| :--- | :--- |
+| `check` | Alert policy name `policyName` |
+| `policyId` / `policyType` / `policyName` / `policyTypeCName` | Alert policy details |
+| `alarmType` / `alarmStatus` | Raw alert type and status |
+| `obj_region` / `obj_namespace` / `obj_appId` / `obj_uin` | Object region, namespace, app, and account |
+| `obj_city` / `obj_host` / `obj_operator` / `obj_taskName` | City, host, carrier, and task name for probe and host objects |
+| `obj_operation` / `obj_service.name` / `obj_span.kind` / `obj_tapm.instance.key` | Operation, service, span kind, and instance for APM objects |
+| `obj_instanceId` / `obj_level` | Instance ID and level for RUM objects |
+| `obj_dimensions_<dimension>` | Each object dimension, for example `obj_dimensions_objName` |
+| `resource` | Resource identifier: for CVM, the IP before `#` in `objName`; otherwise the first non-empty value of `objName`, `unInstanceId`, `InstanceName`, `deviceLanIp`, and `host` |
+| `conditions` | JSON of the alert conditions, at most 4 entries |
+| Resource tags, object tags, policy tags, and `additionalMsg` | Each key-value pair becomes a label with the same name |
+
+Labels with an empty value or `<nil>` are dropped.
+
+## Troubleshooting
+
+- **An alert does not recover**: for `event` alerts, check that `recoverTime` is not `0`; for other types, check that `alarmStatus` is `0`. The notification template sends no recovery push unless both the trigger and the recovery notification types are selected
+- **Flashduty returns a parameter error**: any missing `alarmStatus`, `alarmType`, `alarmObjInfo`, or `alarmPolicyInfo` produces the error
+- **Different instances of one policy produce separate alerts**: when the object carries dimensions, the Alert Key includes them, so this is expected
+- **The severity is not what you expect**: when `alarmLevel` is missing or not one of `Remind`, `Warn`, and `Serious`, the type decides — `metric` is Warning and every other type is Critical
+- **A prometheus alert title is the summary**: a `prometheus` alert uses `summary` as the title and `content` as the description; other types build the title from the policy name and conditions

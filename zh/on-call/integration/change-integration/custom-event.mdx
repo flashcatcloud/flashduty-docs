@@ -64,16 +64,32 @@ POST, Content-Type: application/json
 | 字段 | 必含 | 类型 | 说明 |
 | :--- | :---: | :--- | :--- |
 | title | 是 | string | 变更标题，例如发布单标题、工单标题或部署任务名称。 |
-| change_key | 是 | string | 变更标识。相同 `change_key` 会被识别为同一个变更，后续事件会更新该变更的状态、标签和链接。 |
+| change_key | 否 | string | 变更标识。相同 `change_key` 会被识别为同一个变更，后续事件会更新该变更的状态、标签和链接。不传时 Flashduty 生成一个（形如 `CHG-20260723-A1B2`）并在响应 `data.change_key` 中返回，本次推送会新建一条变更；需要用后续推送更新同一条变更时，请在后续请求中带上这个值。最长 255 个字符，超长时返回 `InvalidParameter`，不会截断。 |
 | change_status | 是 | string | 变更状态。枚举值（首字母大写）：`Planned` 计划中、`Ready` 待执行、`Processing` 执行中、`Canceled` 已取消、`Done` 已完成、`Failed` 失败。 |
 | event_time | 否 | integer | 事件发生时间，Unix 时间戳。支持秒级或毫秒级时间戳；未传时使用 Flashduty 接收事件的时间。 |
-| description | 否 | string | 变更描述，例如变更内容、影响范围、执行步骤或回滚方案。 |
+| description | 否 | string | 变更描述，例如变更内容或执行步骤。 |
 | link | 否 | string | 变更详情链接，例如发布单、工单或 CI/CD 任务地址。 |
 | labels | 否 | map | 变更标签集合，key 和 value 均为 string 类型。建议 key 遵循 Prometheus 标签命名规范；系统会将 key 中的空格、点号、斜杠等特殊字符替换为下划线。 |
+| fields | 否 | map | 账户自定义字段的值，key 为字段名称。按 key 合并到已有值：值为 `null` 时删除该字段。字段必须已定义、启用且适用于变更，类型不匹配时返回 `InvalidParameter`。 |
 
 <Note>
 当 `change_status` 为 `Done`、`Canceled` 或 `Failed` 时，Flashduty 会将该事件时间记录为变更结束时间；再次上报非结束状态时，结束时间会被清空。
 </Note>
+
+### 计划与执行信息
+
+除 `title` 和 `description` 外，推送还可以携带变更的计划与执行字段，内容显示在变更详情的 **变更信息** 中。以下字段均为可选：推送携带了值时覆盖已有值，未携带时保留原值；计划时间传 `0` 等同于未携带。
+
+| 字段 | 必含 | 类型 | 说明 |
+| :--- | :---: | :--- | :--- |
+| planned_start_time | 否 | integer | 计划开始时间，Unix 时间戳，支持秒级或毫秒级。 |
+| planned_end_time | 否 | integer | 计划结束时间，格式同上；早于 `planned_start_time` 时返回 `InvalidParameter`。 |
+| operator | 否 | string | 操作人，填写成员的邮箱或名字。 |
+| impact | 否 | string | 影响评估，支持 Markdown。 |
+| backout_plan | 否 | string | 回滚方案，支持 Markdown。 |
+| checklist | 否 | array | 执行清单，元素包含 `text`（必填，清单项内容）、`done`（是否完成）、`by`（勾选人）和 `at`（勾选时间，Unix 时间戳）。 |
+
+`checklist` 的处理方式与其他字段不同：请求中只要携带该字段（即使为空数组），就替换整份清单。只改动清单勾选状态的推送记为执行进度，不会在变更时间线上新增事件。
 
 ### 请求响应
 
@@ -81,7 +97,7 @@ POST, Content-Type: application/json
 | :--- | :---: | :--- | :--- |
 | request_id | 是 | string | 请求 ID，用于链路追踪。 |
 | error | 否 | [Error](#error) | 错误描述，仅当出现错误时返回。 |
-| data | 否 | object | 上报成功时返回空对象。 |
+| data | 否 | object | 上报成功时返回，其中 `change_key` 为本次事件的变更标识（平台生成或请求中传入）。 |
 
 #### Error <span id="error"></span>
 
@@ -118,7 +134,9 @@ curl -X POST '{api_host}/event/push/change/standard?integration_key={integration
 ```json
 {
   "request_id": "0ace00116215ab4ca0ec5244b8fc54b0",
-  "data": {}
+  "data": {
+    "change_key": "deploy-order-service-202607231030"
+  }
 }
 ```
 

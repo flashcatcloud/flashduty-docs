@@ -66,9 +66,9 @@ SolarWinds 的告警类型有五种（Anomaly、Entity、Event、Log、Metric Gr
 
 填写后点击 **CREATE**。
 
-<img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/sw-1.png" />
+<img alt="SolarWinds Notification Services 列表中选择 Webhook" width="600" src="https://download.flashcat.cloud/flashduty/doc/sw-1.png" />
 
-<img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/sw-2.png" />
+<img alt="Webhook 通道的 Create Configuration 表单与自动生成的 HTTP POST Body" width="600" src="https://download.flashcat.cloud/flashduty/doc/sw-2.png" />
 
 如需创建其他类型的 Webhook 通道，重复以上操作。
 
@@ -87,7 +87,7 @@ SolarWinds 的告警类型有五种（Anomaly、Entity、Event、Log、Metric Gr
 
 其他配置完成后点击 **Save**。
 
-<img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/sw-4.png" />
+<img alt="告警策略的 Actions 中选择 Webhook 通道并开启清除通知" width="600" src="https://download.flashcat.cloud/flashduty/doc/sw-4.png" />
 
 </Step>
 <Step title="触发告警并确认">
@@ -102,6 +102,31 @@ SolarWinds 的告警类型有五种（Anomaly、Entity、Event、Log、Metric Gr
 </Step>
 </Steps>
 
+## 推送内容
+
+SolarWinds 的五种告警通道推送的 JSON 结构不同，Flashduty 读取以下字段：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `name` | 告警名称 | 告警标题，标签 `check` |
+| `severity` | 告警等级 | 告警等级 |
+| `description` | 告警描述 | 告警描述 |
+| `detailUrl` | 告警详情链接 | Alert Key 的来源，标签 `detail_url` |
+| `reason` | 清除原因 | 为 `DISABLED` 或 `AUTOMATIC` 时按恢复处理 |
+| `entities[]` | 受影响对象 | 标签 `entities`（JSON）；第一个实体的 `reason` 也参与恢复判断 |
+| `sWindsEvents` | 事件告警列表 | 标签 `event`（JSON） |
+| `affectedEvaluations` | 受影响的评估 | 标签 `affected_evaluations`（JSON） |
+| `tags` | 对象标签数组 | 标签 `tags`（JSON） |
+| `runbook`、`condition`、`additionalInfo`、`recordCount`、`threshold`、`timespanStart`、`timespanEnd`、`query` | 告警上下文 | 标签 `runbook`、`condition`、`additional_info`、`record_count`、`threshold`、`timespan_start`、`timespan_end`、`query` |
+
+`id` 和 `priority` 不读取，告警等级只取 `severity`。
+
+## Alert Key
+
+Flashduty 用 `detailUrl` 的 MD5 作为 Alert Key。同一条告警的触发通知和清除通知携带相同的详情链接，因此清除通知会关闭对应的告警。
+
+推送中没有 `detailUrl` 时，每次推送都会生成一条新告警，清除通知也无法关闭原告警。修改告警名称、等级、原因或标签不会改变 Alert Key。
+
 ## 状态和告警等级
 
 <div className="md-block">
@@ -112,6 +137,34 @@ SolarWinds 的告警类型有五种（Anomaly、Entity、Event、Log、Metric Gr
 | Warning | Warning |
 | Info | Info |
 
-其他取值按 Info 处理；SolarWinds 发出清除通知时告警恢复。
+其他取值按 Info 处理；收到 `reason` 为 `DISABLED` 或 `AUTOMATIC` 的清除通知时告警恢复。
 
 </div>
+
+## 标签
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警名称 `name` |
+| `runbook` | 处置手册 `runbook` |
+| `detail_url` | 告警详情链接 `detailUrl` |
+| `condition` | 触发条件 `condition` |
+| `additional_info` | 附加信息 `additionalInfo` |
+| `record_count` | 记录数 `recordCount` |
+| `threshold` | 阈值 `threshold` |
+| `timespan_start` / `timespan_end` | 统计时间范围 `timespanStart` / `timespanEnd` |
+| `query` | 查询语句 `query` |
+| `entities` | 受影响对象数组的 JSON |
+| `event` | 事件列表 `sWindsEvents` 的 JSON |
+| `affected_evaluations` | 受影响评估数组的 JSON |
+| `tags` | 对象标签数组的 JSON，形如 `[{"key":"...","value":"..."}]` |
+
+值为空的标签不会写入。
+
+## 排查问题
+
+- **告警没有恢复**：只有 `reason` 为 `DISABLED` 或 `AUTOMATIC` 的清除通知才按恢复处理；告警策略没有开启 **Send an additional notification when the Alert is cleared** 时，SolarWinds 不会发送清除通知
+- **清除通知生成了新告警**：推送缺少 `detailUrl`，Flashduty 无法把它与触发通知关联；请保留系统自动生成的 HTTP POST Body，不要删改该字段
+- **告警等级与预期不符**：`severity` 只识别大写的 `CRITICAL`、`WARNING` 和 `INFO`，其他取值（包括小写）按 Info 处理；`priority` 不参与
+- **标签值是 JSON 字符串**：`entities`、`event`、`affected_evaluations` 和 `tags` 以 JSON 字符串写入，路由规则按字符串匹配
+- **Flashduty 返回参数错误**：请求体必须是合法的 JSON 对象
