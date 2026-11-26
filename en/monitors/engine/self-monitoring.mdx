@@ -4,7 +4,7 @@ description: "Scrape the Prometheus metrics the alert engine exposes to monitor 
 keywords: ["alert engine", "monitedge", "self-monitoring", "Prometheus metrics", "engine health check"]
 ---
 
-The alert engine (`monitedge`) exposes a set of Prometheus metrics locally, covering three failures that silently stop monitoring: the connection to the center is down, rule sync has stalled, and rules keep failing to evaluate. Scrape them into your own time series database and you can tell, outside the console, whether this engine is still doing its job.
+The alert engine (`monitedge`) exposes a set of Prometheus metrics locally, covering three failures that silently stop monitoring: the connection to the center is down, rule sync has stalled, and rules keep failing to evaluate. Scrape them into your own time series database and you can tell, outside the console, whether this engine is still doing its job. Entity alerts have [a separate set of metrics](#entity-alert-metrics).
 
 These metrics are not shown in the console and have no menu entry. You can only read them from the engine's `/metrics`.
 
@@ -115,9 +115,56 @@ When `monit_edge_alert_rule_failing_duration_seconds` climbs, check the scope wi
 sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0
 ```
 
+## Entity alert metrics
+
+Entity Tree alerts use a separate metric family with the `monit_edge_entity_alert_` prefix. Each entity definition and data source pair forms one shard, and most metrics carry the `definition_id` and `datasource_id` labels.
+
+### Discovery and snapshots
+
+| Metric | Type | Labels | Description |
+|------|------|------|------|
+| `monit_edge_entity_alert_shards` | Gauge | `phase` | Shards by phase: `initializing`, `evaluating`, `ready` |
+| `monit_edge_entity_alert_discovery_consecutive_failures` | Gauge | `definition_id`, `datasource_id` | Consecutive discovery failures; resets to zero after one success |
+| `monit_edge_entity_alert_discovery_duration_seconds` | Gauge | `definition_id`, `datasource_id` | Duration of the latest entity discovery attempt |
+| `monit_edge_entity_alert_discovery_results` | Gauge | `definition_id`, `datasource_id` | Entities returned by the latest successful discovery |
+| `monit_edge_entity_alert_snapshot_age_seconds` | Gauge | `definition_id`, `datasource_id` | Age of the current entity snapshot in seconds; it keeps growing while discovery keeps failing |
+| `monit_edge_entity_alert_snapshot_estimated_bytes` | Gauge | `definition_id`, `datasource_id` | Estimated bytes retained by the current entity snapshot |
+| `monit_edge_entity_alert_entities` | Gauge | `state` | Entity count: `active` and `stale` |
+
+### Evaluation
+
+| Metric | Type | Labels | Description |
+|------|------|------|------|
+| `monit_edge_entity_alert_evaluation_consecutive_failures` | Gauge | `definition_id`, `datasource_id` | Consecutive evaluation failures summed across the rules in the shard |
+| `monit_edge_entity_alert_condition_results_ignored_total` | Counter | `definition_id`, `datasource_id`, `reason` | Condition query results ignored: `missing_identity` (the result has no entity identity) and `out_of_scope` (outside the rule scope) |
+
+### Delivery and plan sync
+
+| Metric | Type | Labels | Description |
+|------|------|------|------|
+| `monit_edge_entity_alert_delivery_queue` | Gauge | `kind` | Pending queue depth: `events` and `statuses` (rule status) |
+| `monit_edge_entity_alert_delivery_oldest_age_seconds` | Gauge | — | Seconds the oldest pending event has waited |
+| `monit_edge_entity_alert_delivery_events_total` | Counter | `outcome` | Event delivery results: `delivered`, `retried`, `rejected`, `dropped` |
+| `monit_edge_entity_alert_plan_sync_status` | Gauge | `outcome` | Result of the latest entity alert plan sync; the value is always 1 and only the current result appears: `success`, `error`, or `never` (no successful sync yet) |
+| `monit_edge_entity_alert_plan_sync_age_seconds` | Gauge | — | Seconds since the last successful plan sync; 0 when none has succeeded |
+
+```promql
+# Entity discovery keeps failing, per entity definition and data source
+max by (definition_id, datasource_id) (monit_edge_entity_alert_discovery_consecutive_failures) > 0
+
+# Entity snapshot not updated for 10 minutes
+max by (definition_id, datasource_id) (monit_edge_entity_alert_snapshot_age_seconds) > 600
+
+# Entity evaluation keeps failing
+max by (definition_id, datasource_id) (monit_edge_entity_alert_evaluation_consecutive_failures) > 0
+
+# Entity event backlog: the oldest event has waited more than 5 minutes
+monit_edge_entity_alert_delivery_oldest_age_seconds > 300
+```
+
 ## Recommended alerts
 
-The table below gives rules you can copy as-is, as a metric plus a sustained condition. With more than one instance, keep `instance` or your own instance label so the same series name on different instances doesn't overwrite itself.
+The table below gives rules you can copy as-is, as a metric plus a sustained condition, covering the main failures of both ordinary and entity alerts. With more than one instance, keep `instance` or your own instance label so the same series name on different instances doesn't overwrite itself.
 
 | Alert | PromQL | For | What to do |
 |------|--------|------|------|
@@ -129,7 +176,9 @@ The table below gives rules you can copy as-is, as a metric plus a sustained con
 | Rule sync never succeeded | `monit_edge_alert_rule_sync_status{outcome="pending"} == 1` | 3 minutes | `sync_age_seconds` is 0 when no sync has ever succeeded, so the alert above does not fire; check the network to the center and the engine log |
 | Rules keep failing to evaluate | `max by (datasource_id) (monit_edge_alert_rule_failing_duration_seconds) > 300` | 1 occurrence | Use `monit_edge_alert_rule_scopes{state="failing"}` to tell an unavailable datasource from a broken rule query |
 | Query admission timed out | `sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0` | 3 minutes | A slow datasource has taken all the query concurrency and an evaluation round was skipped |
+| Entity discovery keeps failing | `max by (definition_id, datasource_id) (monit_edge_entity_alert_discovery_consecutive_failures) > 0` | 5 minutes | Entity discovery is not succeeding and the snapshot stops updating; check the data source and the discovery query of that entity definition |
+| Entity event backlog | `monit_edge_entity_alert_delivery_oldest_age_seconds > 300` | 5 minutes | Entity alert events are not being delivered; check the network to the center and the delivery queue |
 
 <Note>
-Entity tree alerts use a different metric family (`monit_edge_entity_alert_*`) for entity discovery, condition queries, and entity event delivery. This page covers ordinary alert rules only.
+The tables above cover the main entity alert metrics. The engine's `/metrics` endpoint reports the complete `monit_edge_entity_alert_` family, including query outcomes and timeouts, per-shard phases, backfill, and rule status delivery metrics that are not tabulated here.
 </Note>

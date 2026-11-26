@@ -4,7 +4,7 @@ description: "采集告警引擎暴露的 Prometheus 指标，监控引擎与中
 keywords: ["告警引擎", "monitedge", "自监控", "Prometheus 指标", "引擎健康检查"]
 ---
 
-告警引擎（`monitedge`）在本地暴露一组 Prometheus 指标，覆盖三项会静默停掉监控的故障：与中心的连接断了、规则同步卡住了、规则一直在评估失败。把它们采集到您自己的时序库，就可以在控制台之外持续判断这台引擎是否还在正常工作。
+告警引擎（`monitedge`）在本地暴露一组 Prometheus 指标，覆盖三类会静默停掉监控的故障：与中心的连接断了、规则同步卡住了、规则一直在评估失败。把它们采集到您自己的时序库，就可以在控制台之外持续判断这台引擎是否还在正常工作。实体告警另有[一组指标](#实体告警指标)。
 
 这些指标不在控制台展示，也没有对应的菜单入口，只能从引擎的 `/metrics` 读取。
 
@@ -115,9 +115,56 @@ sum by (error_type) (increase(monit_edge_alert_rule_evaluations_total{outcome="e
 sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0
 ```
 
+## 实体告警指标
+
+实体树的实体告警使用另一组指标，前缀为 `monit_edge_entity_alert_`。每个实体类别与数据源的组合构成一个分片，多数指标带 `definition_id` 与 `datasource_id` 标签。
+
+### 发现与快照
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `monit_edge_entity_alert_shards` | Gauge | `phase` | 按阶段统计的分片数：`initializing`（初始化）、`evaluating`（评估中）、`ready`（就绪） |
+| `monit_edge_entity_alert_discovery_consecutive_failures` | Gauge | `definition_id`、`datasource_id` | 连续发现失败的次数，成功一次后归零 |
+| `monit_edge_entity_alert_discovery_duration_seconds` | Gauge | `definition_id`、`datasource_id` | 最近一次实体发现尝试的耗时 |
+| `monit_edge_entity_alert_discovery_results` | Gauge | `definition_id`、`datasource_id` | 最近一次成功发现返回的实体数 |
+| `monit_edge_entity_alert_snapshot_age_seconds` | Gauge | `definition_id`、`datasource_id` | 当前实体快照的年龄（秒）。发现持续失败时它一直增长 |
+| `monit_edge_entity_alert_snapshot_estimated_bytes` | Gauge | `definition_id`、`datasource_id` | 当前实体快照占用的估算字节数 |
+| `monit_edge_entity_alert_entities` | Gauge | `state` | 实体数：`active`、`stale` |
+
+### 评估
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `monit_edge_entity_alert_evaluation_consecutive_failures` | Gauge | `definition_id`、`datasource_id` | 该分片内各条规则连续评估失败次数之和 |
+| `monit_edge_entity_alert_condition_results_ignored_total` | Counter | `definition_id`、`datasource_id`、`reason` | 被忽略的条件查询结果数：`missing_identity`（结果缺少实体身份）、`out_of_scope`（不在规则范围） |
+
+### 投递与计划同步
+
+| 指标 | 类型 | 标签 | 说明 |
+|------|------|------|------|
+| `monit_edge_entity_alert_delivery_queue` | Gauge | `kind` | 待投递队列长度：`events`（事件）、`statuses`（规则状态） |
+| `monit_edge_entity_alert_delivery_oldest_age_seconds` | Gauge | — | 最早一条待投递事件已等待的秒数 |
+| `monit_edge_entity_alert_delivery_events_total` | Counter | `outcome` | 事件投递结果：`delivered`、`retried`、`rejected`、`dropped` |
+| `monit_edge_entity_alert_plan_sync_status` | Gauge | `outcome` | 最近一次实体告警计划同步的结果，值恒为 1，只在当前结果上出现一条：`success`、`error` 或 `never`（还没同步成功过） |
+| `monit_edge_entity_alert_plan_sync_age_seconds` | Gauge | — | 距上一次成功同步计划过去的秒数；从未成功时为 0 |
+
+```promql
+# 实体发现连续失败（按实体类别与数据源）
+max by (definition_id, datasource_id) (monit_edge_entity_alert_discovery_consecutive_failures) > 0
+
+# 实体快照 10 分钟没有更新
+max by (definition_id, datasource_id) (monit_edge_entity_alert_snapshot_age_seconds) > 600
+
+# 实体评估连续失败
+max by (definition_id, datasource_id) (monit_edge_entity_alert_evaluation_consecutive_failures) > 0
+
+# 实体事件积压：最早一条已等待超过 5 分钟
+monit_edge_entity_alert_delivery_oldest_age_seconds > 300
+```
+
 ## 推荐告警
 
-下表按“指标 + 持续条件”给出可以直接复制的规则。多实例部署时请保留 `instance` 或您自己的实例标签，避免不同实例的同名序列互相覆盖。
+下表按“指标 + 持续条件”给出可以直接复制的规则，覆盖普通告警与实体告警的主要故障。多实例部署时请保留 `instance` 或您自己的实例标签，避免不同实例的同名序列互相覆盖。
 
 | 告警 | PromQL | 持续 | 处置 |
 |------|--------|------|------|
@@ -129,7 +176,9 @@ sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[1
 | 规则从未同步成功 | `monit_edge_alert_rule_sync_status{outcome="pending"} == 1` | 3 分钟 | `sync_age_seconds` 在从未同步成功时为 0，上一条告警不会触发；检查到中心的网络与引擎日志 |
 | 规则持续评估失败 | `max by (datasource_id) (monit_edge_alert_rule_failing_duration_seconds) > 300` | 1 次 | 对照 `monit_edge_alert_rule_scopes{state="failing"}` 判断是数据源不可用还是单条规则查询有问题 |
 | 查询准入排队超时 | `sum(increase(monit_edge_alert_query_admission_rejected_total{reason="timeout"}[10m])) > 0` | 3 分钟 | 某个数据源变慢占满了查询并发，这一轮评估被跳过 |
+| 实体发现连续失败 | `max by (definition_id, datasource_id) (monit_edge_entity_alert_discovery_consecutive_failures) > 0` | 5 分钟 | 实体发现没有成功，快照不会更新；检查数据源与该实体类别的发现查询 |
+| 实体事件投递积压 | `monit_edge_entity_alert_delivery_oldest_age_seconds > 300` | 5 分钟 | 实体告警事件排不出去；检查到中心的网络与投递队列 |
 
 <Note>
-实体树告警走另一组指标（`monit_edge_entity_alert_*`），覆盖实体发现、条件查询和实体事件投递；本文只覆盖普通告警规则。
+上表覆盖实体告警的主要指标。引擎的 `/metrics` 端点会输出完整的 `monit_edge_entity_alert_` 指标族，包括查询结果与超时、分片阶段、回填与规则状态投递等未在表中列出的指标。
 </Note>
