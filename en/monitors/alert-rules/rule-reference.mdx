@@ -1,0 +1,375 @@
+---
+title: "Alert rule reference"
+sidebarTitle: "Rule reference"
+description: "Reference for Monitors alert rule form fields, defaults, limits, and validation, plus runtime status, batch operations, import/export, and version history."
+keywords: ["alert rules", "rule fields", "additional labels", "alert recovery", "batch operations", "import export", "version history"]
+---
+
+This page is the reference for the alert rule form and rule list: each field's values, defaults, and limits, the rule's runtime status and execution history, plus batch operations, import/export, and version history. To create your first rule, start with [Get started](/en/monitors/quickstart/quickstart).
+
+The create / edit alert rule page is one form with six sections, from top to bottom: **Basic Configuration**, **Data Sources and Queries**, **Alert Conditions**, **Detection Frequency & Effective Time**, **Event Configuration**, and **Investigation entries**.
+
+## Basic configuration
+
+![Basic configuration](https://docs-cdn.flashcat.cloud/imges/mon/3a2978a22d7a23dd862fdbd409adf663.png)
+
+| Config Item | Description |
+|--------|------|
+| **Group** | The group path of the rule (for example, "Default / Database Alerts"). When you edit an existing rule this row is a dropdown listing, by full path, the groups you can write to: pick one and save to move the rule there. If the group has been deleted or you cannot access it, the row is not editable — go back to the rule list and pick a group again |
+| **Rule Name** | Name of the alert rule; does not support variable references (fixed names facilitate filtering and grouping operations). It must be unique within its group; imports, edits, and moves fail if the target group already contains that name |
+| **Additional Labels** | Similar to `labels` in Prometheus; attached to all alert events for filtering, routing, and inhibition. See below for value syntax |
+
+<span id="append-label-syntax"></span>
+### Additional label syntax
+
+An additional label value takes one of three forms, depending on its content:
+
+| Form | Example | Handling |
+|------|---------|----------|
+| Plain text or `${label name}` | `team=ops`, `instance=${host}` | The alert engine replaces `${label name}` with the alert label |
+| Go template containing `{{` | `msg={{ index $annotations "$A.msg" }}` | Rendered before delivery to the channel and sent as an ordinary label |
+| Starts with `[TPL]` | `owner=[TPL]{{ .Labels.team }}` | Passed to On-call as is and rendered by On-call. See [Alert pipeline](/en/on-call/integration/alert-integration/alert-pipelines) for the syntax |
+
+Go templates can use these variables:
+
+| Variable | Description |
+|----------|-------------|
+| `$labels` | The alert's data labels, for example `{{ $labels.service }}` |
+| `$annotations` | Query-provided additional information and the rule's custom fields. Query-provided keys use `$<query name>.<field name>` and must be read with `index`, for example `{{ index $annotations "$A.msg" }}`. See [Query result field mapping](/en/monitors/alert-rules/query-result-fields#query-fields-as-labels) |
+| `$values` | Values used in alert evaluation, for example `{{ index $values "$A.value" }}` |
+| `$severity` | Alert severity |
+| `$status` | `firing` or `recovered` |
+
+- Templates support only `if` / `else` plus `index`, `len`, `printf`, `print`, `replace`, `urlquery`, and the comparison and logical functions. `range`, `with`, and `define` aren't supported.
+- A missing key reads as an empty string in `$labels` and `$annotations`, and as `0` in `$values`. A label that renders to an empty string isn't sent.
+- A single value can't mix `${...}` and `{{...}}`.
+- A label that fails to render isn't sent, and the alert event is still delivered. The error goes to the `__alert_rule_label_template_error` label, which you can see in the alert details.
+- Leading and trailing whitespace in label names is trimmed on save, and the trimmed names must be unique. Label names can't start with `__alert_rule_`. All additional labels together are limited to 1,024 characters as JSON, and `job` and `instance` values to 255 characters.
+- A rendered template value has two more limits, and exceeding either counts as a render failure (the label isn't sent and the reason goes to `__alert_rule_label_template_error`): one label may render to at most 8 KiB, and a rendered `job` or `instance` may be at most 255 characters. The rendered value only exists at runtime, so neither case is rejected at save time.
+- When the alert engine renders descriptions, custom fields, and titles, template labels in `$appendLabels` are still the raw template text. To use query results there, reference `$annotations` directly.
+
+## Data sources and queries
+
+Section 2 has two parts: **Data Sources** decides which data sources the rule applies to, and **Query Statements** decides what to query and how.
+
+### Data sources
+
+![Data source selection](https://docs-cdn.flashcat.cloud/imges/mon/9971af45b4bc19bfe807898bf1bf10a0.png)
+
+First choose a **data source type**. Only types that already have data sources are listed. If you have none yet, click **Go to Data Source Management** (it opens in a new tab, so your form is kept) to create one.
+
+Then choose which data sources the rule applies to — one rule can cover many:
+
+- **Wildcard by name**: matches by name and defaults to `*` (every data source of the type) for a new rule. `*` matches any string (for example, `db-*`), `?` matches one character, `[0-9]` or `[a-z]` match a range, and `[!0-9]` matches characters outside it. Renaming a data source affects matching.
+- **Exact match by ID**: pick specific data sources from the list; unaffected by renames.
+
+Use at least one method, or both; the rule applies to the union of their matches. Tencent CLS is the exception: it binds exactly one data source by exact match.
+
+When a rule stops covering a data source, the rule's active alerts on that data source close but no recovery event is sent to On-call. This happens when, for example, the data source is renamed out of a wildcard match, the rule is changed to bind only other data sources, or the data source is deleted. Close the resulting incidents in On-call manually.
+
+<Tip>
+If you need stable rule bindings that are unaffected by data source renames, prefer exact match. See [Data Source Management](/en/monitors/data-sources/data-sources) for details.
+</Tip>
+
+<Note>
+To save a rule you need query permission on every data source it references, including those matched by a wildcard at save time (the owner account and Admins excepted). A wildcard rule can therefore fail to save because it matches a data source you cannot query. Disabling a rule is exempt. See [Data Source Management](/en/monitors/data-sources/data-sources#data-source-permissions-team-authorization) for data source authorization.
+</Note>
+
+### Query statements
+
+![Query statements](https://docs-cdn.flashcat.cloud/imges/mon/4e38b46952d6cbbfb97c2d28843dcdbe.png)
+
+Configure the query type and statements. Click **Usage guide** for help writing them. For how value fields, label fields, and additional information are mapped from tabular query results, see [Query result field mapping](/en/monitors/alert-rules/query-result-fields).
+
+Click **Write with AI** at the top right of a query input to generate or rewrite the statement with the Query Assistant; see [AI query assistant](/en/monitors/quickstart/quickstart#ai-query-assistant).
+
+## Alert conditions
+
+Alert Conditions offers three check modes, one per tab; enable each with the switch on the card title inside the tab. Enabled tabs show a check mark.
+
+| Check mode | Description |
+|-----|-------------------|
+| **Threshold evaluation** | Set a threshold expression per level; once a condition is met for the required number of checks, an alert of that level fires. Once a higher level fires, lower levels are skipped. Fill in at least one of Critical, Warning and Info |
+| **Missing data** | Alerts when "previously found data is now missing" or "all queries return no data"; the two conditions can be enabled separately |
+| **Data exists** | Any returned data counts as a match; once the trigger count is reached, an alert of the configured level fires |
+
+Each tab has an **Alert fired** card and an **Alert recovered** card (**Missing data** combines them into one **Trigger & recovery conditions** card). Key fields:
+
+| Field | Description |
+|-------|-------------|
+| **Trigger mode** | `Consecutive` or `Cumulative`; see the next section |
+| **Alert level** | `Critical`, `Warning`, or `Info`; defaults to `Critical`. For threshold evaluation, the level comes from the expression that matched |
+| **Recovery mode** | See [Alert recovery](#alert-recovery) below |
+| **Recovery condition** | Recover after N consecutive normal checks; defaults to 1 |
+
+### Trigger mode: consecutive vs cumulative
+
+| Trigger mode | Meaning | Trigger condition sentence |
+|--------------|---------|----------------------------|
+| **Consecutive** (default) | Alerts after the set number of consecutive matches | `alert after N consecutive checks all match` — the rule alerts only after N consecutive checks meet the condition, where N is the **Matches** count, default 3 |
+| **Cumulative** | Alerts when enough of the last checks match, even if not consecutive | `alert once N of the last M checks match` : the rule alerts when N of the last M checks meet the condition. M is the **Checks** count, which defaults to `max(Matches, 5)` when you switch to cumulative |
+
+- Under Cumulative, the match count cannot exceed the check count, and neither can exceed 10000
+
+<Note>
+**Cumulative matching requires alert engine `v0.69.0` or later.** Older engines evaluate it as consecutive matching, so alerts may be delayed or missed.
+</Note>
+
+### Alert recovery
+
+The available recovery modes depend on the check mode:
+
+| Tab | Recovery mode |
+|-----|---------------|
+| **Threshold evaluation** | `Recovery when no thresholds are triggered` (default), `Recovery only when conditions are met` (requires an extra recovery expression), `Recovery when expression finds data` (requires a recovery query statement), `Keep the alert active until it is closed manually` |
+| **Data exists** | `Recover if no data` (default), `Recover when results found` (requires a recovery query statement), `Keep the alert active until it is closed manually` |
+| **Missing data** | For `Alert when all queries return no data` the recovery mode is fixed to "Recovers automatically once any query returns data again". For `Alert if previously found data is now missing` you can choose `End automatically when data reappears` (default), `End when data reappears or the timeout expires` (requires an **Automatic close timeout** in seconds, minimum 1), or `Manual close only` |
+
+With `Recovery when no thresholds are triggered` or `Recovery only when conditions are met`, threshold evaluation also offers **Also count a check as normal when the alert object returns no data**. Use it when alert objects disappear, for example when a Pod is deleted or a grouped query returns no row while things are healthy:
+
+- An alert object is identified by the full values of its label fields. A check counts as normal only when every query referenced by the alert conditions succeeds and none of them returns the object; if only some queries return it, the count neither grows nor resets
+- These checks share the consecutive count in **Recovery condition** with checks where the thresholds clear; the count resets when the object returns and triggers a threshold again
+- Failed or timed-out queries, and results over the row limit, never count as normal
+- When an alert recovers because its object disappeared, the recovery event carries the label `__alert_rule_recovery_reason=data_absent`, and its values are the ones from the last alert
+- New rules have it checked by default. Existing rules keep their behavior until you check it on the edit page; after that, alerts that could not recover before recover in later checks
+- To alert on the disappearance itself, also enable the Missing data check; the two work independently
+
+<Note>
+**This option requires alert engine `v0.77.0` or later.** For an enabled rule with this option checked, saving or enabling it is rejected if any cluster the rule matches has an older engine or no registered engine; upgrade the engine or uncheck the option to save.
+</Note>
+
+## Detection frequency and effective time
+
+![Detection frequency & effective time](https://docs-cdn.flashcat.cloud/imges/mon/0980d71a653985a1706243fc6795685e.png)
+
+| Config Item | Description |
+|--------|------|
+| **Detection Frequency** | Usually periodic detection; also supports `cron` expressions (down to seconds) and the `@every` shorthand. Defaults to `@every 15s`; pick a preset from the dropdown or type your own |
+| **Query Time Offset** | Sets the query time offset (in seconds) to handle data source ingestion lag. For example, setting it to 60 shifts the query window back by 60 seconds, ensuring data has been fully written before querying. Only applies to Prometheus, Loki, VictoriaLogs, SLS, and Tencent CLS data sources |
+| **Rule Timezone** | The timezone in which the rule executes. It controls how `cron` schedules and **Effective Time** windows are interpreted. Defaults to `Asia/Shanghai`. Must be a valid IANA timezone name such as `Asia/Shanghai`, `UTC`, `Europe/London`, or `America/New_York` |
+| **Effective Time** | Time period when the alert rule is effective; alerts will not trigger outside this period. Time windows are evaluated in the **Rule Timezone** above. You can add several windows, each made of weekdays (multi-select) and a start / end time (`HH:mm`). Defaults to all day, every day |
+
+<Warning>
+**Timezone rules**:
+
+- **Rule Timezone** only accepts IANA timezone names. Shortcuts and offsets such as `Local`, `UTC+8`, `CST`, or `GMT+8` are rejected.
+- **`cron` expressions must not start with `CRON_TZ=` or `TZ=`**. Some open-source cron systems embed the timezone in the cron string, for example `CRON_TZ=Asia/Shanghai 0 0 * * *`. If you migrate from one, remove the prefix and set the timezone in **Rule Timezone** instead.
+
+**cron expression format rules**:
+
+- `cron` expressions must be **6-field second-level expressions**, in the order seconds, minutes, hours, day of month, month, day of week. 5-field forms (for example `*/5 * * * *`) are rejected; add the seconds field (for example `0 */5 * * * *`).
+- The `@every` shorthand is supported, for example `@every 30s` for a check every 30 seconds. The duration must be a **whole number of seconds of at least 1 second**. Combined durations such as `@every 1m30s` are accepted, while `@every 0s`, `@every 1500ms`, or any sub-second or non-whole-second value is rejected.
+- When editing an older rule, a detection frequency that does not follow these rules must be fixed before saving.
+</Warning>
+
+<Note>
+The repeat notification maximum count and interval, and the match and recovery counts of every check mode, must all be at least 1; otherwise the rule does not run.
+</Note>
+
+## Event configuration
+
+Event configuration runs from the channel through the notes description and repeat notification settings to two flat subsections, custom fields and related queries.
+
+| Config Item | Description |
+|--------|------|
+| **Channel** | Specify a channel in Flashduty On-call; if not specified, delivery follows integration routing rules |
+| **Notes Description** | Unstructured text field; supports variable references to help responders quickly locate issues |
+| **Repeat Notification** | Continues notifying when alert is not recovered; configurable interval and maximum count (default 10000) |
+| **Custom Fields** | Similar to `annotations` in Prometheus; can attach dashboard URLs, SOP URLs, and so on. Click `+` next to the heading and fill in **Field name** and **Field value** in the dialog; the fields you add are listed as `key=value` tags — click a tag to edit it, click the × on it to delete it, and a field name cannot be empty or repeated |
+| **Related Query** | A separate subsection with its own add button; the result is not used for threshold evaluation, but can be referenced as a variable in the notes (for example, attach log samples). When a related query fails to render, run, or read its fields on the alert engine, its result is left out of the `__alert_rule_relate_values` label and each failure is written to the `__alert_rule_relate_query_error` label as one "query name: error" line |
+
+<Note>
+The maximum notification count does not represent the number of message reminders end users receive. Because alert events generated by Monitors are delivered to On-call, they may be grouped and noise-reduced; the final send count depends on On-call configuration.
+</Note>
+
+## Investigation entries
+
+Section 6 configures **investigation entries**: it wires each alert straight to a dashboard view or to an initial query that is already written, so a responder can see the chart or query the data in one jump.
+
+| Config Item | Description |
+|--------|------|
+| **Add dashboard entry** | Pick a dashboard and target the whole dashboard, a tab, a section or a panel, setting the values of that dashboard's template variables |
+| **Add query entry** | Store an initial query (data source + query type + query + query parameters) that runs on the alert event's own data source by default |
+| **Purpose** | One sentence on what this entry helps confirm; optional |
+| **Time range** | "N min before the alert to M min after", anchored on the alert event time. Dashboard entries default to 60 minutes before and 0 after; the range applies to every panel on the dashboard page and ends at the alert time. Query entries default to 60 minutes before and 30 after |
+
+You can add up to 20 entries and drag them into any order (order only affects display). The eye icon on an entry opens a **preview**: entries without template variables are previewed from the current form and the current time, and entries with template variables from the snapshot of one of the rule's real alerts. Entries take effect when you save the rule and are rendered into a snapshot delivered with the alert event, so editing the rule does not change alerts already produced.
+
+<Warning>
+Saving investigation entries requires every alert engine instance in the cluster to be `v0.75.3` or later; otherwise the save is rejected.
+</Warning>
+
+For the field reference, template variables, validation limits and snapshot semantics, see [Investigation entries](/en/monitors/alert-rules/investigation-entries).
+
+## Rule list
+
+<Tip>
+The search box in the alert rules list supports filtering by rule name, rule ID, or labels for quick navigation. You can also add `?rule_id=<ID>` to the URL: the list opens filtered to that ID within the current group, showing only the matching rule, and the parameter is then removed from the address bar.
+</Tip>
+
+Two columns describe where a rule stands: the **Status** column is the rule's runtime status (its health; the values are in **Rule runtime details** below), and clicking the status label opens the runtime details drawer. The **Active alerts** column is how many active alerts the rule currently has, shown in red when the count is above 0.
+
+Click the number in the **Active alerts** column to switch to the **Active alerts** tab, filtered by that rule. It lists the active alerts that the rule currently produces. Historical alert events can be viewed in On-call. See [Active alerts](/en/monitors/alert-rules/active-alerts) for details.
+
+## Rule runtime details
+
+Every row in the alert rules list provides runtime introspection. Click **Runtime Details** in the row action menu (`⋮` at the end of the row; the menu items are Runtime details, Clone, Move, Version history, and Delete) to open the rule runtime details drawer. Use it to judge the rule's execution health and troubleshoot quickly.
+
+At the top of the drawer you can pick which **data source** to inspect (a rule may be bound to multiple data sources). The viewer's query (`readonly`) permission on each data source filters this picker. Data sources without that permission are dropped silently, so a restricted viewer may see fewer data sources than the rule binds. Below are two tabs:
+
+### Current status
+
+- **State badge**: the rule's current runtime status; see the table below for each value and what to do about it. The **Status** column in the list shows this badge
+- **Latest execution**: execution time, duration, outcome, query result count, last success, consecutive failures, runtime phase, and status update time
+- **Alert instances**: total active instances by check mode (threshold evaluation, data exists, and missing data), plus the kinds of events most recently produced (alert fired, repeat notification, alert recovered, alert closed)
+- **Alert engine & config**: the alert engine cluster, alert engine instance, version, online status, and last heartbeat of the alert engine responsible for this rule
+
+| State | When it appears | What to do |
+|-------|-----------------|------------|
+| **Running normally** | The latest execution succeeded | Nothing |
+| **Execution error** | The latest execution failed, usually because of the query statement or the data source | Open Runtime details to see the error type and error summary, then fix the query or the data source |
+| **Waiting for runtime status** | No runtime status has been reported yet: the rule may still be rolling out, waiting for its first execution, or the current engine version does not report runtime status | Refresh later; if it stays this way, check the alert engine version and the rule rollout |
+| **Status is stale** | No new runtime status arrived past the expected execution cycle | Check whether the alert engine responsible for the rule is online, and whether the rule's data source is reachable |
+| **Outside effective time** | The rule is currently outside its **Effective time** windows, so the alert engine skips it by design | Nothing; you are looking at the last known result, not a failure |
+| **No matching data source** | The rule matches no available data source, for example because the data source was deleted or renamed | Select a data source again in the rule's data source settings |
+| **Edge offline** | The alert engine instance responsible for this rule stopped sending heartbeats | Check the alert engine process and its network connection to the SaaS |
+| **Configuration pending** | The rule configuration is saved but the alert engine has not reported the new version yet; until the change propagates it may still run the old configuration | Wait for the rollout; if it stays this way, check alert engine sync |
+| **Rule disabled** | The rule is disabled | Re-enable the rule if you still need it monitored |
+| **Unknown runtime status** | A runtime status this console version does not recognize | Refresh the page, or upgrade the console to the latest version |
+
+When the state is `Waiting for runtime status` or `Status is stale`, the drawer explains why. For `Outside effective time` and `Rule disabled`, the drawer points out that you are looking at the last known result. For `Configuration pending`, it explains that the alert engine may still be running the old configuration. If the responsible alert engine is offline or an execution error occurred, a prominent banner shows the error type and error summary.
+
+### Execution history
+
+Query the rule's historical execution records by time range (last 15 minutes, 1 hour, 4 hours, or 1 day; up to 24 hours back). Each record carries an execution summary badge: `Execution failed`, `Event produced`, `Alert recovered`, or `Periodic sample`. Expanding a record shows the log ingestion time, alert engine instance and cluster, runtime phase, consecutive failures, active instance counts per check mode, events produced, and the error summary.
+
+<Note>
+Execution history only records key execution summaries (errors, events, recoveries, and periodic samples) — not every evaluation is guaranteed to produce a record. When more than 200 records match, only the latest 200 are shown; narrow the time range to see more.
+</Note>
+
+## Batch operations
+
+The alert rules list supports multi-select for batch operations, improving rule management efficiency.
+
+### Batch enable/disable/delete
+
+After selecting multiple rules in the list, you can batch enable, batch disable, or batch delete them in one click.
+
+<Note>
+Disabling or deleting rules, one at a time or in bulk, ends the related active alerts in Monitors but sends no recovery event to On-call: incidents already delivered to On-call stay open until someone closes them. Use the row switch to disable a single rule, or **Delete** in its `⋮` menu.
+</Note>
+
+### Batch edit fields
+
+After selecting multiple rules, click **Batch Update** to uniformly modify the following 10 fields:
+
+| Batch-editable Field | Description |
+|----------------------|-------------|
+| **Additional Labels** | Uniformly set labels; supports both incremental modification and full replacement |
+| **Data Sources** | Uniformly switch data sources |
+| **Detection Frequency** | Uniformly adjust the detection period |
+| **Rule Timezone** | Uniformly switch the IANA timezone of the alert rule |
+| **Effective Time** | Uniformly configure effective time periods |
+| **Query Time Offset** | Uniformly set the query time offset. Available only when all selected rules use data sources that support it (Prometheus, Loki, VictoriaLogs, SLS, Tencent CLS) |
+| **Custom Fields** | Uniformly configure annotations; supports both incremental modification and full replacement |
+| **Channel** | Uniformly specify the channel for alert delivery |
+| **Repeat Notification Config** | Uniformly set repeat notification interval and count |
+| **Debug Log** | Uniformly enable or disable debug logging |
+
+How to use: In the batch update panel, first select the field to modify, then set the new value, and click OK to apply the change to all selected rules.
+
+When batch updating **Additional Labels** and **Custom Fields**, a dedicated metadata editor provides two update modes:
+
+| Update Mode | Description |
+|-------------|-------------|
+| **Incremental modification** (default) | Add "Set" or "Delete" operations, each with a key and value. Keys and values autocomplete from the selected rules, with a preview of how many rules each operation affects. Custom field keys must not start with `$`, and keys in one batch must be unique |
+| **Full replacement** | Completely replaces the field on each rule with the content below, deleting any other content on each rule that is not filled in here |
+
+<Warning>
+Modifying additional labels may affect alert routing, grouping, or noise reduction. Proceed with caution.
+</Warning>
+
+If some rules fail to update, you see the number of failures and the first reason; the other rules are still updated.
+
+### Batch move
+
+After selecting multiple rules, click **Move** above the list to move them to another folder. To move one rule, choose **Move** in the `⋮` menu at the end of its row.
+
+Both open the **Move to another folder** dialog: pick the target folder in the tree, or filter by name in **Search folders** first. **Confirm** stays disabled while the selected folder is the current one. After a successful move the list refreshes. See [Folder management](/en/monitors/folders/folders).
+
+## Import alert rules
+
+**Menu Entry**: Alert Rules → Import
+
+Import works by file upload: upload one rule file at a time (`.yaml`, `.yml`, or `.json`, up to 1 MB). The system automatically detects the file format and shows pre-import check results. Four source formats are supported:
+
+| Source Format | Description |
+|---------------|-------------|
+| **Flashduty Rules YAML** | Native Flashduty rule bundle, identical in format to what the export feature produces; suitable for migrating rules across tenants or environments |
+| **Flashduty rule JSON** | The legacy Flashduty rule JSON format |
+| **Prometheus Rules YAML** | Standard Prometheus alert rule YAML, rooted at `groups`; YAML indentation must be correct |
+| **Nightingale rule JSON** | Nightingale v6-v9 rule JSON |
+
+### Import configuration
+
+After uploading the file, you can configure:
+
+- **Duplicate rule handling**: `Skip rules with the same name` (default) or `Create a copy`. The first skips rules whose names exist in the target group; the second creates copies of them
+- **Enable rules after import**: only shown for the Flashduty Rules YAML source. When off, imported Flashduty rules stay disabled
+- **Channel**: the channel for alert event delivery
+
+### Pre-import check results
+
+After parsing the file, the system shows a pre-import check table listing, rule by rule, the import name, status (`Ready to import` / `Skipped` / `Invalid`), and explanation. Select the rules to import (all importable rules are selected by default) and submit.
+
+<Note>
+Nightingale rules are imported disabled and must be checked for data source matching and conversion warnings before you enable them manually. The conversion works as follows. Doris data sources map to MySQL. Only the highest-severity alert condition is kept. Level inhibition, query correlation, and notification target configs aren't preserved. Recovery semantics are approximated with Flashduty rule capabilities. The `Local` timezone becomes `Asia/Shanghai`, and all-day effective time becomes `00:00-23:59`. When the evaluation interval is missing, durations are converted at a 15-second interval.
+</Note>
+
+### Import results
+
+After submission, the system reports the import result: counts of imported, skipped, and invalid rules. If nothing was imported, review the reasons in the dialog and select again.
+
+## Export alert rules
+
+Select the rules to export in the list and click the **Export** button. The system displays the full configuration of the selected rules in YAML format (a Flashduty Rules YAML bundle). You can:
+
+- **Download**: Save the YAML as an `alert-rules.yaml` file
+- **Copy**: Copy the YAML content to the clipboard
+
+The exported YAML can be used for backup or imported into other environments through file upload — see [Import alert rules](#import-alert-rules).
+
+## Rule version history
+
+Click **Version history** in the `⋮` menu at the end of a row in the alert rules list to see how the rule has been modified (requires update permission on the rule).
+
+### View version history
+
+The version history list shows:
+
+| Column | Description |
+|--------|-------------|
+| **Version** | The version number; the latest one carries a "Current version" badge |
+| **Operator** | The user who performed the change |
+| **Operation time** | When the change occurred |
+
+### Version comparison
+
+Select two versions in the version history list and click the **Compare** button. The system displays the differences between the two versions in JSON diff format, helping you quickly understand which configuration items were modified.
+
+## Related pages
+
+<CardGroup cols={2}>
+  <Card title="Get started" icon="rocket" href="/en/monitors/quickstart/quickstart">
+    The complete flow from installing the engine to your first working alert rule.
+  </Card>
+  <Card title="Query result field mapping" icon="table" href="/en/monitors/alert-rules/query-result-fields">
+    How table query results map to value fields, label fields, and additional information.
+  </Card>
+  <Card title="Description template" icon="text" href="/en/monitors/alert-rules/description-template">
+    Go template variables and functions for the notes description of an alert event.
+  </Card>
+  <Card title="Investigation entries" icon="magnifying-glass" href="/en/monitors/alert-rules/investigation-entries">
+    Entry fields, template variables, validation limits, and snapshot semantics.
+  </Card>
+</CardGroup>

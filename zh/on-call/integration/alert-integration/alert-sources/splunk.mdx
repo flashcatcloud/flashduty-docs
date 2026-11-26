@@ -55,7 +55,7 @@ keywords: ["告警集成", "Splunk 告警事件", "监控告警", "数据接入"
 
 在 `Search & Reporting` 应用中，搜索想要监控的关键字（例如 error），在右上角的另存为菜单中选择 `Alert`，将搜索配置为监控项。
 
-<img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/splunk-1.png" />
+<img alt="Splunk 搜索结果页的 Save As 菜单中选 Alert" width="600" src="https://download.flashcat.cloud/flashduty/doc/splunk-1.png" />
 
 在弹出的配置框中填写名称，`set up` 和 `Triggering conditions` 部分按实际情况配置。
 
@@ -71,9 +71,9 @@ keywords: ["告警集成", "Splunk 告警事件", "监控告警", "数据接入"
 
 填写后点击 `Save`，完成告警配置。
 
-<img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/splunk-2.png" />
+<img alt="Save as Alarm 配置框的触发动作列表中选择 Webhook" width="600" src="https://download.flashcat.cloud/flashduty/doc/splunk-2.png" />
 
-<img alt="drawing" width="600" src="https://download.flashcat.cloud/flashduty/doc/splunk-3.png" />
+<img alt="Webhook 动作的 URL 中填写 Flashduty 推送地址" width="600" src="https://download.flashcat.cloud/flashduty/doc/splunk-3.png" />
 
 Splunk Enterprise 9.0 及以上、Splunk Cloud Platform 8.2203 及以上要求 Webhook 地址位于 webhook allow list 中，否则请求不会发出。需由 `admin` 角色或具有 `edit_webhook_allow_list` 权限的用户添加，见 [Splunk 官方文档](https://help.splunk.com/en/splunk-enterprise/alert-and-respond/alerting-manual/9.4/configure-webhook-allow-list)。
 
@@ -92,8 +92,52 @@ Splunk 的 Webhook 动作没有测试按钮，等待该 Alert 按其触发条件
 </Step>
 </Steps>
 
+## 推送内容
+
+Splunk 的 Webhook 动作每次触发推送一个 JSON 对象，Flashduty 读取以下字段：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `sid` | 搜索任务 ID | Alert Key |
+| `search_name` | 搜索或告警名称 | 标题中的搜索名称，标签 `check` |
+| `app` | 搜索所在的应用 | 标题中的应用名，标签 `app` |
+| `result._raw` | 命中事件的原文 | 告警描述 |
+| `results_link` | 搜索结果页面的链接 | 标签 `results_link` |
+| `result.source` | 日志来源 | 标签 `source` |
+| `result.sourcetype` | 来源类型 | 标签 `source_type` |
+| `result.splunk_server` | 索引器 | 标签 `splunk_server` |
+
+告警标题为 `app / search_name`，例如 `search / test_alert`。`result` 中的其他字段（例如 `host`、`index` 和自定义字段）不会写入标签。
+
+## Alert Key
+
+Flashduty 使用 `sid` 作为 Alert Key。同一次搜索任务的多次推送携带相同的 `sid`，会合并到同一条告警；计划告警每次触发都是一次新的搜索任务，`sid` 不同，因此各自生成一条告警。
+
+修改搜索名称、应用或 `result` 中的任何字段都不会改变 Alert Key；`sid` 为空时 Flashduty 返回参数错误。
+
 ## 状态和告警等级
 
 <div className="md-block">
 由于 Splunk 的告警事件没有区分严重程度，所以 Splunk 推送到 Flashduty 的所有告警事件状态都为 Warning 且没有恢复事件。在接收该集成的协作空间开启超时自动关闭（**Flashduty 控制台 › 协作空间 › 配置 › 设置 › 高级配置**），建议 24 小时，见[超时自动关闭](/zh/on-call/channel/create-edit)。
 </div>
+
+## 标签
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 搜索或告警名称 `search_name` |
+| `app` | 应用 `app` |
+| `results_link` | 搜索结果链接 `results_link` |
+| `source` | 日志来源 `result.source`，不是固定的 `splunk` |
+| `source_type` | 来源类型 `result.sourcetype` |
+| `splunk_server` | 索引器 `result.splunk_server` |
+
+值为空的标签不会写入。
+
+## 排查问题
+
+- **每次触发都生成一条新告警**：Alert Key 取自搜索任务 ID，计划告警每次触发都是新的搜索任务，这是预期行为；Splunk 不发送恢复事件，请在该协作空间开启超时自动关闭
+- **告警标题中出现 `$app`**：推送缺少 `app` 字段，例如用脚本直接调用推送地址而不是通过 Splunk Alert 动作；标题中的占位符会原样保留
+- **告警没有恢复**：Splunk 的 Webhook 动作只发送触发事件，不发送恢复事件；请在接收该集成的协作空间开启超时自动关闭
+- **Splunk 没有发出请求**：Splunk Enterprise 9.0 及以上、Splunk Cloud Platform 8.2203 及以上要求把推送地址加入 webhook allow list，添加后重新触发
+- **Flashduty 返回参数错误**：请求体必须是合法的 JSON 对象，且包含非空的 `sid`

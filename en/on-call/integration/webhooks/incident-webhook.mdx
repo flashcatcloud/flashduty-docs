@@ -10,8 +10,6 @@ Configure incident Webhook. When specific operations occur on incidents (such as
 
 ## Event types
 
-Flashduty currently supports the following event types and may add more later.
-
 <div className="md-block">
 
 | Event Type | Description |
@@ -40,6 +38,7 @@ Flashduty currently supports the following event types and may add more later.
 | i_wi_assignees | Update action or follow-up assignees (currently only subscribable with the API) |
 | i_wi_completed | Complete action or follow-up (currently only subscribable with the API) |
 | i_wi_converted | Convert action to follow-up (currently only subscribable with the API) |
+| i_wi_auto_converted | Close-time batch conversion of unfinished actions to follow-ups (currently only subscribable with the API) |
 
 </div>
 
@@ -62,7 +61,7 @@ POST, Content-Type:"application/json"
 | event_time | int64 | Yes | Event timestamp in `milliseconds` |
 | event_type | string | Yes | Event type, enum values see [Event Types](#EventTypes) |
 | event_id | string | Yes | Event ID, `the same event may retry multiple times due to timeout, receiver needs to deduplicate` |
-| event_detail | object | No | Event details, the structure varies with event_type, see [Event details](#EventDetail); for event types not listed, it is always an empty object `{}` |
+| event_detail | object | No | Event details, the structure varies with event_type, see [Event details](#EventDetail); for event types not listed on this page, it may be an empty object or another structure |
 | person | [Person](#Person) | No | Operator, only exists for human actions |
 | incident | [Incident](#Incident) | Yes | Incident details |
 
@@ -88,7 +87,7 @@ acknowledged_at | int64 | No | Acknowledgment time
 **AssignedTo**:
 Field|Type|Required|Description
 :-:|:-:|:-:|:---
-person_ids | []int64 | No | List of directly assigned person IDs; present when assigned directly to specific people
+person_ids | []int64 | No | List of directly assigned person IDs; present when assigned directly to people or teams (team members are expanded here)
 escalate_rule_id | string | No | Escalation rule ID; present when assigned by an escalation rule
 escalate_rule_name | string | No | Escalation rule name
 layer_idx | int | Yes | Current escalation layer, starting from 0
@@ -261,6 +260,9 @@ The structure of `event_detail` varies with `event_type`; the field definitions 
 | comment | string | No | Merge note |
 | source_incidents | [][IncidentShort](#IncidentShort) | No | List of the merged (source) incidents |
 | target_incident | [IncidentShort](#IncidentShort) | No | Target incident after the merge |
+| title | string | No | Incident title after the merge; returned only when the merge changed the target incident title |
+| remove_source_incidents | bool | No | Whether the source incidents are deleted after the merge; returned only when true |
+| source_responders | []int64 | No | Responder IDs of the merged (source) incidents |
 
 **i_comm**:
 
@@ -335,6 +337,15 @@ The structure of `event_detail` varies with `event_type`; the field definitions 
 | to_type | string | Yes | Type after conversion, enum values: action, follow_up |
 | status | string | No | Status after conversion |
 | post_mortem_id | string | No | Associated post-mortem ID |
+
+**i_wi_auto_converted**:
+
+| Field | Type | Required | Description |
+| :-------- | :------: | :--: | :--- |
+| count | int | Yes | Number of actions converted in this batch |
+| work_item_ids | []string | Yes | IDs of the converted actions |
+| titles | []string | Yes | Titles of the converted actions |
+| post_mortem_id | string | Yes | Associated post-mortem ID; an empty string when there is none |
 
 ### Request response
 
@@ -429,13 +440,13 @@ Go to **Integration Center** → **Webhook** → Add or edit an **Incident Webho
 
 ### Basic settings
 
-Enter the integration name and description for easy management.
+Enter the webhook **Name** and description for easy management.
 
 ### Webhook settings
 
 | Config Item | Description |
 | :--- | :--- |
-| **Managing Team** | Select the team that manages this integration; only team members can edit the integration configuration |
+| **Team** | Optional. When set, only members of that team, the integration creator, and account administrators can edit this integration; when not set, any member with the integration management permission can edit it |
 | **Endpoint** | HTTP/HTTPS address to receive callbacks, must start with `http://` or `https://` |
 | **TLS Verification** | Enabled by default. When disabled, TLS certificate verification of the target server is skipped; suitable for test environments or self-signed certificates |
 | **Headers** | Custom request headers in Key-Value format; multiple headers supported. Saved values are treated as secrets and read back as `******` in the editor: leaving one untouched keeps the saved value, entering a new one overwrites it. If you change **Endpoint**, every Header still showing `******` must be re-entered, otherwise saving fails with **The endpoint changed. Enter this value again.**, so a saved secret is never sent to a new address |
@@ -446,9 +457,11 @@ Enter the integration name and description for easy management.
 Disabling TLS certificate verification may expose you to man-in-the-middle attacks. Only disable it in test environments or when using self-signed certificates.
 </Warning>
 
-### Custom request body
+<span id="custom-request-body"></span>
 
-By default, the system pushes the complete JSON data following the [Payload structure](#request-payload) described above. If your receiver requires a specific data format, you can use a **custom request body** to reorganize the push content.
+### Custom Payload
+
+By default, the system pushes the complete JSON data following the [Payload structure](#request-payload) described above. If your receiver requires a specific data format, you can use a **Custom Payload** to reorganize the push content.
 
 Use `{{field.path}}` syntax to reference any field from the default Payload. The system replaces variables with actual values at push time.
 
@@ -486,7 +499,7 @@ If a variable path does not exist in the default Payload, the system keeps the o
 
 ### Value mapping (value_mapping)
 
-In the custom request body, you may need to convert Flashduty field values to the format expected by the receiving system. **Value mapping** automatically transforms values during variable resolution.
+In the Custom Payload, you may need to convert Flashduty field values to the format expected by the receiving system. **Value mapping** automatically transforms values during variable resolution.
 
 You configure value mapping per **field path**, with each path containing a `source value → target value` mapping table.
 
@@ -509,7 +522,7 @@ Convert severity and progress to custom values for the receiving system:
 }
 ```
 
-Used with the following custom request body:
+Used with the following Custom Payload:
 
 ```json
 {
@@ -576,7 +589,13 @@ Click **View Details** on a record to see the complete request and response info
    - Flashduty pushes events for the same incident in chronological order, but retries can deliver them out of order
    - Services can filter based on event_time; after receiving a later event, they can drop earlier ones. Each push carries the latest complete information, so occasional event loss is tolerable
 
-4. **Trusted IP whitelist for push source?**
+4. **Does Flashduty pause pushes after repeated failures to the same endpoint?**
+
+   - Yes. After 50 failures to the same endpoint within 1 minute, Flashduty pauses pushes to that address for 5 minutes
+   - Events during the pause are skipped entirely: no retry, no replay, and no record in the invocation history
+   - The pause is per endpoint, so integrations that share an endpoint pause together; to resume immediately, switch to another endpoint (edit the integration, or create a new integration with a new address)
+
+5. **Trusted IP whitelist for push source?**
    {/* console:
    - {ip_whitelist}
    - We may update this list, so check it regularly

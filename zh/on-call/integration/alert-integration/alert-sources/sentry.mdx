@@ -108,6 +108,54 @@ Sentry 提供了两类告警机制：Issue Alerts 和 Metric Alerts。Issue Aler
 </Step>
 </Steps>
 
+## 推送内容
+
+Sentry 的 Internal Integration 推送 JSON 对象，Flashduty 按 `data` 中出现的对象解析，可能是以下三种之一：
+
+**指标告警（`data.metric_alert`）**
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `action` | 推送动作 | 告警状态和等级 |
+| `data.metric_alert.id` | 指标告警规则 ID | Alert Key |
+| `data.description_text` | 告警描述文本 | 告警标题 |
+| `data.web_url` | 告警链接 | 标签 `web_url` |
+| `data.metric_alert.projects` | 涉及的项目 | 标签 `projectName`，多个项目用逗号分隔 |
+
+**Issue 告警（`data.event`）**
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `action` | 推送动作 | 告警等级 |
+| `data.event.issue_id` | Issue ID | Alert Key |
+| `data.event.title` | Issue 标题 | 告警标题 |
+| `data.triggered_rule` | 触发规则名称 | 标签 `check` |
+| `data.event.culprit` | 出错位置 | 标签 `culprit` |
+| `data.event.environment` | 环境 | 标签 `environment` |
+| `data.event.location` | 位置 | 标签 `location` |
+| `data.event.message` | 错误消息 | 标签 `message` |
+| `data.event.url` | Issue 详情链接 | 标签 `detail_url` |
+| `data.event.web_url` | 项目内链接 | 标签 `web_url` |
+| `data.event.tags` | 事件标签数组 | 每个二元组写成同名标签 |
+
+**Issue 已解决（`data.issue`）**
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `action` | 推送动作，只接受 `resolved` | 告警恢复 |
+| `data.issue.id` | Issue ID | Alert Key |
+| `data.issue.title` | Issue 标题 | 告警标题 |
+| `data.issue.project.name` | 项目名称 | 标签 `projectName` |
+| `actor.name` | 操作人 | 标签 `operator` |
+
+指标告警不读取 `data.description_title`，Issue 告警不读取 `data.event.level`。`data` 中三种对象都没有时，Flashduty 返回参数错误。
+
+## Alert Key
+
+Flashduty 按推送的对象取 Alert Key：指标告警用 `data.metric_alert.id`，Issue 告警用 `data.event.issue_id`，Issue 已解决事件用 `data.issue.id`。
+
+同一个 Issue 的 Issue 告警和已解决事件使用同一个 Issue ID，因此已解决事件会关闭对应的告警；同一条指标告警规则的多次触发落在同一条告警上。修改标题、等级或事件标签不会改变 Alert Key。
+
 ## 状态和告警等级
 
 <div className="md-block">
@@ -121,6 +169,27 @@ Sentry 提供了两类告警机制：Issue Alerts 和 Metric Alerts。Issue Aler
 
 </div>
 
-## Alert Key 与恢复
+## 标签
 
-Flashduty 按 Sentry 推送的对象计算 Alert Key：指标告警（Metric Alert）用 `metric_alert.id`，Issue 告警用 `event.issue_id`，issue 已解决事件用 `issue.id`。`action` 为 `resolved` 的推送使对应告警恢复；`action` 不在上表中的推送（如 created、assigned）会被拒绝。
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 触发规则名称 `data.triggered_rule`，仅 Issue 告警 |
+| `culprit` | `data.event.culprit` |
+| `environment` | `data.event.environment` |
+| `location` | `data.event.location` |
+| `message` | `data.event.message` |
+| `detail_url` | `data.event.url` |
+| `web_url` | 指标告警的 `data.web_url`，或 Issue 告警的 `data.event.web_url` |
+| `projectName` | 指标告警的项目列表（逗号分隔），或已解决事件的 `data.issue.project.name` |
+| `operator` | 已解决事件的 `actor.name` |
+| 事件标签中的键 | Issue 告警的 `data.event.tags`：每个二元组的第一个值是标签名，第二个值是取值 |
+
+指标告警只写 `web_url` 和 `projectName`。`data.event.tags` 与内置标签同名时（例如 `environment`），事件标签的取值会覆盖内置值。
+
+## 排查问题
+
+- **告警没有恢复**：Issue 已解决事件只接受 `action` 为 `resolved` 的推送；在 Sentry 的 issue 列表手动标记 resolved 后仍不恢复时，确认 Internal Integration 勾选了 `issue`
+- **Flashduty 返回参数错误**：`action` 取值不受支持。Issue 告警只接受 `critical`、`warning` 和 `triggered`；对 `data.event` 推送 `resolved` 会被拒绝，恢复要走 `data.issue`
+- **告警等级都是 Warning**：Issue 告警的等级取自 `action`，`data.event.level` 不参与；Sentry 的 Issue 告警动作通常是 `triggered`，因此映射为 Warning
+- **内置标签被覆盖**：`data.event.tags` 中与内置标签同名的键会覆盖内置值，路由规则请按实际取值配置
+- **没有产生告警**：确认告警规则的动作为 **Send a notification via** 并选择了 `Flashduty`；`data` 中既没有 `metric_alert`、`event` 也没有 `issue` 的推送会被拒绝

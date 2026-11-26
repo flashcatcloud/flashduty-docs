@@ -22,7 +22,7 @@ AI SRE 提供两类运行环境：
 
 不手动指定时，系统按以下优先级为新会话挑选运行环境：首先使用会话绑定团队名下在线的自托管 Runner；团队下没有时，改用共享范围（即账户级）内在线的 Runner；两者都没有时，使用云端 Sandbox。选择在会话第一条消息发送时确定，之后不会改变，详见[在会话中选择环境](#在会话中选择环境)。
 
-您也可以在会话输入框的环境选择器中手动固定：强制使用云端 Sandbox，或固定使用某个具体 Runner。
+您也可以在会话输入框的环境选择器中手动固定：用云端环境（默认配置或某个云端环境模板）启动 Sandbox，或固定使用某个具体 Runner。
 
 <Note>
 控制台里的记录称为 **环境**（Environment），跑在机器上的进程称为 **Runner**。一个自托管环境对应一个 Runner 进程；云端 Sandbox 由系统按会话管理。
@@ -65,7 +65,11 @@ AI SRE 提供两类运行环境：
 环境变量以明文形式对所有使用该云端环境模板的人可见——请勿在这里填写密钥或凭据。
 </Warning>
 
-**平台保留的环境变量名。** 以下变量由平台注入，模板里设置它们会在保存时被拒绝：`FLASHDUTY_APP_KEY`、`FLASHDUTY_BASE_URL`、`FLASHDUTY_DOCS_URL`、`FLASHDUTY_CONSOLE_URL`、`PATH`、`HOME`，以及 GitHub（`GH_TOKEN*`、`GIT_CONFIG_*`）和 GitLab（`GITLAB_*`、`GLAB_*`）的认证与主机配置变量。
+**平台保留的环境变量名。** 以下变量由平台注入，模板里设置它们会在保存时被拒绝，并提示 `line N: "<名称>" is a reserved variable name`：
+
+- Flashduty 与运行时：`FLASHDUTY_APP_KEY`、`FLASHDUTY_BASE_URL`、`FLASHDUTY_DOCS_URL`、`FLASHDUTY_CONSOLE_URL`、`FLASHDUTY_SESSION_URL`、`PATH`、`HOME`；
+- 认证、主机与 TLS：`GH_TOKEN`、`GH_PROMPT_DISABLED`、`OAUTH_TOKEN`、`CA_CERT`、`SKIP_TLS_VERIFY`，以及 GitLab 的 `GITLAB_TOKEN`、`GITLAB_ACCESS_TOKEN`、`GITLAB_HOST`、`GL_HOST`、`GITLAB_URI`、`GITLAB_API_HOST`、`GITLAB_SSH_HOST`、`GITLAB_SUBFOLDER`；
+- 以 `GIT_CONFIG_`、`GLAB_`、`GH_TOKEN_` 开头的名称同样保留。
 
 `FLASHDUTY_CONSOLE_URL` 是控制台地址，Agent 用它把结论里引用的故障、告警、协作空间、值班表等拼成可点击的链接；没有配置控制台地址时不注入，Agent 改在正文里用资源 ID 指代。它不含密钥，Agent 可以读取。
 
@@ -112,7 +116,7 @@ AI SRE 提供两类运行环境：
 |---|---|---|
 | 名称 | 否 | 在账户范围内唯一，最长 128 字符。留空时，Runner 首次连接并发送心跳后，会自动用机器主机名命名；若主机名重复，会追加环境 ID 后缀。 |
 | 范围 | 是 | 共享范围对整个账户可见；团队范围仅对该团队成员可见和可编辑。范围在创建时固定，之后不能修改；如需迁移，请在目标范围新建环境并重新部署 Runner。见[作用域](#作用域)。 |
-| 标签 | 否 | 用于任务路由的标签，逗号分隔，例如 `linux, docker, gpu`。 |
+| 标签 | 否 | 用于标记和搜索，多个标签用逗号分隔，例如 `linux, docker, gpu`。标签不参与任务分发或环境选择。 |
 
 创建成功后会弹出**接入指引**，包含这个环境的 Token、安装命令、升级命令和卸载命令。列表行里的钥匙按钮或 pending 状态的“查看接入指引”也会打开同一个弹窗。
 
@@ -266,6 +270,8 @@ Runner 启动后会持续发送心跳。列表状态含义如下：
 
 发现新版本时，Runner 会自行下载、校验并替换。手动重跑安装命令也可升级。
 
+需要把版本钉在某一版时，在安装命令里加 `--version <tag>`（等价于环境变量 `VERSION`），例如 `--version v0.0.5`；带同一条命令重跑即可装到该版本。不希望自动升级时，在 Runner 上关掉它：systemd 部署在 `/etc/flashduty-runner/env` 写入 `FLASHDUTY_RUNNER_DISABLE_AUTO_UPDATE=true`，Docker 部署加 `-e FLASHDUTY_RUNNER_DISABLE_AUTO_UPDATE=true`，也可以直接用启动参数 `--disable-auto-update`，重启后生效。关掉之后版本由您自己决定——重跑安装命令（可带 `--version`）才会换版本。
+
 卸载命令也在接入指引里，按安装方式不同：
 
 - **Linux (systemd) / 手动安装**：安装脚本的 `--uninstall`（保留配置卸载）与 `--purge`（清除配置与数据）。
@@ -388,7 +394,8 @@ permission:
 | 选项 | 含义 |
 |---|---|
 | **自动** | 新会话默认值。依次尝试会话绑定团队名下在线的自托管 Runner、共享范围（账户级）在线的 Runner，均不可用时使用云端 Sandbox。 |
-| **云端 Sandbox · 默认** | 强制使用系统托管的云端 Sandbox，忽略自托管 Runner。 |
+| **云端环境 → 默认** | 用系统默认配置启动云端 Sandbox，忽略自托管 Runner。 |
+| **云端环境 → 模板名** | 用该云端环境模板启动云端 Sandbox；共享模板与您所在团队的模板都可选。有创建权限时，分组底部的 **添加云环境…** 可直接新建模板。 |
 | **自托管环境** | 您有权使用的 Runner。离线、从未连接或无团队权限的 Runner 不可选；**性能下降**的 Runner 仍可选，但响应可能变慢。 |
 
 <Warning>
@@ -411,7 +418,7 @@ permission:
 自托管环境使用共享范围和团队范围两级作用域，创建时选定，之后不能修改。可见、可编辑和可创建的规则见[作用域与权限](/zh/ai-sre/context#作用域与权限)。
 
 <Note>
-自动选择 Runner 或按 ID 固定 Runner 时，只会使用共享范围的 Runner，或当前成员所属团队下的团队级 Runner。
+自动选择或按 ID 固定 Runner 时，只会用共享范围的 Runner，或与当前会话所绑定团队相同的团队级 Runner；个人会话（未绑定团队）只会用共享范围的 Runner 和云端 Sandbox。
 </Note>
 
 ## 故障排查
@@ -429,7 +436,7 @@ permission:
   私有化端点的证书未被 Runner 信任。优先把签发该证书的 CA 加入 Runner 所在系统或容器的信任库；如果端点使用自签证书且位于可信私有网络内，也可以按上文说明显式开启 `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY`。systemd 部署需要重启服务，Docker 部署需要用新的环境变量重新创建容器，手动运行的进程需要重新启动。
 </Accordion>
 <Accordion title="会话提示连接超时或无响应" icon="server">
-  如果会话固定到了某个离线 Runner，AI SRE 不会偷偷改派到其他环境。请先恢复该 Runner，或新建会话并选择“自动”或“云端 Sandbox”。如果 Runner 在线但任务失败，多半是 Runner 到目标资源这一段的网络或权限问题。
+  如果会话固定到了某个离线 Runner，AI SRE 不会偷偷改派到其他环境。请先恢复该 Runner，或新建会话并选择 **自动** 或 **云端环境**。如果 Runner 在线但任务失败，多半是 Runner 到目标资源这一段的网络或权限问题。
 </Accordion>
 </AccordionGroup>
 

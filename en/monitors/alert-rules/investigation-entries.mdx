@@ -18,7 +18,7 @@ A rule can hold many investigation entries. Each entry has three parts: the entr
 
 - **An entry is a weak navigation reference.** Saving the configuration and rendering the snapshot never run a query and never read the dashboard. Entries do not participate in alert evaluation, alert identity, instance identity or lifecycle, and they trigger no automatic investigation task.
 - **An entry follows the event's data source.** A rule can match several data sources by type plus name pattern, but each alert event comes from exactly one of them. A query entry runs on the **event's own data source** by default, so the jump lands on the data source that fired the alert rather than on a fixed or default one. You can also name a different data source explicitly (for example to drill into a log data source).
-- **Rendering happens when the alert is ingested.** When an alert is produced, the system renders the entries configured on the rule at that moment — using the event time, the event's raw data labels and the event data source — into a snapshot, which is stored and delivered with the event. The investigation block in the **active alert** detail drawer, the **Investigation** block in an incident's comprehensive info panel (see [Incident details](/en/on-call/incident/search-view-incident#investigation-entries)) and AI SRE all read that same snapshot.
+- **An entry is rendered once, when the alert is accepted.** When an alert is produced, the system renders the entries configured on the rule at that moment — using the event time, the event's raw data labels and the event data source — into a snapshot, which is stored and delivered with the event. The investigation block in the **active alert** detail drawer, the **Investigation** block in an incident's comprehensive info panel (see [Incident details](/en/on-call/incident/search-view-incident#investigation)) and AI SRE all read that same snapshot.
 - **The block has a different name on each side**: it is called **Investigation entries** in Monitors and **Investigation** in incident details, but both render the same event snapshot.
 - **Order affects display only.** Entries can be dragged into any order, but the first one carries no default, primary or recommended meaning, and the order never reaches alert evaluation or lifecycle.
 
@@ -48,8 +48,10 @@ The limit is **20 entries**: once you reach 20 the two add buttons become disabl
 
 | Field | Required | Notes |
 |------|------|------|
-| **Purpose** | No | One sentence on what this entry helps confirm. Single-line plain text; line breaks are replaced with spaces. The console caps the input at 200 characters and the purpose must also be **≤512 bytes**. The purpose is **not** rendered as a template and is **not** part of duplicate identity (two entries that differ only in purpose are still duplicates). It is shown to responders and read by AI SRE to judge each entry's intent |
-| **Time range** | Yes | "**From** N **min before the alert to** M **min after**". A new entry defaults to 60 minutes before and 30 minutes after. Both directions must be non-negative and at least one must be greater than 0 |
+| **Purpose** | No | One sentence on what this entry helps confirm. Shown to responders and read by AI SRE to judge each entry's intent |
+| **Time range** | Yes | Anchored on the alert event time, with a duration before and a duration after it. Both directions must be non-negative and at least one must be greater than 0. A new dashboard entry defaults to 60 minutes before and 0 minutes after; a new query entry defaults to 60 minutes before and 30 minutes after |
+
+**Purpose input limits**: single-line plain text; line breaks are replaced with spaces. The purpose is **not** rendered as a template and is **not** part of duplicate identity — two entries that differ only in purpose are still duplicates. See [Validation and limits](#validation-and-limits) for the character and byte limits.
 
 Time range semantics:
 
@@ -62,9 +64,11 @@ Time range semantics:
 
 | Field | Notes |
 |------|------|
-| **Dashboard** | Search by title or description and pick a dashboard; the folder path of the selection is shown below the picker. The picker opens with the dashboards in **the rule's own folder** (20 per page; click `Load more dashboards` for more), and typing a keyword switches to a search by title or description across folders. **Changing the dashboard clears the target object and the variable values**, because both belong to the previous dashboard |
+| **Dashboard** | Search by title or description and pick a dashboard; the folder path of the selection is shown below the picker |
 | **Open at** | `Whole dashboard`, or a tab / section / panel inside the dashboard; each option shows its full breadcrumb path. A whole-dashboard entry opens the dashboard itself |
 | **Variable values** | One input per template variable of that dashboard. Leave it empty to use the dashboard's own default |
+
+**Dashboard picker**: the picker opens with the dashboards in **the rule's own folder** (20 per page; click `Load more dashboards` for more), and typing a keyword switches to a search by title or description across folders. **Changing the dashboard clears the target object and the variable values**, because both belong to the previous dashboard.
 
 **Open at** failure handling: if the target object no longer exists in the dashboard (deleted or renamed), the field shows `Missing object (<id>)` together with the warning `The selected object no longer exists in the dashboard. The dashboard will open on its default tab.` — the jump opens the dashboard's default tab instead of failing. When the dashboard itself cannot be loaded (deleted, or you have no access), the field area shows `Failed to load the dashboard. It may have been deleted or you may not have access.` and **Open at** is not selectable.
 
@@ -80,13 +84,17 @@ Time range semantics:
 
 | Field | Notes |
 |------|------|
-| **Data source** | Defaults to `Alert event datasource` (the query is written against the rule's data source type); you can also pick a specific data source. When the rule's data source type is not queryable in the workbench, the `Alert event datasource` option is disabled and labelled `Alert event datasource (not supported for this rule type)`, so the entry must name a data source explicitly. **Changing the data source resets the query**, because the query language changed |
-| **Query type** | Only shown for data sources with more than one query type (Prometheus: Graph only / Raw only; Loki: Range / Instant; VictoriaLogs: Raw logs / Instant stats / Range stats). Prometheus "Graph + Raw" is not offered here because it is two executions and cannot be stored as one query. SQL-type data sources, SLS and Tencent CLS each have a single query mode and therefore no such row |
+| **Data source** | Defaults to `Alert event datasource` (the query is written against the rule's data source type); you can also pick a specific data source |
+| **Query type** | Only shown for data sources with more than one query type; the options depend on the data source type |
 | **Initial query** | The query editor, with the same syntax and completion as the Query Workbench. The whole expression is rendered as a Go template and inserted **verbatim — no automatic quoting or escaping** |
 | **Minimum step** | Only for Prometheus / Loki when **Query type** is a range query; in seconds, minimum 1. It is the lower bound on the query step: the backend still derives the step from `max_data_points` but never goes below this value. Leave it empty for no lower bound |
-| **Query parameters** | The data source's named parameters, per data source type (Limit, Direction, the SLS project / logstore, the Tencent CLS region / topic / syntax). Parameter values are **not templated**; a `{{` is rejected (`query args do not support templates`) |
+| **Query parameters** | The data source's named parameters, per data source type (Limit, Direction, the SLS project / logstore, the Tencent CLS region / topic / syntax) |
 
-With the event data source selected, a rule type that the workbench does not support shows `Choose a datasource type under "Datasource and query" first, or pick a datasource for this entry`; an explicitly selected data source that was deleted or that you cannot use shows `The selected datasource is unavailable`. The data source's real type, permissions and provider-specific restrictions are re-checked by the workbench as the current user when the entry is opened or run.
+**Data source**: when the rule's data source type is not queryable in the workbench, the `Alert event datasource` option is disabled and labelled `Alert event datasource (not supported for this rule type)`, so the entry must name a data source explicitly. **Changing the data source resets the query**, because the query language changed. With the event data source selected, a rule type that the workbench does not support shows `Choose a datasource type under "Datasource and query" first, or pick a datasource for this entry`; an explicitly selected data source that was deleted or that you cannot use shows `The selected datasource is unavailable`. The data source's real type, permissions and provider-specific restrictions are re-checked by the workbench as the current user when the entry is opened or run.
+
+**Query type**: Prometheus offers `Graph only` / `Raw only`, Loki offers `Range` / `Instant`, and VictoriaLogs offers `Raw logs` / `Instant stats` / `Range stats`. Prometheus "Graph + Raw" is not offered here because it is two executions and cannot be stored as one query. SQL-type data sources, SLS and Tencent CLS each have a single query mode and therefore no such row.
+
+**Query parameters**: parameter values are **not templated**; a `{{` is rejected (`query args do not support templates`).
 
 ## Template variables
 
@@ -170,7 +178,7 @@ These checks run in two places: in the entry dialog (only the entry being edited
 | Case | Message in the UI |
 |------|---------|
 | The rule no longer exists | The alert rule no longer exists, so no investigation entries were generated |
-| The alert engine that reported the event is too old | The alert engine that reported this event is too old to generate investigation entries. Please upgrade the alert engine. |
+| The Edge that reported the event is too old | The Edge that reported this event is too old to generate investigation entries. Please upgrade Edge. |
 | The configuration or event time is invalid | Investigation entries were not generated because the configuration or event time is invalid |
 | The rendered result exceeds 64 KiB | Investigation entries were not generated because the rendered result exceeds the size limit |
 
@@ -186,7 +194,7 @@ These checks run in two places: in the entry dialog (only the entry being edited
   <Card title="Active alerts" icon="bell" href="/en/monitors/alert-rules/active-alerts">
     The investigation block in the active alert detail drawer renders entries from the event snapshot.
   </Card>
-  <Card title="Incident details · Investigation" icon="file-magnifying-glass" href="/en/on-call/incident/search-view-incident#investigation-entries">
+  <Card title="Incident details · Investigation" icon="file-magnifying-glass" href="/en/on-call/incident/search-view-incident#investigation">
     How the Investigation block renders the snapshot in an incident's comprehensive info panel.
   </Card>
   <Card title="Description template" icon="text" href="/en/monitors/alert-rules/description-template">

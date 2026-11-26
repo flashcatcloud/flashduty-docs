@@ -102,7 +102,7 @@ These flags are registered on the root command; every subcommand accepts them ex
 | `--output-format` | Output format: `table` (default), `json`, or `toon` (compact, token-efficient) |
 | `--json` | Alias for `--output-format json`; emit JSON for parsing with `jq` or similar tools |
 | `--no-trunc` | Disable column truncation in table output |
-| `--fields` | In `json`/`toon` output, keep only the named top-level fields (comma-separated): each row of a list, or the keys of a single record. Table output ignores it and a stderr note says so; a name that matches no key is reported on stderr together with the keys the output does carry, and output that is neither an object nor a list of objects fails the command. See "Field projections for structured output" below |
+| `--fields` | In `json`/`toon` output, keep only the named top-level fields (comma-separated); table output ignores it. For what the projection covers and how an unmatched name fails, see "Field projections for structured output" below |
 | `--base-url` | Override the API endpoint (for private deployments) |
 | `--version` | Print the version — the same single line as `flashduty version`. That meaning exists only on the root command; a command that defines its own `--version` (for example the optimistic-locking version on mutating verbs) follows its own description |
 
@@ -175,7 +175,7 @@ flashduty incident merge <target-id> --source <id1>,<id2> --title "Database outa
 
 #### Work items and follow-ups (work-item-*)
 
-`incident work-item-*` manages work items anchored to an incident or a post-mortem. `--item-type` distinguishes two kinds: `action` (an action item anchored to an active incident) and `follow_up` (a post-mortem follow-up, which must be bound to a post-mortem ID).
+`incident work-item-*` manages work items anchored to an incident or a post-mortem. `--item-type` distinguishes two kinds: `action` (an action item anchored to an active incident) and `follow_up` (a post-mortem follow-up on a closed incident, optionally bound to a post-mortem report).
 
 ```bash
 flashduty incident work-item-create <incident-id> [flags]        # Create an action item / follow-up
@@ -188,14 +188,14 @@ flashduty incident work-item-assignees-reset <work-item-id>      # Reset the ass
 flashduty incident work-item-post-mortem-bind [flags]            # Bind converted follow-ups to a post-mortem
 ```
 
-Key flags for `work-item-create`: `--item-type` (required, `action` or `follow_up`), `--title` (required, up to 512 characters), `--idempotency-key` (required idempotency key, up to 128 characters), `--post-mortem-id` (required for `follow_up`, forbidden for `action`), `--assignee-ids` (initial assignees, a legacy alias). Mutating verbs (`update`/`complete`/`convert`/`delete`/`assignees-reset`) require `--version` (optimistic locking — it must match the stored version).
+Key flags for `work-item-create`: `--item-type` (required, `action` or `follow_up`), `--title` (required, up to 512 characters), `--idempotency-key` (required idempotency key, up to 128 characters), `--post-mortem-id` (forbidden for `action`; optional for `follow_up` — when set, the incident must already be linked to that report, and when omitted the incident's own post-mortem is used if it exists), `--assignee-ids` (initial assignees, a legacy alias). Mutating verbs (`update`/`complete`/`convert`/`delete`/`assignees-reset`) require `--version` (optimistic locking — it must match the stored version).
 
 A work item's status accepts only four values — `open`, `in_progress`, `done`, `cancelled`: `work-item-create --status` defaults to `open` when omitted or blank, `work-item-update --status` can only move it to one of those four, `work-item-complete --target-status` accepts `done` alone (any other value is rejected), and `work-item-convert --target-status` takes one of the four.
 
 A work item's assignees can be members or the account's **AI SRE**:
 
 - `work-item-create` and `work-item-assignees-reset` accept an `assignees` field (each entry shaped `{type, id?}`, where `type` is `person` or `ai_sre`; an `ai_sre` entry carries no `id`, and at most 20 entries are allowed), which can only be passed as JSON through `--data`. `--assignee-ids` is the equivalent legacy alias (an all-`person` list); the two are mutually exclusive and sending both returns an error.
-- `work-item-list` gains `--assignee-type person|ai_sre`: `ai_sre` returns items assigned to AI SRE (an AI caller uses it to list its own tasks) and needs no `--assignee-id`, which is ignored in that case; `person` combined with `--assignee-id` returns only that member's items. Omitting the flag with a positive `--assignee-id` filters by `person`.
+- `work-item-list --assignee-type person|ai_sre`: `ai_sre` returns items assigned to AI SRE (an AI caller uses it to list its own tasks) and needs no `--assignee-id`, which is ignored in that case; `person` combined with `--assignee-id` returns only that member's items. Omitting the flag with a positive `--assignee-id` filters by `person`.
 - In a work item response, `assignee_ids` holds only person assignees (not AI SRE), and `assignees` holds the full list. Items executed by AI SRE also return `agent_session_id` and `agent_session_venue` (`web` or `im`). Both are omitted when no session is recorded.
 
 #### Post-mortem reports (post-mortem-*)
@@ -204,7 +204,7 @@ Post-mortem verbs live under the `incident` command group (there is no standalon
 
 ```bash
 flashduty incident post-mortem-init <incident-id> [<id2>...]        # Initialize a report from 1–10 incidents (--template-id required)
-flashduty incident post-mortem-list [flags]                         # List reports (server defaults to published; pass --status drafting for drafts)
+flashduty incident post-mortem-list [flags]                         # List reports (omitting --status lists every status; --status drafting for drafts, published for published reports)
 flashduty incident post-mortem-info <post-mortem-id>                # Get report detail
 flashduty incident post-mortem-title-reset <post-mortem-id>         # Set the title
 flashduty incident post-mortem-content-reset <post-mortem-id>       # Replace the Markdown body (--markdown-file)
@@ -495,13 +495,22 @@ flashduty rum issue-preset-severity-rules-history-revert <application-id> --vers
 flashduty rum resource-info [--no-cache]   # View the RUM plan version, quotas, and usage (--no-cache bypasses the short-lived cache)
 ```
 
-### oncall — On-call licenses
+### oncall — On-call lookup and licenses
+
+The `oncall` command group answers who is on call now and shows the account's On-call licenses:
 
 ```bash
-flashduty oncall license-list # List people with active On-call licenses in the current account
+flashduty oncall who [flags]                     # Show who is on call now (default window: now to 24 hours from now)
+flashduty oncall schedule list [flags]           # List schedules
+flashduty oncall schedule get <schedule_id>      # Show one schedule's detail and shifts
+flashduty oncall license-list                    # List people with active On-call licenses in the current account
 ```
 
-This read-only command returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window.
+`oncall who` prints one row per schedule: `SCHEDULE` (the schedule name), `ON_CALL` (who is on call, resolved to display names), `UNTIL` (when the current shift ends), and `NEXT` (the next shift's people). `--since` / `--until` set the window, which defaults to `now` through `+24h`; `--team` filters by team ID (comma-separated), `--query` searches by schedule name, and `--limit` (default `20`) and `--page` (default `1`) page the results.
+
+`oncall schedule list` takes the same window and filter flags and prints `ID`, `NAME`, `STATUS`, and `LAYERS`. `oncall schedule get <schedule_id>` takes the numeric schedule ID and shows the current and next shifts plus the computed shifts in the window (`START`, `END`, `GROUP`); its window defaults to `now` through `+7d`.
+
+`oncall license-list` is read-only and returns each person's ID, name, and license type: `fixed` is explicitly assigned, while `temporary` is active for the current temporary-license window.
 
 ### calendar — Service calendars
 
@@ -515,7 +524,7 @@ flashduty calendar event-upsert <cal-id> --start-at <date> --end-at <date> --is-
 flashduty calendar event-delete <cal-id> [--event-id <id> | --start-at <date> --end-at <date>]
 ```
 
-Three things only `--help` and the responses themselves reveal:
+Three rules that shape how you write calendar commands:
 
 - **`event-delete` both deletes a single event and clears a date range.** Pass `--event-id` to delete one event, or `--start-at` and `--end-at` (both `YYYY-MM-DD`; `end_at` is exclusive and must be later than `start_at`) to clear every event the calendar itself holds over `[start_at, end_at)`. The cleared days fall back to the linked holiday calendars and the weekly workdays — the same effect as clicking **Reset to default** on those dates in the console.
 - **`event-upsert` trims the calendar's other own events off the same days**: an event fully inside the range is deleted, one partly inside is shortened, and one spanning the range is split in two, so the latest write decides those days (`--summary` is optional).
@@ -752,7 +761,7 @@ The `monit folder-*` commands manage the folders themselves. `folder-health` ret
 
 Panel runtime and variable resolution take their time window and variable selections as JSON objects in `--data` (time uses millisecond `from_ms` / `to_ms` timestamps). `dashboard-panel-preview` and `dashboard-runtime-variables-preview` need a `context`: `kind: existing` with a `dashboard_id` targets a stored dashboard, `kind: new` with a `folder_id` targets a folder that does not hold one yet.
 
-`dashboard-runtime-queries-resolve` takes two further flags that shape the result: `--max-data-points` (int, 2–5000; both the downsampling target and what decides the step the built-in time variables render with — omit it or send `null` for the server default of 100) and `--preserve-builtin-variables` (bool, off by default): when set, the **built-in time variables** stay verbatim in the resolved expressions so a caller with its own execution window can render them, while user variables are still resolved. The sibling commands `dashboard-panel-run` and `dashboard-panel-preview` already carried `--max-data-points`, likewise a 2–5000 downsampling target.
+`dashboard-runtime-queries-resolve` takes two further flags that shape the result: `--max-data-points` (int, 2–5000; both the downsampling target and what decides the step the built-in time variables render with — omit it or send `null` for the server default of 100) and `--preserve-builtin-variables` (bool, off by default): when set, the **built-in time variables** stay verbatim in the resolved expressions so a caller with its own execution window can render them, while user variables are still resolved. `dashboard-panel-run` and `dashboard-panel-preview` take the same 2–5000 `--max-data-points` downsampling target.
 
 #### `prometheus-api-v1-label-{label_name}-values` — Query Prometheus label values
 
@@ -811,6 +820,8 @@ flashduty automation templates [--locale zh-CN]   # List preset templates
 flashduty automation fire <trigger_id>            # Fire one run through its HTTP POST trigger
 ```
 
+`create` and `update` cover three triggers only: schedule, HTTP POST, and war room creation. The On-call incident and RUM Issue triggers have no command-line flags — create or change them in the console, then use `automation list`, `get`, and `runs` to read the rule and its run history from the CLI.
+
 Common `create` flags:
 
 | Flag | Notes |
@@ -837,7 +848,7 @@ The war room creation trigger starts a run whenever a war room (IM group chat) i
 
 `update` accepts `--name`, `--prompt`/`--prompt-file`, `--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`, `--enable`/`--disable`, `--enable-schedule`/`--disable-schedule`, `--enable-http-post-trigger`/`--disable-http-post-trigger`, `--rotate-http-post-token`, `--enable-war-room-trigger`/`--disable-war-room-trigger`, `--war-room-channel-ids`/`--war-room-severities`, and `--environment-kind`/`--environment-id`. `--enable-war-room-trigger` and `--disable-war-room-trigger` are mutually exclusive and error if both are passed; `--war-room-channel-ids`/`--war-room-severities` replace the trigger's filters wholesale when passed, and the server requires both lists when `update` first creates the war room trigger. The personal/team scope and the execution destination (`--run-in`) are both immutable after creation, so `update` exposes neither. `update`'s `--cron-expr` carries the same constraint as `create`: the minute must be a fixed `0`–`59` integer, so the fastest schedule is hourly, and minute wildcards, ranges, lists, and steps are unsupported.
 
-`runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`), `--trigger-kind` (server-side values `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`, where `war_room_created` is a run triggered by a war room being created), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
+`runs` supports `--status` (`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`, plus `blocked` — a terminal state where the run produced output but stopped on a connector waiting for someone to finish authorization), `--trigger-kind` (server-side values `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`/`rum_issue`, where `war_room_created` is a run triggered by a war room being created and `rum_issue` a run triggered by a RUM Issue alert), `--since`/`--until`, `--page`, and `--limit`. `fire` authenticates with the trigger's token (`--token`, or the `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN` environment variable); `--text` passes context for the run, and `--data` passes a full JSON request body (inline JSON or `-` to read stdin).
 
 <Warning>
 **Timezone semantics**: `--at` and `--cron-expr` are interpreted as local wall-clock time in the **rule's timezone**. When `create` omits `--timezone`, the server picks the rule's timezone: the caller's member timezone, then the account timezone, then `Asia/Shanghai`. Pass an IANA name to pin another one (for example, `--timezone Asia/Shanghai`); a timezone the server cannot load is rejected. When `update` omits `--timezone`, the stored timezone stays, including a legacy empty string; an explicit empty `--timezone ""` is sent and stored as UTC, not the account default. Pass the user's local time directly — do **not** convert it to UTC. `update` recalculates the next fire immediately, so read `schedule_next_fire_at_ms` from the response.
@@ -870,14 +881,14 @@ In `json`/`toon` mode every record is printed in full, not clipped. To see only 
 
 ### Full command coverage
 
-Beyond the curated commands above, the CLI covers **all** Flashduty Open APIs through a spec-driven code generator, organized into top-level command groups by resource. Run `flashduty <group> --help` to browse them. `session export`, `safari send`, `safari watch`, `enrichment mapping-data-upload`, `safari skill-upload`, and `monit prometheus-api-v1-label-{label_name}-values` (see "Query Prometheus label values" below) are hand-written. In addition to the On-call domain (incident, incident-trigger-subscription, change, channel, field, status-page, template, and more), it also covers:
+Beyond the curated commands above, the CLI covers **all** Flashduty Open APIs through a spec-driven code generator, organized into top-level command groups by resource. Run `flashduty <group> --help` to browse them. `session export`, `safari send`, `safari watch`, `enrichment mapping-data-upload`, `safari skill-upload`, and `monit prometheus-api-v1-label-{label_name}-values` (see "Query Prometheus label values" below) are hand-written. In addition to the On-call domain (incident, oncall, change, channel, field, status-page, template, and more), it also covers:
 
 - **AI SRE (`safari`)**: a2a-agents, artifacts, automations, knowledge, mcp-servers, sessions, skills, and more, plus the hand-written `send` and `watch` (see "safari send / safari watch — Talk to AI SRE from a terminal" above)
 - **Alerting & noise reduction**: alert, alert-event, enrichment (alert-rules, rule-sets), route
 - **On-call & scheduling**: calendar, schedule
 - **Platform administration**: account, member, person, team, role (roles-permissions), audit (audit-logs)
 - **Monitoring & RUM**: monit, rum, sourcemap
-- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations; secret masking and update rules in "integration — integrations and secrets" below), `channel integration-*` (create, read, update, delete and key-rotation for channel-owned integrations, in "channel integration — dedicated integrations" below), webhook (integrations)
+- **Integrations & webhooks**: datasource (IM integrations), integration (create, read, update, delete and key-rotation for alert- and change-source integrations; secret masking and update rules in "integration — integrations and secrets" below), `channel integration-*` (create, read, update, delete and key-rotation for channel-owned integrations, in "channel integration — dedicated integrations" below), webhook (outbound webhook delivery history)
 
 These generated leaf commands use a `resource-action` naming form (for example, `flashduty safari a2a-agent-get`, `flashduty safari session-list`); Every public API operation is reachable as `flashduty <group> <verb>`, with the name derived from its API path: request fields become typed flags, and `--data` accepts the full JSON request body (typed flags override fields with the same name). This page does not list them all; explore them level by level with `flashduty <resource> --help`:
 
@@ -1109,13 +1120,13 @@ Use it to catch a window you did not intend: a default wider than you expected (
 
 `json` and `toon` output is not bounded: every row of the returned page and every field is written in full, long values are not shortened, and a list envelope gains no `truncated` or `emitted_rows` marker. The API returns one page and you get that page; `total` and `has_next_page` describe it truthfully.
 
-You control the size: keep only the fields you need with the global `--fields`, lower the rows per page with `--limit`, and fetch the rest with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`). On a few commands `--fields` is a request-body field selector instead (such as `monit rule-update-fields`) and does not apply to the output.
+You control the size: lower the rows per page with `--limit` and fetch the rest with `--page` (for example, `flashduty safari session-list --limit 20 --page 2`); to keep only some fields, use `--fields` — see "Field projections for structured output" below.
 
 ### Field projections for structured output
 
-`--fields` is a global flag (see "Global flags"): every command accepts it in `json` or `toon` output, and it takes a comma-separated list of top-level fields to keep, applied to each row of a list or to the keys of a single record. The projection runs on the response: for a list envelope (row array named `items`, `docs`, or `list`, with only scalar paging fields beside it) it narrows that row array and leaves the paging fields intact; a field no row of the response carries is left out and stderr reports it as matching no key, listing the keys the output does carry; output that is neither an object nor a list of objects fails the command and tells you to drop `--fields`. Table output ignores `--fields`, and stderr says so.
+`--fields` is a global flag: every command accepts it in `json` or `toon` output, and it takes a comma-separated list of top-level fields to keep, applied to each row of a list or to the keys of a single record. The projection runs on the response: for a list envelope (row array named `items`, `docs`, or `list`, with only scalar paging fields beside it) it narrows that row array and leaves the paging fields intact; a field no row of the response carries is left out and stderr reports it as matching no key, listing the keys the output does carry; output that is neither an object nor a list of objects fails the command and tells you to drop `--fields`. Table output ignores `--fields`; when you pass the global flag, stderr notes that it does not apply. On a few commands `--fields` is a request-body field selector instead (such as `monit rule-update-fields`) and does not apply to the output.
 
-Without `--fields`, every command — the curated ones in the table below included — prints the records the API returned in full; there is no default compact projection. Each curated command defines its own `--fields` names (same meaning as the global flag), so a misspelled name fails immediately and lists the names that are valid. Every other command — all the generated ones included — applies `--fields` to the raw fields of the API response, where a name that matches no key produces the stderr note above.
+Without `--fields`, every command — the curated ones in the table below included — prints the records the API returned in full; there is no default compact projection. Each curated command defines its own `--fields` names (same meaning as the global flag). Every other command — all the generated ones included — applies `--fields` to the raw fields of the API response.
 
 | Command | Named fields `--fields` accepts |
 | --- | --- |

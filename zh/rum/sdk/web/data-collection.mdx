@@ -18,12 +18,14 @@ Web RUM SDK 会自动捕获以下默认属性，这些属性适用于所有 RUM 
 | 属性             | 类型   | 描述                                                                |
 | ---------------- | ------ | ------------------------------------------------------------------- |
 | `date`           | 整数   | 事件的时间戳（以毫秒为单位，epoch 毫秒）                           |
-| `type`           | 字符串 | 事件的类型（如 `session`、`view`、`resource`、`error`、`action`） |
+| `type`           | 字符串 | 事件的类型（如 `view`、`action`、`resource`、`error`、`long_task`、`vital`） |
 | `application.id` | 字符串 | 应用的唯一标识符                                                  |
 | `service`        | 字符串 | 生成此事件的服务名称                                              |
 | `env`            | 字符串 | 应用的环境名称（如 `prod`、`dev`、`staging`）                     |
 | `version`        | 字符串 | 应用版本                                                          |
 | `sdk_version`    | 字符串 | RUM SDK 版本                                             |
+
+会话不是独立的事件类型：RUM 通过 `view` 事件上的 `session.*` 属性聚合出会话，`type` 为 `session` 的事件不会被接收。
 
 </Accordion>
 
@@ -339,20 +341,14 @@ RUM 会自动检测用户的挫败信号，帮助您了解用户在应用中遇�
 
 ## 数据存储
 
-在上传到 FlashCat 之前，数据会以明文形式临时存储在浏览器的本地存储（LocalStorage 或 SessionStorage）中。
+RUM 事件只保存在浏览器内存中，不写入 LocalStorage、SessionStorage 或 IndexedDB，页面刷新或关闭后未上传的批次不会保留。
 
 <Steps>
 <Step title="数据收集">
-  SDK 将事件添加到内存中的批次缓冲区。
+  SDK 将事件序列化后写入内存中的批次缓冲区，攒到上传阈值后整批发出。
 </Step>
-<Step title="本地缓存">
-  当网络不可用时，批次会被保留在本地存储中。
-</Step>
-<Step title="批次上传">
-  网络可用时，数据以批次形式发送到服务器。
-</Step>
-<Step title="自动清理">
-  超过一定时限的数据会被自动清理，以避免占用过多存储空间。
+<Step title="页面退出前发送">
+  页面隐藏（`visibilitychange`）或卸载（`beforeunload`）时，SDK 立即发出当前批次，尽量降低退出时的数据丢失。
 </Step>
 </Steps>
 
@@ -369,22 +365,22 @@ Web RUM SDK 会将收集到的事件以批次形式上传到服务器，以优�
    - 批次累积满 50 条事件
    - 批次大小达到 16 KB
    - 距上次上传满 30 秒
-   - 页面卸载时（`beforeunload` 事件）
+   - 页面隐藏（`visibilitychange`）或卸载（`beforeunload`）时
 
 ### 上传策略
 
 | 策略 | 说明 |
 |------|------|
-| **Beacon API** | 优先使用，确保在页面卸载时数据不会丢失 |
-| **XHR/Fetch Fallback** | 如果 Beacon API 不可用，使用 XMLHttpRequest 或 Fetch API |
-| **失败重试** | 如果上传失败，批次会被保留在本地存储，直到成功发送 |
-| **数据压缩** | 上传前对批次数据进行压缩，减少网络流量 |
+| **常规上传** | 使用 `fetch` 的 `keepalive` 模式发送，浏览器不支持时回退到普通 `fetch` |
+| **页面退出上传** | 页面隐藏或卸载时改用 `navigator.sendBeacon` 发送 |
+| **失败重试** | 离线、超时（408）、限流（429）或服务端错误（5xx）时，批次留在内存队列中重试，页面关闭后不会保留 |
+| **数据压缩** | 默认不压缩；设置 `compressIntakeRequests: true` 后，在 Web Worker 中压缩上传请求 |
 
 ## 隐私和合规
 
 - **IP 地址匿名化**：可配置 SDK 对 IP 地址进行匿名化处理
 - **敏感数据过滤**：使用 `beforeSend` 回调过滤或混淆敏感信息
-- **Cookie 和存储控制**：可配置是否使用 Cookie 和本地存储
+- **Cookie 和存储控制**：可配置会话与上下文是否使用 Cookie 或本地存储
 - **GDPR/CCPA 合规**：支持用户隐私选择退出机制
 
 <Tip>

@@ -102,7 +102,7 @@ flashduty config set base_url URL  # 覆盖 API 地址
 | `--output-format` | 输出格式：`table`（默认）、`json` 或 `toon`（紧凑、更省 token） |
 | `--json` | 以 JSON 格式输出，是 `--output-format json` 的别名，便于通过 `jq` 等工具解析 |
 | `--no-trunc` | 表格输出时不截断长字段 |
-| `--fields` | `json`/`toon` 输出时只保留指定的顶层字段（逗号分隔），作用于列表的每一行或单个记录；表格输出忽略该参数，并在 stderr 提示它未生效。字段名未命中时 stderr 会列出实际可用的键；输出不是对象或对象列表时命令直接报错。详见下文「结构化输出的字段投影」 |
+| `--fields` | `json`/`toon` 输出时只保留指定的顶层字段（逗号分隔），表格输出忽略；投影范围与字段名未命中时的失败行为见下文「结构化输出的字段投影」 |
 | `--base-url` | 覆盖 API 地址（私有部署场景） |
 | `--version` | 打印版本信息，与 `flashduty version` 输出相同的一行。这个含义只在根命令上有；个别命令自己定义了 `--version`（例如变更类命令的乐观锁版本号），那些命令按自己的说明生效 |
 
@@ -175,7 +175,7 @@ flashduty incident merge <target-id> --source <id1>,<id2> --title "数据库故�
 
 #### 工作项与跟进项（work-item-*）
 
-`incident work-item-*` 管理挂靠在故障或复盘上的工作项，`--item-type` 区分两种类型：`action`（故障行动项，挂靠进行中的故障）与 `follow_up`（复盘跟进项，必须绑定复盘 ID）。
+`incident work-item-*` 管理挂靠在故障或复盘上的工作项，`--item-type` 区分两种类型：`action`（故障行动项，挂靠进行中的故障）与 `follow_up`（复盘跟进项，挂靠已关闭的故障，可绑定复盘 ID）。
 
 ```bash
 flashduty incident work-item-create <incident-id> [flags]        # 创建行动项/跟进项
@@ -188,15 +188,15 @@ flashduty incident work-item-assignees-reset <work-item-id>      # 重置负责�
 flashduty incident work-item-post-mortem-bind [flags]            # 将已转换的跟进项绑定到复盘
 ```
 
-`work-item-create` 关键参数：`--item-type`（必填，`action` 或 `follow_up`）、`--title`（必填，最多 512 字符）、`--idempotency-key`（必填幂等键，最多 128 字符）、`--post-mortem-id`（`follow_up` 必填，`action` 禁止）、`--assignee-ids`（初始负责人，旧别名）。更新类操作（`update`/`complete`/`convert`/`delete`/`assignees-reset`）均需传 `--version`（乐观锁，必须与当前存储版本一致）。
+`work-item-create` 关键参数：`--item-type`（必填，`action` 或 `follow_up`）、`--title`（必填，最多 512 字符）、`--idempotency-key`（必填幂等键，最多 128 字符）、`--post-mortem-id`（`action` 禁止；`follow_up` 可选——填了就绑定到该复盘且故障须已关联它，省略时若有则用故障自身的复盘）、`--assignee-ids`（初始负责人，旧别名）。更新类操作（`update`/`complete`/`convert`/`delete`/`assignees-reset`）均需传 `--version`（乐观锁，必须与当前存储版本一致）。
 
 工作项状态只接受 `open` / `in_progress` / `done` / `cancelled` 四个取值：`work-item-create --status` 省略或留空时默认 `open`，`work-item-update --status` 只能改成这四个值之一，`work-item-complete --target-status` 只接受 `done`（其它取值会被拒绝），`work-item-convert --target-status` 可传这四个值之一。
 
 工作项的负责人可以是成员，也可以是**本账户的 AI SRE**：
 
 - `work-item-create` 与 `work-item-assignees-reset` 接受 `assignees` 字段（每项形如 `{type, id?}`，`type` 取 `person` 或 `ai_sre`；`ai_sre` 项不带 `id`，最多 20 项），该字段只能通过 `--data` 传 JSON。`--assignee-ids` 是等价的旧别名（相当于全部为 `person`），两者互斥，同时传会报错。
-- `work-item-list` 新增 `--assignee-type person|ai_sre`：`ai_sre` 返回指派给 AI SRE 的事项（AI 调用方用它列出自己的任务），此时不需要 `--assignee-id`，`--assignee-id` 也会被忽略；`person` 搭配 `--assignee-id` 只返回该成员负责的事项。省略本字段且 `--assignee-id` 为正数时按 `person` 过滤。
-- 工作项响应里的 `assignee_ids` 现在只包含人员负责人（不含 AI SRE），完整负责人列表在 `assignees`；由 AI SRE 执行的事项还会返回 `agent_session_id` 与 `agent_session_venue`（`web` 或 `im`），没有关联会话时这两个字段省略。
+- `work-item-list --assignee-type person|ai_sre`：`ai_sre` 返回指派给 AI SRE 的事项（AI 调用方用它列出自己的任务），此时不需要 `--assignee-id`，`--assignee-id` 也会被忽略；`person` 搭配 `--assignee-id` 只返回该成员负责的事项。省略本字段且 `--assignee-id` 为正数时按 `person` 过滤。
+- 工作项响应里的 `assignee_ids` 只包含人员负责人（不含 AI SRE），完整负责人列表在 `assignees`；由 AI SRE 执行的事项还会返回 `agent_session_id` 与 `agent_session_venue`（`web` 或 `im`），没有关联会话时这两个字段省略。
 
 #### 复盘报告（post-mortem-*）
 
@@ -204,7 +204,7 @@ flashduty incident work-item-post-mortem-bind [flags]            # 将已转换�
 
 ```bash
 flashduty incident post-mortem-init <incident-id> [<id2>...]        # 用 1–10 个故障初始化复盘（--template-id 必填）
-flashduty incident post-mortem-list [flags]                         # 列出复盘报告（服务端默认只看 published，加 --status drafting 查看草稿）
+flashduty incident post-mortem-list [flags]                         # 列出复盘报告（省略 --status 时列出全部状态；--status drafting 只看草稿，published 只看已发布）
 flashduty incident post-mortem-info <post-mortem-id>                # 查看报告详情
 flashduty incident post-mortem-title-reset <post-mortem-id>         # 设置标题
 flashduty incident post-mortem-content-reset <post-mortem-id>       # 替换正文 Markdown（--markdown-file）
@@ -495,13 +495,22 @@ flashduty rum issue-preset-severity-rules-history-revert <application-id> --vers
 flashduty rum resource-info [--no-cache]   # 查看 RUM 套餐版本、配额与用量（--no-cache 跳过短缓存直接读源）
 ```
 
-### oncall — On-call 许可证
+### oncall — 值班查询与许可证
+
+`oncall` 命令组用于值班查询，也可查看账户的 On-call 许可证：
 
 ```bash
-flashduty oncall license-list # 列出当前账户中持有有效 On-call 许可证的成员
+flashduty oncall who [flags]                     # 查看当前谁在值班（默认窗口：现在到 24 小时后）
+flashduty oncall schedule list [flags]           # 列出值班表
+flashduty oncall schedule get <schedule_id>      # 查看单个值班表的详情与排班
+flashduty oncall license-list                    # 列出当前账户中持有有效 On-call 许可证的成员
 ```
 
-该命令只读，返回成员 ID、名称及许可证类型：`fixed` 表示固定分配，`temporary` 表示当前临时许可证窗口内生效。
+`oncall who` 每行一个值班表：`SCHEDULE`（值班表名称）、`ON_CALL`（当前值班人员，已解析为显示名）、`UNTIL`（本轮值班结束时间）、`NEXT`（下一轮值班人员）。`--since` / `--until` 指定时间窗口，默认 `now` 到 `+24h`；`--team` 按团队 ID 过滤（逗号分隔），`--query` 按值班表名称搜索，另有 `--limit`（默认 `20`）与 `--page`（默认 `1`）。
+
+`oncall schedule list` 与 `oncall who` 接受相同的窗口与过滤参数，表格列为 `ID`、`NAME`、`STATUS`、`LAYERS`。`oncall schedule get <schedule_id>` 按数值值班表 ID 查看详情：当前与下一轮值班，以及窗口内的排班明细（`START`、`END`、`GROUP`），窗口默认 `now` 到 `+7d`。
+
+`oncall license-list` 只读，返回成员 ID、名称及许可证类型：`fixed` 表示固定分配，`temporary` 表示当前临时许可证窗口内生效。
 
 ### calendar — 服务日历
 
@@ -515,7 +524,7 @@ flashduty calendar event-upsert <cal-id> --start-at <date> --end-at <date> --is-
 flashduty calendar event-delete <cal-id> [--event-id <id> | --start-at <date> --end-at <date>]
 ```
 
-以下三点只能从 `--help` 和响应本身看出来：
+这三条影响您怎么写日历命令：
 
 - **`event-delete` 兼具删除单条事件与清空日期区间两种用法**。传 `--event-id` 删除一条事件；或传 `--start-at` 与 `--end-at`（均为 `YYYY-MM-DD`，`end_at` 为开区间、必须晚于 `start_at`）清空该日历自身在 `[start_at, end_at)` 内的全部事件。被清空的日期回落到关联的节假日日历与每周工作日，效果相当于在控制台里对这些日期点击**恢复默认**。
 - **`event-upsert` 会裁剪同区间内该日历自身的其他事件**：完全落在区间内的被删除、部分重叠的被缩短、跨越区间的被拆成两条，因此这些天以最后一次写入为准（`--summary` 可选）。
@@ -752,7 +761,7 @@ flashduty monit dashboard-runtime-queries-resolve <panel-id> [<id2>...]  # 解�
 
 面板运行时与变量解析的时间窗口、变量选择都以 JSON 对象放在 `--data` 里（时间用 `from_ms` / `to_ms` 的毫秒时间戳）。`dashboard-panel-preview` 与 `dashboard-runtime-variables-preview` 需要一个 `context`：`kind: existing` 配 `dashboard_id` 指向已存仪表盘，`kind: new` 配 `folder_id` 指向尚未落库的分组。
 
-`dashboard-runtime-queries-resolve` 另有两个影响解析结果的参数：`--max-data-points`（整数，取值 2–5000；既作降采样目标，也决定解析出的表达式里内置时间变量渲染出的步长，省略或传 `null` 时取服务端默认值 100）与 `--preserve-builtin-variables`（布尔，默认关）：开启后**内置时间变量**在解析结果里原样保留，交由自带执行窗口的调用方自行渲染，用户变量仍会被解析。兄弟命令 `dashboard-panel-run` 与 `dashboard-panel-preview` 早已带 `--max-data-points`，同为 2–5000 的降采样目标。
+`dashboard-runtime-queries-resolve` 另有两个影响解析结果的参数：`--max-data-points`（整数，取值 2–5000；既作降采样目标，也决定解析出的表达式里内置时间变量渲染出的步长，省略或传 `null` 时取服务端默认值 100）与 `--preserve-builtin-variables`（布尔，默认关）：开启后**内置时间变量**在解析结果里原样保留，交由自带执行窗口的调用方自行渲染，用户变量仍会被解析。`dashboard-panel-run` 与 `dashboard-panel-preview` 的 `--max-data-points` 也是同一个 2–5000 的降采样目标。
 
 #### `prometheus-api-v1-label-{label_name}-values` — 查询 Prometheus 标签值
 
@@ -806,6 +815,8 @@ flashduty automation templates [--locale zh-CN]   # 列出预设模板
 flashduty automation fire <trigger_id>            # 经 HTTP POST 触发器触发一次运行
 ```
 
+`create` 与 `update` 只覆盖定时、HTTP POST 与作战室创建三类触发器。On-call 故障触发与 RUM Issue 触发没有对应的命令行参数，请在控制台创建或修改，命令行侧用 `automation list`、`get`、`runs` 查看规则与运行历史。
+
 `create` 常用参数：
 
 | 参数 | 说明 |
@@ -832,7 +843,7 @@ flashduty automation fire <trigger_id>            # 经 HTTP POST 触发器触�
 
 `update` 可改字段：`--name`、`--prompt`/`--prompt-file`、`--schedule`/`--at`/`--weekday`/`--cron-expr`/`--timezone`、`--enable`/`--disable`、`--enable-schedule`/`--disable-schedule`、`--enable-http-post-trigger`/`--disable-http-post-trigger`、`--rotate-http-post-token`、`--enable-war-room-trigger`/`--disable-war-room-trigger`、`--war-room-channel-ids`/`--war-room-severities`、`--environment-kind`/`--environment-id`。`--enable-war-room-trigger` 与 `--disable-war-room-trigger` 互斥，同时传入会报错；`--war-room-channel-ids`/`--war-room-severities` 一旦传入就整体替换该触发器的过滤器，通过 `update` 首次创建作战室触发器时服务端要求两个列表都给出。个人 / 团队作用域与执行位置（`--run-in`）创建后不可变更，`update` 不提供这两类参数。`update` 的 `--cron-expr` 与 `create` 同一约束：分钟位必须是 `0`–`59` 的单一整数，最快每小时一次，不支持分钟位的通配符、范围、列表与步长。
 
-`runs` 支持 `--status`（`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`）、`--trigger-kind`（服务端取值 `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`，其中 `war_room_created` 表示由作战室创建触发的运行）、`--since`/`--until`、`--page`、`--limit`。`fire` 用触发器的 Token 鉴权（`--token`，或环境变量 `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN`），`--text` 传本次运行的上下文，`--data` 传完整 JSON 请求体（内联 JSON 或 `-` 读 stdin）。
+`runs` 支持 `--status`（`queued`/`running`/`retrying`/`succeeded`/`partial`/`failed`/`skipped`/`abandoned`，以及终态 `blocked`——有产出但停在等待人工完成授权的连接器上）、`--trigger-kind`（服务端取值 `schedule`/`debug`/`manual`/`http_post`/`oncall_incident`/`war_room_created`/`rum_issue`，其中 `war_room_created` 表示由作战室创建触发的运行，`rum_issue` 表示由 RUM Issue 告警触发的运行）、`--since`/`--until`、`--page`、`--limit`。`fire` 用触发器的 Token 鉴权（`--token`，或环境变量 `FLASHDUTY_AUTOMATION_TRIGGER_TOKEN`），`--text` 传本次运行的上下文，`--data` 传完整 JSON 请求体（内联 JSON 或 `-` 读 stdin）。
 
 <Warning>
 **时区语义**：`--at` 与 `--cron-expr` 均按**规则时区**的本地挂钟时间理解。`create` 省略 `--timezone` 时由服务端决定规则时区——依次取调用者的成员时区、账户时区，最后回退 `Asia/Shanghai`；需要固定其它时区时传入 IANA 名称（如 `--timezone Asia/Shanghai`），服务端无法加载的时区会被拒绝。`update` 省略 `--timezone` 时保留已存储的时区（包括历史遗留的空字符串），显式传空值 `--timezone ""` 会按 UTC 发送并存储，而不是账户默认时区。请直接传用户的本地时间，**不要**预先换算成 UTC。`update` 会立即重算下次触发时间，请以响应中的 `schedule_next_fire_at_ms` 为准。
@@ -865,14 +876,14 @@ flashduty insight incident-export [flags]    # 导出筛选后的故障列表为
 
 ### 全量命令覆盖
 
-除上述精选命令外，CLI 通过 spec 驱动的代码生成覆盖**全部** Flashduty Open API，按资源组织为顶层命令组，可用 `flashduty <命令组> --help` 查看。其中 `session export`、`safari send`、`safari watch`、`enrichment mapping-data-upload`、`safari skill-upload` 和 `monit prometheus-api-v1-label-{label_name}-values`（见下文「查询 Prometheus 标签值」）为手工实现。除 On-call 域（incident、incident-trigger-subscription、change、channel、field、status-page、template 等）外，还覆盖了：
+除上述精选命令外，CLI 通过 spec 驱动的代码生成覆盖**全部** Flashduty Open API，按资源组织为顶层命令组，可用 `flashduty <命令组> --help` 查看。其中 `session export`、`safari send`、`safari watch`、`enrichment mapping-data-upload`、`safari skill-upload` 和 `monit prometheus-api-v1-label-{label_name}-values`（见下文「查询 Prometheus 标签值」）为手工实现。除 On-call 域（incident、oncall、change、channel、field、status-page、template 等）外，还覆盖了：
 
 - **AI SRE（`safari`）**：a2a-agents、artifacts、automations、knowledge、mcp-servers、sessions、skills 等，另有手工实现的 `send` 与 `watch`（见上文「safari send / safari watch — 从终端与 AI SRE 对话」）
 - **告警与降噪**：alert、alert-event、enrichment（alert-rules、rule-sets）、route
 - **On-call 与日程**：calendar、schedule
 - **平台管理**：account、member、person、team、role（roles-permissions）、audit（audit-logs）
 - **监控与 RUM**：monit、rum、sourcemap
-- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换，密钥掩码与更新规则见下文「integration — 集成与密钥」）、`channel integration-*`（协作空间专属集成的增删改查与密钥轮换，见下文「channel integration — 专属集成」）、webhook（integrations）
+- **集成与 Webhook**：datasource（IM 集成）、integration（告警源 / 变更源集成的增删改查与密钥轮换，密钥掩码与更新规则见下文「integration — 集成与密钥」）、`channel integration-*`（协作空间专属集成的增删改查与密钥轮换，见下文「channel integration — 专属集成」）、webhook（外发 Webhook 投递历史）
 
 这些生成命令的叶子名称采用「资源-动作」形式（如 `flashduty safari a2a-agent-get`、`flashduty safari session-list`），每个公开 API 操作都对应一条 `flashduty <分组> <动作>` 命令，命令名由 API 路径推导，请求字段生成带类型的命令行参数，`--data` 可传完整 JSON 请求体（具名参数覆盖其中的同名字段）。完整清单不在本页展开，用 `flashduty <资源> --help` 逐层探索：
 
@@ -1098,13 +1109,13 @@ TOON 不能直接用 `jq` 解析；需要管道给 `jq` 时请改用 `--json`。
 
 `json` 与 `toon` 输出不做裁剪：返回页的每一行、每个字段都完整写出，长值不改短，列表信封也不会多出 `truncated`、`emitted_rows` 这类标记。接口返回一页就是一页，`total` 与 `has_next_page` 说的就是真实情况。
 
-输出体积由您自己控制：用全局 `--fields` 只保留需要的字段，用 `--limit` 减少每页行数，再用 `--page` 取后面的页（如 `flashduty safari session-list --limit 20 --page 2`）。个别命令的 `--fields` 是请求体的字段选择器（如 `monit rule-update-fields`），不作用于输出。
+输出体积由您自己控制：用 `--limit` 减少每页行数，再用 `--page` 取后面的页（如 `flashduty safari session-list --limit 20 --page 2`）；只保留部分字段用 `--fields`，见下文「结构化输出的字段投影」。
 
 ### 结构化输出的字段投影
 
-`--fields` 是全局参数（见「全局参数」）：任意命令在 `json` 或 `toon` 输出时都能用它，逗号分隔要保留的顶层字段，作用于列表的每一行或单个记录。投影在返回结果上执行：列表信封（行数组为 `items`、`docs` 或 `list`，同级只有标量分页字段）只收窄其中的行数组，分页字段原样保留；某个字段在整个响应里都不存在时不会被写入输出，精选命令会直接报错并列出具名可用的字段，其它命令会在 stderr 提示该字段未匹配到任何键、并列出实际存在的键；输出既不是对象也不是对象列表时，命令报错并要求去掉 `--fields`。表格输出忽略 `--fields`，此时 stderr 会提示它未生效。
+`--fields` 是全局参数：任意命令在 `json` 或 `toon` 输出时都能用它，逗号分隔要保留的顶层字段，作用于列表的每一行或单个记录。投影在返回结果上执行：列表信封（行数组为 `items`、`docs` 或 `list`，同级只有标量分页字段）只收窄其中的行数组，分页字段原样保留；某个字段在整个响应里都不存在时不会被写入输出，精选命令会直接报错并列出具名可用的字段，其它命令会在 stderr 提示该字段未匹配到任何键、并列出实际存在的键；输出既不是对象也不是对象列表时，命令报错并要求去掉 `--fields`。表格输出忽略 `--fields`，使用全局参数时 stderr 会提示它未生效。个别命令的 `--fields` 是请求体的字段选择器（如 `monit rule-update-fields`），不作用于输出。
 
-省略 `--fields` 时，所有命令——包括下表这些精选命令——都输出接口返回的完整记录，不再有默认紧凑投影。精选命令各自定义了自己的 `--fields`（含义与全局一致），字段名写错会直接报错并列出具名可用的字段；其它命令——包括全部生成命令——的 `--fields` 作用在接口返回的原始字段上，一个字段都没命中时 stderr 会提示并列出实际存在的键。
+省略 `--fields` 时，所有命令——包括下表这些精选命令——都输出接口返回的完整记录，不再有默认紧凑投影。精选命令各自定义了自己的 `--fields`（含义与全局一致）；其它命令——包括全部生成命令——的 `--fields` 作用在接口返回的原始字段上。
 
 | 命令 | 可用 `--fields` 选择的具名字段 |
 | --- | --- |

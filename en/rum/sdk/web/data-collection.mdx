@@ -18,12 +18,14 @@ Web RUM SDK automatically captures the following default attributes, applicable 
 | Attribute        | Type   | Description |
 | ---------------- | ------ | ----------- |
 | `date`           | Integer | Event timestamp (in milliseconds, epoch milliseconds) |
-| `type`           | String | Event type (for example, `session`, `view`, `resource`, `error`, `action`) |
+| `type`           | String | Event type (for example, `view`, `action`, `resource`, `error`, `long_task`, `vital`) |
 | `application.id` | String | Application unique identifier |
 | `service`        | String | Service name that generated this event |
 | `env`            | String | Application environment name (for example, `prod`, `dev`, `staging`) |
 | `version`        | String | Application version |
 | `sdk_version`    | String | RUM SDK version |
+
+A session is not an event type of its own: RUM derives sessions from the `session.*` attributes on `view` events, and an event whose `type` is `session` is not accepted.
 
 </Accordion>
 
@@ -339,20 +341,14 @@ If the URL contains UTM parameters, RUM automatically captures the following att
 
 ## Data storage
 
-Before uploading to FlashCat, data is temporarily stored in plaintext in the browser's local storage (LocalStorage or SessionStorage).
+RUM events live only in browser memory. They are not written to LocalStorage, SessionStorage, or IndexedDB, so a batch that has not been uploaded is lost when the page reloads or closes.
 
 <Steps>
-<Step title="Data Collection">
-  SDK adds events to an in-memory batch buffer.
+<Step title="Data collection">
+  The SDK serializes each event into an in-memory batch buffer and sends the whole batch once it reaches an upload threshold.
 </Step>
-<Step title="Local Caching">
-  When network is unavailable, batches are retained in local storage.
-</Step>
-<Step title="Batch Upload">
-  When network is available, data is sent to server in batches.
-</Step>
-<Step title="Auto Cleanup">
-  Data exceeding certain time limits is automatically cleaned up to avoid excessive storage usage.
+<Step title="Send before page exit">
+  When the page becomes hidden (`visibilitychange`) or unloads (`beforeunload`), the SDK sends the current batch immediately to limit data loss on exit.
 </Step>
 </Steps>
 
@@ -369,22 +365,22 @@ Web RUM SDK uploads collected events to the server in batches to optimize networ
 - The batch reaches 50 events
 - The batch reaches 16 KB
 - 30 seconds have passed since the last upload
-- Page unload (`beforeunload` event)
+- The page becomes hidden (`visibilitychange`) or unloads (`beforeunload`)
 
 ### Upload strategy
 
 | Strategy | Description |
 |----------|-------------|
-| **Beacon API** | Preferred, ensures data isn't lost when page unloads |
-| **XHR/Fetch Fallback** | If Beacon API unavailable, uses XMLHttpRequest or Fetch API |
-| **Failure Retry** | If upload fails, batch is retained in local storage until successfully sent |
-| **Data Compression** | Batch data is compressed before upload to reduce network traffic |
+| **Regular upload** | Sent with `fetch` in `keepalive` mode, falling back to plain `fetch` when the browser does not support it |
+| **Exit upload** | Sent with `navigator.sendBeacon` when the page becomes hidden or unloads |
+| **Failure retry** | On offline, timeout (408), rate limit (429), or server error (5xx), the batch stays in the in-memory queue for retry and is not kept after the page closes |
+| **Data compression** | Off by default; with `compressIntakeRequests: true`, intake requests are compressed in a Web Worker |
 
 ## Privacy and compliance
 
 - **IP Address Anonymization**: SDK can be configured to anonymize IP addresses
 - **Sensitive Data Filtering**: Use `beforeSend` callback to filter or obfuscate sensitive information
-- **Cookie and Storage Control**: Configurable whether to use cookies and local storage
+- **Cookie and Storage Control**: Configurable whether sessions and context use cookies or local storage
 - **GDPR/CCPA Compliance**: Supports user privacy opt-out mechanism
 
 <Tip>

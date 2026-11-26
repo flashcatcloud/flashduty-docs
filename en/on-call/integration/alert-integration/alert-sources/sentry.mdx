@@ -105,6 +105,54 @@ The "Receive first event" item in the setup checklist turns green as well.
 </Step>
 </Steps>
 
+## Payload
+
+A Sentry Internal Integration posts a JSON object whose `data` carries one of three objects. Flashduty parses whichever one is present:
+
+**Metric alert (`data.metric_alert`)**
+
+| Field | Meaning | Use in Flashduty |
+| :--- | :--- | :--- |
+| `action` | Delivery action | Alert status and severity |
+| `data.metric_alert.id` | Metric alert rule ID | Alert key |
+| `data.description_text` | Alert description text | Alert title |
+| `data.web_url` | Alert link | Label `web_url` |
+| `data.metric_alert.projects` | Projects involved | Label `projectName`, projects separated by commas |
+
+**Issue alert (`data.event`)**
+
+| Field | Meaning | Use in Flashduty |
+| :--- | :--- | :--- |
+| `action` | Delivery action | Alert severity |
+| `data.event.issue_id` | Issue ID | Alert key |
+| `data.event.title` | Issue title | Alert title |
+| `data.triggered_rule` | Triggered rule name | Label `check` |
+| `data.event.culprit` | Culprit | Label `culprit` |
+| `data.event.environment` | Environment | Label `environment` |
+| `data.event.location` | Location | Label `location` |
+| `data.event.message` | Error message | Label `message` |
+| `data.event.url` | Issue detail link | Label `detail_url` |
+| `data.event.web_url` | In-project link | Label `web_url` |
+| `data.event.tags` | Event tag array | Each pair becomes a label with the tag's own name |
+
+**Issue resolved (`data.issue`)**
+
+| Field | Meaning | Use in Flashduty |
+| :--- | :--- | :--- |
+| `action` | Delivery action, only `resolved` is accepted | Alert recovery |
+| `data.issue.id` | Issue ID | Alert key |
+| `data.issue.title` | Issue title | Alert title |
+| `data.issue.project.name` | Project name | Label `projectName` |
+| `actor.name` | Person who resolved it | Label `operator` |
+
+A metric alert does not read `data.description_title`, and an issue alert does not read `data.event.level`. When `data` carries none of the three objects, Flashduty returns a parameter error.
+
+## Alert key
+
+Flashduty takes the Alert Key from the pushed object: `data.metric_alert.id` for a metric alert, `data.event.issue_id` for an issue alert, and `data.issue.id` for an issue-resolved event.
+
+The issue alert and the resolved event of one issue carry the same issue ID, so the resolved event closes the matching alert; repeated triggers of one metric alert rule land on one alert. Changing the title, severity, or event tags does not change the Alert Key.
+
 ## Status and severity
 
 <div class="md-block">
@@ -118,6 +166,27 @@ The "Receive first event" item in the setup checklist turns green as well.
 
 </div>
 
-## Alert Key and recovery
+## Labels
 
-Flashduty computes the Alert Key from the object Sentry pushes: `metric_alert.id` for a metric alert, `event.issue_id` for an issue alert, and `issue.id` for an issue-resolved event. A notification whose `action` is `resolved` recovers the matching alert; a notification whose `action` is not in the table above (for example created or assigned) is rejected.
+| Label | Source |
+| :--- | :--- |
+| `check` | Triggered rule name `data.triggered_rule`, issue alerts only |
+| `culprit` | `data.event.culprit` |
+| `environment` | `data.event.environment` |
+| `location` | `data.event.location` |
+| `message` | `data.event.message` |
+| `detail_url` | `data.event.url` |
+| `web_url` | `data.web_url` for a metric alert, or `data.event.web_url` for an issue alert |
+| `projectName` | Project list of a metric alert (comma-separated), or `data.issue.project.name` of a resolved event |
+| `operator` | `actor.name` of a resolved event |
+| Keys from event tags | `data.event.tags` of an issue alert: the first value of each pair is the label name, the second is its value |
+
+A metric alert writes only `web_url` and `projectName`. When a key in `data.event.tags` matches a built-in label (for example `environment`), the event tag overrides the built-in value.
+
+## Troubleshooting
+
+- **An alert does not recover**: an issue-resolved event must carry `action` set to `resolved`. If marking the issue resolved in Sentry's issue list does not recover the alert, check that the Internal Integration has `issue` selected
+- **Flashduty returns a parameter error**: the `action` value is not supported. An issue alert accepts only `critical`, `warning`, and `triggered`; sending `resolved` on `data.event` is rejected, and recovery goes through `data.issue`
+- **Every alert has Warning severity**: an issue alert takes its severity from `action`, not from `data.event.level`. Sentry issue alerts usually report `triggered`, which maps to Warning
+- **A built-in label is overwritten**: a key in `data.event.tags` with the same name as a built-in label overrides it, so configure routing rules with the value that actually arrives
+- **No alert is created**: check that the alert rule action is **Send a notification via** with `Flashduty` selected; a payload whose `data` carries none of `metric_alert`, `event`, or `issue` is rejected

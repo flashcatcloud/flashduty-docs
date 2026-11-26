@@ -22,7 +22,7 @@ AI SRE provides two types of Environments:
 
 If you don't pick an environment, the system picks one for each new session in this order. First, it uses an online self-hosted Runner of the team bound to the session. If there is none, it uses an online Shared-scope (account-level) Runner. If neither exists, it uses the cloud Sandbox. The choice is fixed when the session's first message is sent and does not change afterward; see [Selecting an environment in a session](#selecting-an-environment-in-a-session).
 
-You can also pin the session manually from the environment selector in the chat input: force the cloud Sandbox, or pin a specific Runner.
+You can also pin the session manually from the environment selector in the chat input: start the Sandbox from a cloud environment (the default configuration or a named template), or pin a specific Runner.
 
 <Note>
 The console record is called an **Environment**. The process running on your machine is called a **Runner**. One self-hosted Environment maps to one Runner process; cloud Sandbox instances are managed by the system per session.
@@ -65,7 +65,11 @@ Go to **AI SRE → Customize → Environments → Cloud** to view, create, edit,
 Environment variables are visible in plaintext to everyone who uses this cloud environment template — do not put secrets or credentials here.
 </Warning>
 
-**Platform-reserved environment variable names.** The platform injects the following variables; saving a template that sets any of them is rejected: `FLASHDUTY_APP_KEY`, `FLASHDUTY_BASE_URL`, `FLASHDUTY_DOCS_URL`, `FLASHDUTY_CONSOLE_URL`, `PATH`, `HOME`, and the GitHub (`GH_TOKEN*`, `GIT_CONFIG_*`) and GitLab (`GITLAB_*`, `GLAB_*`) authentication and host variables.
+**Platform-reserved environment variable names.** The platform injects the following variables; saving a template that sets any of them is rejected with `line N: "<name>" is a reserved variable name`:
+
+- Flashduty and runtime: `FLASHDUTY_APP_KEY`, `FLASHDUTY_BASE_URL`, `FLASHDUTY_DOCS_URL`, `FLASHDUTY_CONSOLE_URL`, `FLASHDUTY_SESSION_URL`, `PATH`, `HOME`;
+- Authentication, host and TLS: `GH_TOKEN`, `GH_PROMPT_DISABLED`, `OAUTH_TOKEN`, `CA_CERT`, `SKIP_TLS_VERIFY`, and GitLab's `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`, `GITLAB_HOST`, `GL_HOST`, `GITLAB_URI`, `GITLAB_API_HOST`, `GITLAB_SSH_HOST`, `GITLAB_SUBFOLDER`;
+- Any name starting with `GIT_CONFIG_`, `GLAB_` or `GH_TOKEN_` is reserved too.
 
 `FLASHDUTY_CONSOLE_URL` is the console address. The agent expands it into clickable links when it cites incidents, alerts, channels, and schedules; when no console address is configured it is not injected, and the agent cites resources by ID in prose instead. It holds no secret, so the agent can read it.
 
@@ -112,7 +116,7 @@ Go to **AI SRE → Customize → Environments → Self-hosted** and create a sel
 |---|---|---|
 | Name | No | Unique within the account, up to 128 characters. If left blank, the first Runner heartbeat auto-fills it with the machine hostname; if that hostname already exists, the Environment ID suffix is appended. |
 | Scope | Yes | Shared scope is visible to the whole account. Team scope is visible and editable only by that team. Scope is fixed when you create the Environment and cannot be changed later; to move it, create another Environment in the target scope and deploy a Runner again. See [Scope](#scope). |
-| Tags | No | Tags used for task routing, comma-separated, for example `linux, docker, gpu`. |
+| Tags | No | Used for labeling and searching, comma-separated, for example `linux, docker, gpu`. Tags do not take part in task dispatch or environment selection. |
 
 After creation, the **setup guide** opens with this Environment's Token, install command, upgrade command, and uninstall command. The key button on a list row, or the "Setup guide" entry for a pending row, opens the same modal.
 
@@ -266,6 +270,8 @@ When you see `Degraded`, first check CPU, memory, and disk load on the Runner's 
 
 When a newer version is available, the Runner downloads, verifies, and replaces itself. Re-running the install command also upgrades manually.
 
+To pin a specific version, add `--version <tag>` to the install command (equivalent to the `VERSION` environment variable), for example `--version v0.0.5`; re-running the same command switches to that version. To opt out of automatic upgrades, turn them off on the Runner: on a systemd install write `FLASHDUTY_RUNNER_DISABLE_AUTO_UPDATE=true` into `/etc/flashduty-runner/env`, on Docker pass `-e FLASHDUTY_RUNNER_DISABLE_AUTO_UPDATE=true`, or use the `--disable-auto-update` flag; restart to apply. Once it's off, versions change only when you re-run the install command (optionally with `--version`).
+
 Uninstall commands are also in the setup guide, and differ by installation method:
 
 - **Linux (systemd) / manual install**: the install script's `--uninstall` flag (removes the service while preserving config) and `--purge` flag (removes config and data).
@@ -388,7 +394,8 @@ The environment selector at the bottom of the chat input decides where a new ses
 | Option | Meaning |
 |---|---|
 | **Auto** | The default for new sessions. Tries an online self-hosted Runner under the session's bound team, then an online Shared-scope (account-level) Runner, and uses the cloud Sandbox when neither is available. |
-| **Cloud Sandbox · Default** | Forces the system-managed cloud Sandbox and ignores self-hosted Runners. |
+| **Cloud environment → Default** | Starts the cloud Sandbox with the system default configuration and ignores self-hosted Runners. |
+| **Cloud environment → template name** | Starts the cloud Sandbox from that cloud environment template; both shared templates and your teams' templates are selectable. With create permission, **Add cloud environment...** at the bottom of the group creates a new template. |
 | **Self-hosted environment** | Runners you are allowed to use. Offline, never-connected or team-restricted Runners cannot be selected; **degraded** Runners can still be selected but may respond slowly. |
 
 <Warning>
@@ -411,7 +418,7 @@ A dispatched subagent brings its own **child session**, whose execution-environm
 Self-hosted Environments use two scopes, Shared and Team, chosen at creation and fixed afterward. For who can see, edit, and create them, see [Scope and permissions](/en/ai-sre/context#scope-and-permissions).
 
 <Note>
-When the system auto-selects a Runner, or a session pins a Runner by ID, it uses only Shared-scope Runners or Runners of the current member's teams.
+When the system auto-selects a Runner, or a session pins a Runner by ID, it uses only Shared-scope Runners, or team-scoped Runners belonging to the same team the session is bound to. A personal session (not bound to a team) only uses Shared-scope Runners and the cloud Sandbox.
 </Note>
 
 ## Troubleshooting
@@ -429,7 +436,7 @@ When troubleshooting Runner issues, start with the **Status** and **Last heartbe
   The private endpoint's certificate is not trusted by Runner. Prefer adding the CA that issued the certificate to the trust store of the Runner host or container. If the endpoint uses a self-signed certificate inside a trusted private network, you can instead explicitly enable `FLASHDUTY_RUNNER_INSECURE_SKIP_TLS_VERIFY` as described above. Restart the service for a systemd deployment, recreate the container with the new environment variable for Docker, or restart the process for a manual deployment.
 </Accordion>
 <Accordion title="Session times out or does not respond" icon="server">
-  If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment. Restore that Runner, or start a new session and choose Auto or cloud Sandbox. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.
+  If a session is pinned to an offline Runner, AI SRE does not silently move it to another environment. Restore that Runner, or start a new session and choose **Auto** or **Cloud environment**. If the Runner is online but the task fails, the likely issue is network or permissions between the Runner and the target resource.
 </Accordion>
 </AccordionGroup>
 

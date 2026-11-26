@@ -87,6 +87,33 @@ keywords: ["告警集成", "腾讯云监控 CM集成", "监控告警", "数据�
 </Step>
 </Steps>
 
+## 推送内容
+
+腾讯云可观测平台按通知模板推送 JSON 对象，Flashduty 读取以下字段：
+
+| 字段 | 含义 | 在 Flashduty 中 |
+| :--- | :--- | :--- |
+| `alarmLevel` | 告警级别 | 告警等级 |
+| `alarmStatus` | 告警状态 | 为 `0` 时按恢复处理 |
+| `alarmType` | 告警类型（`metric`、`event`、`prometheus` 等） | 等级的兜底取值和恢复判断 |
+| `recoverTime` | 恢复时间 | `event` 类型不为 `0` 时按恢复处理 |
+| `alarmObjInfo` | 告警对象 | 对象信息写入 `obj_` 开头的标签，维度参与 Alert Key |
+| `alarmPolicyInfo.policyId`、`policyName`、`policyType`、`policyTypeCName` | 告警策略信息 | Alert Key（`policyId`）、标题（`policyName`）和同名标签 |
+| `alarmPolicyInfo.conditions` | 告警条件 | 标题、Alert Key 和标签 `conditions` |
+| `alarmPolicyInfo.tag`、`policyTags` | 资源标签和策略标签 | 每个键值对写成同名标签 |
+| `alarmObjInfo.dimensions` | 对象维度 | Alert Key 和 `obj_dimensions_` 开头的标签 |
+| `alarmObjInfo.tags` | 对象标签 | 每个键值对写成同名标签 |
+| `additionalMsg` | 额外信息 | 能解析为 `{key, value}` 数组时写成同名标签 |
+| `alarmObjInfo.summary`、`content` | 告警摘要和内容 | `prometheus` 类型的标题和描述 |
+
+`alarmStatus`、`alarmType`、`alarmObjInfo` 和 `alarmPolicyInfo` 为必填字段，缺少任一项时返回参数错误。非 `prometheus` 类型的描述在标题之后追加 `objName` 维度和当前值。
+
+## Alert Key
+
+Flashduty 用三部分计算 Alert Key：告警策略 ID `policyId`，各告警条件中的指标名 `metricName`（事件告警为 `eventName`）和产品名 `productName`，以及对象的维度 `dimensions`。
+
+同一策略下同一对象的同一告警条件，其触发和恢复落在同一条告警上；不同策略或不同告警条件各自生成一条告警，对象带有维度时（例如不同实例）也会各自成一条。修改告警级别、对象名称或标签不会改变 Alert Key。
+
 ## 状态和告警等级
 <div className="md-block">
   
@@ -108,3 +135,29 @@ keywords: ["告警集成", "腾讯云监控 CM集成", "监控告警", "数据�
 恢复状态单独判断：`event` 类型的 `recoverTime` 不为 `0` 时映射为已恢复（OK）；其他类型的 `alarmStatus` 为 `0` 时映射为已恢复（OK）。
 
 </div>
+
+## 标签
+
+| 标签 | 来源 |
+| :--- | :--- |
+| `check` | 告警策略名称 `policyName` |
+| `policyId` / `policyType` / `policyName` / `policyTypeCName` | 告警策略信息 |
+| `alarmType` / `alarmStatus` | 告警类型和状态原值 |
+| `obj_region` / `obj_namespace` / `obj_appId` / `obj_uin` | 对象的地域、命名空间、应用和账号 |
+| `obj_city` / `obj_host` / `obj_operator` / `obj_taskName` | 拨测和主机类对象的城市、主机、运营商和任务名 |
+| `obj_operation` / `obj_service.name` / `obj_span.kind` / `obj_tapm.instance.key` | APM 类对象的操作、服务、Span 类型和实例 |
+| `obj_instanceId` / `obj_level` | RUM 类对象的实例 ID 和等级 |
+| `obj_dimensions_<维度名>` | 对象的每个维度，例如 `obj_dimensions_objName` |
+| `resource` | 资源标识：CVM 取 `objName` 中 `#` 前的 IP；其他取 `objName`、`unInstanceId`、`InstanceName`、`deviceLanIp`、`host` 中第一个非空值 |
+| `conditions` | 告警条件的 JSON，最多 4 条 |
+| 资源标签、对象标签、策略标签和 `additionalMsg` | 每个键值对写成同名标签 |
+
+值为空或 `<nil>` 的标签会被丢弃。
+
+## 排查问题
+
+- **告警没有恢复**：`event` 类型看 `recoverTime` 是否不为 `0`，其他类型看 `alarmStatus` 是否为 `0`；通知模板没有同时勾选 `告警触发` 和 `告警恢复` 时收不到恢复推送
+- **推送被拒绝**：`alarmStatus`、`alarmType`、`alarmObjInfo` 和 `alarmPolicyInfo` 任一缺失都会返回参数错误
+- **同一策略的不同实例各自成一条告警**：对象带有维度时，Alert Key 包含维度，这是预期行为
+- **告警等级与预期不符**：`alarmLevel` 缺失或不在 `Remind`、`Warn`、`Serious` 之内时按 `alarmType` 兜底，`metric` 为 Warning，其他类型为 Critical
+- **prometheus 告警的标题是摘要**：`prometheus` 类型直接用 `summary` 作标题、`content` 作描述；其他类型的标题由策略名称和告警条件拼成
