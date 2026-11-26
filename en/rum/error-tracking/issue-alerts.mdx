@@ -30,7 +30,12 @@ You can inspect Issues through daily checks in the console, or configure alert n
 </Steps>
 
 <Frame>
-  <img src="https://docs-cdn.flashcat.cloud/images/png/2bbd455a2ac702246e8399b6628f9158.png" alt="Alert Settings" />
+
+<img
+  src="https://docs-cdn.flashcat.cloud/images/png/2bbd455a2ac702246e8399b6628f9158.png"
+  alt="Alert Settings"
+/>
+
 </Frame>
 
 <Warning>
@@ -51,14 +56,14 @@ The Webhook configuration area provides a "Send Test Event" button. The test sen
 | Trigger Condition | Description |
 |-------------------|-------------|
 | **New Issue** | An error event causes a new Issue to appear, triggering an alert event |
-| **Issue Update** | Error events continue to merge into an unclosed Issue (For Review, Reviewed), and more than 24 hours have passed since the last alert event, a new alert event will be triggered |
+| **Issue Update** | Error events continue to merge into an unclosed Issue (For Review, Reviewed), and more than 7 days have passed since the last alert event, a new alert event will be triggered. Ongoing updates to the same Issue trigger at most one alert every 7 days |
 | **Issue Reopened** | A new error merges into a closed Issue, causing the Issue to be reopened (regression) |
 | **Issue Priority Upgrade** | When a higher-priority error event enters a lower-priority Issue, the Issue priority is automatically upgraded and a new alert event is triggered. For example, a P2 Issue receiving an error matching a P0 rule will be upgraded to P0 |
 
 <Note>
 - An Issue triggers an alert event. The actual destination depends on the delivery mode selected in Alert Settings
 - With Flashduty channel delivery, whether a notification is triggered depends on the channel's integration config, noise reduction config, and escalation rules
-- With Webhook delivery, RUM sends the event directly to the Webhook URL. Your receiver is responsible for later notification, payload transformation, and retry behavior
+- With Webhook delivery, RUM delivers the event to the Webhook URL. A failed delivery is retried automatically about once a minute, up to 4 rounds; network errors, 5xx, and 429 responses also get quick retries within each round. Your receiver may see duplicate events, so make it idempotent. Later notification and payload transformation remain your receiver's responsibility
 - When an Issue is closed, the system triggers a close-type alert event. If the alert is delivered through Flashduty channels, the associated incident may automatically recover
 </Note>
 
@@ -83,7 +88,7 @@ Custom grading rules are evaluated when an Error is reported, producing a priori
 
 - **New Issue**: The Issue priority is determined by the priority of the first Error
 - **Matching existing Issue**: If the Error's priority is higher, the Issue priority is automatically upgraded (never downgraded)
-- **No rule matched**: Default priority P2 is used
+- **No rule matched**: System scoring applies: crash errors are P0 (Critical); every other error is scored by environment and error message keywords as P0 (Critical), P1 (Warning), or P2 (Info)
 
 Each grading rule consists of the following elements:
 
@@ -106,14 +111,14 @@ Rules are evaluated from top to bottom in priority order; **the first matching r
 | User ID (`error.usr_id`) | User identifier that reported the error | `vip_001` |
 | User Email (`error.usr_email`) | User email address | `*@vip.com` |
 | Page URL (`error.view_url`) | Full page URL where the error occurred | Matches `*/payment*` |
+| Page URL Path (`error.view_url_path`) | URL path of the page where the error occurred | `/checkout` |
 | Error Type (`error.error_type`) | Error type classification | `TypeError`, `SyntaxError` |
 | Error Message (`error.error_message`) | Error description text | Matches `*Cannot read property*` |
-| Stack (`error.error_stack`) | Error stack trace | Matches `*at handleClick*` |
 | Environment (`error.env`) | Environment where the error occurred | `production`, `staging` |
 | Service (`error.service`) | Service the error belongs to | `payment` |
-| Version (`error.version`) | Application version | `1.2.0` |
+| Device Type (`error.device_type`) | Device type that reported the error | `Mobile`, `Desktop` |
+| Operating System (`error.os_name`) | Operating system that reported the error | `iOS`, `Android`, `Windows` |
 | Browser (`error.browser_name`) | Browser name | `Chrome`, `Safari` |
-| Browser Version (`error.browser_version`) | Browser version number | `120.0` |
 | Is Crash (`error.is_crash`) | Whether it's a crash error | `true` |
 
 The operators are "Match" and "Not Match". A plain value must equal the whole field value. Wildcards `*` (for example `*vip*` for "contains vip") and regular expressions (for example `/^TypeError/i`) are supported. A condition takes up to 8 values and matches if any one matches.
@@ -150,7 +155,28 @@ The operators are "Match" and "Not Match". A plain value must equal the whole fi
 
 Data filtering allows you to filter out unwanted noise data **before** Errors are aggregated into Issues. Filtered Errors will not participate in Issue aggregation or trigger alerts.
 
-You can add filter rules in "Alert Settings". Each rule can have multiple match conditions with AND logic within the same rule. Supported match fields are the same as [Custom Alert Grading](#custom-alert-grading).
+You can add filter rules in "Alert Settings". Each rule can have multiple match conditions: up to 2 OR groups, conditions within a group use AND logic, each group holds up to 3 conditions, and each condition takes up to 8 match values. Each application supports up to 6 filter rules.
+
+Supported match fields:
+
+| Field | Description |
+|-------|-------------|
+| `error.usr_id` | User ID |
+| `error.usr_email` | User email |
+| `error.error_type` | Error type |
+| `error.error_message` | Error message |
+| `error.error_stack` | Error stack |
+| `error.view_url` | Page URL where the error occurred |
+| `error.env` | Environment |
+| `error.version` | Application version |
+| `error.service` | Service |
+| `error.browser_name` | Browser name |
+| `error.browser_version` | Browser version |
+| `error.fingerprint` | Custom fingerprint carried by the error report |
+| `error.is_crash` | Whether it's a crash error |
+| `context.<field>` | Custom attribute in the event's reported `context` |
+
+`context` fields expand by dots: the console editor accepts one level only (for example, `context.is_vip`); configuring through the API supports up to three levels (for example, `context.user.level`).
 
 | Scenario | Example Rule |
 |----------|--------------|
@@ -169,21 +195,37 @@ RUM alerts pass through four layers in order: data filtering, alert grading, ale
 
 With Flashduty channel delivery, you can process RUM alerts further in the [Alert Pipeline](/en/on-call/integration/alert-integration/alert-pipelines). For example, adjust severity by affected user count, suppress repeated alerts in a time window, or customize alert titles. When you choose Webhook delivery, RUM alerts do not enter this On-call processing chain; handle payload transformation, routing, and notification in your receiver.
 
-The [Auto-analyze](/en/rum/error-tracking/error-viewing#header-actions) automation on the Issue details page is triggered by incidents, and only Flashduty channel delivery turns Issue alerts into incidents. It therefore works only for applications that deliver to channels; Webhook delivery raises no incidents and cannot trigger it.
+The [Auto-analyze](/en/rum/error-tracking/error-viewing#header-actions) automation on the Issue details page is triggered by Issue alerts: both channel and Webhook delivery notify that application's automation rules when the alert is sent. Webhook delivery raises no incident, but it triggers the automation all the same: the automation runs as soon as the alert is sent, so it still runs even if the receiver never gets the alert after retries.
 
 ## Further reading
 
 <CardGroup cols={2}>
-  <Card title="RUM Alert Noise Reduction" icon="sliders" href="/en/rum/best-practices/alert-noise-reduction">
+  <Card
+    title="RUM Alert Noise Reduction"
+    icon="sliders"
+    href="/en/rum/best-practices/alert-noise-reduction"
+  >
     Typical scenario configurations to quickly reduce unnecessary alert noise
   </Card>
-  <Card title="Alert Pipeline" icon="filter" href="/en/on-call/integration/alert-integration/alert-pipelines">
+  <Card
+    title="Alert Pipeline"
+    icon="filter"
+    href="/en/on-call/integration/alert-integration/alert-pipelines"
+  >
     Clean, transform, and filter alerts at the integration layer
   </Card>
-  <Card title="Noise Reduction" icon="volume-slash" href="/en/on-call/channel/noise-reduction">
+  <Card
+    title="Noise Reduction"
+    icon="volume-slash"
+    href="/en/on-call/channel/noise-reduction"
+  >
     Aggregate and suppress alerts at the channel level
   </Card>
-  <Card title="Escalation Rules" icon="route" href="/en/on-call/channel/escalation-rule">
+  <Card
+    title="Escalation Rules"
+    icon="route"
+    href="/en/on-call/channel/escalation-rule"
+  >
     Configure escalation rules to route alerts to the right responders
   </Card>
 </CardGroup>
