@@ -161,7 +161,7 @@ Endpoints are grouped by service and hang off the client: the call convention is
 | `client.ImIntegrations` | IM integrations |
 | `client.DedicatedIntegrations` | Dedicated integrations (owned by one channel, `/channel/integration/*`): `ReadInfo` / `ReadList` / `WriteCreate` / `WriteUpdate` / `WriteDelete` / `WriteEnable` / `WriteDisable` / `WriteRotateKey` |
 | `client.NotificationTemplates` | Notification templates |
-| `client.Changes` | Changes |
+| `client.Changes` | Changes; `Info` / `List` / `Create` / `Update` (`POST /change/info`, `/change/list`, `/change/create`, `/change/update`) — see [Change records](#change-records) for the write semantics |
 | `client.Diagnostics` | Diagnostics |
 | `client.Analytics` | Analytics |
 | `client.A2aAgents` | A2A Agents |
@@ -288,6 +288,24 @@ For `client.DataSources`, the `payload` selects a type-specific configuration bl
 
 The `WorkItem*` methods on `client.Incidents` (`/incident/work-item/*`) manage an incident's action items and post-mortem follow-ups. Work-item status is a closed enum: `Status` on `CreateWorkItemRequest` / `UpdateWorkItemRequest` and `TargetStatus` on `ConvertWorkItemRequest` accept only `open`, `in_progress`, `done`, or `cancelled`, with creation taking `open` when the field is omitted or blank and `TargetStatus` being optional. `WorkItemComplete`'s `CompleteWorkItemRequest.TargetStatus` accepts only `done`; any other value is rejected.
 
+### Change records
+
+The four methods on `client.Changes` cover reading and writing changes:
+
+| Method | Endpoint | Description |
+| --- | --- | --- |
+| `Info` | `POST /change/info` | One change, by `ChangeID` or by `IntegrationID` plus the reporting tool's own `ChangeKey`; the response's `next_statuses` lists the statuses it may currently move to |
+| `List` | `POST /change/list` | Paged query over a time window with filters |
+| `Create` | `POST /change/create` | Create a change in a collaboration space: `ChannelID` and `Title` are required, and the platform generates `ChangeKey` |
+| `Update` | `POST /change/update` | Update title, description, status, link, labels, plan times, checklist, and custom field values |
+
+Two behaviours to know before you write:
+
+- **Omitted means keep.** The text fields of `UpdateChangeRequest` are pointers (`*string`): omit to keep the current value, send an empty string to clear it. The checklist (`Checklist`) is `omitzero`: omit to keep the stored list, send an empty slice to clear it.
+- **Plan times take seconds or milliseconds.** `PlannedStartTime` / `PlannedEndTime` are `*int64`; either unit works, and `0` clears the time. The end cannot be earlier than the start.
+
+`UpdateChangeRequest.ChangeStatus` accepts only the current status or one it may move to; anything else is rejected. The valid values come from `next_statuses` in the `Info` response.
+
 ## Response timestamps
 
 Time fields in responses are self-describing `Timestamp` (Unix seconds) or `TimestampMilli` (milliseconds) types. Types shared by requests and responses are the exception (see the warning below). They serialize to RFC3339 strings in the local time zone, so JSON, logs, and LLM-facing output are directly readable; the raw epoch is still one method call away.
@@ -313,7 +331,7 @@ zero := inc.StartTime.IsZero()        // whether it's the unset sentinel
 | `.String()` | `string` | RFC3339 in the local time zone; `"0"` when unset |
 
 <Warning>
-**Request-side time fields are still `int64`** — the API expects a numeric epoch on the wire. Note: most endpoints take **seconds**, but RUM and webhook history-related endpoints take **milliseconds**.
+**Request-side time fields are still `int64`** — the API expects a numeric epoch on the wire. Note: most endpoints take **seconds**, but RUM and webhook history-related endpoints take **milliseconds**; a change's plan times (`PlannedStartTime` / `PlannedEndTime`) accept either unit.
 
 **Types shared by requests and responses are the same.** `AlertRuleV2` (the return type of `AlertRules.ReadInfoV2` / `WriteCreateV2` / `WriteUpdateV2`, that is, `POST /monit/rule/v2/info`, `/v2/create`, and `/v2/update`) keeps `created_at` / `updated_at` as bare `int64` Unix seconds with `omitempty`, not `Timestamp`. Such fields have no `Unix()` / `String()` / `IsZero()` methods, so convert the seconds yourself — writing `rule.UpdatedAt.Unix()` as in the `Timestamp` examples will not compile.
 </Warning>
