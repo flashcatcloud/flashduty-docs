@@ -161,7 +161,7 @@ client, err := flashduty.NewClientWithAccessToken(accessToken,
 | `client.ImIntegrations` | IM 集成 |
 | `client.DedicatedIntegrations` | 专属集成（协作空间专属，`/channel/integration/*`）：`ReadInfo` / `ReadList` / `WriteCreate` / `WriteUpdate` / `WriteDelete` / `WriteEnable` / `WriteDisable` / `WriteRotateKey` |
 | `client.NotificationTemplates` | 通知模板 |
-| `client.Changes` | 变更 |
+| `client.Changes` | 变更；`Info` / `List` / `Create` / `Update`（`POST /change/info`、`/change/list`、`/change/create`、`/change/update`），写入语义见[变更记录](#变更记录) |
 | `client.Diagnostics` | 诊断 |
 | `client.Analytics` | 分析 |
 | `client.A2aAgents` | A2A Agents |
@@ -288,6 +288,24 @@ out, _, err := client.DataSources.ToolsInvoke(ctx, req)
 
 `client.Incidents` 的 `WorkItem*` 方法（`/incident/work-item/*`）管理故障的行动项与复盘跟进项。工作项状态是封闭枚举：`CreateWorkItemRequest` / `UpdateWorkItemRequest` 的 `Status` 与 `ConvertWorkItemRequest` 的 `TargetStatus` 只接受 `open`、`in_progress`、`done`、`cancelled`，创建时省略或留空即取 `open`，`TargetStatus` 为选填。`WorkItemComplete` 的 `CompleteWorkItemRequest.TargetStatus` 只接受 `done`，传其他值一律被拒绝。
 
+### 变更记录
+
+`client.Changes` 的四个方法分别对应变更的读与写：
+
+| 方法 | 接口 | 说明 |
+| --- | --- | --- |
+| `Info` | `POST /change/info` | 用 `ChangeID`，或用 `IntegrationID` 加上报方自己的 `ChangeKey` 取单条变更；响应里的 `next_statuses` 是它当前允许流转到的状态 |
+| `List` | `POST /change/list` | 按时间窗与过滤条件分页查询 |
+| `Create` | `POST /change/create` | 在协作空间里创建变更：`ChannelID` 与 `Title` 必填，`ChangeKey` 由平台生成 |
+| `Update` | `POST /change/update` | 更新标题、描述、状态、链接、labels、计划时间、执行清单与自定义字段 |
+
+写入前需要知道的两处语义：
+
+- **省略即保留。** `UpdateChangeRequest` 的文本字段是指针（`*string`）：省略保持原值，传空字符串清空。执行清单 `Checklist` 用 `omitzero`：省略保持原清单，传空切片清空。
+- **计划时间秒、毫秒都收。** `PlannedStartTime` / `PlannedEndTime` 是 `*int64`，传 Unix 秒或毫秒都可以；传 `0` 表示清空，结束时间不得早于开始时间。
+
+`UpdateChangeRequest.ChangeStatus` 只能设为当前状态或其允许流转到的状态，其余取值会被拒绝——合法值来自 `Info` 返回的 `next_statuses`。
+
 ## 响应时间戳
 
 响应中的时间字段是自描述的 `Timestamp`（Unix 秒）或 `TimestampMilli`（毫秒）类型（请求与响应共用的类型是例外，见下方警告）。它们序列化为本地时区的 RFC3339 字符串，因此 JSON、日志以及面向 LLM 的输出都直接可读；原始 epoch 仍只需一次方法调用即可取到。
@@ -313,7 +331,7 @@ zero := inc.StartTime.IsZero()        // 是否为未设置哨兵
 | `.String()` | `string` | 本地时区 RFC3339，未设置时为 `"0"` |
 
 <Warning>
-**请求侧时间字段仍为 `int64`**，API 在 wire 上要求数字 epoch。注意：多数接口取**秒**，但 RUM 与 webhook 历史相关接口取**毫秒**。
+**请求侧时间字段仍为 `int64`**，API 在 wire 上要求数字 epoch。注意：多数接口取**秒**，但 RUM 与 webhook 历史相关接口取**毫秒**；变更的计划时间（`PlannedStartTime` / `PlannedEndTime`）秒与毫秒都接受。
 
 **请求与响应共用的类型同样如此**:`AlertRuleV2`（`AlertRules.ReadInfoV2` / `WriteCreateV2` / `WriteUpdateV2` 的返回类型，对应 `POST /monit/rule/v2/info`、`/v2/create`、`/v2/update`）的 `created_at` / `updated_at` 在 SDK 中仍是裸 `int64`（Unix 秒，带 `omitempty`），而不是 `Timestamp`。这类字段不支持 `Unix()` / `String()` / `IsZero()`，需要自行把秒值转成时间；按 `Timestamp` 示例写 `rule.UpdatedAt.Unix()` 会编译不过。
 </Warning>
